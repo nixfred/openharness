@@ -1074,11 +1074,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
           },
       ],
       'tabs': [
-        for (final swarm in app.swarms)
+        for (final swarm in app.profileSwarms)
           {
             'id': swarm.id,
             'name': swarm.name,
-            'label': '${app.swarms.indexOf(swarm) + 1}:${names[swarm.id]}',
+            'label': '${app.profileSwarms.indexOf(swarm) + 1}:${names[swarm.id]}',
             'kind': swarm.kind,
             'agentCount': _tabAgents(swarm).length,
             'engine': swarm.isStore ? 'store' : _tabEngine(swarm),
@@ -3777,12 +3777,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
     if (id == 'pane.layout' || id == 'task.route') return true;
     if (id.startsWith('swarm.select_')) {
       final number = int.tryParse(id.substring('swarm.select_'.length));
-      return number != null && number >= 1 && number <= app.swarms.length;
+      return number != null && number >= 1 && number <= app.profileSwarms.length;
     }
     if (id == 'swarm.new') return true;
     if (id == 'swarm.reopen') return app.canReopenLastClosed;
     if (id == 'swarm.next' || id == 'swarm.previous') {
-      return app.swarms.length > 1;
+      return app.profileSwarms.length > 1;
     }
     if (id == 'navigation.back') return _navigation.canGoBack(app);
     if (id == 'navigation.forward') return _navigation.canGoForward(app);
@@ -4351,7 +4351,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   void _revealSelectedTab(double viewport) {
     final previous = _tabGeometry;
-    final order = app.swarms.map((tab) => tab.id).toList(growable: false);
+    final order = app.profileSwarms.map((tab) => tab.id).toList(growable: false);
     if (previous != null &&
         previous.activeId == app.activeSwarmId &&
         previous.viewport == viewport &&
@@ -4385,7 +4385,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _tabRevealScheduled = false;
       if (!mounted || !_tabScroll.hasClients) return;
-      final index = app.swarms.indexWhere((tab) => tab.id == app.activeSwarmId);
+      final index = app.profileSwarms.indexWhere(
+        (tab) => tab.id == app.activeSwarmId,
+      );
       if (index < 0) return;
       final position = _tabScroll.position;
       final left = _tabWidths.take(index).fold(0.0, (a, b) => a + b);
@@ -4500,8 +4502,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
       );
       final names = workspaceTabNames(app);
       final labels = [
-        for (var index = 0; index < app.swarms.length; index++)
-          '${index + 1}:${names[app.swarms[index].id]}',
+        for (var index = 0; index < app.profileSwarms.length; index++)
+          '${index + 1}:${names[app.profileSwarms[index].id]}',
       ];
       final toolHeight = workspaceBarControlHeight(context);
       final contentWidth = math.max(0.0, constraints.maxWidth - cell.width * 7);
@@ -4556,11 +4558,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
                   scrollDirection: Axis.horizontal,
                   shrinkWrap: true,
                   buildDefaultDragHandles: false,
-                  itemCount: app.swarms.length,
+                  itemCount: app.profileSwarms.length,
                   onReorderItem: (old, to) =>
-                      app.reorderSwarm(app.swarms[old].id, to),
+                      app.reorderSwarm(app.profileSwarms[old].id, to),
                   itemBuilder: (context, index) {
-                    final swarm = app.swarms[index];
+                    final swarm = app.profileSwarms[index];
                     final selected = app.activeSwarmId == swarm.id;
                     return ReorderableDragStartListener(
                       key: ValueKey(swarm.id),
