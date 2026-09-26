@@ -347,7 +347,11 @@ void main() {
     await tester.pump();
     await key(tester, LogicalKeyboardKey.enter);
     await tester.pump();
-    expect(find.textContaining('find walks directory trees'), findsOneWidget);
+    expect(
+      find.text(daemonRoster.byId('fzf')!.lore),
+      findsOneWidget,
+      reason: 'the panel now shows fzf',
+    );
     await tester.tap(find.byKey(const ValueKey('daemon-pair')));
     await tester.pump();
     expect(zoo.zoo.pair, 'fzf');
