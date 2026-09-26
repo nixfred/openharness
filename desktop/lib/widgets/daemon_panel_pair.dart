@@ -221,38 +221,10 @@ mixin _PairSections on State<DaemonPanel> {
     if (canOpen) order.add('conversation');
     return [
       _header(
-        'talk',
+        'talk to $name',
         trailing: widget.talkShortcut == null
             ? null
             : Text(widget.talkShortcut!, style: _ink(_muted)),
-      ),
-      TextField(
-        key: const ValueKey('daemon-talk-input'),
-        controller: _talk,
-        focusNode: _talkFocus,
-        maxLines: 1,
-        maxLength: 2000,
-        style: _ink(),
-        cursorWidth: _cell.width,
-        cursorHeight: _cell.height,
-        cursorColor: _theme.cursor,
-        textInputAction: TextInputAction.send,
-        decoration: InputDecoration(
-          prefixText: 'talk > ',
-          prefixStyle: _ink(_muted),
-          hintText: 'ask $name something',
-          hintStyle: _ink(_muted.withValues(alpha: .4)),
-          counterText: '',
-          isDense: true,
-          border: InputBorder.none,
-          enabledBorder: InputBorder.none,
-          focusedBorder: InputBorder.none,
-          contentPadding: EdgeInsets.zero,
-        ),
-        onSubmitted: (_) {
-          _send();
-          _talkFocus.requestFocus();
-        },
       ),
       for (final entry in talk.skip(max(0, talk.length - 4)))
         Text(
@@ -269,6 +241,42 @@ mixin _PairSections on State<DaemonPanel> {
             brain.talkPhase == DaemonTalkPhase.failed ? _theme.red : _muted,
           ),
         ),
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Text('> ', style: _ink(_muted)),
+          Expanded(
+            child: TextField(
+              key: const ValueKey('daemon-talk-input'),
+              controller: _talk,
+              focusNode: _talkFocus,
+              maxLines: 1,
+              maxLength: 2000,
+              style: _ink(),
+              cursorWidth: _cell.width,
+              cursorHeight: _cell.height,
+              cursorColor: _theme.cursor,
+              textInputAction: TextInputAction.send,
+              decoration: InputDecoration(
+                hintText: 'ask $name something',
+                hintStyle: _ink(_muted.withValues(alpha: .4)),
+                counterText: '',
+                isDense: true,
+                filled: false,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onSubmitted: (_) {
+                _send();
+                _talkFocus.requestFocus();
+              },
+            ),
+          ),
+        ],
+      ),
       if (canOpen)
         _action(
           'conversation',

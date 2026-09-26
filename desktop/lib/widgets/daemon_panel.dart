@@ -900,11 +900,14 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
     String row(String label, int value, int of) =>
         '${label.padRight(10)}${bar(value, of)}  '
         '${'$value/$of'.padLeft(5)}';
+    // The setup egg: habits toward it, until it has come.
+    final setup = zoo.firstEgg ? face.zoo.setupProgress : null;
     return [
       Text(
         [
           row('next egg', into, earn.turnEvery),
           row('today', today.clamp(0, earn.dailyCap), earn.dailyCap),
+          if (setup != null) row('setup egg', setup.$1, setup.$2),
           if (today >= earn.dailyCap)
             "today's turns are counted. more tomorrow.",
         ].join('\n'),

@@ -77,6 +77,7 @@ Zoo _paired(
   String id, {
   String version = '2.0',
   bool shiny = false,
+  int? serial,
   List<String>? more,
   List<ZooEgg> eggs = const [],
   ZooProgress progress = ZooProgress.empty,
@@ -88,6 +89,7 @@ Zoo _paired(
       egg: 'first',
       version: version,
       shiny: shiny,
+      serial: serial,
       xp: const {'0.1': 0, '1.0': 150, '2.0': 600}[version]!,
     ),
     for (final other in more ?? const <String>[])
@@ -244,6 +246,7 @@ Widget _bar(BuildContext context, DaemonFace face, String caption) {
         Expanded(
           child: DaemonVoiceLine(
             face: face,
+            onAnswer: (_) {},
             fallback: Align(
               alignment: Alignment.centerRight,
               child: Text(
@@ -268,26 +271,28 @@ void main() {
     tester,
   ) async {
     final rows = <(String, DaemonFace)>[];
-    for (final (done, label) in [
-      (0, 'nest 0/5'),
-      (2, 'nest 2/5'),
-      (4, 'nest 4/5'),
-      (5, 'egg ready'),
+    // The nest follows render.mjs nestStage: 3 habits, a finished turn
+    // among them; without one, at most two count.
+    for (final (habits, label) in [
+      (const <String>[], 'nest 0/3'),
+      (const ['split'], 'nest 1/3'),
+      (const ['split', 'find', 'store'], 'nest 2/3 no turn'),
+      (const ['turn', 'split', 'find'], 'egg ready'),
     ]) {
+      final ready = habits.contains('turn') && habits.length >= 3;
       final face = await _face(
         tester,
         Zoo(
-          habits: _roster.rules.habits.take(done).map((h) => h.key).toList(),
-          firstEgg: done >= 5,
+          habits: habits,
+          firstEgg: ready,
           eggs: [
-            if (done >= 5)
-              const ZooEgg(id: 'egg1', kind: 'first', grantedAt: ''),
+            if (ready) const ZooEgg(id: 'egg1', kind: 'first', grantedAt: ''),
           ],
         ),
       );
       rows.add((label, face));
     }
-    for (final kind in ['week', 'night', 'history', 'easter']) {
+    for (final kind in ['setup', 'week', 'night', 'history', 'easter']) {
       rows.add((
         '$kind egg',
         await _face(
@@ -677,7 +682,7 @@ void main() {
     ),
     (
       'panel-card',
-      _paired('zsh', shiny: true, more: ['tim']),
+      _paired('zsh', shiny: true, serial: 42, more: ['tim']),
       Brightness.dark,
       const DaemonWatch(),
       'daemon-card',
@@ -726,6 +731,7 @@ void main() {
       if (name == 'panel-card') {
         expect(find.byKey(const ValueKey('daemon-card-text')), findsOneWidget);
         expect(find.textContaining('SHINY RARE', findRichText: true), findsWidgets);
+        expect(find.textContaining('#0042', findRichText: true), findsWidgets);
       }
       if (name == 'panel-tim-zoo-box') {
         expect(find.text('[ ? ]'), findsNWidgets(6));
@@ -739,6 +745,481 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       face.sync(const DaemonWatch());
       await tester.pump(const Duration(minutes: 3));
+    });
+  }
+
+  // ── round 3: the pair brain in the window, and economy v2 ───────────────
+
+  testWidgets('status line: the pair brain keys first, and the +n', (
+    tester,
+  ) async {
+    const need = DaemonSay(
+      id: 'need:1',
+      about: DaemonAbout('office', 'a1', requestId: 'r1'),
+      line: '[y/n/g] api@office Bash: npm test',
+      mood: DaemonSayMood.need,
+      actions: [
+        (key: 'y', label: 'Yes', choice: '1. Yes'),
+        (key: 'n', label: 'No', choice: '3. No'),
+        (key: 'g', label: 'open', choice: 'open'),
+      ],
+      ttl: Duration(milliseconds: 5200),
+    );
+    Future<DaemonFace> saying(DaemonSay say, {DaemonWatch? watch}) async {
+      final face = await _face(tester, _paired('tim'));
+      if (watch != null) face.sync(watch);
+      face.sayFromBrain(say);
+      return face;
+    }
+
+    final rows = <(String, DaemonFace)>[
+      (
+        'need, keys first',
+        await saying(
+          need,
+          watch: const DaemonWatch(
+            needIds: {'office/a1#r1'},
+            needs: {
+              'office/a1#r1': DaemonSubject(
+                'office/a1',
+                who: 'codex@office',
+                q: 'Bash: npm test',
+              ),
+            },
+          ),
+        ),
+      ),
+      (
+        'ask (a proposal)',
+        await saying(
+          const DaemonSay(
+            id: 'ask:1',
+            about: DaemonAbout('m', ''),
+            line: '[y/n] start codex in ~/api?',
+            mood: DaemonSayMood.ask,
+            actions: [
+              (key: 'y', label: 'do it', choice: 'y'),
+              (key: 'n', label: 'skip', choice: 'n'),
+            ],
+            ttl: Duration(milliseconds: 5200),
+          ),
+          watch: const DaemonWatch(asks: 1),
+        ),
+      ),
+      (
+        'lesson [y/n/s]',
+        await saying(
+          const DaemonSay(
+            id: 'lesson:l1:1',
+            about: DaemonAbout('m', 'a7'),
+            line:
+                '[y/n/s] teach your agents "run-migrations-safely"? you corrected codex.',
+            mood: DaemonSayMood.ask,
+            actions: [
+              (key: 'y', label: 'teach', choice: 'y'),
+              (key: 'n', label: 'skip', choice: 'n'),
+              (key: 's', label: 'show', choice: 's'),
+            ],
+            ttl: Duration(milliseconds: 5200),
+          ),
+        ),
+      ),
+      (
+        'say (it answers)',
+        await saying(
+          const DaemonSay(
+            id: 'say:1',
+            about: DaemonAbout('m', ''),
+            line: 'api waits on you, 40m. office is asleep.',
+            mood: DaemonSayMood.say,
+            ttl: Duration(seconds: 30),
+          ),
+        ),
+      ),
+      (
+        'auto (it acted)',
+        await saying(
+          const DaemonSay(
+            id: 'auto:1',
+            about: DaemonAbout('office', 'a2'),
+            line: 'rule: web@office answered "1. Yes"',
+            mood: DaemonSayMood.auto,
+            ttl: Duration(milliseconds: 5200),
+          ),
+        ),
+      ),
+    ];
+    final done = await _face(tester, _paired('tim'));
+    done.sync(
+      const DaemonWatch(
+        doneCount: 3,
+        doneLast: ['api@office finished: tests pass.'],
+      ),
+    );
+    rows.add(('+3 from the brain', done));
+    await _capture(
+      tester,
+      'status-brain',
+      Size(900, 30.0 * rows.length + 20),
+      (context) => Column(
+        children: [
+          for (final (label, face) in rows) _bar(context, face, label),
+        ],
+      ),
+    );
+    expect(find.text('api@office Bash: npm test'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-answer-y')), findsWidgets);
+    expect(find.text('+3'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    for (final (_, face) in rows) {
+      face.sync(const DaemonWatch());
+    }
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  /// A brain that has heard a whole session: talk, asks, a brief, a journal
+  /// and machines, and answers the lessons list itself.
+  DaemonBrain pairBrain({bool keysLive = true}) {
+    late final DaemonBrain brain;
+    final now = DateTime.now();
+    brain = DaemonBrain(
+      now: () => keysLive ? now : now.add(const Duration(minutes: 5)),
+      send: (type, payload) {
+        if (type == 'pair' && payload['verb'] == 'lessons') {
+          final requestId = payload['requestId'];
+          brain.receive('pair_result', {
+            'requestId': requestId,
+            ...switch (payload['action']) {
+              'show' => {
+                'ok': true,
+                'text':
+                    '---\nname: run-migrations-safely\n---\n'
+                    'Back up the database, then `npm run migrate`.',
+              },
+              _ => {
+                'ok': true,
+                'git': true,
+                'lessons': [
+                  {
+                    'id': 'l1',
+                    'kind': 'skill',
+                    'name': 'run-migrations-safely',
+                    'status': 'pending',
+                    'description': 'Back up before migrating.',
+                    'learnedBy': 'tim',
+                  },
+                  {
+                    'id': 'l0',
+                    'kind': 'note',
+                    'name': 'note-l0',
+                    'status': 'approved',
+                    'project': 'api',
+                    'description': 'Tests need docker running.',
+                    'learnedBy': 'tim',
+                  },
+                ],
+              },
+            },
+          });
+        }
+        return true;
+      },
+    );
+    addTearDown(brain.dispose);
+    final at = DateTime.now().millisecondsSinceEpoch;
+    brain.receive('daemon_state', {
+      'pair': 'tim',
+      'needs': [
+        {
+          'machineId': 'office',
+          'machine': 'office',
+          'agentId': 'a1',
+          'name': 'api',
+          'requestId': 'r1',
+          'question': 'Bash: npm test',
+          'id': 'need:office:e:1',
+          'line': '[y/n/g] api@office Bash: npm test',
+          'actions': [
+            {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+            {'key': 'n', 'label': 'No', 'choice': '3. No'},
+            {'key': 'g', 'label': 'open', 'choice': 'open'},
+          ],
+        },
+        {
+          'machineId': 'm',
+          'machine': 'laptop',
+          'agentId': 'a4',
+          'name': 'web',
+          'requestId': 'r4',
+          'question': 'Which branch should I use?',
+        },
+      ],
+      'working': 1,
+      'failing': [],
+      'machines': [
+        {'machineId': 'm', 'name': 'laptop', 'status': 'ok', 'local': true},
+        {'machineId': 'office', 'name': 'office', 'status': 'ok'},
+        {'machineId': 'studio', 'name': 'studio', 'status': 'asleep'},
+      ],
+      'done': {'count': 0, 'last': []},
+      'asks': [
+        {
+          'id': 'ask:7',
+          'line': '[y/n] start codex in ~/api?',
+          'actions': [
+            {'key': 'y', 'label': 'do it', 'choice': 'y'},
+            {'key': 'n', 'label': 'skip', 'choice': 'n'},
+          ],
+        },
+      ],
+      'acted': [
+        {
+          'machineId': 'office',
+          'machine': 'office',
+          'agentId': 'a2',
+          'name': 'web@office',
+          'by': 'rule',
+          'action': 'answer',
+          'text': 'answered "1. Yes"',
+          'at': at - 3 * 60000,
+        },
+        {
+          'machineId': 'm',
+          'machine': 'laptop',
+          'agentId': 'a5',
+          'name': 'docs',
+          'by': 'pair',
+          'action': 'send',
+          'text': 'sent "update the changelog"',
+          'at': at - 12 * 60000,
+        },
+      ],
+    });
+    brain.receive('daemon_brief', {
+      'desk': 'd',
+      'line': 'reattached. 2 done, 1 waiting 40m, studio asleep.',
+      'items': [
+        {
+          'id': 'brief:office:r1:1',
+          'kind': 'waiting',
+          'machineId': 'office',
+          'machine': 'office',
+          'agentId': 'a1',
+          'name': 'api',
+          'line': '[y/n/g] api@office: Bash: npm test (40m)',
+          'actions': [
+            {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+            {'key': 'n', 'label': 'No', 'choice': '3. No'},
+          ],
+        },
+        {
+          'id': 'failed:m:a6',
+          'kind': 'failed',
+          'machineId': 'm',
+          'machine': 'laptop',
+          'agentId': 'a6',
+          'line': 'billing failed: exit 1',
+        },
+        {
+          'id': 'asleep:studio',
+          'kind': 'asleep',
+          'machineId': 'studio',
+          'machine': 'studio',
+          'line': 'studio is asleep.',
+        },
+        {
+          'id': 'done:office:a9',
+          'kind': 'done',
+          'machineId': 'office',
+          'machine': 'office',
+          'agentId': 'a9',
+          'line': 'web@office finished 2 turns: deployed the preview.',
+        },
+      ],
+    });
+    return brain;
+  }
+
+  Widget panelFor(BuildContext context, DaemonFace face, DaemonBrain brain) =>
+      Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: SizedBox(
+            width: terminalCellSizeOf(context).width * 46,
+            child: DaemonPanel(
+              face: face,
+              brain: brain,
+              onClose: () {},
+              onHatch: (_) {},
+              onCommand: (_) {},
+              onAnswer: (_, _, _) {},
+              onOpenConversation: () {},
+              onOpenRules: () {},
+              talkShortcut: '⌘⌥T',
+              shortcut: (_) => null,
+            ),
+          ),
+        ),
+      );
+
+  testWidgets('panel: talk, asks, brief, journal, the dial and lessons', (
+    tester,
+  ) async {
+    final face = await _face(tester, _paired('tim', more: ['vim']));
+    final brain = pairBrain();
+    // A talk: one answered, one on its way.
+    final sent = <String>[];
+    brain.talkTo('what needs me?');
+    sent.add('t1');
+    brain.receive('daemon_say', {
+      'id': 'say:1',
+      'about': {'machineId': 'm', 'agentId': ''},
+      'mood': 'say',
+      'line': 'api@office waits on npm test, 40m. studio is asleep.',
+      'actions': [],
+      'ttlMs': 30000,
+    });
+    brain.talkTo('approve it if the tests are only unit tests');
+    face.sync(
+      const DaemonWatch(
+        asks: 1,
+        needIds: {'office/a1#r1', 'm/a4#r4'},
+        away: [DaemonMachine(name: 'studio', status: 'asleep')],
+      ),
+    );
+    await _capture(
+      tester,
+      'panel-pair',
+      const Size(560, 2300),
+      act: () async {
+        final approve = find.byKey(const ValueKey('daemon-lesson-approve:l1'));
+        await tester.ensureVisible(approve);
+        await tester.tap(approve);
+        await tester.pump();
+      },
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.byKey(const ValueKey('daemon-talk-input')), findsOneWidget);
+    expect(find.text('waking tim...'), findsOneWidget);
+    expect(find.text('start codex in ~/api?'), findsOneWidget);
+    expect(find.text('web@laptop: Which branch should I use?'), findsOneWidget);
+    expect(find.text('api@office: Bash: npm test (40m)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-panel-journal')), findsOneWidget);
+    expect(find.text('(*) suggest'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-panel-floor')), findsOneWidget);
+    expect(
+      find.text('teach "run-migrations-safely" to every agent?'),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('panel: the dial at act within rules, a light terminal', (
+    tester,
+  ) async {
+    final face = await _face(
+      tester,
+      _paired('tim').copyWith(autonomy: 'act-within-rules'),
+    );
+    final brain = pairBrain(keysLive: false);
+    await _capture(
+      tester,
+      'panel-autonomy-light',
+      const Size(560, 2100),
+      brightness: Brightness.light,
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.text('(*) act within rules'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('the brief on return, under the status line', (tester) async {
+    final brain = pairBrain();
+    await _capture(
+      tester,
+      'brief-notice',
+      const Size(760, 200),
+      (context) => Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: DaemonBriefNotice(
+            name: 'tim',
+            brief: brain.brief!,
+            onAnswer: (_, _, _) {},
+          ),
+        ),
+      ),
+    );
+    expect(find.text('api@office: Bash: npm test (40m)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-brief-key-0-y')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final (name, stage) in [
+    ('hatch-duplicate', HatchStage.merged),
+    ('hatch-duplicate-grew', HatchStage.grew),
+  ]) {
+    testWidgets('hatch reveal: $name', (tester) async {
+      final before = _paired('tim', version: '0.1', more: ['vim']);
+      final after = before.copyWith(
+        daemons: [
+          before.daemons.first,
+          const ZooDaemon(
+            id: 'vim',
+            hatchedAt: '2026-09-26T10:00:00Z',
+            egg: 'turn',
+            dupes: 1,
+            shiny: true,
+            xp: 150,
+            bond: 2,
+            version: '1.0',
+          ),
+        ],
+      );
+      await _capture(
+        tester,
+        name,
+        const Size(520, 420),
+        (context) => Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: SizedBox(
+              width: terminalCellSizeOf(context).width * 46,
+              child: DaemonHatchReveal(
+                roster: _roster,
+                egg: egg,
+                result: Future.value(
+                  const ZooHatch(
+                    eggId: 'egg1',
+                    daemonId: 'vim',
+                    shiny: true,
+                    duplicate: true,
+                    xp: 150,
+                  ),
+                ),
+                zoo: () => after,
+                before: before,
+                onClose: () {},
+                still: HatchFrame(stage: stage),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('vim x2 · +150 xp'), findsOneWidget);
+      expect(find.text('another vim. +150 xp. yours is shiny now.'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('daemon-hatch-grew')),
+        stage == HatchStage.grew ? findsOneWidget : findsNothing,
+      );
+      expect(find.byKey(const ValueKey('daemon-hatch-card')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
     });
   }
 }

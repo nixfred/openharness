@@ -96,6 +96,16 @@ void main() {
     final custom = DaemonRoster.parse(jsonEncode(raw)).byId('tim')!;
     expect(daemonColor(custom, _light), const Color(0xff2e6b2e));
     expect(daemonColor(custom, dark, shiny: true), const Color(0xffafff5f));
+    // Every daemon in the roster now has its own shiny colour: tim a
+    // brighter cyan-green, the grue a deep violet on its black.
+    for (final d in daemonRoster.daemons) {
+      expect(d.shinyColor, isNotNull, reason: d.id);
+    }
+    expect(daemonRoster.byId('tim')!.shinyColor, const Color(0xff00ffaf));
+    expect(
+      daemonColor(daemonRoster.byId('tim')!, dark, shiny: true),
+      const Color(0xff00ffaf),
+    );
   });
 
   Future<DaemonFace> face(WidgetTester tester, String id) async {
