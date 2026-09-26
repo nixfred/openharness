@@ -325,10 +325,7 @@ mixin _PairSections on State<DaemonPanel> {
         shownId: confirm.id,
         detail: confirm.detail,
         listing: confirm.kind == 'rules'
-            ? [
-                for (final line in pairConfigTurnsOn(confirm.detail))
-                  line,
-              ]
+            ? pairConfigTurnsOn(confirm.detail)
             : const [],
         onKey: (action) => widget.onAnswer?.call(confirm.id, action, null),
       ),
