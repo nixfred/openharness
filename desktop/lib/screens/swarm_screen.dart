@@ -99,6 +99,7 @@ import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
 import '../daemons/daemon_habits.dart';
 import '../daemons/daemon_settings.dart';
+import '../daemons/pair_rules_file.dart';
 import '../daemons/zoo.dart';
 import '../daemons/zoo_controller.dart';
 import '../widgets/daemon_hatch.dart';
@@ -404,7 +405,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _brain.said.listen(_face.sayFromBrain),
       _brain.unsaid.listen(_face.unsay),
       _brain.errors.listen(_face.sayNote),
+      // [g]: the brain says which harness; opening it is the window's.
+      _brain.opens.listen(_openHarness),
     ]);
+    // Idle at the window is away too: harnessd hears it (a night egg's away
+    // turns, and the brief on return).
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_notePointer);
     HardwareKeyboard.instance.addHandler(_noteKey);
     _syncToolbarNotices();
     unawaited(
@@ -496,6 +502,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     _brain.removeListener(_brainChanged);
     _brain.dispose();
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_notePointer);
+    _idleTimer?.cancel();
     app.agentPulse.removeListener(_face.pulse);
     _face.removeListener(_faceChanged);
     _face.dispose();
@@ -996,7 +1004,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
         final seen = _zooTurnsSeen[id] ?? 0;
         _zooTurnsSeen[id] = machine.zooTurns;
         if (machine.zooTurns > seen) {
-          _zoo.recordTurns(machine.zooTurns - seen, machineId: id);
+          final n = machine.zooTurns - seen;
+          _zoo.recordTurns(n, machineId: id, away: _awayForNight ? n : 0);
         }
       }
     }
@@ -2865,7 +2874,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'label': _face.label,
       'detail': _face.detail,
       'tooltip': _face.tooltip,
-      'voice': _face.voice,
+      // Exactly as sent, keys first: native makes the offered keys buttons.
+      'voice': _nativeVoice,
       'voiceActions': [
         for (final action in _face.voiceActions)
           {'key': action.key, 'label': action.label},
@@ -2873,6 +2883,18 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'voiceColor': (_face.voiceAlert ? theme.yellow : daemonDimInk(theme))
           .toARGB32(),
     };
+  }
+
+  /// The spoken line for native: as the face shows it, with a brain line's
+  /// keys first even if an older brain put them elsewhere.
+  String? get _nativeVoice {
+    final voice = _face.voice;
+    final actions = _face.voiceActions;
+    if (voice == null || actions.isEmpty) return voice;
+    final split = splitDaemonKeys(voice, actions);
+    return split.keys.isEmpty
+        ? voice
+        : '[${split.keys.join('/')}] ${split.rest}';
   }
 
   void _faceChanged() {
@@ -2894,6 +2916,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   bool _noteKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
+    _noteInput();
     // ⌘⌥ plus an offered key answers the daemon's line: `[y]` is ⌘⌥Y.
     final keyboard = HardwareKeyboard.instance;
     if (keyboard.isMetaPressed &&
@@ -2919,8 +2942,141 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final sayId = _face.voiceSayId;
     final action = _face.voiceActions.where((a) => a.key == key).firstOrNull;
     if (sayId == null || action == null) return;
-    _brain.act(sayId, action.choice);
+    _answerLine(sayId, action, _face.voiceTarget);
     _face.answered();
+  }
+
+  /// A key on a line the brain wrote (the status line's, an ask, a brief
+  /// item): `[g]` opens the harness, which is the window's to do; any other
+  /// key goes to the brain as `daemon_act`.
+  void _answerLine(String id, DaemonAction action, DaemonAbout? about) {
+    if (action.key == 'g' && about?.key != null) {
+      _openHarness(about!);
+      return;
+    }
+    if (id.isEmpty) return;
+    _brain.act(id, action.choice);
+  }
+
+  /// Show a harness the daemon named, wherever it is.
+  void _openHarness(DaemonAbout about) {
+    if (!mounted) return;
+    _closeDaemon(restoreFocus: false);
+    _closeDaemonHint();
+    unawaited(
+      app.revealAgentFromAlert(about.machineId, about.agentId).catchError((
+        Object _,
+      ) {
+        // Gone since, or on a machine this window cannot reach.
+        _face.sayNote('that harness is not here any more.');
+      }),
+    );
+  }
+
+  /// The pair harness on this computer (`autonomous/pair`), when known: the
+  /// one a talk reached, else the one this machine lists.
+  ({String machineId, String agentId})? get _pairHarness {
+    final local = app.localMachineState;
+    if (local == null) return null;
+    final machineId = local.machine.machineId;
+    final agentId =
+        _brain.pairAgentId ??
+        local.agents.where((a) => a.dsh == 'autonomous/pair').firstOrNull?.id;
+    return agentId == null ? null : (machineId: machineId, agentId: agentId);
+  }
+
+  /// The whole conversation: the pair harness's own pane.
+  void _openConversation() {
+    final pair = _pairHarness;
+    if (pair == null) return;
+    _openHarness(DaemonAbout(pair.machineId, pair.agentId));
+  }
+
+  /// `~/.config/harness/pair.jsonc`, written with no rules when it is not
+  /// there yet, opened in the editor `.jsonc` files open in.
+  Future<void> _openPairRules() async {
+    try {
+      final file = await ensurePairRules();
+      if (!await launchUrl(file.uri)) {
+        throw StateError('No editor opens .jsonc files. Open ${file.path}.');
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text('Couldn’t open pair.jsonc. $error')),
+        );
+      }
+    }
+  }
+
+  /// "Talk to daemon": the panel, with the talk box ready.
+  void _talkToDaemon() {
+    if (_daemonOverlay != null) _closeDaemon(restoreFocus: false);
+    if (!_brain.paired) {
+      _face.sayNote(
+        _brain.active
+            ? 'pair a daemon first: its panel has [ pair ].'
+            : 'harnessd here cannot talk yet. update it.',
+      );
+    }
+    _toggleDaemon(talk: true);
+  }
+
+  // ── idle: away at the window ───────────────────────────────────────────────
+
+  /// No key or pointer this long, with the window in front, is away:
+  /// harnessd hears `daemon_presence { active: false, awayMs }`.
+  static const _idleAfter = Duration(minutes: 5);
+  DateTime? _lastInput;
+  DateTime? _idleSince;
+  Timer? _idleTimer;
+
+  void _notePointer(PointerEvent event) {
+    if (event is PointerDownEvent ||
+        event is PointerScrollEvent ||
+        event is PointerHoverEvent) {
+      _noteInput();
+    }
+  }
+
+  void _noteInput() {
+    final now = (widget.daemonClock ?? DateTime.now)();
+    _lastInput = now;
+    if (_idleSince case final since?) {
+      // Back from idle: a return, with how long.
+      _idleSince = null;
+      if (app.inForeground) {
+        unawaited(_sendPresence(away: now.difference(since)));
+      }
+    }
+    _idleTimer ??= Timer(_idleAfter, _checkIdle);
+  }
+
+  void _checkIdle() {
+    _idleTimer = null;
+    final last = _lastInput;
+    if (!mounted || last == null || _idleSince != null) return;
+    final now = (widget.daemonClock ?? DateTime.now)();
+    final quiet = now.difference(last);
+    if (quiet < _idleAfter) {
+      _idleTimer = Timer(_idleAfter - quiet, _checkIdle);
+      return;
+    }
+    // Only in front: a window behind others already said it is away.
+    if (!app.inForeground || !_brain.active) return;
+    _idleSince = last;
+    unawaited(_sendPresence(idle: quiet));
+  }
+
+  /// A guest's turns that finish now finished while the person was away if
+  /// the window has not been in use for `earn.night.awayMinutes`.
+  bool get _awayForNight {
+    final minutes = _zoo.roster.rules.earn.awayMinutes;
+    final now = (widget.daemonClock ?? DateTime.now)();
+    final since = _awaySince ?? _idleSince ?? _lastInput;
+    return since != null &&
+        (_awaySince != null || _idleSince != null) &&
+        now.difference(since) >= Duration(minutes: minutes);
   }
 
   void _brainChanged() {
@@ -2941,7 +3097,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   /// `daemon_presence`: whether you are at this window, how long you were
   /// away, and (for a guest, whose zoo is local) which daemon it pairs with.
-  Future<void> _sendPresence({Duration? away}) async {
+  Future<void> _sendPresence({Duration? away, Duration? idle}) async {
     if (!_brain.active) return;
     final pair = app.isGuest ? _zoo.zoo.pair : null;
     _presencePair = pair;
@@ -2950,8 +3106,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _presenceFocus = agentId == null ? null : '${pane!.machineId}/$agentId';
     _presenceAutonomy = app.isGuest ? _zoo.zoo.autonomy : null;
     await _brain.presence(
-      active: app.inForeground,
-      away: away,
+      // Idle in front of the window is away, with how long it has been.
+      active: app.inForeground && idle == null,
+      away: idle ?? away,
       pair: pair,
       autonomy: _presenceAutonomy,
       focusMachineId: agentId == null ? null : pane!.machineId,
@@ -2959,21 +3116,31 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
   }
 
-  /// The brief on return: a short list under the status line.
+  /// The brief on return: a short list under the status line, each item as
+  /// sent, keys first. It stays up while its keys work (a minute) when an
+  /// item has any, else 10 s; it is in the panel until the next one.
   void _showBrief(DaemonBrief brief) {
     if (!app.inForeground || (brief.line.isEmpty && brief.items.isEmpty)) {
       return;
     }
+    final keyed = brief.items.any(
+      (item) => item.actions.any((a) => a.key != 'g'),
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _showDaemonNotice(
-        [
-          if (brief.line.isNotEmpty) '${_face.name}: ${brief.line}',
-          for (final item in brief.items.take(4))
-            '  ${item.machine.isEmpty ? '' : '${item.machine}  '}${item.line}',
-        ].join('\n'),
+      _showDaemonOverlay(
         key: const ValueKey('daemon-brief'),
-        showFor: const Duration(seconds: 10),
+        interactive: true,
+        showFor: keyed ? DaemonBrief.keysFor : const Duration(seconds: 10),
+        child: DaemonBriefNotice(
+          name: _face.name,
+          brief: brief,
+          live: brief.keysLive(_brain.now()),
+          onAnswer: (id, action, about) {
+            _closeDaemonHint();
+            _answerLine(id, action, about);
+          },
+        ),
       );
     });
   }
@@ -3111,6 +3278,24 @@ class _SwarmScreenState extends State<SwarmScreen> {
     String? action,
     VoidCallback? onAction,
     Duration showFor = const Duration(seconds: 6),
+  }) => _showDaemonOverlay(
+    key: key,
+    interactive: onAction != null,
+    showFor: showFor,
+    child: DaemonNotice(
+      message: message,
+      action: action,
+      onAction: onAction,
+    ),
+  );
+
+  /// A note beside the slot: it never takes focus on arrival, and takes
+  /// clicks only when it has something to click.
+  void _showDaemonOverlay({
+    required Key key,
+    required Widget child,
+    required bool interactive,
+    Duration showFor = const Duration(seconds: 6),
   }) {
     if (!mounted || !_daemonNoticeAllowed) return;
     final overlay = Overlay.maybeOf(context);
@@ -3123,7 +3308,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           top: (_native ? 0.0 : _tabBarHeight) + cell.width,
           right: cell.width,
           child: IgnorePointer(
-            ignoring: onAction == null,
+            ignoring: !interactive,
             child: ConstrainedBox(
               constraints: BoxConstraints(
                 maxWidth: math.max(
@@ -3131,12 +3316,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
                   MediaQuery.sizeOf(context).width - cell.width * 2,
                 ),
               ),
-              child: DaemonNotice(
-                key: key,
-                message: message,
-                action: action,
-                onAction: onAction,
-              ),
+              child: KeyedSubtree(key: key, child: child),
             ),
           ),
         );
@@ -3165,7 +3345,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _toggleDaemon();
   }
 
-  void _toggleDaemon() {
+  void _toggleDaemon({bool talk = false}) {
     _closeDaemonHint();
     if (_daemonOverlay != null) {
       _closeDaemon();
@@ -3187,7 +3367,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
         child: DaemonPanel(
           key: ValueKey(_zoo.scope),
           face: _face,
-          brief: _brain.brief,
+          brain: _brain.active ? _brain : null,
+          onAnswer: _answerLine,
+          onOpenConversation: _pairHarness == null ? null : _openConversation,
+          onOpenRules: () => unawaited(_openPairRules()),
+          talkShortcut: _keymap.hint('app.daemon_talk'),
+          focusTalk: talk,
           onClose: _closeDaemon,
           onHatch: _hatch,
           shortcut: (command) => _keymap.hint(command),
@@ -3276,6 +3461,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     dismissTransientMenus();
     // After the person's third hatch, any key skips to the card.
     final skippable = _zoo.zoo.daemons.length >= 3;
+    // A duplicate's level-up is told against the zoo before the hatch.
+    final before = _zoo.zoo;
     _face.beginReveal();
     final result = _zoo.hatch(egg.id);
     _preparePaneFocus();
@@ -3289,6 +3476,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           zoo: () => _zoo.zoo,
           reduceMotion: _reduceMotion,
           skippable: skippable,
+          before: before,
           onRevealed: _face.endReveal,
           onClose: _closeHatch,
         ),
@@ -4484,6 +4672,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     'app.customize': () => unawaited(_customize()),
     'app.store': _openStore,
     'app.daemon': _toggleDaemon,
+    'app.daemon_talk': _talkToDaemon,
     'agent.add': _addAgent,
     if (kDebugSurfaceEnabled) 'app.onboarding_review': _newTab,
     'agent.rename': () => _editAgent(),
@@ -4663,6 +4852,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       ?mode('agent.new', 'New Harness', 'agent · machine · project'),
       ?mode('app.store', 'Harness Store', 'Browse and install harnesses'),
       ?mode('app.daemon', 'Daemon', 'Your zoo · hatch · pair · nap'),
+      ?mode('app.daemon_talk', 'Talk to daemon', 'Ask your paired daemon'),
       ?mode(
         'harnesses.list',
         'Harnesses',

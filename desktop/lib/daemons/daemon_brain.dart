@@ -12,9 +12,12 @@
 ///   `daemon_act_result { requestId, id, ok, open?, error?, detail? }`
 ///   `daemon_talk_result { requestId, ok, agentId?, started? | resumed? |
 ///     sent?, error?, detail? }`
+///   `pair_result { requestId, ... }`: the answer to a `pair` request
 /// Out (only on the socket bound to this computer's harnessd):
 ///   `daemon_act { requestId, id, choice }`
 ///   `daemon_talk { requestId, text }`
+///   `pair { requestId, verb, ... }`: the control interface's local request
+///     (`harness pair lessons ...` uses the same path)
 ///   `daemon_presence { active?, awayMs?, desk, pair?, autonomy?,
 ///     focusMachineId?, focusAgentId?, doneSeen? }`: the pane in front of you
 ///     is never spoken about
@@ -57,10 +60,11 @@ DateTime? _at(Object? value) => value is num
     : null;
 
 /// The keys a line offers, first, as the brain writes them (`voice.ts`
-/// `keysPrefix`): `[y/n/g] `, in that order, only the ones offered.
+/// `keysPrefix`): `[y/n/s/g] `, in that order, only the ones offered. `s`
+/// shows a lesson.
 String daemonKeysPrefix(List<DaemonAction> actions) {
   final keys = [
-    for (final k in const ['y', 'n', 'g'])
+    for (final k in const ['y', 'n', 's', 'g'])
       if (actions.any((a) => a.key == k)) k,
   ];
   return keys.isEmpty ? '' : '[${keys.join('/')}] ';
@@ -453,10 +457,14 @@ class DaemonBriefItem {
     this.agentId,
     this.name,
     this.actions = const [],
+    this.text,
   });
   final String id, kind, machineId, machine, line;
   final String? agentId, name;
   final List<DaemonAction> actions;
+
+  /// A `lesson` item's full text (the SKILL.md or note), shown on `[s]`.
+  final String? text;
 
   /// The harness it is about, when it is about one.
   DaemonAbout? get about => agentId == null || machineId.isEmpty
@@ -474,6 +482,7 @@ class DaemonBriefItem {
       name: _opt(raw['name']),
       line: raw['line'] as String,
       actions: _actions(raw['actions']),
+      text: raw['text'] is String ? raw['text'] as String : null,
     );
   }
 }
@@ -544,6 +553,10 @@ class DaemonBrain extends ChangeNotifier {
   DaemonBrainState? _state;
   DaemonBrief? _brief;
   final _pendingActs = <String, String>{}; // requestId -> say id
+  final _requests = <String, Completer<Map<String, dynamic>>>{};
+
+  /// How long a `pair` request waits for its answer.
+  static const requestTimeout = Duration(seconds: 15);
   final _said = StreamController<DaemonSay>.broadcast(sync: true);
   final _unsaid = StreamController<String>.broadcast(sync: true);
   final _errors = StreamController<String>.broadcast(sync: true);
@@ -645,6 +658,12 @@ class DaemonBrain extends ChangeNotifier {
               ? detail
               : actError(payload['error'] as String?),
         );
+      case 'pair_result':
+        final requestId = payload['requestId'];
+        if (requestId is! String) return;
+        final waiting = _requests.remove(requestId);
+        if (waiting == null || waiting.isCompleted) return;
+        waiting.complete({...payload}..remove('requestId'));
       case 'daemon_talk_result':
         final requestId = payload['requestId'];
         if (_talkRequest == null || requestId != _talkRequest) return;
@@ -706,6 +725,32 @@ class DaemonBrain extends ChangeNotifier {
       _errors.add('harnessd is not reachable.');
     }
     return sent;
+  }
+
+  /// One `pair` request (the control interface, `pair/control.ts`) to this
+  /// computer's harnessd, answered by its `pair_result`: `{ ok, ... }` or
+  /// `{ error, detail? }`. Never throws; a harnessd that cannot be reached or
+  /// does not answer is an error like any other.
+  Future<Map<String, dynamic>> request(
+    String verb, [
+    Map<String, dynamic> payload = const {},
+  ]) async {
+    if (_disposed) return {'ok': false, 'error': 'CLOSED'};
+    final requestId = _id(12);
+    final done = Completer<Map<String, dynamic>>();
+    _requests[requestId] = done;
+    final sent = send('pair', {...payload, 'verb': verb, 'requestId': requestId});
+    if (!sent) {
+      _requests.remove(requestId);
+      return {'ok': false, 'error': 'UNREACHABLE'};
+    }
+    return done.future.timeout(
+      requestTimeout,
+      onTimeout: () {
+        _requests.remove(requestId);
+        return {'ok': false, 'error': 'TIMEOUT'};
+      },
+    );
   }
 
   /// Your words to the paired daemon: harnessd starts, resumes or reaches the
@@ -797,6 +842,10 @@ class DaemonBrain extends ChangeNotifier {
     _state = null;
     _brief = null;
     _pendingActs.clear();
+    for (final waiting in _requests.values) {
+      if (!waiting.isCompleted) waiting.complete({'ok': false, 'error': 'GONE'});
+    }
+    _requests.clear();
     _talkRequest = null;
     _talkPhase = DaemonTalkPhase.idle;
     _talkError = null;
@@ -808,6 +857,12 @@ class DaemonBrain extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    for (final waiting in _requests.values) {
+      if (!waiting.isCompleted) {
+        waiting.complete({'ok': false, 'error': 'CLOSED'});
+      }
+    }
+    _requests.clear();
     unawaited(_said.close());
     unawaited(_unsaid.close());
     unawaited(_errors.close());

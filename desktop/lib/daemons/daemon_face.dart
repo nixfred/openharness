@@ -411,6 +411,9 @@ class DaemonFace extends ChangeNotifier {
   /// The brain's id for the line being spoken, to answer it.
   String? get voiceSayId => _spoken?.sayId;
 
+  /// The harness the line being spoken is about (its `[g]` opens it).
+  DaemonAbout? get voiceTarget => _spoken?.target;
+
   static const moodWords = {
     DaemonMood.idle: 'content',
     DaemonMood.work: 'agents working',
@@ -1008,6 +1011,7 @@ class DaemonFace extends ChangeNotifier {
       kind: kind,
       about: say.aboutKey,
       sayId: say.id,
+      target: say.about?.key == null ? null : say.about,
       actions: say.actions,
       ttl: say.ttl ?? voiceFor,
       exact: true,
@@ -1233,6 +1237,7 @@ class _Line {
     this.ttl,
     this.holdUntil,
     this.exact = false,
+    this.target,
   });
   final String line;
   final DateTime at;
@@ -1242,6 +1247,9 @@ class _Line {
   /// Shown exactly as sent (the brain's line, keys first), not as
   /// `name: line`.
   final bool exact;
+
+  /// The harness a brain line is about.
+  final DaemonAbout? target;
 
   /// `machineId/agentId` of the harness it is about, when it is about one.
   final String? about;

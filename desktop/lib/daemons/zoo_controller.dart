@@ -520,23 +520,30 @@ class ZooController extends ChangeNotifier {
   static final _unsafe = RegExp(r'[^A-Za-z0-9_-]');
 
   /// A guest's finished turns, counted here with the server's rules
-  /// (`zoo.turn`: the daily cap, earned eggs, the pair's xp). Never while
-  /// signed in: harnessd reports those turns, and they would count twice.
-  void recordTurns(int n, {required String machineId}) {
+  /// (`zoo.turn`: the daily cap, earned eggs, the pair's xp), [away] of them
+  /// finished while the person was away. Never while signed in: harnessd
+  /// reports those turns, and they would count twice.
+  void recordTurns(int n, {required String machineId, int away = 0}) {
     if (!loaded || isAccount || _scope != 'guest' || n <= 0) return;
     final now = _now();
     var machine = machineId.replaceAll(_unsafe, '-');
     if (machine.isEmpty) machine = 'local';
     if (machine.length > 64) machine = machine.substring(0, 64);
     final ops = <Map<String, dynamic>>[];
+    // Turns that finished while you were away (what a night egg counts).
+    var awayLeft = away.clamp(0, n);
     for (var left = n; left > 0; left -= 50) {
+      final chunk = min(left, 50);
+      final chunkAway = min(awayLeft, chunk);
+      awayLeft -= chunkAway;
       ops.add({
         'op': 'zoo.turn',
         'batchId': List.generate(
           16,
           (_) => _random.nextInt(16).toRadixString(16),
         ).join(),
-        'n': min(left, 50),
+        'n': chunk,
+        if (chunkAway > 0) 'away': chunkAway,
         'day': localDayOf(now),
         'hour': now.hour,
         'machineId': machine,

@@ -285,6 +285,7 @@ class DaemonKeys extends StatelessWidget {
     this.live = true,
     this.chord = false,
     this.idPrefix = 'daemon-answer',
+    this.height,
   });
   final List<String> keys;
   final List<DaemonAction> actions;
@@ -298,9 +299,12 @@ class DaemonKeys extends StatelessWidget {
   final bool chord;
   final String idPrefix;
 
+  /// The row's height: the status line's by default.
+  final double? height;
+
   @override
   Widget build(BuildContext context) {
-    final height = workspaceBarControlHeight(context);
+    final height = this.height ?? workspaceBarControlHeight(context);
     Widget text(String value) => SizedBox(
       height: height,
       child: Center(
@@ -383,6 +387,129 @@ class DaemonCardText extends StatelessWidget {
         ],
       ),
       style: style,
+    );
+  }
+}
+
+/// The brief on return (`daemon_brief`), under the status line: the daemon's
+/// back line, then at most five items, each exactly as sent. A waiting item's
+/// keys come first and work while its keys are [live] (a minute); `[g]`
+/// opens the harness at any time. A `lesson` item (a lesson's `[s]`) shows
+/// the lesson's text under it.
+class DaemonBriefNotice extends StatelessWidget {
+  const DaemonBriefNotice({
+    super.key,
+    required this.name,
+    required this.brief,
+    this.live = true,
+    this.onAnswer,
+  });
+  final String name;
+  final DaemonBrief brief;
+  final bool live;
+  final void Function(String id, DaemonAction action, DaemonAbout? about)?
+  onAnswer;
+
+  @override
+  Widget build(BuildContext context) {
+    AppTheme.watch(context);
+    return ListenableBuilder(
+      listenable: Listenable.merge([terminalThemeStore, AppTheme.palette]),
+      builder: (context, _) {
+        final theme = currentTerminalTheme();
+        final cell = workspaceBarCellSizeOf(context);
+        TextStyle ink(Color color) => workspaceBarTextStyle(
+          color: color,
+        ).copyWith(fontFeatures: daemonTextFeatures);
+        return Material(
+          color: theme.background,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(kTerminalCornerRadius),
+            side: terminalPaneBorder(focused: true),
+          ),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: cell.width,
+              vertical: cell.height / 2,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (brief.line.isNotEmpty)
+                  Text(
+                    '$name: ${brief.line}',
+                    style: ink(theme.foreground),
+                  ),
+                for (final (i, item) in brief.items.indexed) ...[
+                  () {
+                    final about = item.about;
+                    final actions = [
+                      ...item.actions,
+                      if (about != null && !item.actions.any((a) => a.key == 'g'))
+                        (key: 'g', label: 'open', choice: 'open'),
+                    ];
+                    final split = splitDaemonKeys(item.line, actions);
+                    final color = switch (item.kind) {
+                      'waiting' || 'lesson' => theme.yellow,
+                      'failed' => theme.red,
+                      _ => daemonDimInk(theme),
+                    };
+                    TextStyle style([bool emphasized = false]) =>
+                        workspaceBarTextStyle(
+                          color: color,
+                          emphasized: emphasized,
+                        ).copyWith(fontFeatures: daemonTextFeatures);
+                    return Row(
+                      key: ValueKey('daemon-brief-item-$i'),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(width: cell.width * 2),
+                        if (split.keys.isNotEmpty)
+                          DaemonKeys(
+                            keys: split.keys,
+                            actions: actions,
+                            style: style,
+                            live: live,
+                            idPrefix: 'daemon-brief-key-$i',
+                            onAnswer: onAnswer == null
+                                ? null
+                                : (key) {
+                                    final action = actions
+                                        .where((a) => a.key == key)
+                                        .firstOrNull;
+                                    if (action != null) {
+                                      onAnswer!(item.id, action, about);
+                                    }
+                                  },
+                          ),
+                        Flexible(
+                          child: Text(
+                            split.rest,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: style(),
+                          ),
+                        ),
+                      ],
+                    );
+                  }(),
+                  if (item.kind == 'lesson' && item.text != null)
+                    Padding(
+                      padding: EdgeInsets.only(left: cell.width * 4),
+                      child: Text(
+                        item.text!,
+                        maxLines: 12,
+                        overflow: TextOverflow.ellipsis,
+                        style: ink(daemonDimInk(theme)),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

@@ -33,6 +33,13 @@ enum HatchStage {
   colour,
   banner,
   card,
+
+  /// A duplicate: no reveal of a new name. It merged into yours:
+  /// `tim x2 · +150 xp`.
+  merged,
+
+  /// ... and yours grew a level (its new version, when it has one).
+  grew,
   failed,
 }
 
@@ -72,6 +79,7 @@ class DaemonHatchReveal extends StatefulWidget {
     this.reduceMotion = false,
     this.skippable = false,
     this.still,
+    this.before,
   });
 
   final DaemonRoster roster;
@@ -89,6 +97,9 @@ class DaemonHatchReveal extends StatefulWidget {
 
   /// Draw one fixed moment instead of running (render checks only).
   final HatchFrame? still;
+
+  /// The zoo before this hatch: a duplicate's level-up is told against it.
+  final Zoo? before;
 
   @override
   State<DaemonHatchReveal> createState() => _DaemonHatchRevealState();
@@ -208,6 +219,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     }
     _hatch = result;
     final def = _def!;
+    final grew = result.duplicate && _grew != null;
     if (!widget.reduceMotion && !_skip) {
       // A secret: the stage goes black before the crack.
       if (def.secret || def.darkOnly) {
@@ -234,10 +246,20 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         _egg = eggPopFrame(roster, sparks: def.rarity == 'legendary');
       });
       if (!await _wait(def.rarity == 'legendary' ? 900 : 480)) return;
-      if (def.darkOnly && !_skip) {
+      if (def.darkOnly && !_skip && !result.duplicate) {
         _show(() => _stage = HatchStage.pitch);
         if (!await _wait(1600)) return;
       }
+    }
+    if (result.duplicate) {
+      // Another of one you have: it merges into yours, then yours may grow.
+      _show(() => _stage = HatchStage.merged);
+      _markRevealed();
+      if (grew) {
+        if (!await _wait(1400)) return;
+        _show(() => _stage = HatchStage.grew);
+      }
+      return;
     }
     if (!widget.reduceMotion && !_skip) {
       _show(() => _stage = HatchStage.silhouette);
@@ -281,12 +303,12 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     widget.onClose();
   }
 
-  /// The hatchling's card (card.mjs): at 0.1, with the day it hatched and
-  /// the egg it came from.
+  /// The hatchling's card (card.mjs): at 0.1, with the day it hatched, the
+  /// egg it came from and its serial (`#0042`) when the server minted one.
   List<String>? get _card {
     final def = _def, hatch = _hatch;
     if (def == null || hatch == null) return null;
-    final owned = widget.zoo().daemons.where((d) => d.id == def.id).lastOrNull;
+    final owned = _owned;
     return zooCardLines(
       roster,
       def,
@@ -294,7 +316,21 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       shiny: hatch.shiny,
       hatchedAt: owned?.hatchedAt ?? DateTime.now().toUtc().toIso8601String(),
       egg: widget.egg.kind,
+      serial: owned?.serial ?? hatch.serial,
     );
+  }
+
+  /// The daemon as you have it now (a duplicate merged into it).
+  ZooDaemon? get _owned =>
+      widget.zoo().daemons.where((d) => d.id == _def?.id).firstOrNull;
+
+  /// A duplicate's level-up: the level and version yours reached, when it
+  /// reached a new one.
+  (int, String)? get _grew {
+    final now = _owned;
+    final was = widget.before?.daemons.where((d) => d.id == now?.id).firstOrNull;
+    if (now == null || was == null || now.bond <= was.bond) return null;
+    return (now.bond, now.version);
   }
 
   Future<void> _copy() async {
@@ -477,6 +513,9 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         def == null) {
       return [_eggText(theme, ink)];
     }
+    if (_stage == HatchStage.merged || _stage == HatchStage.grew) {
+      return _merged(def, theme, cell, ink, muted);
+    }
     final shiny = _hatch?.shiny == true;
     final colour = daemonColor(def, theme, shiny: shiny);
     final backdrop = daemonBackdrop(def);
@@ -596,6 +635,70 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           ),
         ],
       ],
+    ];
+  }
+
+  /// A duplicate: yours, at its version and in its colour (shiny now, if the
+  /// duplicate was), `tim x2 · +150 xp`, then how it grew.
+  List<Widget> _merged(
+    DaemonDef def,
+    TerminalTheme theme,
+    Size cell,
+    TextStyle ink,
+    Color muted,
+  ) {
+    final hatch = _hatch!;
+    final owned = _owned;
+    final count = owned?.count ?? 2;
+    final grew = _stage == HatchStage.grew ? _grew : null;
+    final version = grew?.$2 ?? owned?.version ?? roster.rules.versions.first;
+    final shiny = owned?.shiny ?? hatch.shiny;
+    final name = owned?.nickname ?? def.id;
+    return [
+      Container(
+        color: daemonBackdrop(def),
+        child: Text(
+          renderPortrait(
+            roster,
+            def,
+            version,
+            grew == null ? DaemonMood.idle : DaemonMood.done,
+            motion: false,
+          ).join('\n'),
+          key: const ValueKey('daemon-hatch-portrait'),
+          semanticsLabel: '${def.id} $version',
+          style: ink.copyWith(
+            color: daemonColor(def, theme, shiny: shiny),
+            height: 1.15,
+          ),
+        ),
+      ),
+      SizedBox(height: cell.height / 2),
+      Text(
+        '$name x$count · +${hatch.xp} xp',
+        key: const ValueKey('daemon-hatch-merged'),
+        style: ink.copyWith(color: theme.yellow, letterSpacing: 1),
+      ),
+      SizedBox(height: cell.height / 2),
+      Text(
+        [
+          'another ${def.id}. +${hatch.xp} xp.',
+          if (hatch.shiny) 'yours is shiny now.',
+        ].join(' '),
+        key: const ValueKey('daemon-hatch-words'),
+        textAlign: TextAlign.center,
+        style: ink.copyWith(color: muted),
+      ),
+      if (grew != null) ...[
+        SizedBox(height: cell.height / 2),
+        Text(
+          '$name grew: bond ${grew.$1} · ${grew.$2}',
+          key: const ValueKey('daemon-hatch-grew'),
+          style: ink.copyWith(color: theme.green),
+        ),
+      ],
+      SizedBox(height: cell.height),
+      _button('[ close ]', _close, theme, ink),
     ];
   }
 

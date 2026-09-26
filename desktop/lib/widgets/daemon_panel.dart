@@ -1,9 +1,13 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
 import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
+import '../daemons/daemon_lessons.dart';
 import '../daemons/daemon_lines.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
@@ -13,6 +17,8 @@ import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
 import 'daemon_slot.dart';
+
+part 'daemon_panel_pair.dart';
 
 /// Where each first-egg habit can be practised, when the app has a place.
 const daemonHabitCommands = <String, String>{
@@ -25,9 +31,11 @@ const daemonHabitCommands = <String, String>{
 };
 
 /// The daemon's panel: before the first hatch, the nest and its habits; after,
-/// the paired daemon's portrait, lore, family and current line, the zoo, and
-/// pair, rename and nap. Escape closes (or leaves rename), arrows and j/k move,
-/// Enter acts.
+/// the paired daemon's portrait, lore, family and current line; with a pair
+/// brain, the talk box, what it asks, the brief, its journal and lessons;
+/// its autonomy dial; then the zoo, and pair, rename and nap. Escape closes
+/// (or leaves rename or the talk box), arrows and j/k move, Enter acts, and
+/// on a row with keys, y, n, s or g answer it.
 class DaemonPanel extends StatefulWidget {
   const DaemonPanel({
     super.key,
@@ -36,12 +44,35 @@ class DaemonPanel extends StatefulWidget {
     required this.onHatch,
     required this.onCommand,
     required this.shortcut,
-    this.brief,
+    this.brain,
+    this.onAnswer,
+    this.onOpenConversation,
+    this.onOpenRules,
+    this.talkShortcut,
+    this.focusTalk = false,
   });
   final DaemonFace face;
 
-  /// The pair brain's last brief (`daemon_brief`), when harnessd has a brain.
-  final DaemonBrief? brief;
+  /// This computer's pair brain, when harnessd has one: its asks, brief,
+  /// journal, talk and lessons.
+  final DaemonBrain? brain;
+
+  /// A key on a line the brain wrote: the line's (or ask's, or brief item's)
+  /// id, the action, and the harness it is about (`[g]` opens it).
+  final void Function(String id, DaemonAction action, DaemonAbout? about)?
+  onAnswer;
+
+  /// Focus the pair harness's own pane (the full conversation), when known.
+  final VoidCallback? onOpenConversation;
+
+  /// Open `~/.config/harness/pair.jsonc`, the rules act within rules runs.
+  final VoidCallback? onOpenRules;
+
+  /// The Talk to daemon chord, for its hint.
+  final String? talkShortcut;
+
+  /// Open with the talk box focused (the Talk to daemon command).
+  final bool focusTalk;
   final VoidCallback onClose;
   final ValueChanged<ZooEgg> onHatch;
   final ValueChanged<String> onCommand;
@@ -51,7 +82,7 @@ class DaemonPanel extends StatefulWidget {
   State<DaemonPanel> createState() => _DaemonPanelState();
 }
 
-class _DaemonPanelState extends State<DaemonPanel> {
+class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
   final _focus = FocusNode(debugLabel: 'Daemon');
   final _nameFocus = FocusNode(debugLabel: 'Daemon nickname');
   final _name = TextEditingController();
@@ -60,8 +91,10 @@ class _DaemonPanelState extends State<DaemonPanel> {
   String? _viewing;
   bool _renaming = false;
   String? _nameError;
+  @override
   late Size _cell;
 
+  @override
   DaemonFace get face => widget.face;
   DaemonRoster get roster => face.roster;
   Zoo get zoo => face.zoo.zoo;
@@ -69,13 +102,20 @@ class _DaemonPanelState extends State<DaemonPanel> {
   @override
   void initState() {
     super.initState();
+    _initPair();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _focusFirst();
+      if (!mounted) return;
+      if (widget.focusTalk && _pairLive) {
+        _talkFocus.requestFocus();
+      } else {
+        _focusFirst();
+      }
     });
   }
 
   @override
   void dispose() {
+    _disposePair();
     _focus.dispose();
     _nameFocus.dispose();
     _name.dispose();
@@ -85,8 +125,10 @@ class _DaemonPanelState extends State<DaemonPanel> {
     super.dispose();
   }
 
-  FocusNode _node(String key) =>
-      _items.putIfAbsent(key, () => FocusNode(debugLabel: 'Daemon $key'));
+  @override
+  FocusNode _node(String key) => key == 'talk'
+      ? _talkFocus
+      : _items.putIfAbsent(key, () => FocusNode(debugLabel: 'Daemon $key'));
 
   void _focusFirst() {
     if (_order.isEmpty) {
@@ -118,6 +160,11 @@ class _DaemonPanelState extends State<DaemonPanel> {
   }
 
   void _escape() {
+    if (_typing) {
+      // Out of the talk box, still in the panel.
+      _focus.requestFocus();
+      return;
+    }
     if (_renaming) {
       setState(() => _renaming = false);
       _node('rename').requestFocus();
@@ -157,10 +204,13 @@ class _DaemonPanelState extends State<DaemonPanel> {
     });
   }
 
+  @override
   TerminalTheme get _theme => currentTerminalTheme();
+  @override
   TextStyle _ink([Color? color]) =>
       terminalContentStyle(color: color ?? _theme.foreground)
           .copyWith(fontFeatures: daemonTextFeatures);
+  @override
   Color get _muted => _theme.foreground.withValues(alpha: .58);
 
   ButtonStyle get _buttonStyle =>
@@ -188,6 +238,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
         ),
       );
 
+  @override
   Widget _action(
     String key,
     String label,
@@ -211,6 +262,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
     return ListenableBuilder(
       listenable: Listenable.merge([
         face,
+        ?widget.brain,
         terminalFontStore,
         terminalThemeStore,
         AppTheme.palette,
@@ -225,7 +277,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
         return CallbackShortcuts(
           bindings: {
             const SingleActivator(LogicalKeyboardKey.escape): _escape,
-            if (!_renaming) ...{
+            if (!_renaming && !_typing) ...{
               const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
                   _move(1),
               const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
@@ -461,6 +513,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
       nickname: viewing.nickname,
       hatchedAt: viewing.hatchedAt,
       egg: viewing.egg,
+      serial: viewing.serial,
     );
     // The line: what it is saying, else the line for its mood now. Only a
     // harness waiting on you or a failure is the alert yellow.
@@ -470,6 +523,9 @@ class _DaemonPanelState extends State<DaemonPanel> {
         ? face.voiceAlert
         : mood == DaemonMood.need || mood == DaemonMood.fail;
 
+    // Focus follows the page: the pair brain's rows first, then the zoo and
+    // its switches, then the dial and the lessons.
+    final live = isPair ? _pairLiveSections(order, name) : const <Widget>[];
     for (final d in _shelfOrder) {
       if (zoo.owns(d.id)) order.add('zoo:${d.id}');
     }
@@ -485,6 +541,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
     order
       ..add('quiet')
       ..add('motion');
+    final settings = isPair ? _pairSettingsSections(order) : const <Widget>[];
 
     return [
       _title(
@@ -567,19 +624,9 @@ class _DaemonPanelState extends State<DaemonPanel> {
           style: _ink(_muted),
         ),
       ],
-      if (widget.brief case final brief?
-          when brief.line.isNotEmpty || brief.items.isNotEmpty) ...[
-        SizedBox(height: _cell.height),
-        Text(
-          [
-            if (brief.line.isNotEmpty) brief.line,
-            for (final item in brief.items)
-              '  ${item.machine.isEmpty ? '' : '${item.machine}  '}${item.line}',
-          ].join('\n'),
-          key: const ValueKey('daemon-panel-brief'),
-          style: _ink(_muted),
-        ),
-      ],
+      // The pair brain: talk, asks, the brief and its journal. Only for the
+      // paired daemon.
+      ...live,
       SizedBox(height: _cell.height),
       ..._shelf(viewing.id),
       SizedBox(height: _cell.height / 2),
@@ -679,6 +726,8 @@ class _DaemonPanelState extends State<DaemonPanel> {
         ),
         if (_copyNote != null) Text(_copyNote!, style: _ink(_muted)),
       ],
+      // Its dial and its lessons.
+      ...settings,
     ];
   }
 

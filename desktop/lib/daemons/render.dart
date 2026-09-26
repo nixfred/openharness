@@ -315,7 +315,8 @@ List<String> cardLines(
 }
 
 /// The card for a daemon in the zoo: at its version, with its nickname, the
-/// day it hatched and the egg it came from.
+/// day it hatched, the egg it came from, and its serial (`#0042`) when the
+/// server minted one (a guest's daemon has none).
 List<String> zooCardLines(
   DaemonRoster roster,
   DaemonDef d, {
@@ -324,11 +325,13 @@ List<String> zooCardLines(
   String? nickname,
   String? hatchedAt,
   String? egg,
+  int? serial,
 }) => cardLines(
   roster,
   d,
   version: version,
   shiny: shiny,
+  serial: serial,
   nickname: nickname,
   hatched: hatchedAt == null || hatchedAt.length < 10
       ? null

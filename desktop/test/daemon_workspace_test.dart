@@ -802,6 +802,460 @@ void main() {
       'ttlMs': 5200,
     };
 
+    /// A daemon_state as `cli/src/pair/brain.ts` sends it.
+    Map<String, dynamic> state({
+      List<Map<String, dynamic>> needs = const [],
+      List<Map<String, dynamic>> asks = const [],
+      List<Map<String, dynamic>> acted = const [],
+      List<Map<String, dynamic>> machines = const [],
+      int done = 0,
+    }) => {
+      'pair': 'tim',
+      'needs': needs,
+      'working': 0,
+      'failing': [],
+      'machines': machines,
+      'done': {
+        'count': done,
+        'last': [
+          if (done > 0)
+            {
+              'machineId': 'office',
+              'machine': 'office',
+              'agentId': 'a9',
+              'name': 'api@office',
+              'recap': 'tests pass.',
+              'at': 0,
+            },
+        ],
+      },
+      'asks': asks,
+      'acted': acted,
+    };
+
+    Future<void> openPanel(WidgetTester tester) async {
+      await tester.tap(slot);
+      await tester.pump();
+      expect(find.byKey(const ValueKey('daemon-panel')), findsOneWidget);
+    }
+
+    Future<void> tapIn(WidgetTester tester, Finder finder) async {
+      await tester.ensureVisible(finder);
+      await tester.pump();
+      await tester.tap(finder);
+      await tester.pump();
+    }
+
+    testWidgets('Talk to daemon: the talk box, the pair starting, its answer '
+        'in the status line and the panel, and the conversation', (
+      tester,
+    ) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      app.adoptSessionForTest(terminal('pair1', []));
+      app.adoptSessionForTest(terminal('a3', []));
+      app.notifyListeners();
+      await tester.pump();
+      // ⌘⌥T, the keymap's Talk to daemon: the panel, the talk box focused.
+      await key(tester, LogicalKeyboardKey.keyT, cmd: true, alt: true);
+      await tester.pump();
+      final input = find.byKey(const ValueKey('daemon-talk-input'));
+      expect(input, findsOneWidget);
+      expect(
+        tester.widget<TextField>(input).focusNode!.hasFocus,
+        isTrue,
+        reason: 'ready to type',
+      );
+      await tester.enterText(input, 'what needs me?');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      final talk = frames.lastWhere((f) => f.$1 == 'daemon_talk');
+      expect(talk.$2['text'], 'what needs me?');
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('daemon-talk-status'))).data,
+        'waking tim...',
+      );
+      await frame(tester, 'daemon_talk_result', {
+        'requestId': talk.$2['requestId'],
+        'ok': true,
+        'agentId': 'pair1',
+        'started': true,
+      });
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('daemon-talk-status'))).data,
+        contains('starting'),
+      );
+      // Its answer: a dim line in the status line, and in the talk.
+      await frame(tester, 'daemon_say', {
+        'id': 'say:1',
+        'about': {'machineId': 'm', 'agentId': ''},
+        'mood': 'say',
+        'line': 'api waits on you, 40m.',
+        'actions': [],
+        'ttlMs': 30000,
+      });
+      await tester.pump();
+      expect(find.text('tim > api waits on you, 40m.'), findsOneWidget);
+      expect(find.text('you > what needs me?'), findsOneWidget);
+      // The whole conversation: the pair harness's own pane.
+      expect(app.focusedPane!.agentId, 'a3');
+      await tapIn(tester, find.byKey(const ValueKey('daemon-conversation')));
+      expect(app.focusedPane!.agentId, 'pair1');
+      expect(find.byKey(const ValueKey('daemon-panel')), findsNothing);
+      await tester.pump(const Duration(seconds: 31));
+      await unmount(tester);
+    });
+
+    testWidgets('keys first: [g] opens the harness here; the asks list keeps '
+        'what waits, and y answers it', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      app.adoptSessionForTest(terminal('a1', []));
+      app.adoptSessionForTest(terminal('a3', []));
+      app.notifyListeners();
+      await tester.pump();
+      await frame(
+        tester,
+        'daemon_state',
+        state(
+          asks: [
+            {
+              'id': 'ask:7',
+              'line': '[y/n] start codex in ~/api?',
+              'actions': [
+                {'key': 'y', 'label': 'do it', 'choice': 'y'},
+                {'key': 'n', 'label': 'skip', 'choice': 'n'},
+              ],
+            },
+          ],
+          needs: [
+            {
+              'machineId': 'm',
+              'machine': 'laptop',
+              'agentId': 'a1',
+              'name': 'migration',
+              'requestId': 'r1',
+              'question': 'Run npm test?',
+            },
+          ],
+        ),
+      );
+      expect(glyph(tester), '[? ?]', reason: 'it asks you something');
+      await frame(tester, 'daemon_say', {
+        'id': 'need:m:e:1',
+        'about': {'machineId': 'm', 'agentId': 'a1', 'requestId': 'r1'},
+        'mood': 'need',
+        'line': '[y/n/g] migration: Run npm test?',
+        'actions': [
+          {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+          {'key': 'n', 'label': 'No', 'choice': '3. No'},
+          {'key': 'g', 'label': 'open', 'choice': 'open'},
+        ],
+        'ttlMs': 5200,
+      });
+      // The pane in front is a3: the line is about a1, so it speaks.
+      expect(find.text('migration: Run npm test?'), findsOneWidget);
+      final acts = frames.where((f) => f.$1 == 'daemon_act').length;
+      await tester.tap(find.byKey(const ValueKey('daemon-answer-g')));
+      await tester.pump();
+      expect(app.focusedPane!.agentId, 'a1', reason: '[g] opened it');
+      expect(
+        frames.where((f) => f.$1 == 'daemon_act').length,
+        acts,
+        reason: 'opening is the window\'s to do',
+      );
+      // After its time the line goes; the asks list keeps both.
+      await tester.pump(const Duration(seconds: 6));
+      expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
+      await openPanel(tester);
+      expect(find.text('start codex in ~/api?'), findsOneWidget);
+      expect(find.text('migration@laptop: Run npm test?'), findsOneWidget);
+      await tapIn(tester, find.byKey(const ValueKey('daemon-key-ask:ask:7-y')));
+      expect(frames.last.$1, 'daemon_act');
+      expect(frames.last.$2['id'], 'ask:7');
+      expect(frames.last.$2['choice'], 'y');
+      // A focused row answers from the keyboard too: n.
+      _focusRow(tester, 'ask:ask:7');
+      await tester.pump();
+      await key(tester, LogicalKeyboardKey.keyN);
+      expect(frames.last.$2['choice'], 'n');
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
+    testWidgets('+n is the brain\'s count of finished turns; a look sends '
+        'doneSeen; auto is done and journaled; asleep is calm', (
+      tester,
+    ) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(
+        tester,
+        'daemon_state',
+        state(
+          done: 3,
+          machines: [
+            {'machineId': 'm', 'name': 'laptop', 'status': 'ok', 'local': true},
+            {'machineId': 'o', 'name': 'office', 'status': 'asleep'},
+            {'machineId': 's', 'name': 'studio', 'status': 'unreachable'},
+          ],
+          acted: [
+            {
+              'machineId': 'o',
+              'machine': 'office',
+              'agentId': 'a2',
+              'name': 'web@office',
+              'by': 'rule',
+              'action': 'answer',
+              'text': 'answered "1. Yes"',
+              'at': DateTime.now().millisecondsSinceEpoch,
+            },
+          ],
+        ),
+      );
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('daemon-slot-tally')))
+            .data,
+        '+3',
+      );
+      expect(glyph(tester), '[o o]', reason: 'asleep is never a failure');
+      // It acted within rules: drawn like done.
+      await frame(tester, 'daemon_say', {
+        'id': 'auto:o:e:2',
+        'about': {'machineId': 'o', 'agentId': 'a2'},
+        'mood': 'auto',
+        'line': 'rule: web@office answered "1. Yes"',
+        'actions': [],
+        'ttlMs': 5200,
+      });
+      expect(glyph(tester), '[^ ^]');
+      await openPanel(tester);
+      expect(
+        frames.where((f) => f.$2['doneSeen'] == true),
+        hasLength(1),
+        reason: 'opening the panel is a look',
+      );
+      expect(find.byKey(const ValueKey('daemon-slot-tally')), findsNothing);
+      expect(
+        find.textContaining('rule: web@office answered "1. Yes"'),
+        findsWidgets,
+      );
+      final away = tester
+          .widget<Text>(find.byKey(const ValueKey('daemon-panel-away')))
+          .data!;
+      expect(away, contains('office is asleep. its harnesses wait.'));
+      expect(away, contains('studio is out of reach.'));
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
+    testWidgets('autonomy: four levels, the floor, the rules file; the dial '
+        'is posted as zoo.autonomy', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      await openPanel(tester);
+      for (final level in zooAutonomyLevels) {
+        expect(
+          find.byKey(ValueKey('daemon-autonomy:$level')),
+          findsOneWidget,
+        );
+      }
+      expect(find.text('(*) suggest'), findsOneWidget, reason: 'the default');
+      expect(
+        find.textContaining(
+          'never pushes, deletes, force-pushes or bypasses permissions.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('[ rules: ~/.config/harness/pair.jsonc ]'),
+        findsOneWidget,
+      );
+      await tapIn(tester, find.byKey(const ValueKey('daemon-autonomy:watch')));
+      expect(find.text('(*) watch'), findsOneWidget);
+      await zoo.flush();
+      expect(remote.zoo.autonomy, 'watch');
+      expect(
+        remote.batches.expand((b) => b).where((op) => op['op'] == 'zoo.autonomy'),
+        [
+          {'op': 'zoo.autonomy', 'level': 'watch'},
+        ],
+      );
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
+    testWidgets('lessons: listed through the pair request; approve shows it '
+        'first and asks; skip and revert', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      await openPanel(tester);
+      Map<String, dynamic> lastPair() =>
+          frames.lastWhere((f) => f.$1 == 'pair').$2;
+      expect(lastPair()['verb'], 'lessons');
+      expect(lastPair()['action'], 'list');
+      Future<void> answer(Map<String, dynamic> reply) => frame(
+        tester,
+        'pair_result',
+        {'requestId': lastPair()['requestId'], ...reply},
+      );
+      final lessons = {
+        'ok': true,
+        'git': true,
+        'lessons': [
+          {
+            'id': 'l1',
+            'kind': 'skill',
+            'name': 'run-migrations-safely',
+            'status': 'pending',
+            'description': 'Back up before migrating.',
+            'learnedBy': 'tim',
+          },
+          {
+            'id': 'l0',
+            'kind': 'note',
+            'name': 'note-l0',
+            'status': 'approved',
+            'project': 'api',
+            'learnedBy': 'tim',
+          },
+        ],
+      };
+      await answer(lessons);
+      await tester.pump();
+      expect(find.text('pending "run-migrations-safely"'), findsOneWidget);
+      expect(find.text('learned note for api'), findsOneWidget);
+      // Approve: it shows the lesson, then asks.
+      await tapIn(tester, find.byKey(const ValueKey('daemon-lesson-approve:l1')));
+      expect(lastPair()['action'], 'show');
+      await answer({'ok': true, 'text': 'SKILL.md: back up, then migrate.'});
+      await tester.pump();
+      expect(find.text('SKILL.md: back up, then migrate.'), findsOneWidget);
+      expect(
+        find.text('teach "run-migrations-safely" to every agent?'),
+        findsOneWidget,
+      );
+      await tapIn(tester, find.byKey(const ValueKey('daemon-lesson-yes:l1')));
+      expect(lastPair()['action'], 'approve');
+      expect(lastPair()['id'], 'l1');
+      expect(lastPair()['confirmed'], isTrue, reason: 'the person said yes');
+      await answer({'ok': true, 'line': 'learned "run-migrations-safely".'});
+      await tester.pump();
+      expect(lastPair()['action'], 'list', reason: 'read again');
+      await answer(lessons);
+      await tester.pump();
+      expect(
+        find.text('learned "run-migrations-safely".'),
+        findsOneWidget,
+      );
+      await tapIn(tester, find.byKey(const ValueKey('daemon-lesson-revert:l0')));
+      expect(lastPair()['action'], 'revert');
+      expect(lastPair()['id'], 'l0');
+      await answer({'ok': true});
+      await tester.pump();
+      await answer(lessons);
+      await tester.pump();
+      await tapIn(tester, find.byKey(const ValueKey('daemon-lesson-skip:l1')));
+      expect(lastPair()['action'], 'skip');
+      await answer({'ok': false, 'error': 'NOT_PENDING', 'detail': 'lesson l1 is approved'});
+      await tester.pump();
+      await answer(lessons);
+      await tester.pump();
+      expect(find.text('lesson l1 is approved'), findsOneWidget);
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
+    testWidgets('a lesson proposal is keys first with [s]; show is a brief '
+        'with its text', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      await frame(tester, 'daemon_say', {
+        'id': 'lesson:l1:1',
+        'about': {'machineId': 'm', 'agentId': 'a7'},
+        'mood': 'ask',
+        'line':
+            '[y/n/s] teach your agents "run-migrations-safely"? you corrected codex.',
+        'actions': [
+          {'key': 'y', 'label': 'teach', 'choice': 'y'},
+          {'key': 'n', 'label': 'skip', 'choice': 'n'},
+          {'key': 's', 'label': 'show', 'choice': 's'},
+        ],
+        'ttlMs': 5200,
+      });
+      expect(
+        find.text(
+          'teach your agents "run-migrations-safely"? you corrected codex.',
+        ),
+        findsOneWidget,
+      );
+      // ⌘⌥S shows it.
+      await key(tester, LogicalKeyboardKey.keyS, cmd: true, alt: true);
+      expect(frames.last.$1, 'daemon_act');
+      expect(frames.last.$2['choice'], 's');
+      await frame(tester, 'daemon_brief', {
+        'desk': 'local',
+        'line': 'lesson "run-migrations-safely", pending',
+        'items': [
+          {
+            'id': 'lesson:l1:1',
+            'kind': 'lesson',
+            'machineId': 'm',
+            'line': '[y/n] teach your agents "run-migrations-safely"?',
+            'actions': [
+              {'key': 'y', 'label': 'teach', 'choice': 'y'},
+              {'key': 'n', 'label': 'skip', 'choice': 'n'},
+            ],
+            'text': '---\nname: run-migrations-safely\n---\nBack up first.',
+          },
+        ],
+      });
+      await tester.pump();
+      expect(find.textContaining('Back up first.'), findsWidgets);
+      await tester.tap(find.byKey(const ValueKey('daemon-brief-key-0-y')));
+      await tester.pump();
+      expect(frames.last.$2['id'], 'lesson:l1:1');
+      expect(frames.last.$2['choice'], 'y');
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
+    testWidgets('presence: the pane in front (none clears it), and idle is '
+        'away with how long', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      app.adoptSessionForTest(terminal('a3', []));
+      app.notifyListeners();
+      await tester.pump();
+      expect(frames.last.$2, {
+        'desk': frames.last.$2['desk'],
+        'focusMachineId': 'm',
+        'focusAgentId': 'a3',
+      }, reason: 'a focus change only');
+      app.panes.clear();
+      app.notifyListeners();
+      await tester.pump();
+      expect(frames.last.$2['focusAgentId'], isNull);
+      expect(frames.last.$2.containsKey('focusAgentId'), isTrue);
+      // Five minutes with no key or pointer in front of the window: away.
+      await key(tester, LogicalKeyboardKey.shiftLeft);
+      await tester.pump(const Duration(minutes: 5, seconds: 1));
+      final idle = frames.last.$2;
+      expect(idle['active'], isFalse);
+      expect(idle['awayMs'], greaterThanOrEqualTo(5 * 60 * 1000));
+      await tester.pump(const Duration(minutes: 10));
+      await key(tester, LogicalKeyboardKey.shiftLeft);
+      expect(frames.last.$2['active'], isTrue);
+      expect(frames.last.$2['awayMs'], greaterThanOrEqualTo(15 * 60 * 1000));
+      await unmount(tester);
+    });
+
     testWidgets('its state drives the face; its line offers answers', (
       tester,
     ) async {
@@ -927,22 +1381,49 @@ void main() {
         'line': 'welcome back. 2 done, 1 waiting 40m.',
         'items': [
           {
-            'id': 'i1',
+            'id': 'brief:office:r1:1',
             'kind': 'waiting',
+            'machineId': 'office',
             'machine': 'office',
-            'line': 'migration waits 40m',
+            'agentId': 'a1',
+            'name': 'migration',
+            'line': '[y/n/g] migration@office: Run npm test? (40m)',
+            'actions': [
+              {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+              {'key': 'n', 'label': 'No', 'choice': '3. No'},
+              {'key': 'g', 'label': 'open', 'choice': 'open'},
+            ],
+          },
+          {
+            'id': 'asleep:laptop',
+            'kind': 'asleep',
+            'machineId': 'laptop',
+            'machine': 'laptop',
+            'line': 'laptop is asleep.',
           },
         ],
       });
       await tester.pump();
       expect(find.byKey(const ValueKey('daemon-brief')), findsOneWidget);
+      // Each item exactly as sent, keys first.
       expect(
-        find.textContaining('office  migration waits 40m'),
+        find.text('migration@office: Run npm test? (40m)'),
         findsOneWidget,
       );
-      await tester.pump(const Duration(seconds: 11));
-      expect(find.byKey(const ValueKey('daemon-brief')), findsNothing);
+      expect(find.text('laptop is asleep.'), findsOneWidget);
+      // Its keys work while the brief is up: [y] is daemon_act on the item.
+      await tester.tap(find.byKey(const ValueKey('daemon-brief-key-0-y')));
+      await tester.pump();
+      expect(frames.last.$1, 'daemon_act');
+      expect(frames.last.$2['id'], 'brief:office:r1:1');
+      expect(frames.last.$2['choice'], '1. Yes');
       await unmount(tester);
     });
   });
+}
+
+/// Focus a panel row (its keys answer from the keyboard).
+void _focusRow(WidgetTester tester, String key) {
+  final focus = tester.widget<Focus>(find.byKey(ValueKey('daemon-row-$key')));
+  focus.focusNode!.requestFocus();
 }

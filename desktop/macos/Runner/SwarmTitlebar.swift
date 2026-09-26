@@ -1283,8 +1283,9 @@ private final class SwarmSymbolButton: SwarmIconButton {
 /// The daemon's one line, where the status line's context sits: tmux's message
 /// line, yellow for what needs you and the bar's own dimmer ink for a reply.
 /// Right-aligned in the bar font, truncated rather than wrapped. A line from the
-/// pair brain may offer answers: they come first, as `[y] label`, and only those
-/// are clickable; a click answers without taking focus.
+/// pair brain is drawn exactly as sent, its keys first (`[y/n/g] ...`); each
+/// offered key in that bracket is clickable, and a click answers without taking
+/// focus.
 private final class SwarmVoiceLabel: NSView {
   var text = "" { didSet { if text != oldValue { needsDisplay = true; setAccessibilityLabel(text) } } }
   var actions: [(key: String, label: String)] = [] { didSet { needsDisplay = true } }
@@ -1318,32 +1319,37 @@ private final class SwarmVoiceLabel: NSView {
     NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color, .ligature: 0])
   }
 
-  /// The layout, right-aligned as one run: the answers first (`[y] run it  [n] not
-  /// now`), two cells, then the line, which truncates before an answer does.
-  /// Answers the width cannot hold are dropped from the left. Returns the line's rect.
+  /// The line is drawn exactly as the brain sent it, right-aligned, keys first
+  /// (`[y/n/g] api@office: npm test`); it truncates at its tail, so the keys
+  /// always show. Each offered key inside that leading bracket is clickable.
+  /// Returns the line's rect.
   private func layoutActions() -> NSRect {
-    let cell = ceil(("m" as NSString).size(withAttributes: [.font: font]).width)
-    let widths = actions.map { ceil(attributed("[\($0.key)] \($0.label)").size().width) }
-    let answers = widths.reduce(0, +) + CGFloat(actions.count) * cell + (actions.isEmpty ? 0 : cell)
-    let lineWidth = min(ceil(attributed(text).size().width), max(0, bounds.width - answers))
-    var x = max(0, bounds.width - lineWidth - answers)
+    let lineWidth = min(ceil(attributed(text).size().width), bounds.width)
+    let x0 = bounds.width - lineWidth
     var rects: [(key: String, rect: NSRect)] = []
-    for (action, width) in zip(actions, widths) {
-      rects.append((action.key, NSRect(x: x, y: 0, width: width, height: bounds.height)))
-      x += width + cell
+    let offered = Set(actions.map { $0.key })
+    if !offered.isEmpty, text.hasPrefix("["), let close = text.firstIndex(of: "]") {
+      let inside = text[text.index(after: text.startIndex)..<close]
+      var index = 1
+      for part in inside.split(separator: "/", omittingEmptySubsequences: false) {
+        let key = String(part)
+        if offered.contains(key) {
+          let before = ceil(attributed(String(text.prefix(index))).size().width)
+          let width = ceil(attributed(key).size().width)
+          if before + width <= lineWidth {
+            rects.append((key, NSRect(x: x0 + before, y: 0, width: width, height: bounds.height)))
+          }
+        }
+        index += key.count + 1
+      }
     }
     actionRects = rects
-    return NSRect(x: bounds.width - lineWidth, y: 0, width: lineWidth, height: bounds.height)
+    return NSRect(x: x0, y: 0, width: lineWidth, height: bounds.height)
   }
 
   override func draw(_ dirtyRect: NSRect) {
     guard !text.isEmpty, bounds.width > 0 else { actionRects = []; return }
     let lineRect = layoutActions()
-    for (index, action) in actions.enumerated() where index < actionRects.count {
-      let label = attributed("[\(action.key)] \(action.label)")
-      let rect = actionRects[index].rect
-      label.draw(at: NSPoint(x: rect.minX, y: (bounds.height - label.size().height) / 2))
-    }
     let paragraph = NSMutableParagraphStyle()
     paragraph.alignment = .right
     paragraph.lineBreakMode = .byTruncatingTail
@@ -1353,6 +1359,11 @@ private final class SwarmVoiceLabel: NSView {
     let height = ceil(line.size().height)
     line.draw(with: NSRect(x: lineRect.minX, y: (bounds.height - height) / 2, width: lineRect.width, height: height),
       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    // Offered keys are underlined, like the Flutter status line draws them.
+    color.setFill()
+    for hit in actionRects {
+      NSRect(x: hit.rect.minX, y: (bounds.height - height) / 2 + 1, width: hit.rect.width, height: 1).fill()
+    }
   }
 }
 

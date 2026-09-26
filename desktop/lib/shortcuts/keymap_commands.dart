@@ -476,6 +476,15 @@ final harnessCommands = <HarnessCommand>[
     keywords: ['hatch', 'egg', 'zoo', 'pair', 'nap', 'buddy', 'companion'],
     nativeAction: 'daemon',
   ),
+  // ⌘⌥Space is macOS's Finder search; ⌘⌥ plus y, n, s or g answers the
+  // daemon's line. T for talk.
+  const HarnessCommand(
+    'app.daemon_talk',
+    'Talk to daemon',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+alt+t'],
+    keywords: ['ask', 'pair', 'daemon', 'chat', 'autonomy', 'lessons'],
+  ),
   const HarnessCommand(
     'app.settings',
     'Open Settings',

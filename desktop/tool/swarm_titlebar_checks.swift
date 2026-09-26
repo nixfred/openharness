@@ -225,8 +225,8 @@ private extension SwarmTabStrip {
     var events: [String] = []
     emit = { method, _ in events.append(method) }
     var daemon: [String: Any] = ["visible": true, "glyph": "\\_O_/",
-      "foreground": 0xffdfc38b, "label": "Egg", "detail": "2 of 5 habits",
-      "tooltip": "A daemon is incubating: 2 of 5 habits.\nClick to see them."]
+      "foreground": 0xffdfc38b, "label": "Egg", "detail": "2 of 3 habits",
+      "tooltip": "A daemon is incubating: 2 of 3 habits.\nClick to see them."]
     var state: [String: Any] = ["enabled": true, "activeId": "pet-11",
       "tabs": (0..<12).map { ["id": "pet-\($0)", "name": "Pet \($0)", "label": "\($0 + 1):code"] },
       "focusedContext": ["text": "Codex  M2:project  (main)", "canSelectModel": true],
@@ -236,7 +236,7 @@ private extension SwarmTabStrip {
     update(state)
     try checkTitlebar(daemonButton.title.isEmpty && daemonButton.glyph == "\\_O_/",
       "Before hatch the ASCII nest is drawn without a text label")
-    try checkTitlebar(daemonButton.toolTip?.contains("incubating") == true && daemonButton.toolTip?.contains("2 of 5") == true,
+    try checkTitlebar(daemonButton.toolTip?.contains("incubating") == true && daemonButton.toolTip?.contains("2 of 3") == true,
       "Habit progress remains available in the tooltip")
     try checkTitlebar(daemonButton.foreground == statusColor(0xffdfc38b, fallback: .clear),
       "Native daemon colours come from the same values as Flutter")
@@ -360,37 +360,48 @@ private extension SwarmTabStrip {
     try checkTitlebar(contextButton.isHidden && pullRequestButton.isHidden && focusedModelButton.isHidden && !voiceLabel.isHidden,
       "A workspace update while it speaks keeps the message line")
     try checkTitlebar(unmoved(), "A workspace update while it speaks lays out as if the status were shown")
-    // The pair brain's answers: drawn after the line, each one clickable.
-    daemon["voice"] = "pip: codex@m2 wants to run the migration."
+    // The pair brain's line, exactly as sent, keys first: each offered key in
+    // the leading bracket is clickable, nothing else is.
+    daemon["voice"] = "[y/n/g] codex@m2 wants to run the migration."
     daemon["voiceActions"] = [["key": "y", "label": "run it"], ["key": "n", "label": "not now"],
       ["key": "zz\u{e9}", "label": "bad key"]]
     updateDaemon(daemon)
     _ = voiceLabel.renderedPixels()
-    let voiceCell = ceil(("m" as NSString).size(withAttributes: [.font: voiceLabel.font]).width)
     let lineWidth = min(ceil(NSAttributedString(string: voiceLabel.text,
       attributes: [.font: voiceLabel.font, .ligature: 0]).size().width), voiceLabel.bounds.width)
-    try checkTitlebar(voiceLabel.actions.map(\.key) == ["y", "n"] && voiceLabel.actionRects.count == 2 &&
-      voiceLabel.actionRects[0].rect.maxX < voiceLabel.actionRects[1].rect.minX &&
-      voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width - voiceCell * 2 &&
-      (lineWidth + voiceCell * 2 > voiceLabel.bounds.width - voiceLabel.actionRects[1].rect.maxX ||
-        voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width - lineWidth),
-      "Answers come first, before the line, right-aligned as one run; a malformed key is dropped")
+    let lineStart = voiceLabel.bounds.width - lineWidth
+    let voiceCell = ceil(("m" as NSString).size(withAttributes: [.font: voiceLabel.font]).width)
+    func prefixWidth(_ prefix: String) -> CGFloat {
+      ceil(NSAttributedString(string: prefix, attributes: [.font: voiceLabel.font, .ligature: 0]).size().width)
+    }
+    try checkTitlebar(voiceLabel.text == "[y/n/g] codex@m2 wants to run the migration." &&
+      voiceLabel.actions.map(\.key) == ["y", "n"] && voiceLabel.actionRects.map(\.key) == ["y", "n"] &&
+      abs(voiceLabel.actionRects[0].rect.minX - (lineStart + prefixWidth("["))) < 1 &&
+      abs(voiceLabel.actionRects[1].rect.minX - (lineStart + prefixWidth("[y/"))) < 1 &&
+      voiceLabel.actionRects[1].rect.maxX < lineStart + prefixWidth("[y/n/g] "),
+      "The line is drawn as sent; its offered keys, first, are the buttons; [g] not offered and a malformed key are not")
     events.removeAll()
     var answered: [Any?] = []
     let previousEmit = emit
     emit = { method, arguments in events.append(method); answered.append(arguments) }
     let yes = voiceLabel.actionRects[0].rect
     voiceLabel.answer(at: NSPoint(x: yes.midX, y: yes.midY))
-    // The line itself sits after the answers, at the right.
+    // The rest of the line is words, not a button.
     let onLine = NSPoint(x: voiceLabel.bounds.width - 1, y: 1)
     voiceLabel.answer(at: onLine)
     emit = previousEmit
     try checkTitlebar(events == ["daemonAnswer"] && (answered.first as? [String: String])?["key"] == "y",
-      "Clicking an answer sends exactly that key, and the line itself is not a button")
+      "Clicking a key sends exactly that key, and the line itself is not a button")
     try checkTitlebar(voiceLabel.hitTest(voiceLabel.convert(onLine, to: self)) == nil &&
       voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: yes.midX, y: yes.midY), to: self)) === voiceLabel,
-      "Only the answers take the pointer; the rest still drags the window")
-    try checkTitlebar(unmoved(), "Answers move nothing in the bar")
+      "Only the keys take the pointer; the rest still drags the window")
+    try checkTitlebar(unmoved(), "Keys move nothing in the bar")
+    // A long line truncates at its tail: the keys stay.
+    daemon["voice"] = "[y/n] " + String(repeating: "a very long line ", count: 40)
+    updateDaemon(daemon)
+    _ = voiceLabel.renderedPixels()
+    try checkTitlebar(voiceLabel.actionRects.map(\.key) == ["y", "n"] && voiceLabel.actionRects[0].rect.minX < voiceCell * 2,
+      "A line too long for the bar keeps its keys, first")
     daemon["voiceActions"] = nil
     daemon["voice"] = nil
     updateDaemon(daemon)
