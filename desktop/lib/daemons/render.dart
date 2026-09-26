@@ -153,16 +153,39 @@ String eggFrame(DaemonRoster roster, {int offset = 0, int crack = 0}) {
   return [' ' * _eggWidth, ...rows.map(shift), nest].join('\n');
 }
 
-/// The top pops off.
-String eggPopFrame(DaemonRoster roster) => [
-  "    '  .--.  .    ",
-  r'      /\/\/\      ',
-  "         '        ",
-  r'     |\/\/\/|     ',
-  '     |      |     ',
-  r'      \    /      ',
-  _eggRows(roster).last,
-].join('\n');
+/// Where a legendary's sparks fly around the pop: row, column and glyph.
+const eggSparks = <(int, int, String)>[
+  (0, 1, '*'),
+  (0, 16, '*'),
+  (1, 2, "'"),
+  (1, 15, '.'),
+  (2, 4, '.'),
+  (2, 13, '*'),
+  (3, 1, "'"),
+  (3, 16, "'"),
+  (4, 2, '*'),
+  (4, 15, '.'),
+];
+
+/// The top pops off; a legendary's pop throws [eggSparks] around it.
+String eggPopFrame(DaemonRoster roster, {bool sparks = false}) {
+  final rows = [
+    "    '  .--.  .    ",
+    r'      /\/\/\      ',
+    "         '        ",
+    r'     |\/\/\/|     ',
+    '     |      |     ',
+    r'      \    /      ',
+    _eggRows(roster).last,
+  ];
+  if (sparks) {
+    for (final (row, col, glyph) in eggSparks) {
+      final r = rows[row];
+      rows[row] = '${r.substring(0, col)}$glyph${r.substring(col + 1)}';
+    }
+  }
+  return rows.join('\n');
+}
 
 // ── the banner: a small FIGlet-style face, ported from the lookbook ──────────
 

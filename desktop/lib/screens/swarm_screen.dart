@@ -3231,6 +3231,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _closeSearch(restoreFocus: false);
     _closeCommandBar(restoreFocus: false);
     dismissTransientMenus();
+    // After the person's third hatch, any key skips to the card.
+    final skippable = _zoo.zoo.daemons.length >= 3;
     _face.beginReveal();
     final result = _zoo.hatch(egg.id);
     _preparePaneFocus();
@@ -3243,6 +3245,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
           result: result,
           zoo: () => _zoo.zoo,
           reduceMotion: _reduceMotion,
+          skippable: skippable,
           onRevealed: _face.endReveal,
           onClose: _closeHatch,
         ),

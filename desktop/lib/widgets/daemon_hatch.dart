@@ -14,29 +14,48 @@ import 'box_chrome.dart';
 import 'daemon_slot.dart';
 
 /// Where the reveal is. Exposed so render checks can draw any moment of it.
-enum HatchStage { egg, pitch, silhouette, colour, banner, card, failed }
+enum HatchStage {
+  /// Wobbling while harnessd answers: nothing is known yet.
+  egg,
+
+  /// Cracking, with the rarity told on the shell: a rare glows cyan; a
+  /// secret's stage has already gone black.
+  crack,
+
+  /// The top pops off: a legendary throws yellow sparks.
+  pop,
+
+  /// A secret: "It is pitch black."
+  pitch,
+
+  /// The portrait as `#`, in the faint colour.
+  silhouette,
+  colour,
+  banner,
+  card,
+  failed,
+}
 
 /// A still of the reveal, for review captures and Reduce Motion.
 @immutable
 class HatchFrame {
-  const HatchFrame({
-    required this.stage,
-    this.egg,
-    this.sprite,
-    this.bannerRows = 0,
-  });
+  const HatchFrame({required this.stage, this.egg, this.bannerRows = 0});
   final HatchStage stage;
-  final String? egg, sprite;
+
+  /// The egg's frame, for the egg, crack and pop stages.
+  final String? egg;
   final int bannerRows;
 }
 
-/// The hatch reveal (`daemons/README.md`, Hatching): the egg wobbles twice,
-/// cracks and pops; the 0.1 sprite appears as `#` in the faint colour for
-/// 850 ms, fills with its colour and blinks; its name types in as a small
-/// banner; the rarity stamp and first words appear; then the card, which
-/// copies as a fenced code block. A secret's reveal (a daemon that shows
-/// only in the dark) starts pitch black.
-/// Reduce Motion goes straight to the card.
+/// The hatch reveal (`daemons/README.md`, Hatching): the egg wobbles twice
+/// (and keeps wobbling while harnessd answers), then tells its rarity as it
+/// cracks: a rare's shell glows cyan, a legendary's pop throws yellow `*'.`
+/// sparks, and a secret's stage goes black before the crack. The hatchling's
+/// portrait appears as `#` in the faint colour for 1200 ms, fills with its
+/// colour and blinks; its name types in as a banner; the rarity stamp, its
+/// first words and the card follow. The card copies as a fenced code block.
+/// Reduce Motion goes straight to the card. From the fourth hatch on, any key
+/// skips to the card.
 ///
 /// It floats beside the status slot, takes keyboard focus while it is open,
 /// and Escape dismisses it at any point. [onRevealed] runs once, when the
@@ -51,6 +70,7 @@ class DaemonHatchReveal extends StatefulWidget {
     required this.onClose,
     this.onRevealed,
     this.reduceMotion = false,
+    this.skippable = false,
     this.still,
   });
 
@@ -64,6 +84,9 @@ class DaemonHatchReveal extends StatefulWidget {
   final VoidCallback? onRevealed;
   final bool reduceMotion;
 
+  /// After the person's third hatch, any key skips to the card.
+  final bool skippable;
+
   /// Draw one fixed moment instead of running (render checks only).
   final HatchFrame? still;
 
@@ -72,19 +95,29 @@ class DaemonHatchReveal extends StatefulWidget {
 }
 
 class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
+  static const silhouetteFor = 1200;
+
   final _focus = FocusNode(debugLabel: 'Hatch reveal');
   final _copyFocus = FocusNode(debugLabel: 'Copy card');
   HatchStage _stage = HatchStage.egg;
   late String _egg = eggFrame(widget.roster);
-  String? _sprite;
-  bool _faint = false;
+  String? _lid;
   int _bannerRows = 0;
   ZooHatch? _hatch;
-  bool _closed = false, _revealed = false;
+  bool _closed = false, _revealed = false, _skip = false;
+  Timer? _waitTimer;
+  Completer<void>? _waitDone;
   String? _copyNote;
 
   DaemonRoster get roster => widget.roster;
   DaemonDef? get _def => roster.byId(_hatch?.daemonId);
+  bool get _alive => !_closed && mounted;
+
+  /// A secret's stage is black from the crack on.
+  bool get _pitch =>
+      (_def?.secret == true || _def?.darkOnly == true) &&
+      _stage != HatchStage.failed &&
+      _stage != HatchStage.egg;
 
   @override
   void initState() {
@@ -92,8 +125,6 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     if (widget.still case final still?) {
       _stage = still.stage;
       _egg = still.egg ?? _egg;
-      _sprite = still.sprite;
-      _faint = still.stage == HatchStage.silhouette;
       _bannerRows = still.bannerRows;
       unawaited(
         widget.result.then((hatch) {
@@ -111,20 +142,37 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
   @override
   void dispose() {
     _closed = true;
+    _waitTimer?.cancel();
+    if (_waitDone case final done? when !done.isCompleted) done.complete();
     _focus.dispose();
     _copyFocus.dispose();
     super.dispose();
   }
 
   Future<bool> _wait(int ms) async {
-    if (widget.reduceMotion) return !_closed;
-    await Future<void>.delayed(Duration(milliseconds: ms));
-    return !_closed && mounted;
+    if (widget.reduceMotion || _skip) return _alive;
+    final done = Completer<void>();
+    _waitDone = done;
+    _waitTimer = Timer(Duration(milliseconds: ms), () {
+      if (!done.isCompleted) done.complete();
+    });
+    await done.future;
+    _waitTimer = null;
+    _waitDone = null;
+    return _alive;
   }
 
   void _show(VoidCallback change) {
-    if (_closed || !mounted) return;
+    if (!_alive) return;
     setState(change);
+  }
+
+  /// Any key after the third hatch: straight to the card.
+  void _skipToCard() {
+    if (_skip || !widget.skippable) return;
+    _skip = true;
+    _waitTimer?.cancel();
+    if (_waitDone case final done? when !done.isCompleted) done.complete();
   }
 
   Future<void> _run() async {
@@ -138,7 +186,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     );
     // The egg wobbles twice, and keeps wobbling while harnessd answers.
     var wobbles = 0;
-    while (!widget.reduceMotion && (wobbles < 2 || !answered)) {
+    while (!widget.reduceMotion && !_skip && (wobbles < 2 || !answered)) {
       for (final offset in const [-1, 0, 1, 0]) {
         _show(() => _egg = eggFrame(roster, offset: offset));
         if (!await _wait(90)) return;
@@ -152,16 +200,28 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     } catch (_) {
       hatch = null;
     }
-    if (_closed || !mounted) return;
+    if (!_alive) return;
     final result = hatch;
     if (result == null || roster.byId(result.daemonId) == null) {
       _show(() => _stage = HatchStage.failed);
       return;
     }
     _hatch = result;
-    // Crack, shake, crack wider, pop.
-    if (!widget.reduceMotion) {
-      _show(() => _egg = eggFrame(roster, crack: 1));
+    final def = _def!;
+    if (!widget.reduceMotion && !_skip) {
+      // A secret: the stage goes black before the crack.
+      if (def.secret || def.darkOnly) {
+        _show(() {
+          _stage = HatchStage.crack;
+          _egg = eggFrame(roster);
+        });
+        if (!await _wait(700)) return;
+      }
+      // Crack (a rare's shell glows), shake, crack wider, pop.
+      _show(() {
+        _stage = HatchStage.crack;
+        _egg = eggFrame(roster, crack: 1);
+      });
       if (!await _wait(450)) return;
       for (final offset in const [-1, 1, -1, 1, 0]) {
         _show(() => _egg = eggFrame(roster, offset: offset, crack: 1));
@@ -169,42 +229,27 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       }
       _show(() => _egg = eggFrame(roster, crack: 2));
       if (!await _wait(520)) return;
-      _show(() => _egg = eggPopFrame(roster));
-      if (!await _wait(480)) return;
-    }
-    final def = _def!;
-    final sprite = renderSprite(roster, def, 0, DaemonMood.idle);
-    if (def.darkOnly && !widget.reduceMotion) {
-      _show(() => _stage = HatchStage.pitch);
-      if (!await _wait(1600)) return;
-    }
-    if (!widget.reduceMotion) {
       _show(() {
-        _stage = HatchStage.silhouette;
-        _sprite = silhouette(sprite);
-        _faint = true;
+        _stage = HatchStage.pop;
+        _egg = eggPopFrame(roster, sparks: def.rarity == 'legendary');
       });
-      if (!await _wait(850)) return;
-      _show(() {
-        _stage = HatchStage.colour;
-        _sprite = sprite;
-        _faint = false;
-      });
+      if (!await _wait(def.rarity == 'legendary' ? 900 : 480)) return;
+      if (def.darkOnly && !_skip) {
+        _show(() => _stage = HatchStage.pitch);
+        if (!await _wait(1600)) return;
+      }
+    }
+    if (!widget.reduceMotion && !_skip) {
+      _show(() => _stage = HatchStage.silhouette);
+      if (!await _wait(silhouetteFor)) return;
+      _show(() => _stage = HatchStage.colour);
       if (!await _wait(320)) return;
-      _show(
-        () => _sprite = renderSprite(
-          roster,
-          def,
-          0,
-          DaemonMood.idle,
-          lid: def.lid ?? '-',
-        ),
-      );
+      _show(() => _lid = def.lid ?? '-');
       if (!await _wait(120)) return;
-      _show(() => _sprite = sprite);
+      _show(() => _lid = null);
       if (!await _wait(220)) return;
       final rows = bannerRows(def.id).length;
-      for (var row = 1; row <= rows; row++) {
+      for (var row = 1; row <= rows && !_skip; row++) {
         _show(() {
           _stage = HatchStage.banner;
           _bannerRows = row;
@@ -214,8 +259,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     }
     _show(() {
       _stage = HatchStage.card;
-      _sprite = sprite;
-      _faint = false;
+      _lid = null;
       _bannerRows = bannerRows(def.id).length;
     });
     _markRevealed();
@@ -248,8 +292,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       def,
       version: roster.rules.versions.first,
       shiny: hatch.shiny,
-      hatchedAt:
-          owned?.hatchedAt ?? DateTime.now().toUtc().toIso8601String(),
+      hatchedAt: owned?.hatchedAt ?? DateTime.now().toUtc().toIso8601String(),
       egg: widget.egg.kind,
     );
   }
@@ -265,6 +308,32 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     }
   }
 
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent ||
+        !widget.skippable ||
+        _stage == HatchStage.card ||
+        _stage == HatchStage.failed ||
+        event.logicalKey == LogicalKeyboardKey.escape ||
+        _modifiers.contains(event.logicalKey)) {
+      return KeyEventResult.ignored;
+    }
+    _skipToCard();
+    return KeyEventResult.handled;
+  }
+
+  static final _modifiers = {
+    LogicalKeyboardKey.shiftLeft,
+    LogicalKeyboardKey.shiftRight,
+    LogicalKeyboardKey.metaLeft,
+    LogicalKeyboardKey.metaRight,
+    LogicalKeyboardKey.altLeft,
+    LogicalKeyboardKey.altRight,
+    LogicalKeyboardKey.controlLeft,
+    LogicalKeyboardKey.controlRight,
+    LogicalKeyboardKey.capsLock,
+    LogicalKeyboardKey.fn,
+  };
+
   @override
   Widget build(BuildContext context) {
     AppTheme.watch(context);
@@ -277,19 +346,19 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       builder: (context, _) {
         final theme = currentTerminalTheme();
         final cell = terminalCellSizeOf(context);
-        final def = _def;
-        final pitch =
-            def?.darkOnly == true &&
-            _stage != HatchStage.failed &&
-            _stage != HatchStage.egg;
-        final background = pitch ? const Color(0xff000000) : theme.background;
-        final ink = terminalContentStyle(color: theme.foreground)
-            .copyWith(fontFeatures: daemonTextFeatures);
-        final muted = theme.foreground.withValues(alpha: .6);
+        final pitch = _pitch;
+        final background = pitch ? daemonPitch : theme.background;
+        // On the black stage the ink is light, whatever the theme.
+        final fg = pitch ? const Color(0xffd0d0d0) : theme.foreground;
+        final ink = terminalContentStyle(
+          color: fg,
+        ).copyWith(fontFeatures: daemonTextFeatures);
+        final muted = fg.withValues(alpha: .6);
         return CallbackShortcuts(
           bindings: {const SingleActivator(LogicalKeyboardKey.escape): _close},
           child: Focus(
             focusNode: _focus,
+            onKeyEvent: _onKey,
             child: Semantics(
               scopesRoute: true,
               explicitChildNodes: true,
@@ -307,10 +376,10 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
                     horizontal: cell.width * 2,
                     vertical: cell.height,
                   ),
-                  // A steady stage: the egg, the silhouette and the banner
-                  // all fit, so the reveal never jumps before the card.
+                  // A steady stage: the egg, the portrait and the banner all
+                  // fit, so the reveal never jumps before the card.
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(minHeight: cell.height * 12),
+                    constraints: BoxConstraints(minHeight: cell.height * 14),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -323,6 +392,58 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           ),
         );
       },
+    );
+  }
+
+  /// The egg's frame, told by the hatchling's rarity while it cracks: a
+  /// rare's shell glows cyan, a legendary's pop throws yellow sparks.
+  Widget _eggText(TerminalTheme theme, TextStyle ink) {
+    final def = _def;
+    final telling = _stage == HatchStage.crack || _stage == HatchStage.pop;
+    final rare = telling && def?.rarity == 'rare';
+    final legendary = _stage == HatchStage.pop && def?.rarity == 'legendary';
+    final shell = rare
+        ? ink.copyWith(
+            color: theme.cyan,
+            shadows: [
+              Shadow(color: theme.cyan.withValues(alpha: .9), blurRadius: 6),
+              Shadow(color: theme.cyan.withValues(alpha: .5), blurRadius: 14),
+            ],
+          )
+        : ink;
+    final rows = _egg.split('\n');
+    final sparks = legendary
+        ? {for (final (r, c, _) in eggSparks) (r, c)}
+        : const <(int, int)>{};
+    final spark = ink.copyWith(
+      color: theme.yellow,
+      shadows: [Shadow(color: theme.yellow, blurRadius: 6)],
+    );
+    return Text.rich(
+      TextSpan(
+        children: [
+          for (final (r, row) in rows.indexed) ...[
+            if (sparks.isEmpty)
+              TextSpan(text: row, style: shell)
+            else
+              for (final (c, ch) in row.split('').indexed)
+                TextSpan(
+                  text: ch,
+                  style: sparks.contains((r, c)) ? spark : shell,
+                ),
+            if (r < rows.length - 1) const TextSpan(text: '\n'),
+          ],
+        ],
+      ),
+      key: ValueKey(
+        rare
+            ? 'daemon-hatch-egg-rare'
+            : legendary
+            ? 'daemon-hatch-egg-legendary'
+            : 'daemon-hatch-egg',
+      ),
+      semanticsLabel: 'An egg, hatching',
+      style: ink,
     );
   }
 
@@ -350,69 +471,83 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         _button('[ close ]', _close, theme, ink),
       ];
     }
-    if (_stage == HatchStage.egg || def == null) {
-      return [
-        Text(
-          _egg,
-          key: const ValueKey('daemon-hatch-egg'),
-          semanticsLabel: 'An egg, hatching',
-          style: ink.copyWith(color: theme.yellow),
-        ),
-      ];
+    if (_stage == HatchStage.egg ||
+        _stage == HatchStage.crack ||
+        _stage == HatchStage.pop ||
+        def == null) {
+      return [_eggText(theme, ink)];
     }
-    final colour = daemonColor(def, theme, shiny: _hatch?.shiny == true);
-    final big = ink.copyWith(
-      fontSize: (ink.fontSize ?? 13) * 3,
-      height: 1,
-      fontWeight: FontWeight.w500,
-      color: _faint ? theme.foreground.withValues(alpha: .35) : colour,
+    final shiny = _hatch?.shiny == true;
+    final colour = daemonColor(def, theme, shiny: shiny);
+    final backdrop = daemonBackdrop(def);
+    final version = roster.rules.versions.first;
+    final portrait = renderPortrait(
+      roster,
+      def,
+      version,
+      DaemonMood.idle,
+      lid: _lid,
+      motion: false,
     );
+    final silhouetted = _stage == HatchStage.silhouette;
     final rarity = switch (def.rarity) {
       'rare' => theme.cyan,
       'legendary' => theme.yellow,
       'secret' => theme.magenta,
-      _ => theme.foreground,
+      _ => ink.color ?? theme.foreground,
     };
     final rows = bannerRows(def.id);
     final card = _stage == HatchStage.card ? _card : null;
+    // A larger face with room between its rows: at the body's size and line
+    // height the letters touched and read as noise.
+    final banner = ink.copyWith(
+      fontSize: (ink.fontSize ?? 13) * 1.5,
+      height: 1.3,
+      fontWeight: FontWeight.w500,
+    );
     return [
-      if (pitch)
+      if (_stage == HatchStage.pitch)
         Padding(
           padding: EdgeInsets.only(bottom: cell.height),
           child: Text(
             'It is pitch black. You are likely to be eaten by a grue.',
+            key: const ValueKey('daemon-hatch-pitch'),
             textAlign: TextAlign.center,
             style: ink.copyWith(color: const Color(0xff949494)),
           ),
         ),
-      if (_sprite != null)
-        Text(
-          _sprite!,
-          key: const ValueKey('daemon-hatch-sprite'),
-          semanticsLabel: _stage == HatchStage.silhouette
-              ? 'A silhouette'
-              : '${def.id} 0.1',
-          style: big,
+      if (_stage != HatchStage.pitch && card == null)
+        Container(
+          color: silhouetted ? null : backdrop,
+          child: Text(
+            (silhouetted ? portrait.map(silhouette) : portrait).join('\n'),
+            key: const ValueKey('daemon-hatch-portrait'),
+            semanticsLabel: silhouetted ? 'A silhouette' : '${def.id} $version',
+            style: ink.copyWith(
+              color: silhouetted ? ink.color!.withValues(alpha: .35) : colour,
+              height: 1.15,
+            ),
+          ),
         ),
       if (_bannerRows > 0) ...[
-        SizedBox(height: cell.height),
+        SizedBox(height: cell.height / 2),
         Text(
           rows.take(_bannerRows).join('\n'),
           key: const ValueKey('daemon-hatch-banner'),
           semanticsLabel: def.id,
-          style: ink.copyWith(color: theme.brightWhite, height: 1.1),
+          style: banner,
         ),
       ],
       if (_stage == HatchStage.card) ...[
-        SizedBox(height: cell.height),
+        SizedBox(height: cell.height / 2),
         Text(
-          rarityStamp(roster, def, shiny: _hatch?.shiny == true),
+          rarityStamp(roster, def, shiny: shiny),
           key: const ValueKey('daemon-hatch-stamp'),
           style: ink.copyWith(color: rarity, letterSpacing: 1),
         ),
         SizedBox(height: cell.height / 2),
         Text(
-          "fork() returned 0. it's a ${def.id}.\n${def.id} 0.1: ${def.first}",
+          "fork() returned 0. it's a ${def.id}.",
           key: const ValueKey('daemon-hatch-words'),
           textAlign: TextAlign.center,
           style: ink.copyWith(color: muted),
@@ -425,14 +560,17 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
               color: pitch
                   ? const Color(0xff0c0c0c)
                   : Color.lerp(theme.background, theme.foreground, .04),
-              border: Border.all(color: theme.foreground.withValues(alpha: .2)),
+              border: Border.all(color: ink.color!.withValues(alpha: .2)),
             ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: SelectableText(
-                card.join('\n'),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: DaemonCardText(
                 key: const ValueKey('daemon-hatch-card'),
+                lines: card,
+                portraitRows: portraitFor(roster, def, version).length,
                 style: ink.copyWith(fontSize: (ink.fontSize ?? 13) * .92),
+                colour: colour,
+                backdrop: backdrop,
               ),
             ),
           ),
@@ -481,7 +619,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           minimumSize: Size.zero,
           padding: EdgeInsets.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          foregroundColor: theme.foreground,
+          foregroundColor: ink.color,
           shape: const RoundedRectangleBorder(),
           splashFactory: NoSplash.splashFactory,
         ).copyWith(
@@ -498,6 +636,9 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
                 : Colors.transparent,
           ),
         ),
-    child: Text(label, style: ink.copyWith(color: theme.cursor)),
+    child: Text(
+      label,
+      style: ink.copyWith(color: _pitch ? ink.color : theme.cursor),
+    ),
   );
 }
