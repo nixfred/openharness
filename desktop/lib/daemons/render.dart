@@ -121,15 +121,27 @@ int baseWidth(DaemonRoster roster, DaemonDef d, int versionIndex) =>
 /// The hatchling before it has colour: every drawn cell becomes `#`.
 String silhouette(String sprite) => sprite.replaceAll(RegExp(r'[^ ]'), '#');
 
-/// The nest while the first egg incubates: 0–1, 2–3, 4 and 5 habits done.
-String nestFor(DaemonRoster roster, int habitsDone) {
-  final nest = roster.rules.nest;
-  final need = roster.rules.firstEggNeed;
-  if (habitsDone >= need) return nest[3];
-  if (habitsDone >= need - 1) return nest[2];
-  if (habitsDone >= 2) return nest[1];
-  return nest[0];
+/// Which nest stage the first egg shows for the habits done (render.mjs
+/// `nestStage`): habits count up to the egg's need, and until every required
+/// habit (a finished turn) is done at most need - 1 count; the count maps
+/// evenly onto the stages.
+int nestStage(DaemonRoster roster, Iterable<String> habitsDone) {
+  final rules = roster.rules;
+  final known = {for (final h in rules.habits) h.key};
+  final done = {
+    for (final k in habitsDone)
+      if (known.contains(k)) k,
+  };
+  final need = rules.firstEggNeed;
+  final required = rules.firstEggRequire.every(done.contains);
+  final counted = min(done.length, required ? need : need - 1);
+  final last = rules.nest.length - 1;
+  return counted >= need ? last : (counted * last) ~/ need;
 }
+
+/// The nest glyph for the habits done.
+String nestFor(DaemonRoster roster, Iterable<String> habitsDone) =>
+    roster.rules.nest[nestStage(roster, habitsDone)];
 
 // ── the egg, as the hatch reveal draws it ────────────────────────────────────
 

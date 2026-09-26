@@ -123,6 +123,51 @@ class ZooController extends ChangeNotifier {
   int get habitsDone => _zoo.habits.length;
   int get habitsNeeded => roster.rules.firstEggNeed;
 
+  /// Habits that count toward the first egg now (render.mjs `nestStage`'s
+  /// count): up to [habitsNeeded], and one short of it until every required
+  /// habit (a finished turn) is among them.
+  int get habitsCounted {
+    final rules = roster.rules;
+    final known = {for (final h in rules.habits) h.key};
+    final done = _zoo.habits.where(known.contains).toSet();
+    final required = rules.firstEggRequire.every(done.contains);
+    return min(done.length, required ? habitsNeeded : habitsNeeded - 1);
+  }
+
+  /// The habits the first egg cannot come without, still to do.
+  List<DaemonHabit> get habitsRequiredLeft => [
+    for (final h in roster.rules.habits)
+      if (roster.rules.firstEggRequire.contains(h.key) &&
+          !_zoo.habits.contains(h.key))
+        h,
+  ];
+
+  /// The first egg's rule in words, from the roster: `finish a turn in a
+  /// harness, and any 2 more`.
+  String get firstEggRule {
+    final rules = roster.rules;
+    final required = [
+      for (final h in rules.habits)
+        if (rules.firstEggRequire.contains(h.key)) _lower(h.label),
+    ];
+    final more = rules.firstEggNeed - required.length;
+    if (required.isEmpty) return 'any ${rules.firstEggNeed}';
+    return '${required.join(', ')}${more > 0 ? ', and any $more more' : ''}';
+  }
+
+  /// Habits done toward the setup egg (the second habit egg), and how many
+  /// it takes; null once it has come or when the roster has none.
+  (int, int)? get setupProgress {
+    final need = roster.rules.setupEggNeed;
+    if (need == null || _zoo.setupEgg) return null;
+    final known = {for (final h in roster.rules.habits) h.key};
+    return (min(_zoo.habits.where(known.contains).toSet().length, need), need);
+  }
+
+  static String _lower(String label) => label.isEmpty
+      ? label
+      : '${label[0].toLowerCase()}${label.substring(1)}';
+
   /// The daemon in the status line, with its roster entry.
   ZooDaemon? get paired => _zoo.paired;
   DaemonDef? get pairedDef => roster.byId(paired?.id);
@@ -399,15 +444,23 @@ class ZooController extends ChangeNotifier {
     return true;
   }
 
+  /// Whether [word] is one of the roster's easter words (by its hash: the
+  /// words themselves never ship).
+  bool isEasterWord(String word) {
+    final w = word.trim().toLowerCase();
+    return w.isNotEmpty &&
+        w.length <= 64 &&
+        roster.rules.easterHashes.contains(easterHash(w));
+  }
+
   /// An easter word typed (`xyzzy` in Cmd-O). Sent once: a word already
   /// used, or already asked for from this window, is not sent again.
   bool easter(String word) {
-    if (!loaded ||
-        _zoo.easter.contains(word) ||
-        !roster.rules.easterWords.contains(word) ||
-        !_easterAsked.add(word)) {
-      return false;
-    }
+    final w = word.trim().toLowerCase();
+    if (!loaded || !isEasterWord(w)) return false;
+    final hash = easterHash(w);
+    if (_zoo.easter.contains(hash) || !_easterAsked.add(hash)) return false;
+    word = w;
     final op = {'op': 'zoo.easter', 'word': word};
     if (!isAccount) {
       _applyLocal([op]);

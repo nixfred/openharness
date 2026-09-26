@@ -348,7 +348,7 @@ class DaemonFace extends ChangeNotifier {
       if (_revealing) return roster.rules.nest.last;
       final egg = zoo.readyEgg;
       if (egg != null) return eggLook(egg);
-      return nestFor(roster, zoo.habitsDone);
+      return nestFor(roster, zoo.zoo.habits);
     }
     // A new egg sits in the nest for a moment, unless something needs you.
     if (_showsArrival) return eggLook(_arriving!);
@@ -443,7 +443,7 @@ class DaemonFace extends ChangeNotifier {
           ? 'Ready to hatch, $eggsWaiting eggs'
           : 'Ready to hatch';
     }
-    return '${zoo.habitsDone} of ${zoo.habitsNeeded} habits';
+    return '${zoo.habitsCounted} of ${zoo.habitsNeeded} habits';
   }
 
   String get tooltip {
@@ -474,9 +474,13 @@ class DaemonFace extends ChangeNotifier {
                 'Click to hatch it.'
           : 'Your egg is ready. Click to hatch it.';
     }
-    return 'A daemon is incubating: ${zoo.habitsDone} of '
-        '${zoo.habitsNeeded} habits.\nClick to see them.';
+    return 'A daemon is incubating: ${zoo.habitsCounted} of '
+        '${zoo.habitsNeeded} habits.\n${_capital(zoo.firstEggRule)}.\n'
+        'Click to see them.';
   }
+
+  static String _capital(String s) =>
+      s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
 
   // ── lines ──────────────────────────────────────────────────────────────────
 

@@ -76,7 +76,15 @@ class DaemonRules {
       rarities = [for (final r in raw['rarities'] as List) r as String],
       shinyOneIn = (raw['shinyOneIn'] as num).toInt(),
       pityPerMiss = raw['pityPerMiss'] as num,
+      secretGuaranteeAt = (raw['secretGuaranteeAt'] as num? ?? 0).toInt(),
+      duplicateXp = (raw['duplicateXp'] as num? ?? 0).toInt(),
+      overflowXp = (raw['overflowXp'] as num? ?? 0).toInt(),
       firstEggNeed = ((raw['firstEgg'] as Map)['need'] as num).toInt(),
+      firstEggRequire = [
+        for (final k in (raw['firstEgg'] as Map)['require'] as List? ?? const [])
+          k as String,
+      ],
+      setupEggNeed = ((raw['setupEgg'] as Map?)?['need'] as num?)?.toInt(),
       habits = [
         for (final h in (raw['firstEgg'] as Map)['habits'] as List)
           DaemonHabit((h as Map)['key'] as String, h['label'] as String),
@@ -90,7 +98,9 @@ class DaemonRules {
             boost: Map<String, num>.from(e.value['boost'] as Map? ?? const {}),
           ),
       },
-      easterWords = [for (final w in raw['easterWords'] as List) w as String],
+      easterHashes = [
+        for (final h in raw['easterHashes'] as List? ?? const []) h as String,
+      ],
       lineSlots = [
         for (final slot in raw['lineSlots'] as List? ?? defaultLineSlots)
           slot as String,
@@ -127,10 +137,25 @@ class DaemonRules {
   final List<String> rarities;
   final int shinyOneIn;
   final num pityPerMiss;
+
+  /// The pity guarantee: the hatch that would make it this many without a
+  /// secret, from an egg that can hold one, draws only unowned secrets.
+  final int secretGuaranteeAt;
+
+  /// xp a duplicate gives the daemon it merges into; xp an egg earned past
+  /// the held queue gives the paired daemon.
+  final int duplicateXp, overflowXp;
+
+  /// The first egg: this many habits, every one of [firstEggRequire] among
+  /// them (a finished turn). Then the setup egg at [setupEggNeed] habits.
   final int firstEggNeed;
+  final List<String> firstEggRequire;
+  final int? setupEggNeed;
   final List<DaemonHabit> habits;
   final Map<String, DaemonEggKind> eggs;
-  final List<String> easterWords;
+
+  /// sha256 of each lowercased easter word: the words themselves never ship.
+  final List<String> easterHashes;
 
   /// The slots a line template may use (`{who}`, `{q}`, `{recap}`, `{n}`,
   /// `{summary}`), and sample values for previews when the roster has them.
@@ -149,25 +174,58 @@ class DaemonEarn {
   DaemonEarn._(Map raw)
     : turnEvery = _int(raw, 'turn', 'every', 40),
       dailyCap = _int(raw, 'turn', 'dailyCap', 20),
+      minutesPerTurn = _int(raw, 'turn', 'minutesPerTurn', 0),
       weekDays = _int(raw, 'week', 'days', 3),
       marathonTurns = _int(raw, 'marathon', 'turns', 500),
       marathonMachines = _int(raw, 'marathon', 'machines', 2),
       nights = _int(raw, 'night', 'nights', 3),
       nightFrom = _int(raw, 'night', 'fromHour', 0),
-      nightTo = _int(raw, 'night', 'toHour', 4);
+      nightTo = _int(raw, 'night', 'toHour', 4),
+      awayMinutes = _int(raw, 'night', 'awayMinutes', 30),
+      historyDays = _int(raw, 'history', 'days', 1);
 
   static int _int(Map raw, String group, String key, int fallback) =>
       ((raw[group] as Map?)?[key] as num?)?.toInt() ?? fallback;
 
   final int turnEvery, dailyCap, weekDays, marathonTurns, marathonMachines;
-  final int nights, nightFrom, nightTo;
+
+  /// Every this many agent-minutes a turn ran counts one turn more.
+  final int minutesPerTurn;
+
+  /// Night hours (they may run past midnight: 22 to 6) and how many nights
+  /// earn a night egg; a night counts only for a turn that finished while
+  /// the person was away this long.
+  final int nights, nightFrom, nightTo, awayMinutes;
+
+  /// Days a history date's egg stays open from the date.
+  final int historyDays;
 }
 
 class DaemonDrop {
-  const DaemonDrop(this.id, this.n, this.name);
+  const DaemonDrop(this.id, this.n, this.name, {this.announce, this.release});
   final String id;
   final int n;
   final String name;
+
+  /// UTC days (`YYYY-MM-DD`): shown as silhouettes from [announce], drawn
+  /// from [release] on. Absent: always out.
+  final String? announce, release;
+
+  static DateTime? _day(String? day) =>
+      day == null ? null : DateTime.tryParse('${day}T00:00:00.000Z');
+
+  /// `released` (its daemons hatch), `announced` (silhouettes on shelves)
+  /// or `hidden`, at [now] (card.mjs `dropState`).
+  String state(DateTime now) {
+    final release = _day(this.release);
+    if (release == null || !release.isAfter(now.toUtc())) return 'released';
+    final announce = _day(this.announce);
+    return announce != null && !announce.isAfter(now.toUtc())
+        ? 'announced'
+        : 'hidden';
+  }
+
+  bool releasedAt(DateTime now) => state(now) == 'released';
 }
 
 class DaemonDef {
@@ -277,6 +335,8 @@ class DaemonRoster {
             (d as Map)['id'] as String,
             (d['n'] as num).toInt(),
             d['name'] as String,
+            announce: d['announce'] as String?,
+            release: d['release'] as String?,
           ),
       ],
       daemons = [for (final d in raw['daemons'] as List) DaemonDef._(d as Map)];
@@ -292,6 +352,12 @@ class DaemonRoster {
 
   DaemonDef? byId(String? id) => id == null ? null : _byId[id];
   DaemonDrop? drop(String id) => drops.where((d) => d.id == id).firstOrNull;
+
+  /// Every daemon a draw may give at [now]: the released drops, in order.
+  List<DaemonDef> released(DateTime now) => [
+    for (final d in daemons)
+      if (drop(d.drop)?.releasedAt(now) ?? false) d,
+  ];
   int dropSize(String id) => daemons.where((d) => d.drop == id).length;
 
   /// 0, 1 or 2 for `0.1`, `1.0`, `2.0`; unknown versions draw as the first.

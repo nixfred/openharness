@@ -5,7 +5,10 @@
 /// local zoo (and a harnessd that predates the zoo).
 library;
 
+import 'dart:convert';
 import 'dart:math';
+
+import 'package:cryptography/dart.dart' show DartSha256;
 
 import 'roster.dart';
 
@@ -13,6 +16,20 @@ final _printable = RegExp(r'^[\x20-\x7e]*$');
 final _idSafe = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
 final _dayShape = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$');
 final _weekShape = RegExp(r'^\d{4}-W\d{2}$');
+
+final _hashShape = RegExp(r'^[0-9a-f]{64}$');
+
+/// The sha256 (hex) of an easter word as the server hashes it: trimmed and
+/// lowercased. The roster lists only these (`rules.easterHashes`).
+String easterHash(String word) => [
+  for (final b
+      in const DartSha256().hashSync(utf8.encode(word.trim().toLowerCase())).bytes)
+    b.toRadixString(16).padLeft(2, '0'),
+].join();
+
+/// The one easter word a client may know by heart (README: "a client that
+/// wants to react locally to `xyzzy` may hard-code that one classic").
+const classicEasterWord = 'xyzzy';
 
 /// A nickname: 1–24 printable ASCII characters.
 bool validNickname(String? value) =>
@@ -65,6 +82,37 @@ String isoWeek(String day) {
   return '$year-W${week.toString().padLeft(2, '0')}';
 }
 
+String _dayOf(int n) =>
+    localDayOf(DateTime.fromMillisecondsSinceEpoch(n * 86400000, isUtc: true));
+
+/// The night a turn finishing at local [hour] of [day] belongs to, named by
+/// the day it began, or null outside the night hours (which may run past
+/// midnight: 02:00 on the 22nd is the night of the 21st).
+String? nightOf(DaemonRoster roster, String day, int hour) {
+  final from = roster.rules.earn.nightFrom, to = roster.rules.earn.nightTo;
+  if (from <= to) return hour >= from && hour <= to ? day : null;
+  if (hour >= from) return day;
+  return hour <= to ? _dayOf(_dayNumber(day) - 1) : null;
+}
+
+/// The history dates whose egg is open on [day]: each `MM-DD` of
+/// `rules.historyDates`, in the year its week began, when [day] is within
+/// `earn.history.days` of it.
+List<String> historyDatesOpen(DaemonRoster roster, String day) {
+  final at = _dayNumber(day);
+  final year = int.parse(day.substring(0, 4));
+  final open = <String>[];
+  for (final mmdd in roster.rules.historyDates.keys) {
+    for (final y in [year - 1, year]) {
+      final date = '$y-$mmdd';
+      if (!isLocalDay(date)) continue;
+      final since = at - _dayNumber(date);
+      if (since >= 0 && since < roster.rules.earn.historyDays) open.add(date);
+    }
+  }
+  return open..sort();
+}
+
 /// Bond level for [xp]: the highest threshold of `rules.bond.levels` reached.
 int levelFor(DaemonRoster roster, int xp) {
   var level = 0;
@@ -95,7 +143,11 @@ class ZooDaemon {
     this.bond = 0,
     this.xp = 0,
     this.version = '0.1',
+    this.dupes = 0,
+    this.serial,
+    this.origin,
   });
+  static const maxDupes = 1000000, maxSerial = 1000000000;
   final String id;
   final String hatchedAt;
   final String egg;
@@ -103,6 +155,19 @@ class ZooDaemon {
   final String? nickname;
   final int bond, xp;
   final String version;
+
+  /// Duplicates merged into this one: the shelf's `x2` is one.
+  final int dupes;
+
+  /// Its mint number (`#0042`): the nth of its kind the server hatched. None
+  /// for a guest's daemon ([origin] `local`) or one hatched before serials.
+  final int? serial;
+
+  /// `local`: hatched in a guest's zoo, brought in by `zoo.seed`.
+  final String? origin;
+
+  /// How many of it you have: 1 and its duplicates.
+  int get count => 1 + dupes;
 
   DateTime get hatchedDate =>
       DateTime.tryParse(hatchedAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
@@ -113,15 +178,22 @@ class ZooDaemon {
     int? xp,
     int? bond,
     String? version,
+    bool? shiny,
+    int? dupes,
+    String? origin,
+    bool clearSerial = false,
   }) => ZooDaemon(
     id: id,
     hatchedAt: hatchedAt,
     egg: egg,
-    shiny: shiny,
+    shiny: shiny ?? this.shiny,
     nickname: clearNickname ? null : nickname ?? this.nickname,
     bond: bond ?? this.bond,
     xp: xp ?? this.xp,
     version: version ?? this.version,
+    dupes: dupes ?? this.dupes,
+    serial: clearSerial ? null : serial,
+    origin: origin ?? this.origin,
   );
 
   Map<String, dynamic> toJson() => {
@@ -133,6 +205,9 @@ class ZooDaemon {
     'bond': bond,
     'xp': xp,
     'version': version,
+    if (dupes > 0) 'dupes': dupes,
+    'serial': ?serial,
+    'origin': ?origin,
   };
 
   /// Bond and version always follow xp; a daemon stored before xp reads the
@@ -148,6 +223,7 @@ class ZooDaemon {
         ? raw['xp'] as int
         : levels[storedBond.clamp(0, levels.length - 1)];
     final bond = levelFor(roster, xp);
+    final dupes = raw['dupes'], serial = raw['serial'];
     return ZooDaemon(
       id: id,
       hatchedAt: raw['hatchedAt'] is String ? raw['hatchedAt'] as String : '',
@@ -157,6 +233,11 @@ class ZooDaemon {
       bond: bond,
       xp: xp,
       version: versionFor(roster, bond),
+      dupes: dupes is int && dupes > 0 ? min(dupes, maxDupes) : 0,
+      serial: serial is int && serial >= 1 && serial <= maxSerial
+          ? serial
+          : null,
+      origin: raw['origin'] == 'local' ? 'local' : null,
     );
   }
 }
@@ -310,6 +391,7 @@ class Zoo {
     this.autonomy = zooDefaultAutonomy,
     this.habits = const [],
     this.firstEgg = false,
+    this.setupEgg = false,
     this.pity = 0,
     this.easter = const [],
     this.progress = ZooProgress.empty,
@@ -325,7 +407,14 @@ class Zoo {
   final String autonomy;
   final List<String> habits;
   final bool firstEgg;
+
+  /// The setup egg (at `rules.setupEgg.need` habits) has been granted.
+  final bool setupEgg;
+
+  /// Hatches of eggs that can hold a secret since the last secret.
   final int pity;
+
+  /// sha256 of each easter word already used.
   final List<String> easter;
   final ZooProgress progress;
 
@@ -335,6 +424,7 @@ class Zoo {
       eggs.isEmpty &&
       habits.isEmpty &&
       !firstEgg &&
+      !setupEgg &&
       pity == 0 &&
       easter.isEmpty &&
       progress.isEmpty;
@@ -357,6 +447,7 @@ class Zoo {
     String? autonomy,
     List<String>? habits,
     bool? firstEgg,
+    bool? setupEgg,
     int? pity,
     List<String>? easter,
     ZooProgress? progress,
@@ -367,6 +458,7 @@ class Zoo {
     autonomy: autonomy ?? this.autonomy,
     habits: habits ?? this.habits,
     firstEgg: firstEgg ?? this.firstEgg,
+    setupEgg: setupEgg ?? this.setupEgg,
     pity: pity ?? this.pity,
     easter: easter ?? this.easter,
     progress: progress ?? this.progress,
@@ -379,18 +471,32 @@ class Zoo {
     'autonomy': autonomy,
     'habits': habits,
     'firstEgg': firstEgg,
+    'setupEgg': setupEgg,
     'pity': pity,
     'easter': easter,
     'progress': progress.toJson(),
   };
 
-  /// Anything unknown to this roster is dropped, never an error.
+  /// Anything unknown to this roster is dropped, never an error. A second
+  /// record of one daemon (a zoo from before duplicates merged) folds into
+  /// the first: counted in its `dupes`, shiny if either was, no xp.
   static Zoo fromJson(Object? raw, DaemonRoster roster) {
     if (raw is! Map) return empty;
-    final daemons = [
-      for (final d in raw['daemons'] as List? ?? const [])
-        ?ZooDaemon.fromJson(d, roster),
-    ].take(maxDaemons).toList();
+    final daemons = <ZooDaemon>[];
+    for (final item in raw['daemons'] as List? ?? const []) {
+      final d = ZooDaemon.fromJson(item, roster);
+      if (d == null) continue;
+      final at = daemons.indexWhere((x) => x.id == d.id);
+      if (at >= 0) {
+        final first = daemons[at];
+        daemons[at] = first.copyWith(
+          dupes: min(first.dupes + 1 + d.dupes, ZooDaemon.maxDupes),
+          shiny: first.shiny || d.shiny,
+        );
+      } else if (daemons.length < maxDaemons) {
+        daemons.add(d);
+      }
+    }
     final eggs = <ZooEgg>[];
     for (final e in raw['eggs'] as List? ?? const []) {
       final egg = ZooEgg.fromJson(e, roster);
@@ -410,10 +516,13 @@ class Zoo {
           if (h is String && habitKeys.contains(h)) h,
       }.toList(),
       firstEgg: raw['firstEgg'] == true,
+      setupEgg: raw['setupEgg'] == true,
       pity: raw['pity'] is int ? max(0, raw['pity'] as int) : 0,
+      // A word stored before words were hashed reads as its hash.
       easter: <String>{
         for (final w in raw['easter'] as List? ?? const [])
-          if (w is String) w,
+          if (w is String && w.isNotEmpty && w.length <= 64)
+            _hashShape.hasMatch(w) ? w : easterHash(w),
       }.toList(),
       progress: ZooProgress.fromJson(raw['progress'], roster),
     );
@@ -425,35 +534,74 @@ class ZooHatch {
     required this.eggId,
     required this.daemonId,
     required this.shiny,
+    this.duplicate = false,
+    this.xp = 0,
+    this.serial,
   });
   final String eggId, daemonId;
+
+  /// This hatch's own shiny roll (a shiny duplicate makes yours shiny).
   final bool shiny;
+
+  /// It drew a daemon you own: merged into yours, giving it [xp].
+  final bool duplicate;
+  final int xp;
+
+  /// A new daemon's mint number, when the server gave one.
+  final int? serial;
 
   static ZooHatch? fromJson(Object? raw) {
     if (raw is! Map) return null;
     final eggId = raw['eggId'], daemonId = raw['daemonId'];
     if (eggId is! String || daemonId is! String) return null;
+    final xp = raw['xp'], serial = raw['serial'];
     return ZooHatch(
       eggId: eggId,
       daemonId: daemonId,
       shiny: raw['shiny'] == true,
+      duplicate: raw['duplicate'] == true,
+      xp: xp is int && xp > 0 ? xp : 0,
+      serial: serial is int && serial > 0 ? serial : null,
     );
   }
 }
 
 // ── the draw ─────────────────────────────────────────────────────────────────
 
-/// The draw (`zoo.hatch`): the README's rules, for a guest's local zoo only.
-/// An account's draw happens on the server; clients never send a result.
-String? drawDaemon(
+/// Whether an egg of [kind] can hold a secret (its `weights.secret` is above
+/// 0); only its hatches count toward the pity.
+bool eggHoldsSecret(DaemonRoster roster, String kind) =>
+    (roster.rules.eggs[kind]?.weights['secret'] ?? 0) > 0;
+
+/// Who can come out of an egg for this zoo at [now], and how likely
+/// (README, "The draw"; `backend/src/lib/zoo.ts` `drawWeights`):
+///
+///  1. Regulars first: every released regular you do not own; once you own
+///     them all, every released regular again (a duplicate). Secrets sit
+///     outside the set: an unowned released secret is eligible only from an
+///     egg that can hold one.
+///  2. Weight: `weights[rarity] / (eligible of that rarity)`, plus
+///     `pity * pityPerMiss` for a secret, times `boost[id]`.
+///  3. The guarantee: from an egg that can hold a secret, when the pity is
+///     one short of `secretGuaranteeAt`, only the unowned secrets.
+///
+/// An egg whose eligible daemons all weigh nothing draws as if everything
+/// were owned.
+List<(DaemonDef, double)> drawWeights(
   DaemonRoster roster,
   Zoo zoo,
-  DaemonEggKind egg,
-  Random random,
-) {
-  final drops = roster.drops.map((d) => d.id).toSet();
-  final released = roster.daemons.where((d) => drops.contains(d.drop)).toList();
-  final unowned = released.where((d) => !zoo.owns(d.id)).toList();
+  String kind, {
+  required DateTime now,
+}) {
+  final egg = roster.rules.eggs[kind];
+  if (egg == null) return const [];
+  final secretsToo = eggHoldsSecret(roster, kind);
+  final released = roster.released(now);
+  final regulars = released.where((d) => !d.secret).toList();
+  final fresh = regulars.where((d) => !zoo.owns(d.id)).toList();
+  final secrets = secretsToo
+      ? released.where((d) => d.secret && !zoo.owns(d.id)).toList()
+      : const <DaemonDef>[];
   List<(DaemonDef, double)> weigh(List<DaemonDef> pool) {
     final perRarity = <String, int>{};
     for (final d in pool) {
@@ -464,15 +612,34 @@ String? drawDaemon(
         (
           d,
           ((egg.weights[d.rarity] ?? 0) / perRarity[d.rarity]! +
-                  (d.secret ? zoo.pity * roster.rules.pityPerMiss : 0)) *
+                  (d.secret && secretsToo
+                      ? zoo.pity * roster.rules.pityPerMiss
+                      : 0)) *
               (egg.boost[d.id] ?? 1),
         ),
     ];
   }
 
-  // Nothing new to give (or nothing unowned): draw as if everything were owned.
-  var weighted = weigh(unowned);
-  if (weighted.every((w) => w.$2 <= 0)) weighted = weigh(released);
+  if (secrets.isNotEmpty &&
+      roster.rules.secretGuaranteeAt > 0 &&
+      zoo.pity + 1 >= roster.rules.secretGuaranteeAt) {
+    return weigh(secrets);
+  }
+  final eligible = {...(fresh.isNotEmpty ? fresh : regulars), ...secrets};
+  final weights = weigh(released.where(eligible.contains).toList());
+  return weights.any((w) => w.$2 > 0) ? weights : weigh(released);
+}
+
+/// The draw (`zoo.hatch`): the README's rules, for a guest's local zoo only.
+/// An account's draw happens on the server; clients never send a result.
+String? drawDaemon(
+  DaemonRoster roster,
+  Zoo zoo,
+  String kind,
+  Random random, {
+  required DateTime now,
+}) {
+  final weighted = drawWeights(roster, zoo, kind, now: now);
   final total = weighted.fold<double>(0, (sum, w) => sum + max(0, w.$2));
   if (total <= 0) return null;
   var x = random.nextDouble() * total;
@@ -486,8 +653,9 @@ String? drawDaemon(
 
 // ── ops ──────────────────────────────────────────────────────────────────────
 
-/// An egg that arrived in the nest during a request.
-typedef ZooGrant = ({String kind, String eggId});
+/// An egg that arrived in the nest during a request, or one earned past the
+/// held queue that became [xp] for the paired daemon instead.
+typedef ZooGrant = ({String kind, String? eggId, int? xp});
 
 /// A daemon whose bond reached a new level, and the version it is now.
 typedef ZooLevelUp = ({String id, int level, String version});
@@ -519,6 +687,7 @@ class _ZooRules {
       autonomy = zoo.autonomy,
       habits = [...zoo.habits],
       firstEgg = zoo.firstEgg,
+      setupEgg = zoo.setupEgg,
       pity = zoo.pity,
       easter = [...zoo.easter],
       turns = zoo.progress.turns,
@@ -539,7 +708,7 @@ class _ZooRules {
   String? pair;
   String autonomy;
   List<String> habits;
-  bool firstEgg;
+  bool firstEgg, setupEgg;
   int pity;
   List<String> easter;
   int turns;
@@ -559,6 +728,7 @@ class _ZooRules {
     autonomy: autonomy,
     habits: habits,
     firstEgg: firstEgg,
+    setupEgg: setupEgg,
     pity: pity,
     easter: easter,
     progress: ZooProgress(
@@ -597,15 +767,20 @@ class _ZooRules {
     if (eggs.length >= Zoo.maxEggs) return false;
     final egg = ZooEgg(id: _eggId(), kind: kind, grantedAt: _stamp, date: date);
     eggs = [...eggs, egg];
-    grants.add((kind: kind, eggId: egg.id));
+    grants.add((kind: kind, eggId: egg.id, xp: null));
     return true;
   }
 
   /// An egg earned from work waits with the held ones, so a full nest loses
-  /// nothing.
+  /// nothing. Past 64 held it becomes `overflowXp` for the paired daemon.
   void _earn(String kind, {String? date}) {
-    if (held.length >= ZooProgress.maxHeld) return;
-    held = [...held, (kind, date)];
+    if (held.length < ZooProgress.maxHeld) {
+      held = [...held, (kind, date)];
+      return;
+    }
+    if (!daemons.any((d) => d.id == pair)) return;
+    _addXp(roster.rules.overflowXp);
+    grants.add((kind: kind, eggId: null, xp: roster.rules.overflowXp));
   }
 
   void _releaseHeld() {
@@ -616,15 +791,32 @@ class _ZooRules {
     }
   }
 
-  void _maybeFirstEgg() {
-    if (firstEgg) return;
+  /// The eggs habits earn, each once: the first at `firstEgg.need` habits,
+  /// every required one (a finished turn) among them; then the setup egg.
+  void _maybeHabitEggs() {
     final keys = roster.rules.habits.map((h) => h.key).toSet();
-    if (habits.where(keys.contains).length < roster.rules.firstEggNeed) return;
-    if (_grant('first')) firstEgg = true;
+    final done = habits.where(keys.contains).toList();
+    if (!firstEgg &&
+        done.length >= roster.rules.firstEggNeed &&
+        roster.rules.firstEggRequire.every(done.contains) &&
+        _grant('first')) {
+      firstEgg = true;
+    }
+    final setup = roster.rules.setupEggNeed;
+    if (firstEgg &&
+        !setupEgg &&
+        setup != null &&
+        roster.rules.eggs.containsKey('setup') &&
+        done.length >= setup &&
+        _grant('setup')) {
+      setupEgg = true;
+    }
   }
 
-  void _addXp(int xp) {
-    final at = daemons.indexWhere((d) => d.id == pair);
+  void _addXp(int xp) => _grow(daemons.indexWhere((d) => d.id == pair), xp);
+
+  /// xp for one daemon; a new level is answered in `levelUps`.
+  void _grow(int at, int xp) {
     if (at < 0 || xp <= 0) return;
     final d = daemons[at];
     final next = d.xp + xp;
@@ -647,18 +839,43 @@ class _ZooRules {
           return;
         }
         if (!habits.contains(key)) habits = [...habits, key];
-        _maybeFirstEgg();
+        _maybeHabitEggs();
       case 'zoo.hatch':
         final egg = eggs.where((e) => e.id == op['eggId']).firstOrNull;
-        final kind = egg == null ? null : roster.rules.eggs[egg.kind];
-        if (egg == null || kind == null || daemons.length >= Zoo.maxDaemons) {
-          return;
-        }
+        if (egg == null || !roster.rules.eggs.containsKey(egg.kind)) return;
         final own = egg.kind == 'history' ? _historyDaemon(egg.date) : null;
-        final id = own ?? drawDaemon(roster, zoo, kind, random);
+        final id =
+            own ?? drawDaemon(roster, zoo, egg.kind, random, now: now);
         if (id == null) return;
         final shiny = random.nextInt(roster.rules.shinyOneIn) == 0;
+        final at = daemons.indexWhere((d) => d.id == id);
+        if (at < 0 && daemons.length >= Zoo.maxDaemons) return;
         eggs = [...eggs.where((e) => e.id != egg.id)];
+        // The pity counts only hatches that could have been a secret.
+        if (roster.byId(id)!.secret) {
+          pity = 0;
+        } else if (eggHoldsSecret(roster, egg.kind)) {
+          pity++;
+        }
+        if (at >= 0) {
+          // A duplicate grows the one you have; a shiny one makes it shiny.
+          daemons = [...daemons];
+          daemons[at] = daemons[at].copyWith(
+            dupes: min(daemons[at].dupes + 1, ZooDaemon.maxDupes),
+            shiny: daemons[at].shiny || shiny,
+          );
+          _grow(at, roster.rules.duplicateXp);
+          hatched.add(
+            ZooHatch(
+              eggId: egg.id,
+              daemonId: id,
+              shiny: shiny,
+              duplicate: true,
+              xp: roster.rules.duplicateXp,
+            ),
+          );
+          return;
+        }
         daemons = [
           ...daemons,
           ZooDaemon(
@@ -667,9 +884,10 @@ class _ZooRules {
             egg: egg.kind,
             shiny: shiny,
             version: roster.rules.versions.first,
+            // Only the server mints serials; a guest's daemon is local.
+            origin: 'local',
           ),
         ];
-        pity = roster.byId(id)!.secret ? 0 : pity + 1;
         pair ??= id;
         hatched.add(ZooHatch(eggId: egg.id, daemonId: id, shiny: shiny));
       case 'zoo.pair':
@@ -692,18 +910,24 @@ class _ZooRules {
             : daemons[at].copyWith(nickname: (nickname as String).trim());
       case 'zoo.easter':
         final word = op['word'];
-        if (word is! String ||
-            !roster.rules.easterWords.contains(word) ||
-            easter.contains(word)) {
+        if (word is! String || word.isEmpty || word.length > 64) return;
+        final hash = easterHash(word);
+        if (!roster.rules.easterHashes.contains(hash) ||
+            easter.contains(hash)) {
           return;
         }
         // A full nest leaves the word unspent.
-        if (_grant('easter')) easter = [...easter, word];
+        if (_grant('easter')) easter = [...easter, hash];
       case 'zoo.seed':
         if (zoo.holdsAnything) return;
         final seed = Zoo.fromJson(op['zoo'], roster);
         final fresh = turns == 0 && batches.isEmpty;
-        daemons = [...seed.daemons];
+        // A guest's daemons hatched on a client: marked local, never with a
+        // serial (only the server mints).
+        daemons = [
+          for (final d in seed.daemons)
+            d.copyWith(origin: 'local', clearSerial: true),
+        ];
         eggs = [];
         for (final e in seed.eggs) {
           eggs = [
@@ -724,8 +948,12 @@ class _ZooRules {
         }
         habits = [...seed.habits];
         firstEgg = seed.firstEgg;
+        setupEgg = seed.setupEgg;
         pity = seed.pity;
-        easter = [...seed.easter];
+        easter = [
+          for (final h in seed.easter)
+            if (roster.rules.easterHashes.contains(h)) h,
+        ];
         if (fresh) {
           final p = seed.progress;
           turns = p.turns;
@@ -748,7 +976,7 @@ class _ZooRules {
     final id = roster.rules.historyDates[date.substring(5)];
     final def = roster.byId(id);
     if (def == null || daemons.any((d) => d.id == id)) return null;
-    return roster.drops.any((d) => d.id == def.drop) ? def.id : null;
+    return roster.drop(def.drop)?.releasedAt(now) ?? false ? def.id : null;
   }
 
   /// Turns finished on one machine in one local hour (README, "Earning eggs
@@ -757,7 +985,13 @@ class _ZooRules {
   void _turn(Map<String, dynamic> op) {
     final batchId = op['batchId'], n = op['n'], day = op['day'];
     final hour = op['hour'], machineId = op['machineId'];
-    if (batchId is! String ||
+    final minutes = op['minutes'] ?? 0, away = op['away'] ?? 0;
+    if (minutes is! int ||
+        minutes < 0 ||
+        minutes > 50 * 24 * 60 ||
+        away is! int ||
+        away < 0 ||
+        batchId is! String ||
         !_idSafe.hasMatch(batchId) ||
         n is! int ||
         n < 1 ||
@@ -768,7 +1002,8 @@ class _ZooRules {
         hour < 0 ||
         hour > 23 ||
         machineId is! String ||
-        !_idSafe.hasMatch(machineId)) {
+        !_idSafe.hasMatch(machineId) ||
+        away > n) {
       return;
     }
     if (batches.contains(batchId)) return;
@@ -791,7 +1026,10 @@ class _ZooRules {
     }
 
     final before = days[day] ?? 0;
-    final counted = max(0, min(n, earn.dailyCap - before));
+    // Long turns count more: one more for every minutesPerTurn they ran.
+    final units =
+        n + (earn.minutesPerTurn > 0 ? minutes ~/ earn.minutesPerTurn : 0);
+    final counted = max(0, min(units, earn.dailyCap - before));
     if (counted > 0) {
       changed = true;
       days = ZooProgress.pruneDays({...days, day: before + counted});
@@ -814,22 +1052,22 @@ class _ZooRules {
         weeks = ZooProgress._last([...weeks, week], ZooProgress.weekMemory);
         _earn('week');
       }
-      if (hour >= earn.nightFrom &&
-          hour <= earn.nightTo &&
-          !nights.contains(day)) {
-        nights = [...nights, day];
+      // A night counts for a turn that finished while you were away.
+      final night = away > 0 ? nightOf(roster, day, hour) : null;
+      if (night != null && !nights.contains(night)) {
+        nights = [...nights, night];
         if (nights.length >= earn.nights) {
           nights = [];
           _earn('night');
         }
       }
-      if (roster.rules.historyDates.containsKey(day.substring(5)) &&
-          !history.contains(day)) {
+      for (final date in historyDatesOpen(roster, day)) {
+        if (history.contains(date)) continue;
         history = ZooProgress._last([
           ...history,
-          day,
+          date,
         ], ZooProgress.historyMemory);
-        _earn('history', date: day);
+        _earn('history', date: date);
       }
       _addXp(
         counted * roster.rules.xpPerTurn +

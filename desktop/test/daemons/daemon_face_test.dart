@@ -577,14 +577,16 @@ void main() {
   });
 
   testWidgets('the nest shows habits done', (tester) async {
-    await mount(tester, custom: const Zoo(habits: ['turn', 'split']));
+    await mount(tester, custom: const Zoo(habits: ['split']));
     expect(face.glyph, r'~\_O_/~');
     expect(face.label, 'Egg');
-    expect(face.detail, '2 of 5 habits');
+    expect(face.detail, '1 of 3 habits');
+    expect(face.tooltip, contains('Finish a turn in a harness, and any 2 more.'));
     zoo.habit('find');
     zoo.habit('store');
-    expect(face.glyph, r'\_.._/');
-    zoo.habit('resume');
+    expect(face.glyph, r'\_.._/', reason: 'without a finished turn, two count');
+    expect(face.detail, '2 of 3 habits');
+    zoo.habit('turn');
     expect(face.glyph, r'\_o.o_/');
     expect(face.eggReady, isTrue);
   });
@@ -593,11 +595,12 @@ void main() {
       'it as +1 egg until it is opened', (tester) async {
     // At 1.0 (150 xp), two days of turns (200 xp) stay below the next level.
     await mount(tester, version: '1.0');
-    // A guest's 40th counted turn earns a turn egg; two days at the cap.
-    clock.value = DateTime(2026, 9, 21, 12);
+    // A guest's 40th counted turn earns a turn egg; two days at the cap
+    // (after drop 1's release, so it can hatch).
+    clock.value = DateTime(2026, 9, 27, 12);
     zoo.recordTurns(20, machineId: 'm');
     await tester.pump(const Duration(seconds: 6));
-    clock.value = DateTime(2026, 9, 22, 12);
+    clock.value = DateTime(2026, 9, 28, 12);
     zoo.recordTurns(20, machineId: 'm');
     expect(zoo.zoo.eggs.single.kind, 'turn');
     expect(face.glyph, r'\_O_/');

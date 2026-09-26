@@ -76,23 +76,31 @@ void main() {
       applyZooOps(roster, zoo, ops, random: Random(seed), now: now);
 
   group('rules', () {
-    test('five of eight habits grant one first egg, once', () {
+    test('the first egg: three habits, a finished turn among them; the '
+        'setup egg at six', () {
       var zoo = apply(Zoo.empty, [
-        for (final key in ['turn', 'split', 'find', 'turn', 'bogus'])
+        for (final key in ['split', 'find', 'machine', 'split', 'bogus'])
           habit(key),
       ]).zoo;
-      expect(zoo.habits, ['turn', 'split', 'find']);
-      expect(zoo.eggs, isEmpty);
-      zoo = apply(zoo, [habit('machine'), habit('store')]).zoo;
+      expect(zoo.habits, ['split', 'find', 'machine']);
+      expect(zoo.eggs, isEmpty, reason: 'no finished turn yet');
+      zoo = apply(zoo, [habit('turn')]).zoo;
       expect(zoo.firstEgg, isTrue);
       expect(zoo.eggs.single.kind, 'first');
+      zoo = apply(zoo, [habit('store')]).zoo;
+      expect(zoo.eggs, hasLength(1));
       zoo = apply(zoo, [habit('resume'), habit('days')]).zoo;
-      expect(zoo.eggs, hasLength(1), reason: 'the first egg is granted once');
+      expect(zoo.setupEgg, isTrue);
+      expect(zoo.eggs.map((e) => e.kind), ['first', 'setup']);
+      expect(roster.rules.eggs['setup']!.look, r'\_$_/');
+      zoo = apply(zoo, [habit('elsewhere')]).zoo;
+      expect(zoo.eggs, hasLength(2), reason: 'each once');
     });
 
-    test('a hatch draws, removes the egg, pairs the first and counts pity', () {
+    test('a hatch draws, removes the egg and pairs the first; the pity counts '
+        'only eggs that can hold a secret', () {
       var zoo = apply(Zoo.empty, [
-        for (final h in roster.rules.habits.take(5)) habit(h.key),
+        for (final key in ['turn', 'split', 'find']) habit(key),
       ]).zoo;
       final egg = zoo.eggs.single;
       final result = apply(zoo, [
@@ -102,20 +110,35 @@ void main() {
       zoo = result.zoo;
       expect(result.hatched, hasLength(1), reason: 'a missing egg is dropped');
       expect(zoo.eggs, isEmpty);
-      expect(zoo.daemons.single.id, result.hatched.single.daemonId);
-      expect(zoo.pair, zoo.daemons.single.id);
-      expect(zoo.daemons.single.version, '0.1');
-      expect(zoo.daemons.single.egg, 'first');
-      expect(zoo.pity, zoo.daemons.single.id == 'grue' ? 0 : 1);
+      final d = zoo.daemons.single;
+      expect(d.id, result.hatched.single.daemonId);
+      expect(zoo.pair, d.id);
+      expect([d.version, d.egg, d.origin, d.serial], ['0.1', 'first', 'local', null]);
+      expect(zoo.pity, 0, reason: 'a first egg can never be the grue');
+      final night = apply(
+        zoo.copyWith(
+          eggs: const [ZooEgg(id: 'n1', kind: 'night', grantedAt: '')],
+        ),
+        [
+          {'op': 'zoo.hatch', 'eggId': 'n1'},
+        ],
+      );
+      expect(
+        night.zoo.pity,
+        night.hatched.single.daemonId == 'grue' ? 0 : 1,
+      );
     });
 
-    test('no duplicates until the drop is complete', () {
+    test('regulars first; secrets only from night and easter eggs', () {
       var zoo = Zoo.empty;
       final random = Random(3);
       final seen = <String>[];
-      for (var i = 0; i < roster.daemons.length; i++) {
-        final kind = roster.rules.eggs['marathon']!;
-        final id = drawDaemon(roster, zoo, kind, random)!;
+      final regulars = [
+        for (final d in roster.daemons)
+          if (!d.secret) d.id,
+      ];
+      for (var i = 0; i < regulars.length; i++) {
+        final id = drawDaemon(roster, zoo, 'marathon', random, now: now)!;
         expect(zoo.owns(id), isFalse);
         seen.add(id);
         zoo = zoo.copyWith(
@@ -125,57 +148,128 @@ void main() {
           ],
         );
       }
-      expect(seen.toSet(), roster.daemons.map((d) => d.id).toSet());
-      // Everything owned: duplicates again.
+      expect(seen.toSet(), regulars.toSet(), reason: 'never the grue');
+      // Every regular owned: duplicates again, still never the grue from a
+      // marathon egg; a night egg can still give it.
+      for (var i = 0; i < 200; i++) {
+        expect(
+          drawDaemon(roster, zoo, 'marathon', random, now: now),
+          isNot('grue'),
+        );
+      }
       expect(
-        drawDaemon(roster, zoo, roster.rules.eggs['first']!, random),
-        isNotNull,
+        drawWeights(roster, zoo, 'night', now: now).map((w) => w.$1.id),
+        [...regulars, 'grue'],
+      );
+      expect(
+        drawWeights(roster, Zoo.empty, 'first', now: now)
+            .where((w) => w.$1.secret),
+        isEmpty,
+      );
+      // Before drop 1's release nothing hatches.
+      expect(
+        drawDaemon(
+          roster,
+          Zoo.empty,
+          'first',
+          random,
+          now: DateTime.utc(2026, 9, 20),
+        ),
+        isNull,
       );
     });
 
-    test('odds follow the egg weights over eligible daemons', () {
+    test('odds follow the egg weights; the first egg leans toward tim', () {
       final random = Random(11);
       final counts = <String, int>{};
+      final ids = <String, int>{};
       const draws = 20000;
       for (var i = 0; i < draws; i++) {
-        final id = drawDaemon(
-          roster,
-          Zoo.empty,
-          roster.rules.eggs['first']!,
-          random,
-        )!;
+        final id = drawDaemon(roster, Zoo.empty, 'first', random, now: now)!;
         final rarity = roster.byId(id)!.rarity;
         counts[rarity] = (counts[rarity] ?? 0) + 1;
+        ids[id] = (ids[id] ?? 0) + 1;
       }
-      expect(counts['common']! / draws, closeTo(.60, .02));
-      expect(counts['rare']! / draws, closeTo(.27, .02));
-      expect(counts['legendary']! / draws, closeTo(.12, .015));
-      expect(counts['secret']! / draws, closeTo(.01, .005));
+      // Commons 60 (tim x4 of four), rare 27, legendary 12: of 144.
+      expect(ids['tim']! / draws, closeTo(60 / 144, .02));
+      expect(counts['rare']! / draws, closeTo(27 / 144, .015));
+      expect(counts['legendary']! / draws, closeTo(12 / 144, .01));
+      expect(counts['secret'], isNull);
       // A night egg boosts bat fourfold among the commons.
       final night = <String, int>{};
       for (var i = 0; i < draws; i++) {
-        final id = drawDaemon(
-          roster,
-          Zoo.empty,
-          roster.rules.eggs['night']!,
-          random,
-        )!;
+        final id = drawDaemon(roster, Zoo.empty, 'night', random, now: now)!;
         night[id] = (night[id] ?? 0) + 1;
       }
       expect(night['bat']! / night['tim']!, closeTo(4, .6));
     });
 
-    test('pity raises the secret and resets on it', () {
-      final egg = roster.rules.eggs['first']!;
+    test('pity raises the secret; the eighth egg that could hold it is it', () {
       final random = Random(5);
       var grue = 0;
       for (var i = 0; i < 4000; i++) {
-        if (drawDaemon(roster, const Zoo(pity: 40), egg, random) == 'grue') {
+        if (drawDaemon(
+              roster,
+              const Zoo(pity: 5),
+              'easter',
+              random,
+              now: now,
+            ) ==
+            'grue') {
           grue++;
         }
       }
-      // (1 + 40) against 60 + 27 + 12: about 29%.
-      expect(grue / 4000, closeTo(41 / 140, .03));
+      // (10 + 5) against 90 of legendaries.
+      expect(grue / 4000, closeTo(15 / 105, .03));
+      expect(
+        drawWeights(
+          roster,
+          Zoo(pity: roster.rules.secretGuaranteeAt - 1),
+          'night',
+          now: now,
+        ).map((w) => w.$1.id),
+        ['grue'],
+      );
+    });
+
+    test('a duplicate merges: +150 xp, x2, a shiny one makes yours shiny, '
+        'and it never pairs', () {
+      final regulars = [
+        for (final d in roster.daemons)
+          if (!d.secret) d.id,
+      ];
+      final zoo = Zoo(
+        daemons: [
+          for (final id in regulars) ZooDaemon(id: id, hatchedAt: '', egg: 'turn'),
+        ],
+        pair: 'tim',
+        eggs: const [ZooEgg(id: 't1', kind: 'turn', grantedAt: '')],
+      );
+      final r = apply(zoo, [
+        {'op': 'zoo.hatch', 'eggId': 't1'},
+      ]);
+      final hatch = r.hatched.single;
+      expect(hatch.duplicate, isTrue);
+      expect(hatch.xp, roster.rules.duplicateXp);
+      expect(r.zoo.daemons, hasLength(regulars.length), reason: 'no new one');
+      final merged = r.zoo.daemons.firstWhere((d) => d.id == hatch.daemonId);
+      expect(merged.dupes, 1);
+      expect(merged.count, 2);
+      expect(merged.xp, 150);
+      expect(merged.version, '1.0', reason: '150 xp is level 2');
+      expect(r.levelUps.single.id, hatch.daemonId);
+      expect(r.zoo.pair, 'tim');
+      // A zoo stored with two records of one daemon reads as one.
+      final folded = Zoo.fromJson({
+        'daemons': [
+          {'id': 'fzf', 'hatchedAt': '', 'egg': 'turn'},
+          {'id': 'fzf', 'hatchedAt': '', 'egg': 'week', 'shiny': true},
+          {'id': 'fzf', 'hatchedAt': '', 'egg': 'week', 'dupes': 2},
+        ],
+      }, roster);
+      expect(folded.daemons.single.dupes, 4);
+      expect(folded.daemons.single.shiny, isTrue);
+      expect(folded.daemons.single.egg, 'turn');
     });
 
     test('pair, nickname, easter and seed follow the rules', () {
@@ -193,22 +287,47 @@ void main() {
         {'op': 'zoo.nickname', 'id': 'vim', 'nickname': 'café'},
         {'op': 'zoo.nickname', 'id': 'tim', 'nickname': ' Pip '},
         {'op': 'zoo.easter', 'word': 'plugh'},
-        {'op': 'zoo.easter', 'word': 'xyzzy'},
+        {'op': 'zoo.easter', 'word': ' XYZZY '},
         {'op': 'zoo.easter', 'word': 'xyzzy'},
       ]).zoo;
       expect(zoo.pair, 'vim');
       expect(zoo.daemons[1].nickname, isNull);
       expect(zoo.daemons[0].nickname, 'Pip');
       expect(zoo.eggs.single.kind, 'easter');
-      expect(zoo.easter, ['xyzzy']);
+      // Words never ship: the zoo keeps the hash, as the roster lists it.
+      expect(zoo.easter, [easterHash('xyzzy')]);
+      expect(roster.rules.easterHashes, contains(easterHash('xyzzy')));
+      expect(
+        Zoo.fromJson({
+          'easter': ['xyzzy'],
+        }, roster).easter,
+        [easterHash('xyzzy')],
+        reason: 'a word stored before hashing reads as its hash',
+      );
       zoo = apply(zoo, [
         {'op': 'zoo.nickname', 'id': 'tim', 'nickname': null},
       ]).zoo;
       expect(zoo.daemons[0].nickname, isNull);
       // Seed applies only to an empty zoo.
       final seeded = apply(Zoo.empty, [
-        {'op': 'zoo.seed', 'zoo': zoo.toJson()},
+        {
+          'op': 'zoo.seed',
+          'zoo': {
+            ...zoo.toJson(),
+            'daemons': [
+              for (final d in zoo.daemons) {...d.toJson(), 'serial': 7},
+            ],
+          },
+        },
       ]).zoo;
+      // A guest's daemons are local and carry no serial.
+      expect(seeded.daemons.map((d) => (d.origin, d.serial)), [
+        ('local', null),
+        ('local', null),
+      ]);
+      zoo = zoo.copyWith(
+        daemons: [for (final d in zoo.daemons) d.copyWith(origin: 'local')],
+      );
       expect(seeded.toJson(), zoo.toJson());
       expect(
         apply(seeded, [
@@ -285,10 +404,14 @@ void main() {
       int n, {
       int hour = 12,
       String machine = 'm1',
+      int? away,
+      int? minutes,
     }) => {
       'op': 'zoo.turn',
       'batchId': 'b${++batch}',
       'n': n,
+      'minutes': ?minutes,
+      'away': ?away,
       'day': day,
       'hour': hour,
       'machineId': machine,
@@ -330,6 +453,27 @@ void main() {
       expect(roster.rules.bondLevels, [0, 50, 150, 300, 600]);
       expect(roster.rules.historyDates.keys, ['04-01', '09-09', '10-31']);
       expect(roster.rules.eggs['history']!.look, r'\_47_/');
+      expect(
+        [
+          earn.minutesPerTurn,
+          earn.nightFrom,
+          earn.nightTo,
+          earn.awayMinutes,
+          earn.historyDays,
+        ],
+        [10, 22, 6, 30, 7],
+      );
+      expect(
+        [
+          roster.rules.firstEggNeed,
+          roster.rules.setupEggNeed,
+          roster.rules.secretGuaranteeAt,
+          roster.rules.duplicateXp,
+          roster.rules.overflowXp,
+        ],
+        [3, 6, 8, 150, 50],
+      );
+      expect(roster.rules.firstEggRequire, ['turn']);
     });
 
     test(
@@ -364,22 +508,31 @@ void main() {
       'a second machine earns a marathon egg once; nights earn a night egg',
       () {
         final r = play(Zoo.empty, [
-          turn('2026-09-21', 1, hour: 2, machine: 'a'),
-          turn('2026-09-22', 1, hour: 3, machine: 'b'),
-          turn('2026-09-23', 1, hour: 4, machine: 'c'),
-          turn('2026-09-24', 1, hour: 5),
+          turn('2026-09-21', 1, hour: 23, away: 1, machine: 'a'),
+          // 02:00 on the 22nd is still the night of the 21st.
+          turn('2026-09-22', 1, hour: 2, away: 1, machine: 'b'),
+          // At the desk at night: not an away turn.
+          turn('2026-09-22', 1, hour: 23, machine: 'c'),
+          turn('2026-09-23', 1, hour: 22, away: 1),
+          turn('2026-09-24', 2, hour: 22, away: 1),
         ]);
         // Three days of one ISO week earn its week egg on the way.
-      expect(r.grants.map((g) => g.kind), ['marathon', 'week', 'night']);
+        expect(r.grants.map((g) => g.kind), ['marathon', 'week', 'night']);
         expect(r.zoo.progress.machines, ['a', 'b']);
         expect(r.zoo.progress.nights, isEmpty);
+        expect(nightOf(roster, '2026-09-22', 2), '2026-09-21');
+        expect(nightOf(roster, '2026-09-22', 12), isNull);
       },
     );
 
-    test('a history date gives a dated egg', () {
-      final r = play(Zoo.empty, [turn('2026-09-09', 1)]);
+    test('a history date gives a dated egg all its week; long turns count '
+        'more', () {
+      final r = play(Zoo.empty, [turn('2026-09-12', 1)]);
       expect(r.zoo.eggs.single.kind, 'history');
-      expect(r.zoo.eggs.single.date, '2026-09-09');
+      expect(r.zoo.eggs.single.date, '2026-09-09', reason: 'the date it keeps');
+      expect(historyDatesOpen(roster, '2026-09-15'), ['2026-09-09']);
+      expect(historyDatesOpen(roster, '2026-09-16'), isEmpty);
+      expect(play(Zoo.empty, [turn('2026-09-13', 1)]).zoo.eggs, hasLength(1));
       final hatched = applyZooOps(
         roster,
         r.zoo,
@@ -387,7 +540,12 @@ void main() {
           {'op': 'zoo.hatch', 'eggId': r.zoo.eggs.single.id},
         ],
         random: Random(1),
-        now: noon('2026-09-09'),
+        now: noon('2026-09-27'),
+      );
+      // Every 10 agent-minutes is one more counted turn.
+      expect(
+        play(Zoo.empty, [turn('2026-09-21', 1, minutes: 25)]).zoo.progress.turns,
+        3,
       );
       // No drop holds the moth yet: the usual pool.
       expect(hatched.zoo.daemons.single.egg, 'history');
@@ -434,7 +592,7 @@ void main() {
           {'op': 'zoo.hatch', 'eggId': 'e0'},
         ],
         random: Random(2),
-        now: noon('2026-09-21'),
+        now: noon('2026-09-27'),
       );
       expect(hatched.zoo.eggs, hasLength(Zoo.maxEggs));
       expect(hatched.zoo.progress.held, isEmpty);
@@ -442,7 +600,7 @@ void main() {
       // The first egg waits for room too, and so does an easter word.
       final waiting = applyZooOps(
         roster,
-        full.copyWith(habits: ['turn', 'split', 'find', 'machine']),
+        full.copyWith(habits: ['turn', 'split']),
         [
           {'op': 'zoo.habit', 'key': 'store'},
           {'op': 'zoo.easter', 'word': 'xyzzy'},
@@ -452,6 +610,27 @@ void main() {
       ).zoo;
       expect(waiting.firstEgg, isFalse);
       expect(waiting.easter, isEmpty);
+    });
+
+    test('past 64 held, an earned egg is xp for the pair', () {
+      final r = play(
+        Zoo(
+          daemons: tim.daemons,
+          pair: 'tim',
+          eggs: [
+            for (var i = 0; i < Zoo.maxEggs; i++)
+              ZooEgg(id: 'e$i', kind: 'turn', grantedAt: ''),
+          ],
+          progress: ZooProgress(
+            turns: 39,
+            held: [for (var i = 0; i < ZooProgress.maxHeld; i++) ('turn', null)],
+          ),
+        ),
+        [turn('2026-09-21', 1)],
+      );
+      expect(r.grants.single, (kind: 'turn', eggId: null, xp: 50));
+      expect(r.zoo.daemons.single.xp, 1 + 5 + 50);
+      expect(r.zoo.progress.held, hasLength(ZooProgress.maxHeld));
     });
 
     test('a day that cannot be today anywhere is dropped', () {

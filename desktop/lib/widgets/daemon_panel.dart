@@ -301,7 +301,10 @@ class _DaemonPanelState extends State<DaemonPanel> {
   /// done (the status line draws it in its own ink).
   Color get _nestInk {
     if (face.revealing || face.eggReady) return _theme.yellow;
-    final progress = (face.zoo.habitsDone / face.zoo.habitsNeeded).clamp(0, 1);
+    final progress = (face.zoo.habitsCounted / face.zoo.habitsNeeded).clamp(
+      0,
+      1,
+    );
     return Color.lerp(_theme.foreground, _theme.yellow, .28 + .72 * progress)!;
   }
 
@@ -311,7 +314,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
     final done = zoo.habits.toSet();
     final egg = face.zoo.readyEgg;
     final need = face.zoo.habitsNeeded;
-    final left = need - done.length;
+    final left = need - face.zoo.habitsCounted;
     for (final habit in roster.rules.habits) {
       if (daemonHabitCommands.containsKey(habit.key) &&
           !done.contains(habit.key)) {
@@ -340,7 +343,8 @@ class _DaemonPanelState extends State<DaemonPanel> {
                   ? 'Ready. Nothing hatches on its own.'
                   : left <= 0
                   ? 'Ready. The egg is on its way.'
-                  : '${done.length} of $need habits, any order.',
+                  : '${face.zoo.habitsCounted} of $need habits: '
+                        '${face.zoo.firstEggRule}.',
               key: const ValueKey('daemon-panel-progress'),
               style: _ink(),
             ),
@@ -383,8 +387,16 @@ class _DaemonPanelState extends State<DaemonPanel> {
           ),
           SizedBox(width: _cell.width),
           Expanded(
-            child: Text(
-              habit.label,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: habit.label),
+                  // The first egg cannot come without it (`firstEgg.require`).
+                  if (!complete &&
+                      roster.rules.firstEggRequire.contains(habit.key))
+                    TextSpan(text: '  needed', style: _ink(_muted)),
+                ],
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: _ink(complete ? _muted : null),
@@ -770,6 +782,8 @@ class _DaemonPanelState extends State<DaemonPanel> {
       );
     }
     final first = owned.first;
+    // One record per daemon; its duplicates are counted in it.
+    final count = owned.fold<int>(0, (n, z) => n + z.count);
     final selected = d.id == viewing;
     final sprite = renderSprite(
       roster,
@@ -782,7 +796,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
     return Tooltip(
       message:
           '${first.nickname ?? d.id} ${first.version}'
-          '${owned.length > 1 ? ' · x${owned.length}' : ''}'
+          '${count > 1 ? ' · x$count' : ''}'
           '${d.id == zoo.pair ? ' · paired' : ''}',
       child: SizedBox(
         width: _cell.width * _slotCells,
@@ -811,7 +825,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
                 ).copyWith(backgroundColor: backdrop),
               ),
               Text(
-                '${first.version}${owned.length > 1 ? ' x${owned.length}' : ''}',
+                '${first.version}${count > 1 ? ' x$count' : ''}',
                 style: _ink(_muted),
               ),
             ],

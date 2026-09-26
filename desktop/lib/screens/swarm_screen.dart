@@ -2993,7 +2993,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _lastZooScope = _zoo.scope;
     }
     if (_zoo.loaded) {
-      final habits = _zoo.habitsDone;
+      final habits = _zoo.habitsCounted;
       final egg = _zoo.readyEgg;
       final beforeHatch = _zoo.zoo.daemons.isEmpty;
       if (beforeHatch &&
@@ -3002,6 +3002,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
         final scope = _zoo.scope;
         final left = _zoo.habitsNeeded - habits;
         final ready = egg != null;
+        // One short, and what is left is the habit it cannot come without.
+        final required = _zoo.habitsRequiredLeft.firstOrNull;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted || _zoo.scope != scope || _face.revealing) return;
           _showDaemonNotice(
@@ -3009,6 +3011,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 ? 'Your egg is ready.'
                 : left <= 0
                 ? 'The egg is on its way.'
+                : left == 1 && required != null
+                ? '${required.label}, and it hatches.'
                 : left == 1
                 ? 'One habit left. Something stirs.'
                 : 'One step closer. $left to go.',
@@ -3773,10 +3777,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
   }
 
-  /// The daemons' easter words (`rules.easterWords`): the box answers as the
-  /// old adventure did, and the word is sent to the zoo once.
+  /// The one easter word the window knows by heart: the box answers as the
+  /// old adventure did. Any easter word (the roster holds only their hashes)
+  /// is sent to the zoo once.
   String? _easterNote(String query) =>
-      _zoo.roster.rules.easterWords.contains(query.trim().toLowerCase())
+      query.trim().toLowerCase() == classicEasterWord
       ? 'Nothing happens.'
       : null;
 
@@ -3784,7 +3789,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final search = _search;
     if (search == null) return;
     final word = search.query.trim().toLowerCase();
-    if (_zoo.roster.rules.easterWords.contains(word)) _zoo.easter(word);
+    if (word.length >= 3 && _zoo.isEasterWord(word)) _zoo.easter(word);
     if (_machineSearchVisible != search.isMachineMode) {
       _machineSearchVisible = search.isMachineMode;
       if (_machineSearchVisible) unawaited(search.refreshMachineResources());

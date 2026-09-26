@@ -149,7 +149,8 @@ void main() {
         .map((op) => op['key'])
         .toList();
     expect(sent.toSet().length, sent.length, reason: 'each habit once');
-    expect(glyph(tester), r'~\_O_/~');
+    // A finished turn and two more: the first egg is ready.
+    expect(glyph(tester), r'\_o.o_/');
     await unmount(tester);
   });
 

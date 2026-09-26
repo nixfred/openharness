@@ -169,19 +169,15 @@ void main() {
     expect(cardCodeBlock(zooCard), startsWith('```\n.---'));
   });
 
-  test('nest stages follow habits done', () {
-    expect(
-      [for (var h = 0; h <= 6; h++) nestFor(roster, h)],
-      [
-        r'\_O_/',
-        r'\_O_/',
-        r'~\_O_/~',
-        r'~\_O_/~',
-        r'\_.._/',
-        r'\_o.o_/',
-        r'\_o.o_/',
-      ],
-    );
+  test('every nest matches render.mjs nestStage', () {
+    final nests = frames['nests'] as List;
+    expect(nests, isNotEmpty);
+    for (final raw in nests) {
+      final f = raw as Map;
+      final habits = [for (final h in f['habits'] as List) h as String];
+      expect(nestStage(roster, habits), f['stage'], reason: '$habits');
+      expect(nestFor(roster, habits), f['out'], reason: '$habits');
+    }
   });
 
   test('every banner matches renderBanner in the shared face', () {
