@@ -214,11 +214,13 @@ class _SwarmScreenState extends State<SwarmScreen> {
   late final _brain = DaemonBrain(
     send: app.sendDaemonFrame,
     storage: kUnderTest ? null : HarnessFileStore.shared,
+    now: widget.daemonClock,
   );
   final _brainSubscriptions = <StreamSubscription<Object?>>[];
   DateTime? _awaySince;
   String? _presencePair;
   String? _presenceAutonomy;
+  bool? _presenceConsent;
   String? _presenceFocus;
   DaemonBrief? _lastBrief;
   StreamSubscription<int?>? _zooPushes;
@@ -387,6 +389,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _onboarding.addListener(_onboardingChanged);
     _zoo.addListener(_zooChanged);
     _face.addListener(_faceChanged);
+    // A line with keys is acknowledged once it, and what its keys would do,
+    // are on screen (`daemon_shown`); its keys arm a moment later.
+    _face.voiceLine.addListener(_voiceChanged);
     unawaited(_daemonSettings.load());
     app.agentPulse.addListener(_face.pulse);
     _face.dialogOpen = () =>
@@ -505,6 +510,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     GestureBinding.instance.pointerRouter.removeGlobalRoute(_notePointer);
     _idleTimer?.cancel();
     app.agentPulse.removeListener(_face.pulse);
+    _face.voiceLine.removeListener(_voiceChanged);
     _face.removeListener(_faceChanged);
     _face.dispose();
     _daemonSettings.dispose();
@@ -984,7 +990,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
             .length,
         focus: focus,
         away: away,
-        asks: paired ? brain!.asks.length : 0,
+        // A proposal or a setting waiting for your yes: it asks you
+        // something.
+        asks: (paired ? brain!.asks.length : 0) + (brain?.confirms.length ?? 0),
+        autonomy: brain?.autonomy,
+        autonomyRequested: brain?.autonomyRequested,
         doneCount: paired ? brain!.doneCount : null,
         doneLast: [
           if (paired)
@@ -2874,27 +2884,104 @@ class _SwarmScreenState extends State<SwarmScreen> {
       'label': _face.label,
       'detail': _face.detail,
       'tooltip': _face.tooltip,
-      // Exactly as sent, keys first: native makes the offered keys buttons.
+      // Exactly as sent, keys first: native makes the offered keys buttons,
+      // once the line is armed (drawn, with its detail, a moment ago).
       'voice': _nativeVoice,
       'voiceActions': [
         for (final action in _face.voiceActions)
           {'key': action.key, 'label': action.label},
       ],
+      'voiceArmed': _voiceArmed,
       'voiceColor': (_face.voiceAlert ? theme.yellow : daemonDimInk(theme))
           .toARGB32(),
     };
   }
 
   /// The spoken line for native: as the face shows it, with a brain line's
-  /// keys first even if an older brain put them elsewhere.
+  /// keys first even if an older brain put them elsewhere, and the pair
+  /// harness's `<nick>` before its own words.
   String? get _nativeVoice {
     final voice = _face.voice;
+    if (voice == null) return null;
+    final nick = _face.voiceFromPair ? daemonPairNick(_face.name) : '';
     final actions = _face.voiceActions;
-    if (voice == null || actions.isEmpty) return voice;
+    if (actions.isEmpty) return '$nick$voice';
     final split = splitDaemonKeys(voice, actions);
     return split.keys.isEmpty
-        ? voice
-        : '[${split.keys.join('/')}] ${split.rest}';
+        ? '$nick$voice'
+        : '[${split.keys.join('/')}] $nick${split.rest}';
+  }
+
+  /// Whether a key on the spoken line counts yet.
+  bool get _voiceArmed {
+    final id = _face.voiceSayId;
+    return id == null || _brain.armed(id);
+  }
+
+  String? _voiceShownFor;
+  String? _detailOverlayFor;
+
+  /// A brain line began or ended. One with keys is acknowledged to harnessd
+  /// once it is on screen, and, when it carries a `detail`, once that is on
+  /// screen too, in full, in a disclosure under the status line.
+  void _voiceChanged() {
+    final id = _face.voiceSayId;
+    if (_face.voice == null || id == null) {
+      _voiceShownFor = null;
+      if (_detailOverlayFor != null) _closeDaemonHint();
+      return;
+    }
+    if (id == _voiceShownFor) return;
+    _voiceShownFor = id;
+    if (_detailOverlayFor != null && _detailOverlayFor != id) {
+      _closeDaemonHint();
+    }
+    final keyed = _face.voiceActions.any((a) => a.key != 'g');
+    if (!keyed) return;
+    final detail = _face.voiceDetail;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _face.voiceSayId != id) return;
+      if (detail == null || detail.isEmpty) {
+        // The line is everything its keys act on.
+        _brain.shown(id);
+        return;
+      }
+      _showVoiceDetail(id, detail);
+    });
+  }
+
+  void _showVoiceDetail(String id, String detail) {
+    final harness = _face.voiceHarness;
+    final title = [
+      if (_face.voiceFromPair) '${daemonPairNick(_face.name).trim()} asks',
+      ?harness?.label,
+      _face.voiceConfirm != null
+          ? 'what a yes turns on'
+          : id.startsWith('lesson:')
+          ? 'the lesson, in full'
+          : 'exactly what a key does',
+    ].join(' · ');
+    final shown = _showDaemonOverlay(
+      key: ValueKey('daemon-detail-$id'),
+      interactive: true,
+      showFor: DaemonFace.voiceFor,
+      child: Builder(
+        builder: (context) => ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: workspaceBarCellSizeOf(context).width * 84,
+          ),
+          child: DaemonDetailNotice(
+            title: title,
+            detail: detail,
+            actions: _face.voiceActions,
+            onShown: () {
+              if (_face.voiceSayId == id) _brain.shown(id);
+            },
+          ),
+        ),
+      ),
+    );
+    if (shown) _detailOverlayFor = id;
   }
 
   void _faceChanged() {
@@ -2924,7 +3011,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
         !keyboard.isControlPressed &&
         _face.voiceActions.isNotEmpty) {
       final label = event.logicalKey.keyLabel.toLowerCase();
-      if (_face.voiceActions.any((a) => a.key == label)) {
+      // Only a line that is armed: drawn, with what its keys do, a moment
+      // ago. `[g]` opens at any time.
+      if (_face.voiceActions.any((a) => a.key == label) &&
+          (label == 'g' || _voiceArmed)) {
         _answerDaemon(label);
         return true;
       }
@@ -2937,24 +3027,40 @@ class _SwarmScreenState extends State<SwarmScreen> {
     return false;
   }
 
-  /// Answer the daemon's spoken line with one of its offered keys.
+  /// Answer the daemon's spoken line with one of its offered keys: only once
+  /// it is armed (`[g]` opens at any time).
   void _answerDaemon(String key) {
     final sayId = _face.voiceSayId;
     final action = _face.voiceActions.where((a) => a.key == key).firstOrNull;
     if (sayId == null || action == null) return;
+    final opens = key == 'g' && _face.voiceTarget?.key != null;
+    if (!opens && !_brain.armed(sayId)) return;
     _answerLine(sayId, action, _face.voiceTarget);
     _face.answered();
   }
 
   /// A key on a line the brain wrote (the status line's, an ask, a brief
-  /// item): `[g]` opens the harness, which is the window's to do; any other
-  /// key goes to the brain as `daemon_act`.
+  /// item, a confirmation): `[g]` opens the harness, which is the window's to
+  /// do; a confirmation's y or n is `daemon_confirm`; any other key goes to
+  /// the brain as `daemon_act`. The brain sends nothing for a line that is
+  /// not armed yet.
   void _answerLine(String id, DaemonAction action, DaemonAbout? about) {
     if (action.key == 'g' && about?.key != null) {
       _openHarness(about!);
       return;
     }
     if (id.isEmpty) return;
+    if (id.startsWith('confirm:')) {
+      final rest = id.substring('confirm:'.length);
+      final colon = rest.indexOf(':');
+      if (colon <= 0) return;
+      _brain.confirm(
+        rest.substring(0, colon),
+        rest.substring(colon + 1),
+        accept: action.key == 'y',
+      );
+      return;
+    }
     _brain.act(id, action.choice);
   }
 
@@ -3091,6 +3197,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     _daemonOverlay?.markNeedsBuild();
     _syncDaemon();
+    // A line arming changes what native may click.
+    _faceChanged();
     // The brain's state changing is news from agents too.
     if (_brain.state?.working == true) _face.pulse();
   }
@@ -3105,12 +3213,14 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final agentId = pane?.agentId;
     _presenceFocus = agentId == null ? null : '${pane!.machineId}/$agentId';
     _presenceAutonomy = app.isGuest ? _zoo.zoo.autonomy : null;
+    _presenceConsent = app.isGuest ? _zoo.zoo.watching : null;
     await _brain.presence(
       // Idle in front of the window is away, with how long it has been.
       active: app.inForeground && idle == null,
       away: idle ?? away,
       pair: pair,
       autonomy: _presenceAutonomy,
+      consent: _presenceConsent,
       focusMachineId: agentId == null ? null : pane!.machineId,
       focusAgentId: agentId,
     );
@@ -3136,7 +3246,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
           name: _face.name,
           brief: brief,
           live: brief.keysLive(_brain.now()),
+          armed: _brain.armed,
+          arming: _brain,
+          onShown: _brain.shown,
           onAnswer: (id, action, about) {
+            final opens = action.key == 'g' && about?.key != null;
+            if (!opens && !_brain.armed(id)) return;
             _closeDaemonHint();
             _answerLine(id, action, about);
           },
@@ -3192,16 +3307,22 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _lastHabits = habits;
       _lastEggId = egg?.id;
     }
-    // A guest's pair and dial live in its local zoo; the brain hears of a
-    // change.
+    // A guest's pair, dial and consent live in its local zoo; the brain
+    // hears of a change.
     if (app.isGuest &&
         _brain.active &&
         (_zoo.zoo.pair != _presencePair ||
-            _zoo.zoo.autonomy != _presenceAutonomy)) {
+            _zoo.zoo.autonomy != _presenceAutonomy ||
+            _zoo.zoo.watching != _presenceConsent)) {
       _presencePair = _zoo.zoo.pair;
       _presenceAutonomy = _zoo.zoo.autonomy;
+      _presenceConsent = _zoo.zoo.watching;
       unawaited(
-        _brain.guest(pair: _presencePair, autonomy: _presenceAutonomy),
+        _brain.guest(
+          pair: _presencePair,
+          autonomy: _presenceAutonomy,
+          consent: _presenceConsent,
+        ),
       );
     }
     if (_zoo.loaded != _zooWasLoaded) {
@@ -3237,6 +3358,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   }
 
   void _closeDaemonHint() {
+    _detailOverlayFor = null;
     _daemonHintTimer?.cancel();
     _daemonHintTimer = null;
     _daemonHintOverlay?.remove();
@@ -3291,15 +3413,15 @@ class _SwarmScreenState extends State<SwarmScreen> {
 
   /// A note beside the slot: it never takes focus on arrival, and takes
   /// clicks only when it has something to click.
-  void _showDaemonOverlay({
+  bool _showDaemonOverlay({
     required Key key,
     required Widget child,
     required bool interactive,
     Duration showFor = const Duration(seconds: 6),
   }) {
-    if (!mounted || !_daemonNoticeAllowed) return;
+    if (!mounted || !_daemonNoticeAllowed) return false;
     final overlay = Overlay.maybeOf(context);
-    if (overlay == null) return;
+    if (overlay == null) return false;
     _closeDaemonHint();
     _daemonHintOverlay = OverlayEntry(
       builder: (context) {
@@ -3324,6 +3446,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     );
     overlay.insert(_daemonHintOverlay!);
     _daemonHintTimer = Timer(showFor, _closeDaemonHint);
+    return true;
   }
 
   /// A click on the status slot: a ready egg hatches; otherwise the daemon is
@@ -3477,6 +3600,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
           reduceMotion: _reduceMotion,
           skippable: skippable,
           before: before,
+          // Nobody has said yet whether it may watch: after the card, the
+          // first-day screen (README, "What your daemon sees").
+          needsConsent: before.consent == null,
+          onConsent: (watching) => _zoo.consent(watching: watching),
+          onSuggest: () => _zoo.autonomy('suggest'),
           onRevealed: _face.endReveal,
           onClose: _closeHatch,
         ),
@@ -5636,6 +5764,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 // tmux's message line replaces the status line.
                 child: DaemonVoiceLine(
                   face: _face,
+                  brain: _brain,
                   onAnswer: _shortcutsEnabled ? _answerDaemon : null,
                   fallback: Align(
                     alignment: Alignment.centerRight,

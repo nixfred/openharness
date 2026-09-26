@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
+import '../daemons/daemon_lines.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
 import '../daemons/zoo.dart';
@@ -11,6 +13,7 @@ import '../shared/theme/app_theme.dart';
 import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
+import 'daemon_consent.dart';
 import 'daemon_slot.dart';
 
 /// Where the reveal is. Exposed so render checks can draw any moment of it.
@@ -38,20 +41,86 @@ enum HatchStage {
   /// `tim x2 · +150 xp`.
   merged,
 
-  /// ... and yours grew a level (its new version, when it has one).
+  /// ... and yours grew a level: its portrait morphs to the new version in
+  /// three frames, then holds, with the version's changelog line.
   grew,
   failed,
+
+  /// After the first hatch, before anything is watched: what the daemon sees,
+  /// "Let it watch" or "Not now" (`zoo.consent`).
+  consent,
+
+  /// Only after a yes, its own step: "Let it suggest answers?"
+  suggest,
+}
+
+/// Ordered dithering (Bayer 4x4): which cells of a morph have turned by each
+/// quarter. Crisp in a terminal, the same every time.
+const _bayer = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
+/// Frame [step] of [steps] of a portrait turning from [from] into [to]: both
+/// bottom-aligned and centred on one canvas. Of the cells that differ, a
+/// share turns at each step, in ordered-dither order (so every frame shows
+/// progress, spread evenly). Step 0 is [from], step [steps] is [to], on the
+/// same canvas, so the held frame never jumps.
+List<String> morphPortrait(
+  List<String> from,
+  List<String> to,
+  int step, {
+  int steps = 4,
+}) {
+  final rows = max(from.length, to.length);
+  final cols = [...from, ...to].fold<int>(0, (w, r) => max(w, r.length));
+  List<List<int>> fit(List<String> art) {
+    final top = rows - art.length;
+    final width = art.fold<int>(0, (w, r) => max(w, r.length));
+    final left = (cols - width) ~/ 2;
+    return [
+      for (var r = 0; r < rows; r++)
+        (r < top ? ' ' * cols : (' ' * left + art[r - top]).padRight(cols))
+            .codeUnits
+            .toList(),
+    ];
+  }
+
+  final a = fit(from), b = fit(to);
+  final differ = [
+    for (var r = 0; r < rows; r++)
+      for (var c = 0; c < cols; c++)
+        if (a[r][c] != b[r][c]) (r, c),
+  ]..sort((x, y) {
+      final bx = _bayer[x.$1 % 4][x.$2 % 4], by = _bayer[y.$1 % 4][y.$2 % 4];
+      return bx != by ? bx - by : (x.$1 * cols + x.$2) - (y.$1 * cols + y.$2);
+    });
+  final turned = (differ.length * step.clamp(0, steps) / steps).round();
+  for (final (r, c) in differ.take(turned)) {
+    a[r][c] = b[r][c];
+  }
+  return [for (final row in a) String.fromCharCodes(row).trimRight()];
 }
 
 /// A still of the reveal, for review captures and Reduce Motion.
 @immutable
 class HatchFrame {
-  const HatchFrame({required this.stage, this.egg, this.bannerRows = 0});
+  const HatchFrame({
+    required this.stage,
+    this.egg,
+    this.bannerRows = 0,
+    this.morph,
+  });
   final HatchStage stage;
 
   /// The egg's frame, for the egg, crack and pop stages.
   final String? egg;
   final int bannerRows;
+
+  /// On `grew`: the morph's frame (1–3), or null for the new version held.
+  final int? morph;
 }
 
 /// The hatch reveal (`daemons/README.md`, Hatching): the egg wobbles twice
@@ -80,6 +149,9 @@ class DaemonHatchReveal extends StatefulWidget {
     this.skippable = false,
     this.still,
     this.before,
+    this.needsConsent = false,
+    this.onConsent,
+    this.onSuggest,
   });
 
   final DaemonRoster roster;
@@ -101,6 +173,13 @@ class DaemonHatchReveal extends StatefulWidget {
   /// The zoo before this hatch: a duplicate's level-up is told against it.
   final Zoo? before;
 
+  /// Nobody has answered the first-day consent: after the card, `[ next ]`
+  /// shows what the daemon sees and asks. [onConsent] hears the answer;
+  /// [onSuggest], a yes to the second step.
+  final bool needsConsent;
+  final ValueChanged<bool>? onConsent;
+  final VoidCallback? onSuggest;
+
   @override
   State<DaemonHatchReveal> createState() => _DaemonHatchRevealState();
 }
@@ -108,12 +187,17 @@ class DaemonHatchReveal extends StatefulWidget {
 class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
   static const silhouetteFor = 1200;
 
+  /// Each of the morph's three frames.
+  static const morphFrame = 160;
+
   final _focus = FocusNode(debugLabel: 'Hatch reveal');
   final _copyFocus = FocusNode(debugLabel: 'Copy card');
+  final _nextFocus = FocusNode(debugLabel: 'Hatch next');
   HatchStage _stage = HatchStage.egg;
   late String _egg = eggFrame(widget.roster);
   String? _lid;
   int _bannerRows = 0;
+  int? _morph;
   ZooHatch? _hatch;
   bool _closed = false, _revealed = false, _skip = false;
   Timer? _waitTimer;
@@ -137,6 +221,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       _stage = still.stage;
       _egg = still.egg ?? _egg;
       _bannerRows = still.bannerRows;
+      _morph = still.morph;
       unawaited(
         widget.result.then((hatch) {
           if (mounted) setState(() => _hatch = hatch);
@@ -157,6 +242,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     if (_waitDone case final done? when !done.isCompleted) done.complete();
     _focus.dispose();
     _copyFocus.dispose();
+    _nextFocus.dispose();
     super.dispose();
   }
 
@@ -257,8 +343,20 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       _markRevealed();
       if (grew) {
         if (!await _wait(1400)) return;
-        _show(() => _stage = HatchStage.grew);
+        // Three frames of the old version turning into the new, then held.
+        for (var step = 1; step <= 3 && !widget.reduceMotion && !_skip; step++) {
+          _show(() {
+            _stage = HatchStage.grew;
+            _morph = step;
+          });
+          if (!await _wait(morphFrame)) return;
+        }
+        _show(() {
+          _stage = HatchStage.grew;
+          _morph = null;
+        });
       }
+      _focusNext();
       return;
     }
     if (!widget.reduceMotion && !_skip) {
@@ -286,9 +384,21 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     });
     _markRevealed();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _focus.hasFocus) _copyFocus.requestFocus();
+      if (!mounted || !_focus.hasFocus) return;
+      (widget.needsConsent ? _nextFocus : _copyFocus).requestFocus();
     });
   }
+
+  /// With consent to ask, `[ next ]` takes the keyboard once it shows.
+  void _focusNext() {
+    if (!widget.needsConsent) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _focus.hasFocus) _nextFocus.requestFocus();
+    });
+  }
+
+  /// After the card (or a merge): what the daemon sees, and the question.
+  void _toConsent() => _show(() => _stage = HatchStage.consent);
 
   void _markRevealed() {
     if (_revealed) return;
@@ -325,13 +435,18 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
       widget.zoo().daemons.where((d) => d.id == _def?.id).firstOrNull;
 
   /// A duplicate's level-up: the level and version yours reached, when it
-  /// reached a new one.
+  /// reached a new one, and the version it was.
   (int, String)? get _grew {
     final now = _owned;
     final was = widget.before?.daemons.where((d) => d.id == now?.id).firstOrNull;
     if (now == null || was == null || now.bond <= was.bond) return null;
     return (now.bond, now.version);
   }
+
+  String? get _grewFrom => widget.before?.daemons
+      .where((d) => d.id == _owned?.id)
+      .firstOrNull
+      ?.version;
 
   Future<void> _copy() async {
     final card = _card;
@@ -349,6 +464,10 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         !widget.skippable ||
         _stage == HatchStage.card ||
         _stage == HatchStage.failed ||
+        _stage == HatchStage.consent ||
+        _stage == HatchStage.suggest ||
+        _stage == HatchStage.merged ||
+        _stage == HatchStage.grew ||
         event.logicalKey == LogicalKeyboardKey.escape ||
         _modifiers.contains(event.logicalKey)) {
       return KeyEventResult.ignored;
@@ -491,6 +610,34 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     bool pitch,
   ) {
     final def = _def;
+    if (_stage == HatchStage.consent || _stage == HatchStage.suggest) {
+      final name = _owned?.nickname ?? def?.id ?? 'it';
+      return [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: DaemonConsent(
+            name: name,
+            ink: ink.color,
+            step: _stage == HatchStage.consent
+                ? DaemonConsentStep.watch
+                : DaemonConsentStep.suggest,
+            onWatch: () {
+              widget.onConsent?.call(true);
+              _show(() => _stage = HatchStage.suggest);
+            },
+            onNotNow: () {
+              widget.onConsent?.call(false);
+              _close();
+            },
+            onSuggest: () {
+              widget.onSuggest?.call();
+              _close();
+            },
+            onKeepWatch: _close,
+          ),
+        ),
+      ];
+    }
     if (_stage == HatchStage.failed) {
       return [
         Text(
@@ -621,7 +768,17 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
                 key: const ValueKey('daemon-hatch-copy'),
               ),
               SizedBox(width: cell.width),
-              _button('[ close ]', _close, theme, ink),
+              if (widget.needsConsent)
+                _button(
+                  '[ next ]',
+                  _toConsent,
+                  theme,
+                  ink,
+                  focusNode: _nextFocus,
+                  key: const ValueKey('daemon-hatch-next'),
+                )
+              else
+                _button('[ close ]', _close, theme, ink),
               SizedBox(width: cell.width * 2),
               Expanded(
                 child: Text(
@@ -654,18 +811,32 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     final version = grew?.$2 ?? owned?.version ?? roster.rules.versions.first;
     final shiny = owned?.shiny ?? hatch.shiny;
     final name = owned?.nickname ?? def.id;
-    return [
-      Container(
-        color: daemonBackdrop(def),
-        child: Text(
-          renderPortrait(
+    final from = _grewFrom;
+    // A level-up: the old version turns into the new in three frames, then
+    // the new one holds, on one canvas so nothing jumps.
+    final portrait = grew != null && from != null && from != version
+        ? morphPortrait(
+            renderPortrait(roster, def, from, DaemonMood.idle, motion: false),
+            renderPortrait(roster, def, version, DaemonMood.done, motion: false),
+            _morph ?? 4,
+          )
+        : renderPortrait(
             roster,
             def,
             version,
             grew == null ? DaemonMood.idle : DaemonMood.done,
             motion: false,
-          ).join('\n'),
-          key: const ValueKey('daemon-hatch-portrait'),
+          );
+    return [
+      Container(
+        color: daemonBackdrop(def),
+        child: Text(
+          portrait.join('\n'),
+          key: ValueKey(
+            _morph == null || grew == null
+                ? 'daemon-hatch-portrait'
+                : 'daemon-hatch-morph-$_morph',
+          ),
           semanticsLabel: '${def.id} $version',
           style: ink.copyWith(
             color: daemonColor(def, theme, shiny: shiny),
@@ -696,9 +867,32 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
           key: const ValueKey('daemon-hatch-grew'),
           style: ink.copyWith(color: theme.green),
         ),
+        // Its room is kept while the portrait morphs, so nothing moves when
+        // the changelog line appears.
+        Opacity(
+          opacity: _morph == null ? 1 : 0,
+          child: Text(
+            daemonChangelog(def, grew.$2, bond: grew.$1, xp: owned?.xp ?? 0),
+            key: _morph == null
+                ? const ValueKey('daemon-hatch-changelog')
+                : null,
+            textAlign: TextAlign.center,
+            style: ink.copyWith(color: muted),
+          ),
+        ),
       ],
       SizedBox(height: cell.height),
-      _button('[ close ]', _close, theme, ink),
+      if (widget.needsConsent)
+        _button(
+          '[ next ]',
+          _toConsent,
+          theme,
+          ink,
+          focusNode: _nextFocus,
+          key: const ValueKey('daemon-hatch-next'),
+        )
+      else
+        _button('[ close ]', _close, theme, ink),
     ];
   }
 

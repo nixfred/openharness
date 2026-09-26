@@ -396,6 +396,33 @@ private extension SwarmTabStrip {
       voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: yes.midX, y: yes.midY), to: self)) === voiceLabel,
       "Only the keys take the pointer; the rest still drags the window")
     try checkTitlebar(unmoved(), "Keys move nothing in the bar")
+    // Until the line is armed (drawn, with its detail, a moment ago) its keys
+    // are drawn faint and take no click; [g] opens at any time.
+    daemon["voice"] = "[y/n/g] codex@m2 wants to run the migration."
+    daemon["voiceActions"] = [["key": "y", "label": "run it"], ["key": "n", "label": "not now"],
+      ["key": "g", "label": "open"]]
+    daemon["voiceArmed"] = false
+    updateDaemon(daemon)
+    let unarmedPixels = voiceLabel.renderedPixels()
+    try checkTitlebar(voiceLabel.actionRects.map(\.key) == ["g"] && voiceLabel.arming.map(\.key) == ["y", "n"] &&
+      voiceLabel.arming[0].range == NSRange(location: 1, length: 1) &&
+      voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: yes.midX, y: yes.midY), to: self)) == nil,
+      "An unarmed line's y and n are faint and take no click; its g still opens")
+    daemon["voiceArmed"] = true
+    updateDaemon(daemon)
+    try checkTitlebar(voiceLabel.renderedPixels() != unarmedPixels && voiceLabel.actionRects.map(\.key) == ["y", "n", "g"] &&
+      voiceLabel.arming.isEmpty && unmoved(),
+      "Armed, the same line's keys are buttons, redrawn in place")
+    // The pair harness speaking: its <nick> first, no keys.
+    daemon["voice"] = "<tim> api waits on you, 40m."
+    daemon["voiceActions"] = []
+    updateDaemon(daemon)
+    _ = voiceLabel.renderedPixels()
+    try checkTitlebar(voiceLabel.text == "<tim> api waits on you, 40m." && voiceLabel.actionRects.isEmpty &&
+      voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: voiceLabel.bounds.width - 1, y: 1), to: self)) == nil,
+      "The pair's own words are drawn with its nick and carry no key")
+    daemon["voiceArmed"] = nil
+    daemon["voiceActions"] = [["key": "y", "label": "run it"], ["key": "n", "label": "not now"]]
     // A long line truncates at its tail: the keys stay.
     daemon["voice"] = "[y/n] " + String(repeating: "a very long line ", count: 40)
     updateDaemon(daemon)

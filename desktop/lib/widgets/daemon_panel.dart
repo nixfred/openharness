@@ -9,6 +9,8 @@ import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
 import '../daemons/daemon_lessons.dart';
 import '../daemons/daemon_lines.dart';
+import '../daemons/daemon_settings.dart';
+import '../daemons/pair_rules_file.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
 import '../daemons/zoo.dart';
@@ -16,6 +18,7 @@ import '../shared/theme/app_theme.dart';
 import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
+import 'daemon_consent.dart';
 import 'daemon_slot.dart';
 
 part 'daemon_panel_pair.dart';
@@ -30,12 +33,25 @@ const daemonHabitCommands = <String, String>{
   'resume': 'harnesses.list',
 };
 
-/// The daemon's panel: before the first hatch, the nest and its habits; after,
-/// the paired daemon's portrait, lore, family and current line; with a pair
-/// brain, the talk box, what it asks, the brief, its journal and lessons;
-/// its autonomy dial; then the zoo, and pair, rename and nap. Escape closes
-/// (or leaves rename or the talk box), arrows and j/k move, Enter acts, and
-/// on a row with keys, y, n, s or g answer it.
+/// Habits that need something besides this computer: a second computer, or
+/// answering from another device (which this app cannot even see). Never
+/// needed: every egg can come from the habits this computer has.
+const daemonHabitsElsewhere = {'machine', 'elsewhere'};
+
+/// The daemon's panel. Before the first hatch: the nest and its habits,
+/// the ones possible on this computer first. After: four tabs, like tmux's
+/// windows (`1:now* 2:zoo 3:lessons 4:settings`), remembered per computer:
+///
+/// - **now**: its line, what waits for your key (each with the harness and
+///   exactly what the key does), the brief, what it did on its own, the talk;
+/// - **zoo**: the portrait or card, lore, the box back, meters and eggs;
+/// - **lessons**: what it learned, a lesson's whole text before a yes;
+/// - **settings**: quiet, motion, nap, the autonomy dial and the floor, the
+///   rules file, and consent.
+///
+/// 1–4 switch tabs, Escape closes (or leaves rename or the talk box), arrows
+/// and j/k move, Enter acts, and on a row with keys, y, n, s or g answer it
+/// once the row has been on screen a moment (its keys are faint until then).
 class DaemonPanel extends StatefulWidget {
   const DaemonPanel({
     super.key,
@@ -57,8 +73,9 @@ class DaemonPanel extends StatefulWidget {
   /// journal, talk and lessons.
   final DaemonBrain? brain;
 
-  /// A key on a line the brain wrote: the line's (or ask's, or brief item's)
-  /// id, the action, and the harness it is about (`[g]` opens it).
+  /// A key on a line the brain wrote: the line's (or ask's, brief item's or
+  /// confirmation's) id, the action, and the harness it is about (`[g]`
+  /// opens it).
   final void Function(String id, DaemonAction action, DaemonAbout? about)?
   onAnswer;
 
@@ -71,7 +88,7 @@ class DaemonPanel extends StatefulWidget {
   /// The Talk to daemon chord, for its hint.
   final String? talkShortcut;
 
-  /// Open with the talk box focused (the Talk to daemon command).
+  /// Open on the now tab with the talk box focused (Talk to daemon).
   final bool focusTalk;
   final VoidCallback onClose;
   final ValueChanged<ZooEgg> onHatch;
@@ -87,6 +104,9 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
   final _nameFocus = FocusNode(debugLabel: 'Daemon nickname');
   final _name = TextEditingController();
   final _items = <String, FocusNode>{};
+  final _scroll = ScrollController();
+  @override
+  final _viewport = GlobalKey(debugLabel: 'Daemon panel viewport');
   List<String> _order = const [];
   String? _viewing;
   bool _renaming = false;
@@ -97,12 +117,18 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
   @override
   DaemonFace get face => widget.face;
   DaemonRoster get roster => face.roster;
+  @override
   Zoo get zoo => face.zoo.zoo;
+
+  /// The tab showing, as the settings keep it.
+  String get _tab => face.settings.tab;
 
   @override
   void initState() {
     super.initState();
+    if (widget.focusTalk) face.settings.tab = DaemonSettings.tabs.first;
     _initPair();
+    _scroll.addListener(_scheduleShown);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (widget.focusTalk && _pairLive) {
@@ -116,6 +142,8 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
   @override
   void dispose() {
     _disposePair();
+    _scroll.removeListener(_scheduleShown);
+    _scroll.dispose();
     _focus.dispose();
     _nameFocus.dispose();
     _name.dispose();
@@ -131,7 +159,9 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       : _items.putIfAbsent(key, () => FocusNode(debugLabel: 'Daemon $key'));
 
   void _focusFirst() {
-    if (_order.isEmpty) {
+    // The talk box takes focus only when asked for (Talk to daemon): typing
+    // 1–4 or j there would be words, not keys.
+    if (_order.every((k) => k == 'talk')) {
       _focus.requestFocus();
       return;
     }
@@ -143,12 +173,22 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
             orElse: () => _order.contains('pair')
                 ? 'pair'
                 : _order.firstWhere(
-                    (k) => k.startsWith('zoo:') || k.startsWith('habit:'),
-                    orElse: () => _order.first,
+                    (k) =>
+                        k.startsWith('zoo:') ||
+                        k.startsWith('habit:') ||
+                        k.startsWith('ask:') ||
+                        k.startsWith('confirm:') ||
+                        k.startsWith('need:'),
+                    orElse: () => _order.firstWhere((k) => k != 'talk'),
                   ),
           );
     _node(preferred).requestFocus();
   }
+
+  @override
+  void _refocus() => WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (mounted) _focusFirst();
+  });
 
   void _move(int direction) {
     if (_order.isEmpty) return;
@@ -156,7 +196,29 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
     final next = current < 0
         ? (direction > 0 ? 0 : _order.length - 1)
         : (current + direction) % _order.length;
-    _node(_order[next]).requestFocus();
+    final node = _node(_order[next])..requestFocus();
+    // The row comes into view: its keys work only where they can be seen.
+    final context = node.context;
+    if (context != null) {
+      unawaited(
+        Scrollable.ensureVisible(
+          context,
+          alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        ),
+      );
+    }
+  }
+
+  void _switchTab(String tab) {
+    if (_tab == tab || _renaming) return;
+    setState(() {
+      face.settings.tab = tab;
+      _consentStep = null;
+    });
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusFirst();
+    });
   }
 
   void _escape() {
@@ -251,7 +313,12 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       focusNode: _node(key),
       onPressed: onPressed,
       style: _buttonStyle,
-      child: Text(label, style: _ink(color ?? _theme.cursor)),
+      child: Text(
+        label,
+        style: _ink(
+          onPressed == null ? _muted : color ?? _theme.cursor,
+        ),
+      ),
     );
     return tooltip == null ? button : Tooltip(message: tooltip, child: button);
   }
@@ -262,6 +329,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
     return ListenableBuilder(
       listenable: Listenable.merge([
         face,
+        face.settings,
         ?widget.brain,
         terminalFontStore,
         terminalThemeStore,
@@ -270,10 +338,11 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       builder: (context, _) {
         _cell = terminalCellSizeOf(context);
         final order = <String>[];
-        final body = face.def == null && zoo.daemons.isEmpty
-            ? _nest(order)
-            : _daemon(order);
+        _beginShown();
+        final tabbed = !(face.def == null && zoo.daemons.isEmpty);
+        final body = tabbed ? _daemon(order) : _nest(order);
         _order = order;
+        _endShown();
         return CallbackShortcuts(
           bindings: {
             const SingleActivator(LogicalKeyboardKey.escape): _escape,
@@ -288,6 +357,9 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
               const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
                   _move(-1),
               const SingleActivator(LogicalKeyboardKey.keyK): () => _move(-1),
+              if (tabbed)
+                for (final (i, tab) in DaemonSettings.tabs.indexed)
+                  SingleActivator(_digits[i]): () => _switchTab(tab),
             },
           },
           child: Focus(
@@ -307,6 +379,8 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: SingleChildScrollView(
+                  key: _viewport,
+                  controller: _scroll,
                   padding: EdgeInsets.symmetric(
                     horizontal: _cell.width * 2,
                     vertical: _cell.height,
@@ -325,7 +399,14 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
     );
   }
 
-  Widget _title(String title) => Row(
+  static const _digits = [
+    LogicalKeyboardKey.digit1,
+    LogicalKeyboardKey.digit2,
+    LogicalKeyboardKey.digit3,
+    LogicalKeyboardKey.digit4,
+  ];
+
+  Widget _title(String title, {Widget? badge}) => Row(
     children: [
       Expanded(
         child: Text(
@@ -336,6 +417,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
           overflow: TextOverflow.ellipsis,
         ),
       ),
+      ?badge,
       SizedBox(width: _cell.width),
       Tooltip(
         message: 'Close',
@@ -347,6 +429,35 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
         ),
       ),
     ],
+  );
+
+  /// tmux's window list: `1:now*  2:zoo  3:lessons  4:settings`, the one
+  /// showing starred and highlighted. A click or 1–4 switches.
+  Widget _tabBar() => Padding(
+    padding: EdgeInsets.only(top: _cell.height / 2),
+    child: Wrap(
+      spacing: _cell.width * 2,
+      children: [
+        for (final (i, tab) in DaemonSettings.tabs.indexed)
+          Semantics(
+            selected: tab == _tab,
+            button: true,
+            child: TextButton(
+              key: ValueKey('daemon-tab-$tab'),
+              onPressed: () => _switchTab(tab),
+              style: _buttonStyle.copyWith(
+                backgroundColor: WidgetStatePropertyAll(
+                  tab == _tab ? _theme.selection.withValues(alpha: .55) : null,
+                ),
+              ),
+              child: Text(
+                '${i + 1}:$tab${tab == _tab ? '*' : ' '}',
+                style: _ink(tab == _tab ? _theme.foreground : _muted),
+              ),
+            ),
+          ),
+      ],
+    ),
   );
 
   /// On the terminal background the nest warms toward yellow as habits are
@@ -362,18 +473,31 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
 
   // ── before the first hatch: the nest and its habits ─────────────────────────
 
+  /// The habits this computer can do first, then the ones that need another
+  /// computer or device (never needed for an egg).
+  List<DaemonHabit> get _habitsHereFirst => [
+    for (final h in roster.rules.habits)
+      if (!daemonHabitsElsewhere.contains(h.key)) h,
+    for (final h in roster.rules.habits)
+      if (daemonHabitsElsewhere.contains(h.key)) h,
+  ];
+
   List<Widget> _nest(List<String> order) {
     final done = zoo.habits.toSet();
     final egg = face.zoo.readyEgg;
     final need = face.zoo.habitsNeeded;
     final left = need - face.zoo.habitsCounted;
-    for (final habit in roster.rules.habits) {
+    final habits = _habitsHereFirst;
+    for (final habit in habits) {
       if (daemonHabitCommands.containsKey(habit.key) &&
           !done.contains(habit.key)) {
         order.add('habit:${habit.key}');
       }
     }
     if (egg != null) order.add('hatch');
+    final here = habits
+        .where((h) => !daemonHabitsElsewhere.contains(h.key))
+        .length;
     return [
       _title(egg != null ? 'Your egg is ready' : 'Your first egg'),
       SizedBox(height: _cell.height),
@@ -403,8 +527,27 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
           ),
         ],
       ),
+      if (egg == null && here >= need) ...[
+        SizedBox(height: _cell.height / 2),
+        Text(
+          'all of it can happen on this computer.',
+          key: const ValueKey('daemon-panel-here'),
+          style: _ink(_muted),
+        ),
+      ],
       SizedBox(height: _cell.height),
-      for (final habit in roster.rules.habits) _habitRow(habit, done),
+      for (final habit in habits)
+        if (!daemonHabitsElsewhere.contains(habit.key)) _habitRow(habit, done),
+      Padding(
+        padding: EdgeInsets.only(top: _cell.height / 2),
+        child: Text(
+          'with another computer or device (never needed):',
+          key: const ValueKey('daemon-panel-elsewhere'),
+          style: _ink(_muted),
+        ),
+      ),
+      for (final habit in habits)
+        if (daemonHabitsElsewhere.contains(habit.key)) _habitRow(habit, done),
       SizedBox(height: _cell.height),
       Row(
         children: [
@@ -424,6 +567,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
   Widget _habitRow(DaemonHabit habit, Set<String> done) {
     final complete = done.contains(habit.key);
     final command = daemonHabitCommands[habit.key];
+    final elsewhere = daemonHabitsElsewhere.contains(habit.key);
     // Days show their count where other habits show their shortcut.
     final hint = habit.key == 'days'
         ? '${face.zoo.daysUsed.clamp(0, 3)}/3'
@@ -451,7 +595,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: _ink(complete ? _muted : null),
+              style: _ink(complete || elsewhere ? _muted : null),
             ),
           ),
           if (hint != null &&
@@ -479,7 +623,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
     );
   }
 
-  // ── after: the daemon, the zoo, pair, rename, nap ──────────────────────────
+  // ── after: four tabs ────────────────────────────────────────────────────────
 
   List<Widget> _daemon(List<String> order) {
     final paired = face.daemon ?? zoo.paired;
@@ -490,6 +634,118 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
         zoo.daemons.where((d) => d.id == viewingId).firstOrNull ?? paired;
     final def = roster.byId(viewing?.id);
     if (viewing == null || def == null) return [_title('Daemon')];
+    final pairedDef = roster.byId(paired?.id) ?? def;
+    final pairedName = paired?.nickname ?? pairedDef.id;
+    final tab = _tab;
+    return [
+      _title(
+        tab == 'zoo'
+            ? viewing.nickname == null
+                  ? def.id
+                  : '${viewing.nickname} (${def.id})'
+            : paired?.nickname == null
+            ? pairedDef.id
+            : '$pairedName (${pairedDef.id})',
+        badge: _autonomyBadge(),
+      ),
+      _tabBar(),
+      SizedBox(height: _cell.height),
+      ...switch (tab) {
+        'zoo' => _zooTab(order, viewing, def),
+        'lessons' => _lessonsTab(order, pairedName),
+        'settings' => _settingsTab(order, pairedName),
+        _ => _nowTab(order, pairedDef, pairedName),
+      },
+    ];
+  }
+
+  /// `[act on key]` beside the name whenever the daemon acts above
+  /// `suggest`.
+  Widget? _autonomyBadge() {
+    final level = widget.brain?.autonomy;
+    if (!daemonAutonomyAboveSuggest(level)) return null;
+    return Tooltip(
+      message: 'It acts on its own at this level. The floor still holds.',
+      child: Text(
+        '[${daemonAutonomyLabel(level!)}]',
+        key: const ValueKey('daemon-panel-autonomy-badge'),
+        style: _ink(_theme.yellow),
+      ),
+    );
+  }
+
+  /// Its line now, and what is not there: yellow only when something needs
+  /// you or failed.
+  List<Widget> _lineRows(DaemonDef def, String name) {
+    final mood = face.mood;
+    final spoken = face.voice;
+    final nick = face.voiceFromPair ? daemonPairNick(name) : '';
+    final line = spoken != null
+        ? '$nick$spoken'
+        : '$name: ${face.currentLine(mood)}';
+    final alert = spoken != null
+        ? face.voiceAlert
+        : mood == DaemonMood.need || mood == DaemonMood.fail;
+    return [
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            face.glyph,
+            semanticsLabel: '$name, ${DaemonFace.moodWords[mood]}',
+            style: _ink(daemonColor(def, _theme, shiny: face.daemon?.shiny ?? false))
+                .copyWith(backgroundColor: daemonBackdrop(def)),
+          ),
+          SizedBox(width: _cell.width * 2),
+          Expanded(
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                line,
+                key: const ValueKey('daemon-panel-line'),
+                style: _ink(alert ? _theme.yellow : _muted),
+              ),
+            ),
+          ),
+        ],
+      ),
+      // Asleep or out of reach is not a failure: said calmly, once.
+      if (face.away.isNotEmpty) ...[
+        SizedBox(height: _cell.height / 2),
+        Text(
+          [
+            for (final machine in face.away)
+              daemonMachineLine(machine.name, machine.status),
+          ].join('\n'),
+          key: const ValueKey('daemon-panel-away'),
+          style: _ink(_muted),
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _nowTab(List<String> order, DaemonDef def, String name) => [
+    ..._lineRows(def, name),
+    if (_eggKinds.isNotEmpty) ...[
+      SizedBox(height: _cell.height / 2),
+      Wrap(
+        spacing: _cell.width * 2,
+        children: [
+          for (final kind in _eggKinds) () {
+            order.add('egg:$kind');
+            return _eggButton(kind);
+          }(),
+        ],
+      ),
+    ],
+    // Nothing is watched until the person says so (and after a yes, the
+    // second step, suggest, until it is answered).
+    if (!zoo.watching || _consentStep != null)
+      ..._consentSection(order, name, inline: true),
+    ..._pairNowSections(order, name),
+  ];
+
+  List<Widget> _zooTab(List<String> order, ZooDaemon viewing, DaemonDef def) {
     final isPair = viewing.id == zoo.pair || zoo.pair == null;
     final mood = isPair ? face.mood : DaemonMood.idle;
     final colour = daemonColor(def, _theme, shiny: viewing.shiny);
@@ -515,17 +771,6 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       egg: viewing.egg,
       serial: viewing.serial,
     );
-    // The line: what it is saying, else the line for its mood now. Only a
-    // harness waiting on you or a failure is the alert yellow.
-    final spoken = isPair ? face.voice : null;
-    final line = spoken ?? '$name: ${_lineFor(def, mood, isPair)}';
-    final alert = spoken != null
-        ? face.voiceAlert
-        : mood == DaemonMood.need || mood == DaemonMood.fail;
-
-    // Focus follows the page: the pair brain's rows first, then the zoo and
-    // its switches, then the dial and the lessons.
-    final live = isPair ? _pairLiveSections(order, name) : const <Widget>[];
     for (final d in _shelfOrder) {
       if (zoo.owns(d.id)) order.add('zoo:${d.id}');
     }
@@ -537,17 +782,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       ..add('rename')
       ..add('card');
     if (_showCard) order.add('copy');
-    if (isPair) order.add('nap');
-    order
-      ..add('quiet')
-      ..add('motion');
-    final settings = isPair ? _pairSettingsSections(order) : const <Widget>[];
-
     return [
-      _title(
-        viewing.nickname == null ? def.id : '${viewing.nickname} (${def.id})',
-      ),
-      SizedBox(height: _cell.height),
       if (_showCard)
         Container(
           width: double.infinity,
@@ -604,43 +839,6 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       SizedBox(height: _cell.height),
       Text(def.lore, key: const ValueKey('daemon-panel-lore'), style: _ink()),
       SizedBox(height: _cell.height),
-      Semantics(
-        liveRegion: true,
-        child: Text(
-          line,
-          key: const ValueKey('daemon-panel-line'),
-          style: _ink(alert ? _theme.yellow : _muted),
-        ),
-      ),
-      // Asleep or out of reach is not a failure: said calmly, once.
-      if (face.away.isNotEmpty) ...[
-        SizedBox(height: _cell.height / 2),
-        Text(
-          [
-            for (final machine in face.away)
-              daemonMachineLine(machine.name, machine.status),
-          ].join('\n'),
-          key: const ValueKey('daemon-panel-away'),
-          style: _ink(_muted),
-        ),
-      ],
-      // The pair brain: talk, asks, the brief and its journal. Only for the
-      // paired daemon.
-      ...live,
-      SizedBox(height: _cell.height),
-      ..._shelf(viewing.id),
-      SizedBox(height: _cell.height / 2),
-      ..._meters(),
-      if (_eggKinds.isNotEmpty) ...[
-        SizedBox(height: _cell.height / 2),
-        Wrap(
-          spacing: _cell.width * 2,
-          children: [
-            for (final kind in _eggKinds) _eggButton(kind),
-          ],
-        ),
-      ],
-      SizedBox(height: _cell.height),
       if (_renaming) ...[
         TextField(
           key: const ValueKey('daemon-name-input'),
@@ -666,7 +864,7 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
           onSubmitted: (_) => _rename(viewing),
         ),
         Text('enter saves · empty clears · esc cancels', style: _ink(_muted)),
-      ] else ...[
+      ] else
         Wrap(
           spacing: _cell.width * 2,
           children: [
@@ -692,42 +890,62 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
                 () => _copy(card),
                 tooltip: 'Copy the card as a fenced code block',
               ),
-            if (isPair)
-              _action(
-                'nap',
-                face.napping ? '[ wake ]' : '[ nap ]',
-                face.napping ? face.wake : face.nap,
-                tooltip: face.napping
-                    ? 'Wake ${def.id}'
-                    : 'Nap for 15 minutes. A harness needing you wakes it.',
-              ),
           ],
         ),
+      if (_copyNote != null) Text(_copyNote!, style: _ink(_muted)),
+      SizedBox(height: _cell.height),
+      ..._shelf(viewing.id),
+      SizedBox(height: _cell.height / 2),
+      ..._meters(),
+      if (_eggKinds.isNotEmpty) ...[
+        SizedBox(height: _cell.height / 2),
         Wrap(
           spacing: _cell.width * 2,
-          children: [
-            _action(
-              'quiet',
-              face.quiet ? '[ quiet: on ]' : '[ quiet: off ]',
-              () => face.settings.quiet = !face.quiet,
-              tooltip: face.quiet
-                  ? 'It says nothing until you turn this off.'
-                  : 'Say nothing in the status line until turned off.',
-            ),
-            _action(
-              'motion',
-              face.settings.motion ? '[ motion: on ]' : '[ motion: off ]',
-              () => face.settings.motion = !face.settings.motion,
-              tooltip: face.settings.motion
-                  ? 'Work frames step with agent events; blinks answer you.'
-                  : 'Nothing moves. The face still changes with the mood.',
-            ),
-          ],
+          children: [for (final kind in _eggKinds) _eggButton(kind)],
         ),
-        if (_copyNote != null) Text(_copyNote!, style: _ink(_muted)),
       ],
-      // Its dial and its lessons.
-      ...settings,
+    ];
+  }
+
+  /// Quiet, motion and nap; then (with a pair brain) the dial, the rules
+  /// file and consent.
+  List<Widget> _settingsTab(List<String> order, String name) {
+    order
+      ..add('quiet')
+      ..add('motion')
+      ..add('nap');
+    return [
+      Wrap(
+        spacing: _cell.width * 2,
+        children: [
+          _action(
+            'quiet',
+            face.quiet ? '[ quiet: on ]' : '[ quiet: off ]',
+            () => face.settings.quiet = !face.quiet,
+            tooltip: face.quiet
+                ? 'It says nothing until you turn this off.'
+                : 'Say nothing in the status line until turned off.',
+          ),
+          _action(
+            'motion',
+            face.settings.motion ? '[ motion: on ]' : '[ motion: off ]',
+            () => face.settings.motion = !face.settings.motion,
+            tooltip: face.settings.motion
+                ? 'Work frames step with agent events; blinks answer you.'
+                : 'Nothing moves. The face still changes with the mood.',
+          ),
+          _action(
+            'nap',
+            face.napping ? '[ wake ]' : '[ nap ]',
+            face.napping ? face.wake : face.nap,
+            tooltip: face.napping
+                ? 'Wake $name'
+                : 'Nap for 15 minutes. A harness needing you wakes it.',
+          ),
+        ],
+      ),
+      ..._autonomySection(order, name),
+      ..._consentSection(order, name),
     ];
   }
 
@@ -742,12 +960,6 @@ class _DaemonPanelState extends State<DaemonPanel> with _PairSections {
       if (mounted) setState(() => _copyNote = 'Could not copy.');
     }
   }
-
-  /// The line for [mood] now: filled from what the window knows; the
-  /// roster's example only while nothing is going on.
-  String _lineFor(DaemonDef def, DaemonMood mood, bool isPair) => isPair
-      ? face.currentLine(mood)
-      : daemonPreviewLine(def, mood, const {});
 
   /// `bond 2 · 160/300 xp`: levels come from counted turns (README,
   /// "Earning eggs and growing"); the version follows the level.

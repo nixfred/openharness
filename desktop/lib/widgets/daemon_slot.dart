@@ -207,6 +207,10 @@ class DaemonSlotButton extends StatelessWidget {
   }
 }
 
+/// How a line the pair harness wrote is drawn: IRC's `<nick>` before its
+/// words, so a model speaking never reads as one of the daemon's own facts.
+String daemonPairNick(String name) => '<$name> ';
+
 /// The daemon's one line where the status line's context sits: tmux's
 /// message line. An alert (a harness needs you, a failure, the pair asking
 /// for your key) is in the message yellow; a reply (a boop, its first words,
@@ -214,22 +218,28 @@ class DaemonSlotButton extends StatelessWidget {
 /// shows whenever it is silent. A line from the pair brain is drawn exactly
 /// as sent, keys first (`[y/n/g] api@office: npm test`): each offered key in
 /// that bracket is clickable (also ⌘⌥ plus the key, handled by the
-/// workspace), and only while the line shows.
+/// workspace), only while the line shows, and only once it is armed ([brain]
+/// says so: the window drew it and its detail a moment ago). Until then its
+/// keys are drawn faint and do nothing; `[g]` opens at any time. A line the
+/// pair harness wrote starts with its `<nick>`.
 class DaemonVoiceLine extends StatelessWidget {
   const DaemonVoiceLine({
     super.key,
     required this.face,
     required this.fallback,
     this.onAnswer,
+    this.brain,
   });
   final DaemonFace face;
   final Widget fallback;
   final ValueChanged<String>? onAnswer;
+  final DaemonBrain? brain;
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<String?>(
-    valueListenable: face.voiceLine,
-    builder: (context, voice, _) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([face.voiceLine, ?brain]),
+    builder: (context, _) {
+      final voice = face.voiceLine.value;
       if (voice == null) return fallback;
       final theme = currentTerminalTheme();
       final ink = face.voiceAlert ? theme.yellow : daemonDimInk(theme);
@@ -241,8 +251,17 @@ class DaemonVoiceLine extends StatelessWidget {
       final split = actions.isEmpty
           ? (keys: const <String>[], rest: voice)
           : splitDaemonKeys(voice, actions);
-      final rest = Text(
-        split.rest,
+      final sayId = face.voiceSayId;
+      final armed = sayId == null || brain == null || brain!.armed(sayId);
+      final nick = face.voiceFromPair ? daemonPairNick(face.name) : null;
+      final rest = Text.rich(
+        TextSpan(
+          children: [
+            if (nick != null) TextSpan(text: nick, style: style(true)),
+            TextSpan(text: split.rest),
+          ],
+        ),
+        key: const ValueKey('daemon-voice-text'),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         textAlign: TextAlign.right,
@@ -251,7 +270,7 @@ class DaemonVoiceLine extends StatelessWidget {
       return Semantics(
         key: const ValueKey('daemon-voice'),
         liveRegion: true,
-        label: voice,
+        label: nick == null ? voice : '${face.name} says: $voice',
         child: split.keys.isEmpty
             ? ExcludeSemantics(child: rest)
             : Row(
@@ -262,6 +281,7 @@ class DaemonVoiceLine extends StatelessWidget {
                     actions: actions,
                     style: style,
                     onAnswer: onAnswer,
+                    armed: armed,
                     chord: true,
                   ),
                   Flexible(child: ExcludeSemantics(child: rest)),
@@ -274,7 +294,8 @@ class DaemonVoiceLine extends StatelessWidget {
 
 /// A line's keys, first, as the brain writes them: `[y/n/g] `. Each key that
 /// is offered is its own small button ([onAnswer] with the key); a key that
-/// is not (a brief's `[y]` after its minute) is drawn and does nothing.
+/// is not (a brief's `[y]` after its minute) is drawn and does nothing. A
+/// key on a line not yet [armed] is drawn faint and does nothing until it is.
 class DaemonKeys extends StatelessWidget {
   const DaemonKeys({
     super.key,
@@ -283,6 +304,7 @@ class DaemonKeys extends StatelessWidget {
     required this.style,
     this.onAnswer,
     this.live = true,
+    this.armed = true,
     this.chord = false,
     this.idPrefix = 'daemon-answer',
     this.height,
@@ -294,6 +316,10 @@ class DaemonKeys extends StatelessWidget {
 
   /// Whether y and n still work (g always opens).
   final bool live;
+
+  /// Whether the line has been shown long enough for a key to count
+  /// (`daemon_shown`, then 400 ms). `[g]` opens either way.
+  final bool armed;
 
   /// The tooltip names the ⌘⌥ chord (only the status line's line has one).
   final bool chord;
@@ -312,13 +338,34 @@ class DaemonKeys extends StatelessWidget {
         child: Text(value, style: style()),
       ),
     );
+    Widget faint(String key) => SizedBox(
+      key: ValueKey('$idPrefix-$key-arming'),
+      height: height,
+      child: Center(
+        widthFactor: 1,
+        child: Text(
+          key,
+          style: style().copyWith(
+            color: style().color?.withValues(
+              alpha: (style().color?.a ?? 1) * .4,
+            ),
+          ),
+        ),
+      ),
+    );
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         text('['),
         for (final (i, key) in keys.indexed) ...[
           if (i > 0) text('/'),
-          if (actions.where((a) => a.key == key).firstOrNull
+          if (key != 'g' &&
+              !armed &&
+              live &&
+              onAnswer != null &&
+              actions.any((a) => a.key == key))
+            faint(key)
+          else if (actions.where((a) => a.key == key).firstOrNull
               case final action?
               when onAnswer != null && (live || key == 'g'))
             WorkspaceBarControl(
@@ -391,18 +438,201 @@ class DaemonCardText extends StatelessWidget {
   }
 }
 
+/// Everything a key would act on, in full and never cut: the whole command
+/// or diff, the whole prompt, a lesson's text, a pair.jsonc. It scrolls past
+/// [maxRows]; nothing is ever truncated or summarised.
+class DaemonDetailBox extends StatefulWidget {
+  const DaemonDetailBox({
+    super.key,
+    required this.text,
+    required this.style,
+    required this.rowHeight,
+    this.maxRows = 12,
+    this.background,
+  });
+  final String text;
+  final TextStyle style;
+  final double rowHeight;
+  final int maxRows;
+  final Color? background;
+
+  @override
+  State<DaemonDetailBox> createState() => _DaemonDetailBoxState();
+}
+
+class _DaemonDetailBoxState extends State<DaemonDetailBox> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = '\n'.allMatches(widget.text).length + 1;
+    return Container(
+      width: double.infinity,
+      color: widget.background,
+      padding: EdgeInsets.symmetric(horizontal: widget.rowHeight / 3),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: widget.rowHeight * widget.maxRows,
+        ),
+        child: Scrollbar(
+          controller: _scroll,
+          thumbVisibility: rows > widget.maxRows,
+          child: SingleChildScrollView(
+            controller: _scroll,
+            child: SelectableText(
+              widget.text,
+              key: const ValueKey('daemon-detail-text'),
+              style: widget.style,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A line's `detail` under the status line, as a disclosure: the harness it
+/// names, then everything a key on it would do, in full. It opens by itself
+/// for a line with keys (a key counts only once this has been seen); `[-]`
+/// folds it. [onShown] runs once, after the frame that first drew it open.
+class DaemonDetailNotice extends StatefulWidget {
+  const DaemonDetailNotice({
+    super.key,
+    required this.title,
+    required this.detail,
+    this.actions = const [],
+    this.initiallyOpen = true,
+    this.onShown,
+  });
+
+  /// `api@office · what [y] approves`.
+  final String title;
+  final String detail;
+
+  /// The line's keys, named in a legend under the detail.
+  final List<DaemonAction> actions;
+  final bool initiallyOpen;
+  final VoidCallback? onShown;
+
+  @override
+  State<DaemonDetailNotice> createState() => _DaemonDetailNoticeState();
+}
+
+class _DaemonDetailNoticeState extends State<DaemonDetailNotice> {
+  late bool _open = widget.initiallyOpen;
+  bool _told = false;
+
+  void _tell() {
+    if (_told || !_open || widget.onShown == null) return;
+    _told = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onShown!();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    AppTheme.watch(context);
+    _tell();
+    return ListenableBuilder(
+      listenable: Listenable.merge([terminalThemeStore, AppTheme.palette]),
+      builder: (context, _) {
+        final theme = currentTerminalTheme();
+        final cell = workspaceBarCellSizeOf(context);
+        TextStyle ink(Color color, [bool emphasized = false]) =>
+            workspaceBarTextStyle(
+              color: color,
+              emphasized: emphasized,
+            ).copyWith(fontFeatures: daemonTextFeatures);
+        final legend = [
+          for (final a in widget.actions) '${a.key} ${a.label}',
+        ].join(' · ');
+        return Material(
+          key: const ValueKey('daemon-detail'),
+          color: theme.background,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(kTerminalCornerRadius),
+            side: terminalPaneBorder(focused: true),
+          ),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: cell.width,
+              vertical: cell.height / 2,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                WorkspaceBarControl(
+                  key: const ValueKey('daemon-detail-toggle'),
+                  label: _open ? 'Hide the detail' : 'Show the detail',
+                  onPressed: () => setState(() => _open = !_open),
+                  builder: (context, emphasized) => SizedBox(
+                    height: workspaceBarControlHeight(context),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '${_open ? '[-]' : '[+]'} ${widget.title}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ink(theme.foreground, emphasized),
+                      ),
+                    ),
+                  ),
+                ),
+                if (_open) ...[
+                  DaemonDetailBox(
+                    text: widget.detail,
+                    style: ink(theme.foreground),
+                    rowHeight: cell.height,
+                    maxRows: 14,
+                    background: Color.lerp(
+                      theme.background,
+                      theme.foreground,
+                      .05,
+                    ),
+                  ),
+                  if (legend.isNotEmpty)
+                    Padding(
+                      padding: EdgeInsets.only(top: cell.height / 4),
+                      child: Text(
+                        legend,
+                        key: const ValueKey('daemon-detail-legend'),
+                        style: ink(daemonDimInk(theme)),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// The brief on return (`daemon_brief`), under the status line: the daemon's
 /// back line, then at most five items, each exactly as sent. A waiting item's
-/// keys come first and work while its keys are [live] (a minute); `[g]`
-/// opens the harness at any time. A `lesson` item (a lesson's `[s]`) shows
-/// the lesson's text under it.
-class DaemonBriefNotice extends StatelessWidget {
+/// keys come first and work while its keys are [live] (a minute) and once
+/// they are [armed]; `[g]` opens the harness at any time. What a keyed item
+/// would act on (its dialog, or a `lesson` item's text) shows in full under
+/// it, and [onShown] hears each keyed item once it has been drawn.
+class DaemonBriefNotice extends StatefulWidget {
   const DaemonBriefNotice({
     super.key,
     required this.name,
     required this.brief,
     this.live = true,
     this.onAnswer,
+    this.armed,
+    this.arming,
+    this.onShown,
   });
   final String name;
   final DaemonBrief brief;
@@ -410,11 +640,51 @@ class DaemonBriefNotice extends StatelessWidget {
   final void Function(String id, DaemonAction action, DaemonAbout? about)?
   onAnswer;
 
+  /// Whether a key on an item counts yet; null: always.
+  final bool Function(String id)? armed;
+
+  /// Heard when an item arms.
+  final Listenable? arming;
+  final ValueChanged<String>? onShown;
+
+  @override
+  State<DaemonBriefNotice> createState() => _DaemonBriefNoticeState();
+}
+
+class _DaemonBriefNoticeState extends State<DaemonBriefNotice> {
+  final _told = <String>{};
+
+  static bool _keyed(DaemonBriefItem item) =>
+      item.id.isNotEmpty && item.actions.any((a) => a.key != 'g');
+
+  void _tell() {
+    final onShown = widget.onShown;
+    if (onShown == null || !widget.live) return;
+    final fresh = [
+      for (final item in widget.brief.items)
+        if (_keyed(item) && _told.add(item.id)) item.id,
+    ];
+    if (fresh.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      for (final id in fresh) {
+        onShown(id);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     AppTheme.watch(context);
+    _tell();
+    final brief = widget.brief;
+    final name = widget.name;
     return ListenableBuilder(
-      listenable: Listenable.merge([terminalThemeStore, AppTheme.palette]),
+      listenable: Listenable.merge([
+        terminalThemeStore,
+        AppTheme.palette,
+        ?widget.arming,
+      ]),
       builder: (context, _) {
         final theme = currentTerminalTheme();
         final cell = workspaceBarCellSizeOf(context);
@@ -460,6 +730,7 @@ class DaemonBriefNotice extends StatelessWidget {
                           color: color,
                           emphasized: emphasized,
                         ).copyWith(fontFeatures: daemonTextFeatures);
+                    final onAnswer = widget.onAnswer;
                     return Row(
                       key: ValueKey('daemon-brief-item-$i'),
                       mainAxisSize: MainAxisSize.min,
@@ -470,7 +741,8 @@ class DaemonBriefNotice extends StatelessWidget {
                             keys: split.keys,
                             actions: actions,
                             style: style,
-                            live: live,
+                            live: widget.live,
+                            armed: widget.armed?.call(item.id) ?? true,
                             idPrefix: 'daemon-brief-key-$i',
                             onAnswer: onAnswer == null
                                 ? null
@@ -479,7 +751,7 @@ class DaemonBriefNotice extends StatelessWidget {
                                         .where((a) => a.key == key)
                                         .firstOrNull;
                                     if (action != null) {
-                                      onAnswer!(item.id, action, about);
+                                      onAnswer(item.id, action, about);
                                     }
                                   },
                           ),
@@ -494,14 +766,16 @@ class DaemonBriefNotice extends StatelessWidget {
                       ],
                     );
                   }(),
-                  if (item.kind == 'lesson' && item.text != null)
+                  if ((item.kind == 'lesson' || _keyed(item)) &&
+                      item.shows != null)
                     Padding(
                       padding: EdgeInsets.only(left: cell.width * 4),
-                      child: Text(
-                        item.text!,
-                        maxLines: 12,
-                        overflow: TextOverflow.ellipsis,
+                      child: DaemonDetailBox(
+                        key: ValueKey('daemon-brief-detail-$i'),
+                        text: item.shows!,
                         style: ink(daemonDimInk(theme)),
+                        rowHeight: cell.height,
+                        maxRows: 12,
                       ),
                     ),
                 ],

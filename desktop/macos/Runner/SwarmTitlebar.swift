@@ -1285,10 +1285,14 @@ private final class SwarmSymbolButton: SwarmIconButton {
 /// Right-aligned in the bar font, truncated rather than wrapped. A line from the
 /// pair brain is drawn exactly as sent, its keys first (`[y/n/g] ...`); each
 /// offered key in that bracket is clickable, and a click answers without taking
-/// focus.
+/// focus. Until the line is armed (the window drew it, and what its keys do, a
+/// moment ago) its keys other than `g` are drawn faint and take no click.
 private final class SwarmVoiceLabel: NSView {
   var text = "" { didSet { if text != oldValue { needsDisplay = true; setAccessibilityLabel(text) } } }
   var actions: [(key: String, label: String)] = [] { didSet { needsDisplay = true } }
+  var armed = true { didSet { if armed != oldValue { needsDisplay = true } } }
+  /// Offered keys that are not armed yet: where they are in `text`.
+  private(set) var arming: [(key: String, range: NSRange)] = []
   var color = NSColor.systemYellow { didSet { needsDisplay = true } }
   var font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) { didSet { needsDisplay = true } }
   var onAction: ((String) -> Void)?
@@ -1327,13 +1331,16 @@ private final class SwarmVoiceLabel: NSView {
     let lineWidth = min(ceil(attributed(text).size().width), bounds.width)
     let x0 = bounds.width - lineWidth
     var rects: [(key: String, rect: NSRect)] = []
+    var faint: [(key: String, range: NSRange)] = []
     let offered = Set(actions.map { $0.key })
     if !offered.isEmpty, text.hasPrefix("["), let close = text.firstIndex(of: "]") {
       let inside = text[text.index(after: text.startIndex)..<close]
       var index = 1
       for part in inside.split(separator: "/", omittingEmptySubsequences: false) {
         let key = String(part)
-        if offered.contains(key) {
+        if offered.contains(key) && !armed && key != "g" {
+          faint.append((key, NSRange(location: index, length: key.count)))
+        } else if offered.contains(key) {
           let before = ceil(attributed(String(text.prefix(index))).size().width)
           let width = ceil(attributed(key).size().width)
           if before + width <= lineWidth {
@@ -1344,6 +1351,7 @@ private final class SwarmVoiceLabel: NSView {
       }
     }
     actionRects = rects
+    arming = faint
     return NSRect(x: x0, y: 0, width: lineWidth, height: bounds.height)
   }
 
@@ -1353,9 +1361,12 @@ private final class SwarmVoiceLabel: NSView {
     let paragraph = NSMutableParagraphStyle()
     paragraph.alignment = .right
     paragraph.lineBreakMode = .byTruncatingTail
-    let line = NSAttributedString(string: text, attributes: [
+    let line = NSMutableAttributedString(string: text, attributes: [
       .font: font, .foregroundColor: color, .ligature: 0, .paragraphStyle: paragraph,
     ])
+    for key in arming {
+      line.addAttribute(.foregroundColor, value: color.withAlphaComponent(color.alphaComponent * 0.4), range: key.range)
+    }
     let height = ceil(line.size().height)
     line.draw(with: NSRect(x: lineRect.minX, y: (bounds.height - height) / 2, width: lineRect.width, height: height),
       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
@@ -1579,6 +1590,7 @@ private final class SwarmTabStrip: NSView {
             validDaemonGlyph(key) != nil, !key.isEmpty, key.count <= 2 else { return nil }
       return (key: key, label: String(label.prefix(24)))
     }
+    voiceLabel.armed = state["voiceArmed"] as? Bool ?? true
     voiceActive = !voice.isEmpty
     applyStatusVisibility()
     // Layout runs only when the slot appears or goes, or its tally changes width.
