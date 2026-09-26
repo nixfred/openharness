@@ -141,6 +141,27 @@ class ApiClient {
     return unwrapApiResponse(res) as Map<String, dynamic>?;
   }
 
+  // -- the zoo: the account's daemons and eggs (daemons/README.md), proxied like the desk --
+
+  /// `{revision, zoo}`; null when the daemon predates the zoo (404) or is signed out (401).
+  Future<Map<String, dynamic>?> zoo() async {
+    final res = await _dio.get('/api/zoo');
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  /// Apply [ops] in order; answers `{revision, zoo, hatched}`. Null under the same two
+  /// conditions as [zoo].
+  Future<Map<String, dynamic>?> zooOps(List<Map<String, dynamic>> ops) async {
+    final res = await _dio.post(
+      '/api/zoo/ops',
+      data: {'ops': ops},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
   // -- the Harness Store: ratings and reviews (control plane, proxied by the local CLI) --
   Future<Map<String, dynamic>?> storeRatings() async {
     final res = await _dio.get('/api/store/ratings');

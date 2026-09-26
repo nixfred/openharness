@@ -334,6 +334,12 @@ class MachineState {
   final completedHarnessUses = <({String harness, String? model})>{};
   int completedHarnessTurns = 0;
 
+  /// The same turns when they ended with an error: the daemon's `fail`.
+  int failedHarnessTurns = 0;
+
+  /// Paused harnesses this window resumed: the daemon's `resume` habit.
+  int resumedHarnesses = 0;
+
   /// Agents on this machine that have stopped to ask something, by agentId.
   /// At most one per agent: a pane shows one dialog at a time, and the daemon
   /// re-announces the same open question rather than queueing a second.
@@ -554,6 +560,11 @@ class AppNotifier extends ChangeNotifier {
   Stream<SpokenTaskRequest> get spokenTasks => _spokenTasks.stream;
   final StreamController<void> _modelsRequests =
       StreamController<void>.broadcast();
+
+  /// `zoo_changed` revisions, as harnessd relays them. The zoo lives beside the
+  /// workspace (lib/daemons/zoo_controller.dart), not in this notifier.
+  final StreamController<int?> _zooPushes = StreamController<int?>.broadcast();
+  Stream<int?> get zooPushes => _zooPushes.stream;
   Stream<void> get modelsRequests => _modelsRequests.stream;
   final LocalManualFixture? localManualFixture;
   final Duration turnActivityTimeout;
@@ -8380,6 +8391,7 @@ class AppNotifier extends ChangeNotifier {
       return unknown;
     }
     machine._agentRestartRevisions[agentId] = ++machine._agentRevision;
+    if (resuming) machine.resumedHarnesses++;
     attempt._awaitingConfirmation = false;
     if (identical(_agentRestarts[(machineId, agentId)], attempt)) {
       _agentRestarts.remove((machineId, agentId));
@@ -11163,6 +11175,12 @@ class AppNotifier extends ChangeNotifier {
           unawaited(_deskFetch());
         }
         break;
+      case 'zoo_changed':
+        // The account's daemons and eggs changed (daemons/README.md). Its own
+        // path: a zoo change never re-reads the desk, and the other way round.
+        final zooRevision = payload['revision'];
+        _zooPushes.add(zooRevision is int ? zooRevision : null);
+        return;
       case 'device_prepare_open':
         final operationId = payload['operationId'];
         final prepareAgentId = payload['agentId'];
@@ -11442,17 +11460,18 @@ class AppNotifier extends ChangeNotifier {
             final agent = machine.agents
                 .where((a) => a.id == agentId)
                 .firstOrNull;
-            if (agent != null &&
+            final ownWork =
+                agent != null &&
                 !machine.machine.isShared &&
                 !isTerminalEngine(agent.engine) &&
-                event['error'] == null &&
-                payload['error'] == null &&
                 allPanes.any(
                   (pane) =>
                       pane.machineId == machine.machine.machineId &&
                       pane.agentId == agentId &&
                       pane.session != null,
-                )) {
+                );
+            final failed = event['error'] != null || payload['error'] != null;
+            if (ownWork && !failed) {
               machine.completedHarnessUses.add((
                 harness: agent.dsh == null
                     ? 'coding'
@@ -11460,6 +11479,8 @@ class AppNotifier extends ChangeNotifier {
                 model: agent.gridModel,
               ));
               machine.completedHarnessTurns++;
+            } else if (ownWork) {
+              machine.failedHarnessTurns++;
             }
           }
           _cancelTurnActivity(machine.machine.machineId, agentId);
@@ -11564,6 +11585,7 @@ class AppNotifier extends ChangeNotifier {
       swarm.panes.clear();
     }
     unawaited(_spokenTasks.close());
+    unawaited(_zooPushes.close());
     unawaited(_modelsRequests.close());
     super.dispose();
   }
