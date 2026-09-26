@@ -43,6 +43,8 @@ class _FirstApp extends AppNotifier {
         configStore: null,
       ) {
     status = AppStatus.authenticated;
+    // Signed in with its profile read: the workspace keys progress by account.
+    currentUser = const CurrentUserProfile(email: 'first@example.test');
     const local = Machine(
       machineId: 'm',
       name: 'This Mac',
@@ -217,6 +219,13 @@ void main() {
           isFalse,
         );
         expect(app.focusedPane?.session?.acceptsInput, isTrue);
+        // Starting is not the discovery; the harness's first finished turn is.
+        expect(journey.completed(OnboardingStep.harnesses), isFalse);
+        await app.handleMachineEventForTest('m', {
+          'type': 'turn_ended',
+          'agentId': 'first',
+        });
+        await tester.pump();
         expect(journey.completed(OnboardingStep.harnesses), isTrue);
         expect(journey.completed(OnboardingStep.machines), isFalse);
         expect(journey.completed(OnboardingStep.models), isFalse);
@@ -293,8 +302,15 @@ void main() {
     expect(app.launches.last.project?.name, project?.name);
     expect(find.byType(NewHarnessForm), findsNothing);
     expect(find.byType(TerminalView), findsOneWidget);
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_ended',
+      'agentId': 'first',
+    });
+    await tester.pump();
     expect(journey.completed(OnboardingStep.harnesses), isTrue);
     expect(tester.takeException(), isNull);
+    // Let the finished turn's notices run out.
+    await tester.pump(const Duration(seconds: 10));
     await tester.pumpWidget(const SizedBox());
   });
 
