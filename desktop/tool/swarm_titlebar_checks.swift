@@ -218,86 +218,174 @@ private extension SwarmTabButton {
 }
 
 private extension SwarmTabStrip {
-  func checkCompanion() throws {
+  func checkDaemon() throws {
     let originalSize = frame.size
     let originalEmit = emit
     defer { setFrameSize(originalSize); emit = originalEmit }
     var events: [String] = []
     emit = { method, _ in events.append(method) }
-    var symbol: [String: Any] = ["visible": true, "glyph": "\\_O_/", "columns": 8,
-      "foreground": 0xffdfc38b, "opacity": 0.95, "label": "Hatch your companion", "detail": "2 of 3 discoveries complete",
-      "tooltip": "A companion is inside. Click to explore.\n2 of 3 discoveries complete"]
+    var daemon: [String: Any] = ["visible": true, "glyph": "\\_O_/",
+      "foreground": 0xffdfc38b, "label": "Egg", "detail": "2 of 5 habits",
+      "tooltip": "A daemon is incubating: 2 of 5 habits.\nClick to see them."]
     var state: [String: Any] = ["enabled": true, "activeId": "pet-11",
       "tabs": (0..<12).map { ["id": "pet-\($0)", "name": "Pet \($0)", "label": "\($0 + 1):code"] },
       "focusedContext": ["text": "Codex  M2:project  (main)", "canSelectModel": true],
+      "focusedModel": ["text": "gpt-5", "paneId": 3, "agentId": "a1"],
       "pullRequest": ["text": "PR #298 · Merged", "url": "https://github.com/acme/repo/pull/298"],
-      "companion": symbol]
+      "daemon": daemon]
     update(state)
-    try checkTitlebar(companionButton.title.isEmpty && companionButton.glyph == "\\_O_/",
-      "Before hatch the ASCII egg is drawn without a text label")
-    try checkTitlebar(companionButton.toolTip?.contains("A companion is inside") == true && companionButton.toolTip?.contains("2 of 3") == true,
-      "Progress remains available in the tooltip")
-    try checkTitlebar(companionButton.foreground == statusColor(0xffdfc38b, fallback: .clear),
-      "Native egg colors come from the same terminal palette as Flutter")
-    companionButton.performClick(nil)
-    try checkTitlebar(events == ["companion"], "The symbol opens its panel exactly once")
+    try checkTitlebar(daemonButton.title.isEmpty && daemonButton.glyph == "\\_O_/",
+      "Before hatch the ASCII nest is drawn without a text label")
+    try checkTitlebar(daemonButton.toolTip?.contains("incubating") == true && daemonButton.toolTip?.contains("2 of 5") == true,
+      "Habit progress remains available in the tooltip")
+    try checkTitlebar(daemonButton.foreground == statusColor(0xffdfc38b, fallback: .clear),
+      "Native daemon colours come from the same values as Flutter")
+    daemonButton.performClick(nil)
+    try checkTitlebar(events == ["daemon"], "The slot opens its panel exactly once")
+    let eggs = ["\\_O_/", "~\\_O_/~", "\\_.._/", "\\_o.o_/"]
+    let sprites = ["[oo]", "\\[o|o]/", "><(((o>", ";:(oo):;", "U(oo)U~", "o   o", "\\[-|-]/z"]
     for size in [13.0, 22.0] {
       state["barStyle"] = ["family": "Menlo", "size": size]
-      for glyph in ["\\_O_/", "~\\_O_/~", "\\_.._/", "\\_o.o_/", "=^o.o^="] {
-        symbol["glyph"] = glyph
-        state["companion"] = symbol
+      for glyph in eggs + sprites {
+        daemon["glyph"] = glyph
+        state["daemon"] = daemon
         for width in [CGFloat(320), CGFloat(640), CGFloat(900), CGFloat(1280)] {
           setFrameSize(NSSize(width: width, height: originalSize.height))
           update(state)
-          try checkTitlebar(companionButton.font == tabs[0].labelFont,
-            "The symbol shares the workspace bar font at \(size)pt")
-          try checkTitlebar(companionButton.frame.maxX <= bounds.width &&
-            companionButton.frame.minX >= pullRequestButton.frame.maxX &&
+          try checkTitlebar(daemonButton.glyph == glyph, "Every nest stage and drop 1 sprite is drawn as sent")
+          try checkTitlebar(daemonButton.font == tabs[0].labelFont,
+            "The daemon shares the workspace bar font at \(size)pt")
+          try checkTitlebar(daemonButton.frame.maxX <= bounds.width &&
+            daemonButton.frame.minX >= pullRequestButton.frame.maxX &&
             contextButton.frame.maxX <= pullRequestButton.frame.minX &&
             newButton.frame.maxX < contextButton.frame.minX,
-            "Companion, PR, context, and tabs do not overlap at \(width)px / \(size)pt")
+            "Daemon, PR, context, and tabs do not overlap at \(width)px / \(size)pt")
+          try checkTitlebar(abs(daemonButton.frame.width - ceil(workspaceBarTextWidth("m", font: daemonButton.font!)) * 10) < 0.5,
+            "Eight cells plus a one-cell gutter each side at \(size)pt")
           try checkActiveVisible()
         }
       }
     }
     let tab = tabs[0]
-    try checkTitlebar(pullRequestButton.frame.maxX == companionButton.frame.minX &&
-      companionButton.frame.height == newButton.frame.height &&
-      companionButton.frame.midY == newButton.frame.midY,
-      "The companion follows the focused context and shares the controls' height and inner gutters")
+    try checkTitlebar(pullRequestButton.frame.maxX == daemonButton.frame.minX &&
+      daemonButton.frame.height == newButton.frame.height &&
+      daemonButton.frame.midY == newButton.frame.midY,
+      "The daemon follows the focused context and shares the controls' height and inner gutters")
     scroll.contentView.scroll(to: .zero)
     let scrollFrame = scroll.frame, visible = scroll.documentVisibleRect
-    let documentFrame = document.frame, companionFrame = companionButton.frame
-    for glyph in ["\\_O_/", " ~\\_O_/~", "\\_.._/", "\\_--_/", "\\_o.o_/", "\\_-.-_/", "=^o.o^="] {
-      symbol["glyph"] = glyph
-      updateCompanion(symbol)
-      try checkTitlebar(companionButton.frame == companionFrame && scroll.frame == scrollFrame,
-        "Wobbling and hatching keep the same eight-cell slot")
+    let documentFrame = document.frame, daemonFrame = daemonButton.frame
+    let contextFrame = contextButton.frame, prFrame = pullRequestButton.frame
+    let modelFrame = focusedModelButton.frame
+    func unmoved() -> Bool {
+      tabs[0] === tab && scroll.frame == scrollFrame && scroll.documentVisibleRect == visible &&
+        document.frame == documentFrame && daemonButton.frame == daemonFrame &&
+        contextButton.frame == contextFrame && pullRequestButton.frame == prFrame &&
+        focusedModelButton.frame == modelFrame
     }
-    symbol["hatching"] = true
-    updateCompanion(symbol)
-    try checkTitlebar(!companionButton.isEnabled && companionButton.animating,
-      "Hatching stays bright while repeated activation is disabled")
-    symbol["hatching"] = false
-    symbol["glyph"] = "=^z.z^="
-    symbol["label"] = "Miso"
-    symbol["open"] = true
-    updateCompanion(symbol)
-    try checkTitlebar(tabs[0] === tab && scroll.frame == scrollFrame &&
-      scroll.documentVisibleRect == visible && document.frame == documentFrame &&
-      companionButton.frame == companionFrame,
-      "A mood change does not rebuild tabs, scroll them, or move status text")
-    try checkTitlebar(companionButton.title.isEmpty && companionButton.accessibilityLabel() == "Miso",
-      "The companion name is available to accessibility without appearing in the bar")
+    for glyph in eggs + sprites + ["\\[=|=]/", "|[=|=]|", "/[=|=]\\", "-[=|=]-", "[==] |"] {
+      daemon["glyph"] = glyph
+      updateDaemon(daemon)
+      try checkTitlebar(unmoved(), "Moods and work frames keep the same eight-cell slot and move nothing else")
+    }
+    // Anything that is not at most eight printable ASCII cells draws nothing, never a stand-in.
+    daemon["glyph"] = "[oo]"
+    updateDaemon(daemon)
+    let drawn = daemonButton.renderedPixels()
+    daemon["glyph"] = ""
+    updateDaemon(daemon)
+    let blank = daemonButton.renderedPixels()
+    try checkTitlebar(drawn != blank, "A sprite draws ink")
+    for invalid in ["=^o.o^=~~", "[ö ö]", "[o\to]", "🥚"] {
+      daemon["glyph"] = invalid
+      updateDaemon(daemon)
+      try checkTitlebar(daemonButton.glyph.isEmpty && daemonButton.renderedPixels() == blank,
+        "An invalid glyph (\(invalid.unicodeScalars.count) scalars) draws nothing")
+    }
+    daemon["glyph"] = "\\_o.o_/"
+    daemon["busy"] = true
+    updateDaemon(daemon)
+    events.removeAll()
+    daemonButton.performClick(nil)
+    try checkTitlebar(!daemonButton.isEnabled && daemonButton.busy && events.isEmpty,
+      "A hatch in flight disables the slot")
+    let busyPixels = daemonButton.renderedPixels()
+    daemon["busy"] = false
+    state["enabled"] = false
+    state["daemon"] = daemon
+    update(state)
+    try checkTitlebar(busyPixels != blank && busyPixels != daemonButton.renderedPixels(),
+      "A busy slot keeps full ink; only a disabled one dims")
+    state["enabled"] = true
+    update(state)
+    daemon["busy"] = false
+    daemon["glyph"] = "\\[-|-]/z"
+    daemon["label"] = "Pip"
+    daemon["detail"] = "tim 2.0, napping"
+    daemon["open"] = true
+    updateDaemon(daemon)
+    try checkTitlebar(unmoved(), "A mood change does not rebuild tabs, scroll them, or move status text")
+    try checkTitlebar(daemonButton.title.isEmpty && daemonButton.accessibilityLabel() == "Pip" &&
+      (daemonButton.accessibilityValue() as? String)?.contains("napping") == true,
+      "The daemon's name and mood reach accessibility without appearing in the bar")
+    // Hover: "I see you", once per entry, through the plain channel path.
+    let pointer = NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [],
+      timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+    events.removeAll()
+    daemonButton.mouseEntered(with: pointer)
+    daemonButton.mouseExited(with: pointer)
+    daemonButton.mouseEntered(with: pointer)
+    try checkTitlebar(events == ["daemonLook", "daemonLook"], "Each hover entry emits one look")
+    daemonButton.mouseExited(with: pointer)
+    // Voice: tmux's message line replaces the status, and nothing moves.
+    daemon["voice"] = "pip: two agents idle. nothing needs you."
+    daemon["voiceColor"] = 0xffd7af5f
+    updateDaemon(daemon)
+    try checkTitlebar(!voiceLabel.isHidden && voiceLabel.text == "pip: two agents idle. nothing needs you." &&
+      voiceLabel.color == statusColor(0xffd7af5f, fallback: .clear) &&
+      voiceLabel.accessibilityLabel() == voiceLabel.text && voiceLabel.accessibilityRole() == .staticText,
+      "The daemon's line shows in the message colour")
+    try checkTitlebar(contextButton.isHidden && pullRequestButton.isHidden && focusedModelButton.isHidden,
+      "Its line replaces the context, PR and model while it speaks")
+    try checkTitlebar(unmoved(), "Speaking moves no tab, status control or the slot")
+    try checkTitlebar(voiceLabel.frame.maxX == daemonButton.frame.minX &&
+      voiceLabel.frame.minX == newButton.frame.maxX + ceil(("m" as NSString).size(withAttributes: [.font: daemonButton.font!]).width) * 2,
+      "The line spans the status area up to the slot")
+    let voicePixels = voiceLabel.renderedPixels()
+    daemon["voice"] = String(repeating: "a very long line ", count: 40)
+    updateDaemon(daemon)
+    try checkTitlebar(voiceLabel.renderedPixels() != voicePixels && unmoved(),
+      "A long line truncates in place")
+    state["daemon"] = daemon
+    update(state)
+    try checkTitlebar(contextButton.isHidden && pullRequestButton.isHidden && focusedModelButton.isHidden && !voiceLabel.isHidden,
+      "A workspace update while it speaks keeps the message line")
+    try checkTitlebar(unmoved(), "A workspace update while it speaks lays out as if the status were shown")
+    daemon["voice"] = nil
+    updateDaemon(daemon)
+    try checkTitlebar(voiceLabel.isHidden && !contextButton.isHidden && !pullRequestButton.isHidden &&
+      !focusedModelButton.isHidden && unmoved(),
+      "Silence restores the status exactly where it was")
+    state["daemon"] = daemon
+    state["pullRequest"] = nil
+    state["focusedModel"] = nil
+    update(state)
+    daemon["voice"] = "pip: pong."
+    updateDaemon(daemon)
+    daemon["voice"] = ""
+    updateDaemon(daemon)
+    try checkTitlebar(pullRequestButton.isHidden && focusedModelButton.isHidden && !contextButton.isHidden,
+      "Silence restores only what the status holds")
     state["enabled"] = false
     update(state)
     events.removeAll()
-    companionButton.performClick(nil)
-    try checkTitlebar(events.isEmpty && !companionButton.isEnabled,
-      "A modal disables the companion action")
+    daemonButton.performClick(nil)
+    daemonButton.mouseEntered(with: pointer)
+    daemonButton.mouseExited(with: pointer)
+    try checkTitlebar(events.isEmpty && !daemonButton.isEnabled,
+      "A modal disables the daemon's click and look")
     update([:])
-    try checkTitlebar(companionButton.isHidden && !companionButton.isEnabled,
-      "Workspace teardown hides the companion")
+    try checkTitlebar(daemonButton.isHidden && !daemonButton.isEnabled && voiceLabel.isHidden,
+      "Workspace teardown hides the daemon")
   }
 
   func checkAgentIdentity() throws {
@@ -526,7 +614,7 @@ private extension SwarmTabStrip {
       newButton.frame.maxX < contextButton.frame.minX, "Tabs are left of the right-aligned focused context")
     try checkTitlebar(tabs[0].frame.width < 120 && tabs[0].displayLabel == "1:code",
       "Short numbered labels use text-sized widths")
-    try checkTitlebar(subviews.count == 6 && pullRequestButton.isHidden && focusedModelButton.isHidden && companionButton.isHidden,
+    try checkTitlebar(subviews.count == 7 && pullRequestButton.isHidden && focusedModelButton.isHidden && daemonButton.isHidden && voiceLabel.isHidden,
       "Context links fill the bar; standalone search and management controls are absent")
     let controls = [newButton]
     for (control, symbol) in zip(controls, ["+"]) {
@@ -659,15 +747,23 @@ private extension SwarmTabStrip {
     messenger.finishNextReply()
     try checkTitlebar(window.firstResponder === window.contentInput && messenger.calls.last?.method == "new",
       "New swarm returns keyboard ownership to the workspace")
-    updateCompanion(["visible": true, "glyph": "\\_O_/", "columns": 8])
-    try checkTitlebar(window.makeFirstResponder(companionButton), "The companion accepts keyboard focus")
-    companionButton.performClick(nil)
-    try checkTitlebar(window.firstResponder === companionButton,
-      "Companion activation waits for the Flutter panel before releasing keyboard focus")
+    updateDaemon(["visible": true, "glyph": "\\_O_/"])
+    try checkTitlebar(window.makeFirstResponder(daemonButton), "The daemon accepts keyboard focus")
+    daemonButton.performClick(nil)
+    try checkTitlebar(window.firstResponder === daemonButton,
+      "Daemon activation waits for the Flutter panel before releasing keyboard focus")
     messenger.finishNextReply()
-    try checkTitlebar(window.firstResponder === window.contentInput && messenger.calls.last?.method == "companion",
-      "The companion panel receives the next keystroke")
-    updateCompanion([:])
+    try checkTitlebar(window.firstResponder === window.contentInput && messenger.calls.last?.method == "daemon",
+      "The daemon panel receives the next keystroke")
+    let hover = NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [],
+      timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+    let beforeLook = messenger.calls.count, pendingReplies = messenger.replies.count
+    daemonButton.mouseEntered(with: hover)
+    daemonButton.mouseExited(with: hover)
+    try checkTitlebar(messenger.calls.count == beforeLook + 1 && messenger.calls.last?.method == "daemonLook" &&
+      messenger.replies.count == pendingReplies && window.firstResponder === window.contentInput,
+      "Hovering the daemon sends one look and never moves keyboard focus")
+    updateDaemon([:])
     let current = tabs[0].accessibilityChildren()!.first as! NSButton
     window.makeFirstResponder(current)
     current.performClick(nil)
@@ -1385,7 +1481,7 @@ do {
   try strip.checkAgentIdentity()
   try strip.checkSharedTypography()
   try SwarmTabButton(id: "hover-fixture").checkHoverStyleAndTooltips()
-  try strip.checkCompanion()
+  try strip.checkDaemon()
   try checkTitlebar(titlebarCheckApp.windows.isEmpty, "Checks never open an application window")
   if CommandLine.arguments.contains("--window-layout") {
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 700),

@@ -866,6 +866,8 @@ void main() {
     (tester) async {
       final app = createApp();
       addTearDown(app.dispose);
+      // A signed-in window shows its daemon once the profile has loaded.
+      app.currentUser = const CurrentUserProfile(email: 'review@example.test');
       app.adoptSessionForTest(terminal('a0', []));
       final first = app.activeSwarm;
       app.newSwarm();
@@ -928,14 +930,11 @@ void main() {
           tester.view.physicalSize = Size(width, 800);
           await tester.pump(const Duration(milliseconds: 100));
           expect(tester.takeException(), isNull);
-          final companion = tester.getRect(
-            find.byKey(const ValueKey('companion-tab-button')),
+          final daemon = tester.getRect(
+            find.byKey(const ValueKey('daemon-slot')),
           );
-          expect(
-            tester.getRect(context).right,
-            lessThanOrEqualTo(companion.left),
-          );
-          expect(companion.right, lessThan(width));
+          expect(tester.getRect(context).right, lessThanOrEqualTo(daemon.left));
+          expect(daemon.right, lessThan(width));
         }
       }
       await captureControls(tester, 'unified-search-toolbar', height: 100);

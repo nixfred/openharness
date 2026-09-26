@@ -88,7 +88,7 @@ class DaemonFace extends ChangeNotifier {
   DaemonMood? _framesFor;
 
   // Voice.
-  String? _voice;
+  final _voice = ValueNotifier<String?>(null);
   Timer? _voiceTimer;
   ({String line, DateTime at, DaemonMood? mood})? _pendingVoice;
   Timer? _pendingTimer;
@@ -149,7 +149,11 @@ class DaemonFace extends ChangeNotifier {
   }
 
   /// `tim: two agents idle. nothing needs you.` while it speaks.
-  String? get voice => _voice;
+  String? get voice => _voice.value;
+
+  /// Only the spoken line, for what swaps the status line's context: it does
+  /// not change on every work frame.
+  ValueListenable<String?> get voiceLine => _voice;
 
   static const moodWords = {
     DaemonMood.idle: 'content',
@@ -434,11 +438,12 @@ class DaemonFace extends ChangeNotifier {
       return;
     }
     _pendingVoice = null;
-    _voice = '$name: ${pending.line}';
+    _voice.value = '$name: ${pending.line}';
     _voiceTimer?.cancel();
     _voiceTimer = Timer(voiceFor, () {
-      _voice = null;
-      if (!_disposed) notifyListeners();
+      if (_disposed) return;
+      _voice.value = null;
+      notifyListeners();
     });
     notifyListeners();
   }
@@ -509,6 +514,7 @@ class DaemonFace extends ChangeNotifier {
     ]) {
       timer?.cancel();
     }
+    _voice.dispose();
     super.dispose();
   }
 }

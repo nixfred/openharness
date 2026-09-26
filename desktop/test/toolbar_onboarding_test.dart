@@ -12,7 +12,6 @@ import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/workspace_onboarding.dart';
-import 'package:harness/state/workspace_companion.dart';
 import 'package:harness/terminal/terminal_session.dart';
 import 'package:harness/widgets/new_harness_form.dart';
 import 'package:harness/widgets/onboarding_card.dart';
@@ -122,134 +121,6 @@ void main() {
     });
   }
 
-  testWidgets('egg hint disappears and does not repeat on a new tab', (
-    tester,
-  ) async {
-    await mount(tester, storage: MemoryStore());
-    expect(
-      find.byKey(const ValueKey('companion-arrival-hint')),
-      findsOneWidget,
-    );
-    expect(journey.completedCount, 0);
-    await tester.pump(const Duration(seconds: 6));
-    expect(find.byKey(const ValueKey('companion-arrival-hint')), findsNothing);
-    await key(tester, LogicalKeyboardKey.keyT, cmd: true);
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('companion-arrival-hint')), findsNothing);
-    expect(journey.needsCompanionHint, isFalse);
-    await tester.pumpWidget(const SizedBox());
-  });
-
-  testWidgets(
-    'discovery notice keeps work feedback and hatches without taking focus',
-    (tester) async {
-      await mount(tester);
-      final messenger = ScaffoldMessenger.of(
-        tester.element(find.byType(SwarmScreen)),
-      );
-      messenger.showSnackBar(
-        const SnackBar(
-          duration: Duration(minutes: 1),
-          content: Text('Work needs your attention.'),
-        ),
-      );
-      final focus = FocusManager.instance.primaryFocus;
-      journey.sync(
-        scope: journey.scope!,
-        observed: WorkspaceOnboarding.hatchSteps.toSet(),
-        otherComputer: true,
-        modelsAvailable: false,
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 200));
-      expect(find.text('Work needs your attention.'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('companion-discovery-notice')),
-        findsOneWidget,
-      );
-      expect(FocusManager.instance.primaryFocus, same(focus));
-      await tester.tap(find.text('[ hatch ]'));
-      await tester.pump();
-      expect(journey.companion, isNotNull);
-      expect(
-        find.byKey(const ValueKey('companion-discovery-notice')),
-        findsNothing,
-      );
-      expect(find.text('Hatch your companion'), findsNothing);
-      expect(find.text('Work needs your attention.'), findsOneWidget);
-      expect(FocusManager.instance.primaryFocus, same(focus));
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
-
-  testWidgets(
-    'three discoveries hatch directly from the egg without moving focus or requiring a model',
-    (tester) async {
-      await mount(tester);
-      journey.sync(
-        scope: journey.scope!,
-        observed: WorkspaceOnboarding.hatchSteps.toSet(),
-        otherComputer: true,
-        modelsAvailable: false,
-      );
-      await tester.pumpAndSettle();
-      expect(journey.completed(OnboardingStep.models), isFalse);
-      final button = find.byKey(const ValueKey('companion-tab-button'));
-      final before = tester.getRect(button);
-      final focus = FocusManager.instance.primaryFocus;
-      await tester.tap(button);
-      await tester.pump();
-      expect(journey.companion, isNotNull);
-      expect(find.text('Hatch your companion'), findsNothing);
-      expect(FocusManager.instance.primaryFocus, same(focus));
-      await tester.pump(const Duration(seconds: 3));
-      expect(tester.getRect(button), before);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
-
-  testWidgets(
-    'symbol opens onboarding at the far right and preserves shortcuts',
-    (tester) async {
-      await mount(tester);
-      final button = find.byKey(const ValueKey('companion-tab-button'));
-      expect(find.text(CompanionController.egg), findsOneWidget);
-      expect(find.text('Hatch a companion'), findsNothing);
-      expect(
-        tester.getRect(button).left,
-        greaterThanOrEqualTo(
-          tester
-              .getRect(find.byKey(const ValueKey('workspace-pane-context')))
-              .right,
-        ),
-      );
-      await tap(tester, button);
-      expect(find.text('Hatch your companion'), findsOneWidget);
-      await key(tester, LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
-      expect(find.text('Hatch your companion'), findsNothing);
-      await key(tester, LogicalKeyboardKey.keyP, cmd: true, shift: true);
-      await tester.enterText(
-        find.byKey(const ValueKey('swarm-search-input')),
-        '> Terminal companion',
-      );
-      await tester.pumpAndSettle();
-      await key(tester, LogicalKeyboardKey.enter);
-      await tester.pumpAndSettle();
-      expect(find.text('Hatch your companion'), findsOneWidget);
-      await key(tester, LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
-      await tap(tester, button);
-      await tap(tester, find.byKey(const ValueKey('companion-step-harnesses')));
-      expect(find.byType(NewHarnessForm), findsOneWidget);
-      expect(find.text('Hatch your companion'), findsNothing);
-      expect(journey.completedCount, 0);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
-
   testWidgets(
     'unlocks require completed work; agent and model switches are not new harnesses',
     (tester) async {
@@ -270,19 +141,19 @@ void main() {
       app.adoptSessionForTest(terminal('work', []));
       app.notifyListeners();
       await tester.pumpAndSettle();
-      expect(journey.completedCount, 0);
+      expect(journey.completed(OnboardingStep.harnesses), isFalse);
       await app.handleMachineEventForTest('m', {
         'type': 'turn_started',
         'agentId': 'work',
       });
       await tester.pumpAndSettle();
-      expect(journey.completedCount, 0);
+      expect(journey.completed(OnboardingStep.harnesses), isFalse);
       await app.handleMachineEventForTest('m', {
         'type': 'turn_ended',
         'agentId': 'work',
       });
       await tester.pumpAndSettle();
-      expect(journey.completedCount, 1);
+      expect(journey.completed(OnboardingStep.harnesses), isTrue);
       expect(find.text('1/4'), findsNothing);
       app.stateOf('m')!.agents = const [
         Agent(
@@ -332,7 +203,7 @@ void main() {
       });
       await tester.pumpAndSettle();
       expect(journey.completed(OnboardingStep.store), isTrue);
-      expect(journey.completedCount, 2);
+      expect(journey.completed(OnboardingStep.machines), isFalse);
       expect(find.text('2/3'), findsNothing);
       // A real remote turn earns the remaining milestone.
       const remote = Machine(
@@ -358,24 +229,16 @@ void main() {
         'agentId': 'remote',
       });
       await tester.pumpAndSettle();
-      expect(journey.complete, isTrue);
+      expect(journey.completed(OnboardingStep.machines), isTrue);
       expect(find.byKey(const ValueKey('onboarding-progress')), findsNothing);
       expect(
         find.byKey(const ValueKey('onboarding-harnesses-complete')),
         findsNothing,
       );
-      expect(find.text('Your companion is ready.'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('workspace-status-bar')),
         findsOneWidget,
       );
-      expect(
-        find.byKey(const ValueKey('companion-tab-button')),
-        findsOneWidget,
-      );
-      await tap(tester, find.text('[ hatch ]'));
-      expect(journey.companion, isNotNull);
-      expect(find.text('Hatch your companion'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
@@ -723,7 +586,10 @@ void main() {
       expect(resourceSearch(tester).selected!.machineId, 'source');
       expect(field, findsNothing);
       expect(app.stateOf('source')!.needsLink, isFalse);
-      expect(app.stateOf('source')!.connectionStatus, ConnectionStatus.connected);
+      expect(
+        app.stateOf('source')!.connectionStatus,
+        ConnectionStatus.connected,
+      );
       expect(app.allPanes, isEmpty);
       await key(tester, LogicalKeyboardKey.enter);
       expect(resourceScope('@'), findsOneWidget);

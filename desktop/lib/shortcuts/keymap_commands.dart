@@ -470,11 +470,11 @@ final harnessCommands = <HarnessCommand>[
     nativeAction: 'store',
   ),
   const HarnessCommand(
-    'app.companion',
-    'Terminal companion',
+    'app.daemon',
+    'Daemon',
     ShortcutGroup.actions,
-    keywords: ['pet', 'hatch', 'egg', 'moods', 'onboarding'],
-    nativeAction: 'companion',
+    keywords: ['hatch', 'egg', 'zoo', 'pair', 'nap', 'buddy', 'companion'],
+    nativeAction: 'daemon',
   ),
   const HarnessCommand(
     'app.settings',
