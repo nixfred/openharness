@@ -16,7 +16,14 @@ const daemonTextFeatures = [
 ];
 
 TerminalTheme currentTerminalTheme() =>
+    debugDaemonTerminalTheme ??
     terminalThemeFor(AppTheme.palette.value, terminalThemeStore.value);
+
+/// A terminal theme for review captures and tests. Every scheme the app
+/// ships is dark today; this is how the light-theme rules (light-safe
+/// colours, the grue's patch) are drawn and checked before one ships.
+@visibleForTesting
+TerminalTheme? debugDaemonTerminalTheme;
 
 bool isDarkTerminal(TerminalTheme theme) =>
     theme.background.computeLuminance() < .4;

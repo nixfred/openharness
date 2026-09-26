@@ -113,6 +113,9 @@ below 3:1); a light theme takes the roster's `color.light` when it has one,
 else the colour darkened until it reaches 4.5:1. The grue brings its own pitch
 black wherever it is drawn: in the panel, the reveal, the zoo, the card, and on
 a light theme as a black eight-cell patch behind its eyes in the slot.
+Every terminal scheme the app ships today is dark, so the light rules wait for
+a light scheme; `debugDaemonTerminalTheme` draws them now for the review
+captures and `test/daemons/daemon_colors_test.dart` (Solarized Light).
 
 **Shiny.** A `*` in the slot's left gutter; the roster's `shiny.hex` (else the
 colour brighter and more saturated) in the panel, card and reveal; the card

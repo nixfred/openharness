@@ -28,7 +28,7 @@ import 'package:harness/terminal/terminal_typography.dart';
 import 'package:harness/widgets/daemon_hatch.dart';
 import 'package:harness/widgets/daemon_panel.dart';
 import 'package:harness/widgets/daemon_slot.dart';
-import 'package:xterm/xterm.dart' show TerminalStyle;
+import 'package:xterm/xterm.dart' show TerminalStyle, TerminalTheme;
 
 import 'support/real_fonts.dart';
 
@@ -43,6 +43,33 @@ class _Memory implements LocalKeyValueStore {
 }
 
 final _roster = daemonRoster;
+
+/// Every scheme the app ships is dark; light captures use Solarized Light.
+const _solarizedLight = TerminalTheme(
+  cursor: Color(0xff268bd2),
+  selection: Color(0x40268bd2),
+  foreground: Color(0xff586e75),
+  background: Color(0xfffdf6e3),
+  black: Color(0xff073642),
+  red: Color(0xffdc322f),
+  green: Color(0xff859900),
+  yellow: Color(0xffb58900),
+  blue: Color(0xff268bd2),
+  magenta: Color(0xffd33682),
+  cyan: Color(0xff2aa198),
+  white: Color(0xffeee8d5),
+  brightBlack: Color(0xff002b36),
+  brightRed: Color(0xffcb4b16),
+  brightGreen: Color(0xff586e75),
+  brightYellow: Color(0xff657b83),
+  brightBlue: Color(0xff839496),
+  brightMagenta: Color(0xff6c71c4),
+  brightCyan: Color(0xff93a1a1),
+  brightWhite: Color(0xfffdf6e3),
+  searchHitBackground: Color(0xffb58900),
+  searchHitBackgroundCurrent: Color(0xffcb4b16),
+  searchHitForeground: Color(0xfffdf6e3),
+);
 final _output = Platform.environment['HARNESS_DAEMON_CAPTURE_DIR'];
 
 Zoo _paired(
@@ -138,7 +165,11 @@ Future<void> _capture(
     fontSize: 13,
   );
   terminalThemeStore.value = TerminalThemeChoice.matchApp;
+  debugDaemonTerminalTheme = brightness == Brightness.light
+      ? _solarizedLight
+      : null;
   addTearDown(() {
+    debugDaemonTerminalTheme = null;
     grid.AppTheme.brightness.value = previousBrightness;
     terminalFontStore.value = previousFont;
     terminalThemeStore.value = previousTheme;
