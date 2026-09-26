@@ -442,6 +442,29 @@ void main() {
       expect(zoo.zoo.habits, ['days']);
     });
 
+    test(
+      'the arrival hint shows once per scope, before the first hatch',
+      () async {
+        final zoo = controller();
+        addTearDown(zoo.dispose);
+        expect(zoo.needsHint, isFalse);
+        zoo.bind('guest');
+        await pumpEventQueue();
+        expect(zoo.needsHint, isTrue);
+        expect(zoo.acknowledgeHint(), isTrue);
+        expect(zoo.acknowledgeHint(), isFalse);
+        await zoo.flush();
+        final again = controller();
+        addTearDown(again.dispose);
+        again.bind('guest');
+        await pumpEventQueue();
+        expect(again.needsHint, isFalse);
+        again.bind('account:u9', remote: FakeZooTransport());
+        await pumpEventQueue();
+        expect(again.needsHint, isTrue);
+      },
+    );
+
     test('a new scope forgets the previous account at once', () async {
       final remote = FakeZooTransport()
         ..zoo = const Zoo(
