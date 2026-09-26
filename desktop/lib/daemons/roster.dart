@@ -59,6 +59,17 @@ class DaemonRules {
         for (final e in (raw['bondForVersion'] as Map).entries)
           e.key as String: (e.value as num).toInt(),
       },
+      xpPerTurn = ((raw['bond'] as Map?)?['xpPerTurn'] as num? ?? 1).toInt(),
+      xpPerDay = ((raw['bond'] as Map?)?['xpPerDay'] as num? ?? 5).toInt(),
+      bondLevels = [
+        for (final l in (raw['bond'] as Map?)?['levels'] as List? ?? const [0])
+          (l as num).toInt(),
+      ],
+      earn = DaemonEarn._(raw['earn'] as Map? ?? const {}),
+      historyDates = {
+        for (final e in (raw['historyDates'] as Map? ?? const {}).entries)
+          e.key as String: e.value as String?,
+      },
       statusCells = (raw['statusCells'] as num).toInt(),
       portraitMaxCols = (raw['portraitMaxCols'] as num).toInt(),
       portraitMaxRows = (raw['portraitMaxRows'] as num).toInt(),
@@ -91,6 +102,15 @@ class DaemonRules {
   final int backFrameMs;
   final List<String> versions;
   final Map<String, int> bondForVersion;
+
+  /// Bond (README, "Earning eggs and growing"): xp per counted turn, per
+  /// first counted turn of a day, and the xp each level starts at.
+  final int xpPerTurn, xpPerDay;
+  final List<int> bondLevels;
+  final DaemonEarn earn;
+
+  /// `MM-DD` → the daemon that date's history egg gives, or null.
+  final Map<String, String?> historyDates;
   final int statusCells, portraitMaxCols, portraitMaxRows;
   final List<String> rarities;
   final int shinyOneIn;
@@ -104,6 +124,25 @@ class DaemonRules {
 
   Duration hold(DaemonMood mood) =>
       Duration(milliseconds: holdMs[mood.name] ?? 0);
+}
+
+/// How work earns eggs (`rules.earn`).
+class DaemonEarn {
+  DaemonEarn._(Map raw)
+    : turnEvery = _int(raw, 'turn', 'every', 40),
+      dailyCap = _int(raw, 'turn', 'dailyCap', 20),
+      weekDays = _int(raw, 'week', 'days', 3),
+      marathonTurns = _int(raw, 'marathon', 'turns', 500),
+      marathonMachines = _int(raw, 'marathon', 'machines', 2),
+      nights = _int(raw, 'night', 'nights', 3),
+      nightFrom = _int(raw, 'night', 'fromHour', 0),
+      nightTo = _int(raw, 'night', 'toHour', 4);
+
+  static int _int(Map raw, String group, String key, int fallback) =>
+      ((raw[group] as Map?)?[key] as num?)?.toInt() ?? fallback;
+
+  final int turnEvery, dailyCap, weekDays, marathonTurns, marathonMachines;
+  final int nights, nightFrom, nightTo;
 }
 
 class DaemonDrop {

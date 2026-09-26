@@ -42,6 +42,34 @@ with the same shape and rules, drawn on the client. It is sent once with
 the zoo answers 404; the window then uses the local zoo too, and seeds it when
 the account's zoo appears.
 
+At sign-in the guest's zoo is queued first, ahead of any habit report, and
+only when the account holds no daemon, egg or habit (the server refuses it
+after that). Its answer is a baseline: the guest's eggs come back under server
+ids and are not news.
+
+Every zoo the window shows is compared with the one before it: a new egg id is
+an arrival and a higher `bond` is a level-up, whether it came in this window's
+own answer (`grants`, `levelUps`) or another window's change learned from
+`zoo_changed`. A first read and a seed are baselines.
+
+## Earning eggs and growing
+
+Signed in, harnessd counts turns and reports them with `zoo.turn`; the desktop
+never sends `zoo.turn` (the turns would count twice). A guest's turns are
+counted by the app (a live `turn_started`, then a `turn_ended` without error or
+interrupt, not a sub-agent, terminal or the pair harness) and applied to the
+local zoo with the server's rules: 20 a local day, a turn egg every 40, week,
+marathon, night and history eggs, held eggs when the nest is full, and xp for
+the pair (levels 0–4 on `rules.bond.levels`, 1.0 at level 2, 2.0 at level 4).
+
+The paired daemon draws at its `version`. A new egg sits in the status slot for
+3 s with a line (`a week egg arrived. it waits in the nest.`), then the daemon
+returns; its tooltip counts the eggs waiting and a click opens the panel on
+the egg. A level-up is a slow blink and one line (`tim 1.0 released.`, or
+`bond level 3.`). Before the first hatch the slot shows the waiting egg itself:
+the first egg's ready face, or its kind's `look`. The panel shows the bond, xp
+toward the next level, and how many counted turns until the next turn egg.
+
 Nothing is drawn until the window knows whose zoo it is and the first read has
 answered. A signed-in window waits for its profile (the old code keyed its
 first reads by a temporary scope and flashed other progress at boot).

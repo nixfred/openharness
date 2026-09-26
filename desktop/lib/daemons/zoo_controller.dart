@@ -38,6 +38,28 @@ class ApiZooTransport implements ZooTransport {
       api.zooOps(ops);
 }
 
+/// Something that arrived in the zoo since it was last shown: learned from
+/// this window's own answers and from other windows' changes alike, by
+/// comparing what the zoo was with what it is (a first read and a seed are
+/// baselines, never news).
+sealed class ZooEvent {
+  const ZooEvent();
+}
+
+/// A new egg in the nest: earned from work, a first or easter egg, or one
+/// that was held until there was room.
+class ZooEggArrived extends ZooEvent {
+  const ZooEggArrived(this.egg);
+  final ZooEgg egg;
+}
+
+/// A daemon's bond reached a new level (and maybe a new version).
+class ZooDaemonGrew extends ZooEvent {
+  const ZooDaemonGrew(this.daemon, {required this.versionChanged});
+  final ZooDaemon daemon;
+  final bool versionChanged;
+}
+
 enum ZooSource {
   /// Not loaded yet, or no scope.
   none,
@@ -82,12 +104,16 @@ class ZooController extends ChangeNotifier {
   String? _hatchingEgg;
   Future<void> _queue = Future.value();
   Future<void> _saving = Future.value();
+  final _events = StreamController<ZooEvent>.broadcast(sync: true);
   final _unsent = <Map<String, dynamic>>[];
   Timer? _retry;
   int _failures = 0;
 
   String? get scope => _scope;
   ZooSource get source => _source;
+
+  /// New eggs and level-ups, for the face and the notices.
+  Stream<ZooEvent> get events => _events.stream;
   bool get loaded => _source != ZooSource.none;
   bool get isAccount => _source == ZooSource.account;
   Zoo get zoo => _zoo;
@@ -150,9 +176,32 @@ class ZooController extends ChangeNotifier {
 
   void _adoptLocal() {
     _source = ZooSource.local;
-    _zoo = _local;
     _revision = 0;
+    _show(_local, baseline: true);
+  }
+
+  /// Show [next]. Unless it is a baseline (a first read, a seed), whatever
+  /// arrived since the zoo was last shown is told to [events].
+  void _show(Zoo next, {bool baseline = false}) {
+    final before = _zoo;
+    _zoo = next;
     notifyListeners();
+    if (baseline || _disposed) return;
+    for (final egg in next.eggs) {
+      if (!before.eggs.any((e) => e.id == egg.id)) {
+        _events.add(ZooEggArrived(egg));
+      }
+    }
+    final seen = <String>{};
+    for (final daemon in next.daemons) {
+      if (!seen.add(daemon.id)) continue;
+      final was = before.daemons.where((d) => d.id == daemon.id).firstOrNull;
+      if (was != null && daemon.bond > was.bond) {
+        _events.add(
+          ZooDaemonGrew(daemon, versionChanged: daemon.version != was.version),
+        );
+      }
+    }
   }
 
   Future<void> _fetch(int generation) async {
@@ -175,12 +224,19 @@ class ZooController extends ChangeNotifier {
       return;
     }
     final wasAccount = isAccount;
-    _adopt(raw, force: !wasAccount);
     if (!wasAccount) {
+      // At sign-in the guest's zoo goes first, ahead of any habit this window
+      // is about to report: the server refuses a seed once the account holds
+      // any daemon, egg or habit.
+      if (!_seeded &&
+          !_local.isEmpty &&
+          !Zoo.fromJson(raw['zoo'], roster).holdsAnything) {
+        _enqueueSeed(generation);
+      }
       _failures = 0;
-      unawaited(_seed(generation));
-      if (_unsent.isNotEmpty) _flushUnsent(generation);
     }
+    _adopt(raw, force: !wasAccount, baseline: !wasAccount);
+    if (!wasAccount && _unsent.isNotEmpty) _flushUnsent(generation);
   }
 
   void _scheduleRetry(int generation) {
@@ -200,14 +256,17 @@ class ZooController extends ChangeNotifier {
   }
 
   /// Take the server's answer when it is not older than what is shown.
-  bool _adopt(Map<String, dynamic> raw, {bool force = false}) {
+  bool _adopt(
+    Map<String, dynamic> raw, {
+    bool force = false,
+    bool baseline = false,
+  }) {
     final revision = raw['revision'];
     if (revision is! int) return false;
     if (!force && isAccount && revision < _revision) return false;
     _source = ZooSource.account;
     _revision = revision;
-    _zoo = _overlayUnsent(Zoo.fromJson(raw['zoo'], roster));
-    notifyListeners();
+    _show(_overlayUnsent(Zoo.fromJson(raw['zoo'], roster)), baseline: baseline);
     return true;
   }
 
@@ -240,21 +299,25 @@ class ZooController extends ChangeNotifier {
     return next;
   }
 
-  /// A guest's zoo goes to the account once. The server applies it only while
-  /// the account's zoo is empty.
-  Future<void> _seed(int generation) async {
-    if (_seeded || _local.isEmpty) return;
-    try {
-      final answer = await _remote!.apply([
-        {'op': 'zoo.seed', 'zoo': _local.toJson()},
-      ]);
-      if (!_current(generation) || answer == null) return;
-      _seeded = true;
-      _saveLocal();
-      _adopt(answer);
-    } catch (error) {
-      debugPrint('zoo: seed failed: $error');
-    }
+  /// A guest's zoo goes to the account once, first in the queue. The server
+  /// applies it only while the account holds no daemon, egg or habit; its
+  /// answer is a baseline (the guest's eggs come back under server ids).
+  void _enqueueSeed(int generation) {
+    final seed = _local.toJson();
+    _enqueue(() async {
+      if (!_current(generation) || _seeded) return;
+      try {
+        final answer = await _remote!.apply([
+          {'op': 'zoo.seed', 'zoo': seed},
+        ]);
+        if (!_current(generation) || answer == null) return;
+        _seeded = true;
+        _saveLocal();
+        _adopt(answer, baseline: true);
+      } catch (error) {
+        debugPrint('zoo: seed failed: $error');
+      }
+    });
   }
 
   /// `zoo_changed { revision }`: fetch only when the push is news.
@@ -285,8 +348,7 @@ class ZooController extends ChangeNotifier {
       return;
     }
     // Optimistic for the habit only: the egg is the server's to grant.
-    _zoo = _zoo.copyWith(habits: [..._zoo.habits, key]);
-    notifyListeners();
+    _show(_zoo.copyWith(habits: [..._zoo.habits, key]));
     _sendLater(op);
   }
 
@@ -297,8 +359,7 @@ class ZooController extends ChangeNotifier {
       _applyLocal([op]);
       return;
     }
-    _zoo = _zoo.copyWith(pair: id);
-    notifyListeners();
+    _show(_zoo.copyWith(pair: id));
     _sendLater(op);
   }
 
@@ -314,22 +375,11 @@ class ZooController extends ChangeNotifier {
       'id': id,
       'nickname': value == null || value.isEmpty ? null : value,
     };
-    final result = applyZooOps(
-      roster,
-      _zoo,
-      [op],
-      random: _random,
-      now: _now(),
-    );
     if (!isAccount) {
-      _local = result.zoo;
-      _zoo = result.zoo;
-      _saveLocal();
-      notifyListeners();
+      _applyLocal([op]);
       return true;
     }
-    _zoo = result.zoo;
-    notifyListeners();
+    _show(applyZooOps(roster, _zoo, [op], random: _random, now: _now()).zoo);
     _sendLater(op);
     return true;
   }
@@ -389,11 +439,38 @@ class ZooController extends ChangeNotifier {
 
   List<ZooHatch> _applyLocal(List<Map<String, dynamic>> ops) {
     final result = applyZooOps(roster, _zoo, ops, random: _random, now: _now());
-    _zoo = result.zoo;
     _local = result.zoo;
     _saveLocal();
-    notifyListeners();
+    _show(result.zoo);
     return result.hatched;
+  }
+
+  static final _unsafe = RegExp(r'[^A-Za-z0-9_-]');
+
+  /// A guest's finished turns, counted here with the server's rules
+  /// (`zoo.turn`: the daily cap, earned eggs, the pair's xp). Never while
+  /// signed in: harnessd reports those turns, and they would count twice.
+  void recordTurns(int n, {required String machineId}) {
+    if (!loaded || isAccount || _scope != 'guest' || n <= 0) return;
+    final now = _now();
+    var machine = machineId.replaceAll(_unsafe, '-');
+    if (machine.isEmpty) machine = 'local';
+    if (machine.length > 64) machine = machine.substring(0, 64);
+    final ops = <Map<String, dynamic>>[];
+    for (var left = n; left > 0; left -= 50) {
+      ops.add({
+        'op': 'zoo.turn',
+        'batchId': List.generate(
+          16,
+          (_) => _random.nextInt(16).toRadixString(16),
+        ).join(),
+        'n': min(left, 50),
+        'day': localDayOf(now),
+        'hour': now.hour,
+        'machineId': machine,
+      });
+    }
+    _applyLocal(ops);
   }
 
   void _enqueue(Future<void> Function() work) {
@@ -496,6 +573,7 @@ class ZooController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _retry?.cancel();
+    unawaited(_events.close());
     super.dispose();
   }
 }

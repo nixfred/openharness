@@ -50,6 +50,7 @@ Zoo _paired(String id, {String version = '2.0', List<String>? more}) => Zoo(
       hatchedAt: '2026-09-26T09:42:00Z',
       egg: 'first',
       version: version,
+      xp: const {'0.1': 0, '1.0': 150, '2.0': 600}[version]!,
     ),
     for (final other in more ?? const <String>[])
       ZooDaemon(id: other, hatchedAt: '2026-09-26T10:00:00Z', egg: 'turn'),
@@ -227,6 +228,17 @@ void main() {
         ),
       );
       rows.add((label, face));
+    }
+    for (final kind in ['week', 'night', 'history', 'easter']) {
+      rows.add((
+        '$kind egg',
+        await _face(
+          tester,
+          Zoo(
+            eggs: [ZooEgg(id: kind, kind: kind, grantedAt: '')],
+          ),
+        ),
+      ));
     }
     for (final version in ['0.1', '1.0', '2.0']) {
       rows.add((

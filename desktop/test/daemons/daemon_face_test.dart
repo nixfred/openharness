@@ -47,6 +47,8 @@ void main() {
               hatchedAt: '2026-09-26T09:00:00Z',
               egg: 'first',
               version: version,
+              // Bond and version follow xp: 0.1, 1.0 at level 2, 2.0 at 4.
+              xp: const {'0.1': 0, '1.0': 150, '2.0': 600}[version]!,
             ),
           ],
           pair: id,
@@ -337,5 +339,50 @@ void main() {
     zoo.habit('resume');
     expect(face.glyph, r'\_o.o_/');
     expect(face.eggReady, isTrue);
+  });
+  testWidgets('a new egg shows in the slot for a moment and is announced', (
+    tester,
+  ) async {
+    // At 1.0 (150 xp), two days of turns (200 xp) stay below the next level.
+    await mount(tester, version: '1.0');
+    // A guest's 40th counted turn earns a turn egg; two days at the cap.
+    clock.value = DateTime(2026, 9, 21, 12);
+    zoo.recordTurns(20, machineId: 'm');
+    await tester.pump(const Duration(seconds: 6));
+    clock.value = DateTime(2026, 9, 22, 12);
+    zoo.recordTurns(20, machineId: 'm');
+    expect(zoo.zoo.eggs.single.kind, 'turn');
+    expect(face.glyph, r'\_O_/');
+    expect(face.voice, 'tim: a turn egg arrived. it waits in the nest.');
+    expect(face.detail, contains('1 egg waiting'));
+    await pass(tester, const Duration(seconds: 3));
+    expect(face.glyph, '[o|o]', reason: 'the daemon comes back');
+    await pass(tester, const Duration(seconds: 6));
+  });
+
+  testWidgets('a level-up is a slow blink and one line of changelog', (
+    tester,
+  ) async {
+    await mount(tester, version: '0.1');
+    clock.value = DateTime(2026, 9, 21, 12);
+    // 20 turns + the day's 5 = 25 xp; two days reach level 1 (50 xp).
+    zoo.recordTurns(20, machineId: 'm');
+    await pass(tester, const Duration(seconds: 6));
+    clock.value = DateTime(2026, 9, 22, 12);
+    zoo.recordTurns(20, machineId: 'm');
+    expect(zoo.paired!.bond, 1);
+    expect(face.voice, 'tim: bond level 1.');
+    await pass(tester, const Duration(milliseconds: 210));
+    expect(face.lid, '_', reason: 'a slow blink');
+    await pass(tester, const Duration(seconds: 6));
+    // Days later, level 2 releases 1.0 and the slot draws it.
+    for (var d = 23; d <= 27; d++) {
+      clock.value = DateTime(2026, 9, d, 12);
+      zoo.recordTurns(20, machineId: 'm');
+      await pass(tester, const Duration(seconds: 6));
+    }
+    expect(zoo.paired!.version, '1.0');
+    expect(face.glyph, '[o|o]');
+    await pass(tester, const Duration(seconds: 6));
   });
 }

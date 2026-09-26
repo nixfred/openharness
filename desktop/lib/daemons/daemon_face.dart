@@ -46,9 +46,14 @@ class DaemonFace extends ChangeNotifier {
     : roster = roster ?? zoo.roster,
       _now = now ?? DateTime.now {
     zoo.addListener(_zooChanged);
+    _events = zoo.events.listen(_zooEvent);
   }
 
   final ZooController zoo;
+  late final StreamSubscription<ZooEvent> _events;
+
+  /// How long a new egg shows in the slot before the daemon comes back.
+  static const eggShowFor = Duration(seconds: 3);
   final DaemonRoster roster;
   final DateTime Function() _now;
 
@@ -97,6 +102,8 @@ class DaemonFace extends ChangeNotifier {
   static bool _never() => false;
 
   String? _pairKey;
+  ZooEgg? _arriving;
+  Timer? _arrivingTimer;
 
   // ── what it shows ──────────────────────────────────────────────────────────
 
@@ -129,13 +136,31 @@ class DaemonFace extends ChangeNotifier {
   /// Milliseconds into the current motion.
   int get t => _t;
 
+  /// How an egg looks in the nest: the first egg's ready face, or its kind's
+  /// look (`rules.eggs[kind].look`).
+  String eggLook(ZooEgg egg) => egg.kind == 'first'
+      ? roster.rules.nest.last
+      : roster.rules.eggs[egg.kind]?.look ?? roster.rules.nest.last;
+
+  /// Eggs waiting to be hatched.
+  int get eggsWaiting => zoo.zoo.eggs.length;
+
   /// The sprite, nest or egg for the status slot (at most eight cells).
   String get glyph {
     if (!visible) return '';
     final d = def;
     if (d == null) {
-      if (_revealing || zoo.readyEgg != null) return roster.rules.nest.last;
+      if (_revealing) return roster.rules.nest.last;
+      final egg = zoo.readyEgg;
+      if (egg != null) return eggLook(egg);
       return nestFor(roster, zoo.habitsDone);
+    }
+    // A new egg sits in the nest for a moment, unless something needs you.
+    final arriving = _arriving;
+    if (arriving != null &&
+        mood != DaemonMood.need &&
+        mood != DaemonMood.boop) {
+      return eggLook(arriving);
     }
     return renderSprite(
       roster,
@@ -176,7 +201,9 @@ class DaemonFace extends ChangeNotifier {
     if (_revealing) return 'Hatching';
     final d = def;
     if (d != null) {
-      return '${d.id} ${daemon!.version}, ${moodWords[mood]}';
+      final eggs = eggsWaiting;
+      return '${d.id} ${daemon!.version}, ${moodWords[mood]}'
+          '${eggs == 0 ? '' : ', $eggs ${eggs == 1 ? 'egg' : 'eggs'} waiting'}';
     }
     if (eggReady) return 'Ready to hatch';
     return '${zoo.habitsDone} of ${zoo.habitsNeeded} habits';
@@ -321,34 +348,55 @@ class DaemonFace extends ChangeNotifier {
     _baselined = false;
     final d = def;
     if (d != null) {
-      _pairKey = _keyOf(daemon);
+      _pairKey = daemon?.id;
       _blink('slow', delay: const Duration(milliseconds: 300));
       _say(d.first, mood: null);
     }
     _update(force: true);
   }
 
-  static String? _keyOf(ZooDaemon? d) =>
-      d == null ? null : '${d.id}@${d.version}';
-
   void _zooChanged() {
     if (_disposed) return;
-    final key = _keyOf(daemon);
+    final key = daemon?.id;
     if (key != _pairKey) {
-      final previous = _pairKey;
+      // A different pair: what it watches starts again from a baseline.
       _pairKey = key;
-      // A new version of the same daemon is a level up: a slow blink.
-      if (previous != null &&
-          key != null &&
-          previous.split('@').first == key.split('@').first) {
-        _blink('slow');
-      } else {
-        _baselined = false;
-        _held = null;
-        _holdTimer?.cancel();
-      }
+      _baselined = false;
+      _held = null;
+      _holdTimer?.cancel();
     }
     _update(force: true);
+  }
+
+  /// A new egg or a level-up, here or on another client.
+  void _zooEvent(ZooEvent event) {
+    if (_disposed) return;
+    final d = def;
+    switch (event) {
+      case ZooEggArrived(:final egg):
+        // Before the first hatch the slot already shows the egg itself.
+        if (d == null) return;
+        _arriving = egg;
+        _arrivingTimer?.cancel();
+        _arrivingTimer = Timer(eggShowFor, () {
+          _arriving = null;
+          _update(force: true);
+        });
+        _blink('ack', delay: const Duration(milliseconds: 160));
+        _say('a ${egg.kind} egg arrived. it waits in the nest.', mood: null);
+        _update(force: true);
+      case ZooDaemonGrew(:final daemon, :final versionChanged):
+        if (d == null || daemon.id != this.daemon?.id) return;
+        // "I trust you": a slow blink, and one line of changelog.
+        _blink('slow', delay: const Duration(milliseconds: 200));
+        _say(
+          versionChanged
+              ? '${d.id} ${daemon.version} released.'
+              : 'bond level ${daemon.bond}.',
+          mood: null,
+        );
+        _update(force: true);
+    }
   }
 
   // ── reactions ──────────────────────────────────────────────────────────────
@@ -503,7 +551,9 @@ class DaemonFace extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     zoo.removeListener(_zooChanged);
+    unawaited(_events.cancel());
     for (final timer in [
+      _arrivingTimer,
       _holdTimer,
       _boopTimer,
       _napTimer,

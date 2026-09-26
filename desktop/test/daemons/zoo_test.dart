@@ -239,6 +239,220 @@ void main() {
     });
   });
 
+  group('earning eggs and growing (the server rules, for a guest)', () {
+    var batch = 0;
+    Map<String, dynamic> turn(
+      String day,
+      int n, {
+      int hour = 12,
+      String machine = 'm1',
+    }) => {
+      'op': 'zoo.turn',
+      'batchId': 'b${++batch}',
+      'n': n,
+      'day': day,
+      'hour': hour,
+      'machineId': machine,
+    };
+    DateTime noon(String day) => DateTime.parse('${day}T12:00:00Z');
+    ({Zoo zoo, List<ZooGrant> grants, List<ZooLevelUp> levelUps}) play(
+      Zoo start,
+      List<Map<String, dynamic>> ops,
+    ) {
+      var zoo = start;
+      final grants = <ZooGrant>[];
+      final levelUps = <ZooLevelUp>[];
+      for (final op in ops) {
+        final r = applyZooOps(
+          roster,
+          zoo,
+          [op],
+          random: Random(3),
+          now: noon(op['day'] as String),
+        );
+        zoo = r.zoo;
+        grants.addAll(r.grants);
+        levelUps.addAll(r.levelUps);
+      }
+      return (zoo: zoo, grants: grants, levelUps: levelUps);
+    }
+
+    const tim = Zoo(
+      daemons: [ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first')],
+      pair: 'tim',
+    );
+
+    test('the roster carries the earn and bond rules', () {
+      final earn = roster.rules.earn;
+      expect(
+        [earn.turnEvery, earn.dailyCap, earn.weekDays, earn.marathonTurns],
+        [40, 20, 3, 500],
+      );
+      expect(roster.rules.bondLevels, [0, 50, 150, 300, 600]);
+      expect(roster.rules.historyDates.keys, ['04-01', '09-09', '10-31']);
+      expect(roster.rules.eggs['history']!.look, r'\_47_/');
+    });
+
+    test(
+      'at most 20 turns count a local day; a replayed batch counts once',
+      () {
+        final replay = turn('2026-09-21', 3);
+        final r = play(Zoo.empty, [
+          turn('2026-09-21', 15),
+          turn('2026-09-21', 4, machine: 'm2'),
+          turn('2026-09-21', 10),
+          replay,
+          replay,
+        ]);
+        expect(r.zoo.progress.days, {'2026-09-21': 20});
+        expect(r.zoo.progress.turns, 20);
+        expect(r.zoo.progress.batches, hasLength(3));
+      },
+    );
+
+    test('a turn egg every 40 counted turns, a week egg at 3 days', () {
+      final r = play(Zoo.empty, [
+        turn('2026-09-21', 20),
+        turn('2026-09-22', 20),
+        turn('2026-09-23', 1),
+      ]);
+      expect(r.grants.map((g) => g.kind), ['turn', 'week']);
+      expect(r.zoo.eggs.map((e) => e.kind), ['turn', 'week']);
+      expect(r.zoo.progress.weeks, [isoWeek('2026-09-23')]);
+    });
+
+    test(
+      'a second machine earns a marathon egg once; nights earn a night egg',
+      () {
+        final r = play(Zoo.empty, [
+          turn('2026-09-21', 1, hour: 2, machine: 'a'),
+          turn('2026-09-22', 1, hour: 3, machine: 'b'),
+          turn('2026-09-23', 1, hour: 4, machine: 'c'),
+          turn('2026-09-24', 1, hour: 5),
+        ]);
+        // Three days of one ISO week earn its week egg on the way.
+      expect(r.grants.map((g) => g.kind), ['marathon', 'week', 'night']);
+        expect(r.zoo.progress.machines, ['a', 'b']);
+        expect(r.zoo.progress.nights, isEmpty);
+      },
+    );
+
+    test('a history date gives a dated egg', () {
+      final r = play(Zoo.empty, [turn('2026-09-09', 1)]);
+      expect(r.zoo.eggs.single.kind, 'history');
+      expect(r.zoo.eggs.single.date, '2026-09-09');
+      final hatched = applyZooOps(
+        roster,
+        r.zoo,
+        [
+          {'op': 'zoo.hatch', 'eggId': r.zoo.eggs.single.id},
+        ],
+        random: Random(1),
+        now: noon('2026-09-09'),
+      );
+      // No drop holds the moth yet: the usual pool.
+      expect(hatched.zoo.daemons.single.egg, 'history');
+    });
+
+    test('the pair grows by xp: levels, versions, level-ups', () {
+      final r = play(tim, [
+        turn('2026-09-21', 20),
+        turn('2026-09-22', 20),
+        turn('2026-09-23', 20),
+      ]);
+      // 3 days x (20 + 5) = 75 xp: level 1, still 0.1.
+      expect(r.zoo.daemons.single.xp, 75);
+      expect(r.zoo.daemons.single.bond, 1);
+      expect(r.zoo.daemons.single.version, '0.1');
+      expect(r.levelUps, [(id: 'tim', level: 1, version: '0.1')]);
+      final more = play(r.zoo, [
+        for (var d = 24; d <= 27; d++) turn('2026-09-$d', 20),
+      ]);
+      expect(more.zoo.daemons.single.xp, 175);
+      expect(more.zoo.daemons.single.version, '1.0');
+      expect(more.levelUps.single.version, '1.0');
+      // Nothing is earned without a pair.
+      expect(play(Zoo.empty, [turn('2026-09-21', 5)]).levelUps, isEmpty);
+    });
+
+    test('a full nest holds earned eggs and lets them in after a hatch', () {
+      final full = Zoo(
+        daemons: tim.daemons,
+        pair: 'tim',
+        eggs: [
+          for (var i = 0; i < Zoo.maxEggs; i++)
+            ZooEgg(id: 'e$i', kind: 'turn', grantedAt: ''),
+        ],
+        progress: const ZooProgress(turns: 39),
+      );
+      final r = play(full, [turn('2026-09-21', 1)]);
+      expect(r.zoo.eggs, hasLength(Zoo.maxEggs));
+      expect(r.zoo.progress.held, [('turn', null)]);
+      final hatched = applyZooOps(
+        roster,
+        r.zoo,
+        [
+          {'op': 'zoo.hatch', 'eggId': 'e0'},
+        ],
+        random: Random(2),
+        now: noon('2026-09-21'),
+      );
+      expect(hatched.zoo.eggs, hasLength(Zoo.maxEggs));
+      expect(hatched.zoo.progress.held, isEmpty);
+      expect(hatched.grants.single.kind, 'turn');
+      // The first egg waits for room too, and so does an easter word.
+      final waiting = applyZooOps(
+        roster,
+        full.copyWith(habits: ['turn', 'split', 'find', 'machine']),
+        [
+          {'op': 'zoo.habit', 'key': 'store'},
+          {'op': 'zoo.easter', 'word': 'xyzzy'},
+        ],
+        random: Random(2),
+        now: noon('2026-09-21'),
+      ).zoo;
+      expect(waiting.firstEgg, isFalse);
+      expect(waiting.easter, isEmpty);
+    });
+
+    test('a day that cannot be today anywhere is dropped', () {
+      final now = DateTime.parse('2026-09-26T12:00:00Z');
+      bool accepted(String day) =>
+          applyZooOps(
+            roster,
+            Zoo.empty,
+            [turn(day, 1)],
+            random: Random(1),
+            now: now,
+          ).zoo.progress.turns ==
+          1;
+      expect(
+        ['2026-09-24', '2026-09-25', '2026-09-26', '2026-09-27'].map(accepted),
+        everyElement(isTrue),
+      );
+      expect(
+        ['2026-09-23', '2026-09-28', '2025-09-26'].map(accepted),
+        everyElement(isFalse),
+      );
+    });
+
+    test('ISO weeks match the server', () {
+      expect(isoWeek('2027-01-01'), '2026-W53');
+      expect(isoWeek('2024-12-30'), '2025-W01');
+      expect(isoWeek('2026-09-26'), '2026-W39');
+    });
+
+    test('a stored daemon without xp reads the least xp its bond needs', () {
+      final zoo = Zoo.fromJson({
+        'daemons': [
+          {'id': 'tim', 'hatchedAt': '', 'egg': 'first', 'bond': 2},
+        ],
+      }, roster);
+      expect(zoo.daemons.single.xp, 150);
+      expect(zoo.daemons.single.version, '1.0');
+    });
+  });
+
   group('controller', () {
     late _Memory storage;
     setUp(() => storage = _Memory());
@@ -462,6 +676,119 @@ void main() {
         again.bind('account:u9', remote: FakeZooTransport());
         await pumpEventQueue();
         expect(again.needsHint, isTrue);
+      },
+    );
+
+    test('the seed goes first at sign-in, before any habit', () async {
+      final guest = controller();
+      addTearDown(guest.dispose);
+      guest.bind('guest');
+      await pumpEventQueue();
+      guest.habit('turn');
+      await guest.flush();
+
+      final remote = FakeZooTransport()..gate = Completer();
+      final account = controller();
+      addTearDown(account.dispose);
+      account.bind('account:u1', remote: remote);
+      remote.gate!.complete();
+      await pumpEventQueue();
+      account.habit('split');
+      await account.flush();
+      expect(remote.batches.map((b) => b.single['op']), [
+        'zoo.seed',
+        'zoo.habit',
+      ]);
+      expect(remote.zoo.habits, ['turn', 'split']);
+    });
+
+    test('no seed when the account already holds something', () async {
+      final guest = controller();
+      addTearDown(guest.dispose);
+      guest.bind('guest');
+      await pumpEventQueue();
+      guest.habit('turn');
+      await guest.flush();
+      final remote = FakeZooTransport()..zoo = const Zoo(habits: ['store']);
+      final account = controller();
+      addTearDown(account.dispose);
+      account.bind('account:u1', remote: remote);
+      await pumpEventQueue();
+      await account.flush();
+      expect(remote.batches, isEmpty);
+    });
+
+    test(
+      'new eggs and level-ups are events; reads and seeds are not',
+      () async {
+        final remote = FakeZooTransport()
+          ..zoo = const Zoo(
+            daemons: [ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first')],
+            pair: 'tim',
+            eggs: [ZooEgg(id: 'old', kind: 'turn', grantedAt: '')],
+          )
+          ..revision = 1;
+        final zoo = controller();
+        addTearDown(zoo.dispose);
+        final events = <ZooEvent>[];
+        zoo.events.listen(events.add);
+        zoo.bind('account:u1', remote: remote);
+        await pumpEventQueue();
+        expect(events, isEmpty, reason: 'the first read is a baseline');
+        // Another window's grant and level-up arrive as zoo_changed.
+        remote
+          ..zoo = remote.zoo.copyWith(
+            daemons: const [
+              ZooDaemon(
+                id: 'tim',
+                hatchedAt: '',
+                egg: 'first',
+                xp: 160,
+                bond: 2,
+                version: '1.0',
+              ),
+            ],
+            eggs: const [
+              ZooEgg(id: 'old', kind: 'turn', grantedAt: ''),
+              ZooEgg(id: 'new', kind: 'week', grantedAt: ''),
+            ],
+          )
+          ..revision = 2;
+        zoo.pushed(2);
+        await pumpEventQueue();
+        expect(events, hasLength(2));
+        expect((events[0] as ZooEggArrived).egg.id, 'new');
+        final grew = events[1] as ZooDaemonGrew;
+        expect(grew.daemon.version, '1.0');
+        expect(grew.versionChanged, isTrue);
+      },
+    );
+
+    test(
+      'a guest counts its own turns; an account never sends zoo.turn',
+      () async {
+        final guest = controller();
+        addTearDown(guest.dispose);
+        guest.bind('guest');
+        await pumpEventQueue();
+        guest.recordTurns(3, machineId: 'this mac/1');
+        expect(guest.zoo.progress.turns, 3);
+        expect(guest.zoo.progress.machines, ['this-mac-1']);
+
+        final remote = FakeZooTransport();
+        final account = controller();
+        addTearDown(account.dispose);
+        account.bind('account:u1', remote: remote);
+        await pumpEventQueue();
+        await account.flush();
+        final before = remote.batches.length;
+        account.recordTurns(3, machineId: 'm');
+        await account.flush();
+        expect(remote.batches.length, before);
+        expect(
+          remote.batches.expand((b) => b).where((op) => op['op'] == 'zoo.turn'),
+          isEmpty,
+        );
       },
     );
 

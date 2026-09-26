@@ -317,6 +317,7 @@ void main() {
             hatchedAt: '2026-09-26T10:00:00Z',
             egg: 'turn',
             version: '2.0',
+            xp: 600,
           ),
         ],
         pair: 'tim',
@@ -422,4 +423,47 @@ void main() {
     expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
     await unmount(tester);
   });
+  for (final guest in [true, false]) {
+    testWidgets(
+      guest
+          ? 'a guest earns from its own live turns'
+          : 'signed in, turns are left to harnessd: no zoo.turn is sent',
+      (tester) async {
+        if (guest) app.signedIn = false;
+        await mount(tester);
+        await tester.pump();
+        app.adoptSessionForTest(terminal('a0', []));
+        Future<void> turn({bool live = true, bool aborted = false}) async {
+          if (live) {
+            await app.handleMachineEventForTest('m', {
+              'type': 'turn_started',
+              'agentId': 'a0',
+            });
+          }
+          await app.handleMachineEventForTest('m', {
+            'type': 'turn_ended',
+            'agentId': 'a0',
+            if (aborted) 'payload': {'aborted': true},
+          });
+          await tester.pump();
+        }
+
+        await turn();
+        await turn(live: false); // picked up at attach: never counts
+        await turn(aborted: true); // interrupted: never counts
+        await turn();
+        await zoo.flush();
+        if (guest) {
+          expect(zoo.zoo.progress.turns, 2);
+        } else {
+          expect(
+            remote.batches.expand((b) => b).map((op) => op['op']),
+            isNot(contains('zoo.turn')),
+          );
+          expect(zoo.zoo.progress.turns, 0);
+        }
+        await unmount(tester);
+      },
+    );
+  }
 }

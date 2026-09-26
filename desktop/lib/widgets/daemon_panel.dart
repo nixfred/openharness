@@ -87,13 +87,17 @@ class _DaemonPanelState extends State<DaemonPanel> {
       _focus.requestFocus();
       return;
     }
+    // A waiting egg first: that is usually why the panel was opened.
     final preferred = _order.contains('hatch')
         ? 'hatch'
-        : _order.contains('pair')
-        ? 'pair'
         : _order.firstWhere(
-            (k) => k.startsWith('zoo:') || k.startsWith('habit:'),
-            orElse: () => _order.first,
+            (k) => k.startsWith('egg:'),
+            orElse: () => _order.contains('pair')
+                ? 'pair'
+                : _order.firstWhere(
+                    (k) => k.startsWith('zoo:') || k.startsWith('habit:'),
+                    orElse: () => _order.first,
+                  ),
           );
     _node(preferred).requestFocus();
   }
@@ -464,6 +468,11 @@ class _DaemonPanelState extends State<DaemonPanel> {
         style: _ink(),
       ),
       Text(
+        _bondLine(viewing),
+        key: const ValueKey('daemon-panel-bond'),
+        style: _ink(_muted),
+      ),
+      Text(
         def.familyYears.isEmpty
             ? def.familyLine
             : '${def.familyLine}\n${def.familyYears}',
@@ -483,7 +492,9 @@ class _DaemonPanelState extends State<DaemonPanel> {
       ),
       SizedBox(height: _cell.height),
       Text(
-        'zoo ${zoo.daemons.map((d) => d.id).toSet().length}/${roster.daemons.length}',
+        'zoo ${zoo.daemons.map((d) => d.id).toSet().length}/${roster.daemons.length}'
+        ' · ${_progressLine()}',
+        key: const ValueKey('daemon-panel-progress'),
         style: _ink(_muted),
       ),
       Wrap(
@@ -548,6 +559,25 @@ class _DaemonPanelState extends State<DaemonPanel> {
           ],
         ),
     ];
+  }
+
+  /// `bond 2 · 160/300 xp`: levels come from counted turns (README,
+  /// "Earning eggs and growing"); the version follows the level.
+  String _bondLine(ZooDaemon daemon) {
+    final levels = roster.rules.bondLevels;
+    final next = daemon.bond + 1 < levels.length
+        ? levels[daemon.bond + 1]
+        : null;
+    return 'bond ${daemon.bond} · ${daemon.xp}${next == null ? '' : '/$next'} xp';
+  }
+
+  /// How close the next egg from work is, and today's counted turns.
+  String _progressLine() {
+    final earn = roster.rules.earn;
+    final progress = zoo.progress;
+    final left = earn.turnEvery - progress.turns % earn.turnEvery;
+    final today = progress.days[localDayOf(DateTime.now())] ?? 0;
+    return 'turn egg in $left · today $today/${earn.dailyCap}';
   }
 
   Widget _zooEntry(DaemonDef d, String viewing) {

@@ -841,7 +841,21 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _zoo.habit(key);
     }
     if (app.inForeground) _zoo.noteDay();
+    // A guest's turns earn eggs in its local zoo. Signed in, harnessd reports
+    // them to the account; sending them here too would count them twice.
+    if (app.isGuest) {
+      for (final machine in app.machineStates.values) {
+        final id = machine.machine.machineId;
+        final seen = _zooTurnsSeen[id] ?? 0;
+        _zooTurnsSeen[id] = machine.zooTurns;
+        if (machine.zooTurns > seen) {
+          _zoo.recordTurns(machine.zooTurns - seen, machineId: id);
+        }
+      }
+    }
   }
+
+  final _zooTurnsSeen = <String, int>{};
 
   void _syncToolbarNotices() {
     _syncOnboarding();

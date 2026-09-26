@@ -340,6 +340,15 @@ class MachineState {
   /// Paused harnesses this window resumed: the daemon's `resume` habit.
   int resumedHarnesses = 0;
 
+  /// Agents whose `turn_started` this window saw live (not a heartbeat).
+  final liveTurnAgents = <String>{};
+
+  /// Turns counted the way harnessd counts them for the zoo
+  /// (daemons/README.md, "What counts as a turn"): started live, ended without
+  /// error or interrupt, not a sub-agent, a terminal or the pair harness. Only
+  /// a guest's local zoo uses it; a signed-in harnessd reports its own.
+  int zooTurns = 0;
+
   /// Agents on this machine that have stopped to ask something, by agentId.
   /// At most one per agent: a pane shows one dialog at a time, and the daemon
   /// re-announces the same open question rather than queueing a second.
@@ -11428,6 +11437,7 @@ class AppNotifier extends ChangeNotifier {
         var changed = false;
         final agentId = _eventAgentId(machine, event, payload);
         if (agentId != null) {
+          if (type == 'turn_started') machine.liveTurnAgents.add(agentId);
           changed = _markAgentProcessing(machine, agentId);
           // Only a START opens a stats turn, for the reason above: a heartbeat
           // is a turn already under way, and counting one would report an agent
@@ -11450,6 +11460,7 @@ class AppNotifier extends ChangeNotifier {
       case 'turn_ended':
         final agentId = _eventAgentId(machine, event, payload);
         if (agentId != null) {
+          final live = machine.liveTurnAgents.remove(agentId);
           // A SUB-AGENT'S turn end is not news — an Orchestrator specialist, or
           // its Director while specialists are still out. The dial has always
           // known (`silent` on its summary card) and this window never did, so a
@@ -11481,6 +11492,15 @@ class AppNotifier extends ChangeNotifier {
               machine.completedHarnessTurns++;
             } else if (ownWork) {
               machine.failedHarnessTurns++;
+            }
+            if (live &&
+                agent != null &&
+                !failed &&
+                payload['aborted'] != true &&
+                !machine.machine.isShared &&
+                !isTerminalEngine(agent.engine) &&
+                agent.dsh != 'autonomous/pair') {
+              machine.zooTurns++;
             }
           }
           _cancelTurnActivity(machine.machine.machineId, agentId);
