@@ -1251,11 +1251,16 @@ private final class SwarmSymbolButton: SwarmIconButton {
 }
 
 /// The daemon's one line, where the status line's context sits: tmux's yellow
-/// message line. Right-aligned in the bar font, truncated rather than wrapped.
+/// message line. Right-aligned in the bar font, truncated rather than wrapped. A
+/// line from the pair brain may offer answers, drawn after it as `[y] label`;
+/// only those are clickable, and a click answers without taking focus.
 private final class SwarmVoiceLabel: NSView {
   var text = "" { didSet { if text != oldValue { needsDisplay = true; setAccessibilityLabel(text) } } }
+  var actions: [(key: String, label: String)] = [] { didSet { needsDisplay = true } }
   var color = NSColor.systemYellow { didSet { needsDisplay = true } }
   var font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) { didSet { needsDisplay = true } }
+  var onAction: ((String) -> Void)?
+  private(set) var actionRects: [(key: String, rect: NSRect)] = []
 
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -1263,11 +1268,48 @@ private final class SwarmVoiceLabel: NSView {
     setAccessibilityRole(.staticText)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-  override var mouseDownCanMoveWindow: Bool { true }
-  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  override var mouseDownCanMoveWindow: Bool { actionRects.isEmpty }
+  override var acceptsFirstResponder: Bool { false }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    let local = convert(point, from: superview)
+    return actionRects.contains(where: { $0.rect.contains(local) }) ? self : nil
+  }
+  override func mouseDown(with event: NSEvent) {
+    answer(at: convert(event.locationInWindow, from: nil))
+  }
+  /// The answer drawn at a point of this view, if any.
+  func answer(at local: NSPoint) {
+    if let hit = actionRects.first(where: { $0.rect.contains(local) }) { onAction?(hit.key) }
+  }
+
+  private func attributed(_ string: String) -> NSAttributedString {
+    NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color, .ligature: 0])
+  }
+
+  /// The answers' layout, right-aligned: `[y] run it  [n] not now`.
+  private func layoutActions() -> CGFloat {
+    let cell = ceil(("m" as NSString).size(withAttributes: [.font: font]).width)
+    var x = bounds.width
+    var rects: [(key: String, rect: NSRect)] = []
+    for action in actions.reversed() {
+      let width = ceil(attributed("[\(action.key)] \(action.label)").size().width)
+      x -= width
+      rects.insert((action.key, NSRect(x: x, y: 0, width: width, height: bounds.height)), at: 0)
+      x -= cell
+    }
+    actionRects = rects
+    return actions.isEmpty ? bounds.width : max(0, x)
+  }
 
   override func draw(_ dirtyRect: NSRect) {
-    guard !text.isEmpty, bounds.width > 0 else { return }
+    guard !text.isEmpty, bounds.width > 0 else { actionRects = []; return }
+    let lineWidth = layoutActions()
+    for (index, action) in actions.enumerated() where index < actionRects.count {
+      let label = attributed("[\(action.key)] \(action.label)")
+      let rect = actionRects[index].rect
+      label.draw(at: NSPoint(x: rect.minX, y: (bounds.height - label.size().height) / 2))
+    }
     let paragraph = NSMutableParagraphStyle()
     paragraph.alignment = .right
     paragraph.lineBreakMode = .byTruncatingTail
@@ -1275,7 +1317,7 @@ private final class SwarmVoiceLabel: NSView {
       .font: font, .foregroundColor: color, .ligature: 0, .paragraphStyle: paragraph,
     ])
     let height = ceil(line.size().height)
-    line.draw(with: NSRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height),
+    line.draw(with: NSRect(x: 0, y: (bounds.height - height) / 2, width: lineWidth, height: height),
       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
   }
 }
@@ -1348,6 +1390,11 @@ private final class SwarmTabStrip: NSView {
     pullRequestButton.isHidden = true
     addSubview(pullRequestButton)
     voiceLabel.isHidden = true
+    voiceLabel.onAction = { [weak self] key in
+      guard let self, self.actionsEnabled, !self.voiceLabel.isHidden else { return }
+      // The plain channel path: an answer never moves keyboard focus.
+      self.emit?("daemonAnswer", ["key": key])
+    }
     addSubview(voiceLabel)
     daemonButton.isBordered = false
     daemonButton.title = ""
@@ -1477,6 +1524,11 @@ private final class SwarmTabStrip: NSView {
     let voice = daemonButton.isHidden ? "" : (state["voice"] as? String ?? "")
     voiceLabel.color = statusColor(state["voiceColor"], fallback: .systemYellow)
     voiceLabel.text = voice
+    voiceLabel.actions = voice.isEmpty ? [] : (state["voiceActions"] as? [[String: Any]] ?? []).compactMap { row in
+      guard let key = row["key"] as? String, let label = row["label"] as? String,
+            validDaemonGlyph(key) != nil, !key.isEmpty, key.count <= 2 else { return nil }
+      return (key: key, label: String(label.prefix(24)))
+    }
     voiceActive = !voice.isEmpty
     applyStatusVisibility()
     if wasHidden != daemonButton.isHidden {

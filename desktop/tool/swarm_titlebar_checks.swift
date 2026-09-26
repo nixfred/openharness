@@ -360,6 +360,31 @@ private extension SwarmTabStrip {
     try checkTitlebar(contextButton.isHidden && pullRequestButton.isHidden && focusedModelButton.isHidden && !voiceLabel.isHidden,
       "A workspace update while it speaks keeps the message line")
     try checkTitlebar(unmoved(), "A workspace update while it speaks lays out as if the status were shown")
+    // The pair brain's answers: drawn after the line, each one clickable.
+    daemon["voice"] = "pip: codex@m2 wants to run the migration."
+    daemon["voiceActions"] = [["key": "y", "label": "run it"], ["key": "n", "label": "not now"],
+      ["key": "zz\u{e9}", "label": "bad key"]]
+    updateDaemon(daemon)
+    _ = voiceLabel.renderedPixels()
+    try checkTitlebar(voiceLabel.actions.map(\.key) == ["y", "n"] && voiceLabel.actionRects.count == 2 &&
+      voiceLabel.actionRects[0].rect.maxX < voiceLabel.actionRects[1].rect.minX &&
+      voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width + 0.5,
+      "Answers are drawn right-aligned after the line; a malformed key is dropped")
+    events.removeAll()
+    var answered: [Any?] = []
+    let previousEmit = emit
+    emit = { method, arguments in events.append(method); answered.append(arguments) }
+    let yes = voiceLabel.actionRects[0].rect
+    voiceLabel.answer(at: NSPoint(x: yes.midX, y: yes.midY))
+    voiceLabel.answer(at: NSPoint(x: 1, y: 1))
+    emit = previousEmit
+    try checkTitlebar(events == ["daemonAnswer"] && (answered.first as? [String: String])?["key"] == "y",
+      "Clicking an answer sends exactly that key, and the line itself is not a button")
+    try checkTitlebar(voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: 1, y: 1), to: self)) == nil &&
+      voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: yes.midX, y: yes.midY), to: self)) === voiceLabel,
+      "Only the answers take the pointer; the rest still drags the window")
+    try checkTitlebar(unmoved(), "Answers move nothing in the bar")
+    daemon["voiceActions"] = nil
     daemon["voice"] = nil
     updateDaemon(daemon)
     try checkTitlebar(voiceLabel.isHidden && !contextButton.isHidden && !pullRequestButton.isHidden &&

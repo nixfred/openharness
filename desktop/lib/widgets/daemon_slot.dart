@@ -123,22 +123,29 @@ class DaemonSlotButton extends StatelessWidget {
 }
 
 /// The daemon's one line, in tmux's yellow message colour, where the status
-/// line's context sits. [fallback] shows whenever it is silent.
+/// line's context sits. [fallback] shows whenever it is silent. A line from
+/// the pair brain may offer answers, drawn as `[y] label` and clickable (also
+/// ⌘⌥ plus the key, handled by the workspace).
 class DaemonVoiceLine extends StatelessWidget {
   const DaemonVoiceLine({
     super.key,
     required this.face,
     required this.fallback,
+    this.onAnswer,
   });
   final DaemonFace face;
   final Widget fallback;
+  final ValueChanged<String>? onAnswer;
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<String?>(
     valueListenable: face.voiceLine,
     builder: (context, voice, _) {
       if (voice == null) return fallback;
-      return Semantics(
+      final theme = currentTerminalTheme();
+      final style = workspaceBarTextStyle(color: theme.yellow)
+          .copyWith(fontFeatures: daemonTextFeatures);
+      final line = Semantics(
         liveRegion: true,
         child: Text(
           voice,
@@ -146,9 +153,39 @@ class DaemonVoiceLine extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.right,
-          style: workspaceBarTextStyle(color: currentTerminalTheme().yellow)
-              .copyWith(fontFeatures: daemonTextFeatures),
+          style: style,
         ),
+      );
+      final actions = face.voiceActions;
+      if (actions.isEmpty) return line;
+      final cell = workspaceBarCellSizeOf(context);
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Flexible(child: line),
+          for (final action in actions) ...[
+            SizedBox(width: cell.width),
+            WorkspaceBarControl(
+              key: ValueKey('daemon-answer-${action.key}'),
+              label: action.label,
+              tooltip: '${action.label} ⌘⌥${action.key.toUpperCase()}',
+              onPressed: onAnswer == null ? null : () => onAnswer!(action.key),
+              builder: (context, emphasized) => SizedBox(
+                height: workspaceBarControlHeight(context),
+                child: Center(
+                  widthFactor: 1,
+                  child: Text(
+                    '[${action.key}] ${action.label}',
+                    style: workspaceBarTextStyle(
+                      color: theme.yellow,
+                      emphasized: emphasized,
+                    ).copyWith(fontFeatures: daemonTextFeatures),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
       );
     },
   );

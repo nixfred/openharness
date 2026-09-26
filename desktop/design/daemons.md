@@ -116,6 +116,35 @@ terminal's yellow, as tmux's message line does. It is held until 2 s after the
 last key and while a dialog, picker or the reveal is open, and dropped if it
 is still waiting after 10 s.
 
+## The pair brain
+
+When this computer's harnessd has a pair brain ([daemons/BRAIN.md](../../daemons/BRAIN.md))
+it sends local frames, heard only from the loopback socket bound to this
+computer's own harnessd (`AppNotifier.daemonFrames`); `daemon_*` frames are
+sent only on that socket, never a relayed one (an older daemon forwards unknown
+frames from a relayed socket to the cloud). `lib/daemons/daemon_brain.dart`
+holds what was heard.
+
+- `daemon_state` is merged into the face's inputs: its needs (same ids as the
+  window's own questions, `machineId/agentId#requestId`), working and failing,
+  across every machine. Without it the face works from this window alone.
+- `daemon_say` replaces the roster line: with a brain, a need/done/fail/back
+  line waits up to 2.5 s for it, and it is still held while you type or a
+  dialog is open. Its actions draw after the line as `[y] run it`, clickable
+  in the Flutter bar and natively, and ⌘⌥ plus the key answers from anywhere
+  in the window. A line with answers stays up until answered, withdrawn
+  (`daemon_unsay`) or its `ttlMs` (30 s by default).
+- `daemon_act { requestId, id, choice }` goes out on a click or chord;
+  a failed `daemon_act_result` becomes one line (`STALE_QUESTION`'s detail, or
+  a worded code).
+- `daemon_presence { active, awayMs, desk, pair? }` goes out when the brain is
+  first heard and when the window loses or regains the front; `desk` is a
+  random id kept per computer, and a guest adds its local zoo's pair.
+- `daemon_brief` shows as a short list under the status line on return (10 s)
+  and in the panel until the next one.
+
+Not done: idle detection for presence (only blur and focus are reported).
+
 ## Performance
 
 `SwarmScreen` reads only Reduce Motion from `MediaQuery`, so a resize no longer

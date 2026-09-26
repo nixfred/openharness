@@ -12,6 +12,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'daemon_brain.dart';
 import 'render.dart';
 import 'roster.dart';
 import 'zoo.dart';
@@ -65,6 +66,14 @@ class DaemonFace extends ChangeNotifier {
   static const typingQuiet = Duration(seconds: 2);
   static const voiceExpires = Duration(seconds: 10);
 
+  /// How long a roster line waits for the brain's own line about the same
+  /// moment (`daemons/BRAIN.md`: prefer a `daemon_say` within 2.5 s).
+  static const brainWait = Duration(milliseconds: 2500);
+
+  /// A line with answers stays up this long unless its `ttlMs` says otherwise
+  /// or it is answered, withdrawn or dismissed.
+  static const askFor = Duration(seconds: 30);
+
   bool _disposed = false;
   bool _foreground = true, _reduceMotion = false;
   bool _revealing = false;
@@ -95,7 +104,11 @@ class DaemonFace extends ChangeNotifier {
   // Voice.
   final _voice = ValueNotifier<String?>(null);
   Timer? _voiceTimer;
-  ({String line, DateTime at, DaemonMood? mood})? _pendingVoice;
+  _Line? _pendingVoice;
+  _Line? _spoken;
+
+  /// Whether this harnessd's pair brain is talking (it sent `daemon_state`).
+  bool brainActive = false;
   Timer? _pendingTimer;
   DateTime? _lastKey;
   bool Function() quiet = _never;
@@ -179,6 +192,12 @@ class DaemonFace extends ChangeNotifier {
   /// Only the spoken line, for what swaps the status line's context: it does
   /// not change on every work frame.
   ValueListenable<String?> get voiceLine => _voice;
+
+  /// The brain's answers offered with the line being spoken: `[y] [n]`.
+  List<DaemonAction> get voiceActions => _spoken?.actions ?? const [];
+
+  /// The brain's id for the line being spoken, to answer it.
+  String? get voiceSayId => _spoken?.sayId;
 
   static const moodWords = {
     DaemonMood.idle: 'content',
@@ -459,8 +478,60 @@ class DaemonFace extends ChangeNotifier {
 
   void _say(String line, {required DaemonMood? mood}) {
     if (line.isEmpty) return;
-    _pendingVoice = (line: line, at: _now(), mood: mood);
+    final now = _now();
+    // With a brain, a roster line waits a moment for the brain's own words.
+    final waits =
+        brainActive &&
+        (mood == DaemonMood.need ||
+            mood == DaemonMood.done ||
+            mood == DaemonMood.fail ||
+            mood == DaemonMood.back);
+    _pendingVoice = _Line(
+      line,
+      at: now,
+      mood: mood,
+      holdUntil: waits ? now.add(brainWait) : null,
+    );
     _trySpeak();
+  }
+
+  /// The brain's line (`daemon_say`): it replaces the roster's and speaks as
+  /// soon as you are not typing and no dialog is open.
+  void sayFromBrain(DaemonSay say) {
+    if (_disposed || def == null) return;
+    _pendingVoice = _Line(
+      say.line,
+      at: _now(),
+      mood: say.mood,
+      sayId: say.id,
+      actions: say.actions,
+      ttl: say.ttl,
+    );
+    _trySpeak();
+  }
+
+  /// A line of the window's own, such as why an answer did not go through.
+  void sayNote(String line) {
+    if (_disposed || def == null) return;
+    _say(line, mood: null);
+  }
+
+  /// `daemon_unsay`: answered elsewhere, gone, done or stale.
+  void unsay(String id) {
+    if (_pendingVoice?.sayId == id) _pendingVoice = null;
+    if (_spoken?.sayId == id) _silence();
+  }
+
+  /// Escape, or an answer given: the line goes.
+  void dismissVoice() => _silence();
+
+  void _silence() {
+    _voiceTimer?.cancel();
+    _voiceTimer = null;
+    _spoken = null;
+    if (_voice.value == null) return;
+    _voice.value = null;
+    if (!_disposed) notifyListeners();
   }
 
   void _trySpeak() {
@@ -469,14 +540,19 @@ class DaemonFace extends ChangeNotifier {
     final pending = _pendingVoice;
     if (pending == null || _disposed) return;
     final now = _now();
-    if (now.difference(pending.at) > voiceExpires ||
-        (pending.mood == DaemonMood.need && _needIds.isEmpty) ||
+    if (now.difference(pending.at) > (pending.ttl ?? voiceExpires) ||
+        (pending.mood == DaemonMood.need &&
+            pending.sayId == null &&
+            _needIds.isEmpty) ||
         def == null) {
       _pendingVoice = null;
       return;
     }
     Duration? wait;
-    if (_lastKey case final key? when now.difference(key) < typingQuiet) {
+    if (pending.holdUntil case final until? when now.isBefore(until)) {
+      wait = until.difference(now);
+    } else if (_lastKey case final key?
+        when now.difference(key) < typingQuiet) {
       wait = typingQuiet - now.difference(key);
     } else if (quiet() || !_foreground) {
       wait = const Duration(milliseconds: 500);
@@ -486,13 +562,11 @@ class DaemonFace extends ChangeNotifier {
       return;
     }
     _pendingVoice = null;
+    _spoken = pending;
     _voice.value = '$name: ${pending.line}';
     _voiceTimer?.cancel();
-    _voiceTimer = Timer(voiceFor, () {
-      if (_disposed) return;
-      _voice.value = null;
-      notifyListeners();
-    });
+    final showFor = pending.actions.isEmpty ? voiceFor : pending.ttl ?? askFor;
+    _voiceTimer = Timer(showFor, _silence);
     notifyListeners();
   }
 
@@ -567,4 +641,25 @@ class DaemonFace extends ChangeNotifier {
     _voice.dispose();
     super.dispose();
   }
+}
+
+class _Line {
+  const _Line(
+    this.line, {
+    required this.at,
+    this.mood,
+    this.sayId,
+    this.actions = const [],
+    this.ttl,
+    this.holdUntil,
+  });
+  final String line;
+  final DateTime at;
+  final DaemonMood? mood;
+  final String? sayId;
+  final List<DaemonAction> actions;
+  final Duration? ttl;
+
+  /// A roster line waiting for the brain's words until then.
+  final DateTime? holdUntil;
 }

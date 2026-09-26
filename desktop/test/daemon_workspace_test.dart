@@ -13,6 +13,7 @@ import 'package:harness/daemons/zoo_controller.dart';
 import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
+import 'package:harness/ws/local_cli_discovery.dart';
 import 'package:harness/state/swarm_catalog.dart' show SwarmProjectStore;
 
 import 'daemons/zoo_test.dart' show FakeZooTransport;
@@ -67,6 +68,7 @@ void main() {
           projectStore: SwarmProjectStore(),
           zoo: zoo,
           zooTransport: remote,
+          daemonClock: () => tester.binding.clock.now(),
         ),
       ),
     );
@@ -466,4 +468,183 @@ void main() {
       },
     );
   }
+  group('the pair brain', () {
+    late List<(String, Map<String, dynamic>)> frames;
+    setUp(() {
+      frames = [];
+      // This computer's own harnessd: the only socket daemon_* frames use.
+      app.stateOf('m')!.localEndpoint = LocalCliEndpoint(
+        computerId: 'test-computer',
+        wsUri: Uri.parse('ws://fixture.invalid'),
+        protocolVersion: 1,
+        terminalProtocolVersion: 3,
+      );
+      app.daemonFrameSenderForTest = (type, payload) {
+        frames.add((type, payload));
+        return true;
+      };
+    });
+
+    Future<void> frame(
+      WidgetTester tester,
+      String type,
+      Map<String, dynamic> payload, {
+      String machine = 'm',
+    }) async {
+      await app.handleMachineEventForTest(machine, {
+        'type': type,
+        'payload': payload,
+      });
+      await tester.pump();
+    }
+
+    const zooWithTim = Zoo(
+      daemons: [ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first')],
+      pair: 'tim',
+      habits: _habits5,
+      firstEgg: true,
+    );
+    final question = {
+      'id': 'q1',
+      'about': 'office/a1',
+      'mood': 'need',
+      'line': 'codex@office wants to run the migration.',
+      'actions': [
+        {'key': 'y', 'label': 'run it', 'choice': '1'},
+        {'key': 'n', 'label': 'not now', 'choice': '3'},
+      ],
+    };
+
+    testWidgets('its state drives the face; its line offers answers', (
+      tester,
+    ) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      expect(glyph(tester), '[oo]');
+      await frame(tester, 'daemon_state', {
+        'pair': 'tim',
+        'needs': [
+          {
+            'machineId': 'office',
+            'agentId': 'a1',
+            'requestId': 'r1',
+            'name': 'migration',
+          },
+        ],
+        'working': false,
+        'failing': [],
+        'machines': [],
+      });
+      expect(glyph(tester), '[??]', reason: 'a harness on another machine');
+      expect(frames.first.$1, 'daemon_presence');
+      expect(frames.first.$2['active'], isTrue);
+      expect(frames.first.$2['desk'], isA<String>());
+      expect(frames.first.$2.containsKey('pair'), isFalse, reason: 'signed in');
+      await frame(tester, 'daemon_say', question);
+      expect(
+        find.text('tim: codex@office wants to run the migration.'),
+        findsOneWidget,
+      );
+      expect(find.text('[y] run it'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('daemon-answer-y')));
+      await tester.pump();
+      expect(frames.last.$1, 'daemon_act');
+      expect(frames.last.$2['id'], 'q1');
+      expect(frames.last.$2['choice'], '1');
+      expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
+      // The chord answers too: ⌘⌥N.
+      await frame(tester, 'daemon_say', {...question, 'id': 'q2'});
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyN);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pump();
+      expect(frames.last.$2['id'], 'q2');
+      expect(frames.last.$2['choice'], '3');
+      // A stale answer is explained in one line.
+      await frame(tester, 'daemon_act_result', {
+        'requestId': frames.last.$2['requestId'],
+        'id': 'q2',
+        'ok': false,
+        'error': 'STALE_QUESTION',
+      });
+      await tester.pump(const Duration(seconds: 3));
+      expect(
+        find.text('tim: that question changed before the answer landed.'),
+        findsOneWidget,
+      );
+      // Withdrawn lines go; frames from a relayed socket are never heard.
+      await tester.pump(const Duration(seconds: 6));
+      await frame(tester, 'daemon_say', {...question, 'id': 'q3'});
+      await tester.pump(const Duration(seconds: 3));
+      await frame(tester, 'daemon_unsay', {'id': 'q3', 'reason': 'answered'});
+      expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
+      app.machineStates['r'] = MachineState(
+        const Machine(
+          machineId: 'r',
+          name: 'office',
+          authMode: MachineAuthMode.remote,
+        ),
+      );
+      await frame(tester, 'daemon_say', {
+        ...question,
+        'id': 'q4',
+      }, machine: 'r');
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets('presence follows the window; the brief shows on return', (
+      tester,
+    ) async {
+      app.signedIn = false;
+      await mount(tester);
+      await tester.pump();
+      await frame(tester, 'daemon_state', {'pair': null, 'needs': []});
+      expect(frames.single.$2['active'], isTrue);
+      expect(
+        frames.single.$2.containsKey('pair'),
+        isFalse,
+        reason: 'no pair yet',
+      );
+      // A guest's pair lives in its local zoo: the brain hears it paired.
+      for (final key in _habits5) {
+        zoo.habit(key);
+      }
+      final hatched = await zoo.hatch(zoo.readyEgg!.id);
+      await tester.pump();
+      expect(frames.last.$2['pair'], hatched!.daemonId);
+      app.appLifecycleChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(frames.last.$2['active'], isFalse);
+      app.appLifecycleChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(frames.last.$2['active'], isTrue);
+      expect(frames.last.$2['awayMs'], isA<int>());
+      expect(frames.last.$2['pair'], hatched.daemonId, reason: 'a guest');
+      await frame(tester, 'daemon_brief', {
+        'desk': frames.last.$2['desk'],
+        'line': 'welcome back. 2 done, 1 waiting 40m.',
+        'items': [
+          {
+            'id': 'i1',
+            'kind': 'waiting',
+            'machine': 'office',
+            'line': 'migration waits 40m',
+          },
+        ],
+      });
+      await tester.pump();
+      expect(find.byKey(const ValueKey('daemon-brief')), findsOneWidget);
+      expect(
+        find.textContaining('office  migration waits 40m'),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(seconds: 11));
+      expect(find.byKey(const ValueKey('daemon-brief')), findsNothing);
+      await unmount(tester);
+    });
+  });
 }

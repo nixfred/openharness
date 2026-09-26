@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
+import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
@@ -34,8 +35,12 @@ class DaemonPanel extends StatefulWidget {
     required this.onHatch,
     required this.onCommand,
     required this.shortcut,
+    this.brief,
   });
   final DaemonFace face;
+
+  /// The pair brain's last brief (`daemon_brief`), when harnessd has a brain.
+  final DaemonBrief? brief;
   final VoidCallback onClose;
   final ValueChanged<ZooEgg> onHatch;
   final ValueChanged<String> onCommand;
@@ -490,6 +495,19 @@ class _DaemonPanelState extends State<DaemonPanel> {
           style: _ink(_theme.yellow),
         ),
       ),
+      if (widget.brief case final brief?
+          when brief.line.isNotEmpty || brief.items.isNotEmpty) ...[
+        SizedBox(height: _cell.height),
+        Text(
+          [
+            if (brief.line.isNotEmpty) brief.line,
+            for (final item in brief.items)
+              '  ${item.machine.isEmpty ? '' : '${item.machine}  '}${item.line}',
+          ].join('\n'),
+          key: const ValueKey('daemon-panel-brief'),
+          style: _ink(_muted),
+        ),
+      ],
       SizedBox(height: _cell.height),
       Text(
         'zoo ${zoo.daemons.map((d) => d.id).toSet().length}/${roster.daemons.length}'

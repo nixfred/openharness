@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/local_key_value_store.dart';
+import 'package:harness/daemons/daemon_brain.dart';
 import 'package:harness/daemons/daemon_face.dart';
 import 'package:harness/daemons/roster.dart';
 import 'package:harness/daemons/zoo.dart';
@@ -385,4 +386,79 @@ void main() {
     expect(face.glyph, '[o|o]');
     await pass(tester, const Duration(seconds: 6));
   });
+  testWidgets('with a brain, a roster line waits 2.5 s for the brain\'s own', (
+    tester,
+  ) async {
+    await mount(tester);
+    face.brainActive = true;
+    face.sync(const DaemonWatch(turns: {'m': 1}));
+    face.sync(const DaemonWatch(turns: {'m': 2}));
+    expect(face.mood, DaemonMood.done, reason: 'the face does not wait');
+    expect(face.voice, isNull, reason: 'the line waits for the brain');
+    await pass(tester, const Duration(seconds: 1));
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 's1',
+        line: 'claude finished the auth refactor. 3 files, tests pass.',
+        mood: DaemonMood.done,
+      ),
+    );
+    expect(
+      face.voice,
+      'tim: claude finished the auth refactor. 3 files, tests pass.',
+    );
+    await pass(tester, const Duration(seconds: 6));
+    expect(face.voice, isNull);
+    // No brain line in time: the roster's line after 2.5 s.
+    await pass(tester, const Duration(seconds: 20));
+    face.sync(const DaemonWatch(turns: {'m': 3}));
+    await pass(tester, const Duration(milliseconds: 2400));
+    expect(face.voice, isNull);
+    await pass(tester, const Duration(milliseconds: 200));
+    expect(
+      face.voice,
+      'tim: claude finished the refactor. 3 files, tests pass.',
+    );
+    await pass(tester, const Duration(seconds: 6));
+  });
+
+  testWidgets(
+    'a line with answers stays until answered, withdrawn or its ttl',
+    (tester) async {
+      await mount(tester);
+      const say = DaemonSay(
+        id: 'q1',
+        line: 'codex@office wants to run the migration.',
+        mood: DaemonMood.need,
+        actions: [
+          (key: 'y', label: 'run it', choice: '1'),
+          (key: 'n', label: 'not now', choice: '3'),
+        ],
+      );
+      face.sayFromBrain(say);
+      expect(face.voiceActions.map((a) => a.key), ['y', 'n']);
+      expect(face.voiceSayId, 'q1');
+      await pass(tester, const Duration(seconds: 10));
+      expect(face.voice, isNotNull, reason: 'a question outlasts 5.2 s');
+      face.unsay('q1');
+      expect(face.voice, isNull);
+      expect(face.voiceActions, isEmpty);
+      face.sayFromBrain(
+        const DaemonSay(
+          id: 'q2',
+          line: 'claude asks which branch.',
+          actions: [(key: 'y', label: 'main', choice: 'main')],
+          ttl: Duration(seconds: 3),
+        ),
+      );
+      await pass(tester, const Duration(seconds: 3));
+      expect(face.voice, isNull, reason: 'its ttl ran out');
+      face.sayNote('that question changed before the answer landed.');
+      expect(
+        face.voice,
+        'tim: that question changed before the answer landed.',
+      );
+      await pass(tester, const Duration(seconds: 6));
+    },
+  );
 }

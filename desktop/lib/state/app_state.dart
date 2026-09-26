@@ -574,6 +574,37 @@ class AppNotifier extends ChangeNotifier {
   /// workspace (lib/daemons/zoo_controller.dart), not in this notifier.
   final StreamController<int?> _zooPushes = StreamController<int?>.broadcast();
   Stream<int?> get zooPushes => _zooPushes.stream;
+
+  /// The pair brain's local frames (`daemon_state`, `daemon_say`, ...), heard
+  /// only from this computer's own harnessd (daemons/BRAIN.md).
+  final StreamController<({String type, Map<String, dynamic> payload})>
+  _daemonFrames = StreamController.broadcast();
+  Stream<({String type, Map<String, dynamic> payload})> get daemonFrames =>
+      _daemonFrames.stream;
+
+  /// Replaces the socket send in tests.
+  @visibleForTesting
+  bool Function(String type, Map<String, dynamic> payload)?
+  daemonFrameSenderForTest;
+
+  /// Send a `daemon_*` frame on the socket bound to this computer's own
+  /// harnessd, never on a relayed one: an older daemon forwards unknown frames
+  /// from a relayed socket to the cloud. False when there is no such socket.
+  bool sendDaemonFrame(String type, Map<String, dynamic> payload) {
+    final test = daemonFrameSenderForTest;
+    if (test != null) return test(type, payload);
+    for (final machine in machineStates.values) {
+      if (!machine.usesLocalTransport) continue;
+      final connection = _pool?[machine.machine.machineId];
+      if (connection == null || !connection.isReady) return false;
+      unawaited(
+        connection.sendTerminalFrame(type, payload).catchError((_) => false),
+      );
+      return true;
+    }
+    return false;
+  }
+
   Stream<void> get modelsRequests => _modelsRequests.stream;
   final LocalManualFixture? localManualFixture;
   final Duration turnActivityTimeout;
@@ -11184,6 +11215,16 @@ class AppNotifier extends ChangeNotifier {
           unawaited(_deskFetch());
         }
         break;
+      case 'daemon_state':
+      case 'daemon_say':
+      case 'daemon_unsay':
+      case 'daemon_brief':
+      case 'daemon_act_result':
+        // Only from the loopback socket bound to this computer's harnessd.
+        if (machine.usesLocalTransport) {
+          _daemonFrames.add((type: type, payload: payload));
+        }
+        return;
       case 'zoo_changed':
         // The account's daemons and eggs changed (daemons/README.md). Its own
         // path: a zoo change never re-reads the desk, and the other way round.
@@ -11606,6 +11647,7 @@ class AppNotifier extends ChangeNotifier {
     }
     unawaited(_spokenTasks.close());
     unawaited(_zooPushes.close());
+    unawaited(_daemonFrames.close());
     unawaited(_modelsRequests.close());
     super.dispose();
   }
