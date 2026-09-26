@@ -221,7 +221,12 @@ Future<void> _capture(
 }
 
 /// One status bar: context text, then the slot, as the workspace draws it.
-Widget _bar(BuildContext context, DaemonFace face, String caption) {
+Widget _bar(
+  BuildContext context,
+  DaemonFace face,
+  String caption, {
+  DaemonBrain? brain,
+}) {
   final theme = currentTerminalTheme();
   final cell = workspaceBarCellSizeOf(context);
   return Container(
@@ -246,6 +251,7 @@ Widget _bar(BuildContext context, DaemonFace face, String caption) {
         Expanded(
           child: DaemonVoiceLine(
             face: face,
+            brain: brain,
             onAnswer: (_) {},
             fallback: Align(
               alignment: Alignment.centerRight,
@@ -605,6 +611,13 @@ void main() {
       null,
     ),
     (
+      'panel-nest-single-machine',
+      const Zoo(habits: ['split', 'find']),
+      Brightness.dark,
+      const DaemonWatch(),
+      null,
+    ),
+    (
       'panel-egg-ready',
       const Zoo(
         habits: ['turn', 'split', 'find', 'machine', 'store'],
@@ -688,10 +701,13 @@ void main() {
       'daemon-card',
     ),
   ];
+  // The now tab tells what is going on; the rest show the zoo.
+  const nowPanels = {'panel-vim-need', 'panel-away-calm'};
   for (final (name, zoo, brightness, watch, tap) in panels) {
     testWidgets('panel: $name', (tester) async {
       final face = await _face(tester, zoo);
       face.sync(watch);
+      face.settings.tab = nowPanels.contains(name) ? 'now' : 'zoo';
       await _capture(
         tester,
         name,
@@ -741,6 +757,12 @@ void main() {
       if (name == 'panel-away-calm') {
         expect(face.mood, DaemonMood.idle, reason: 'asleep is not a failure');
         expect(find.byKey(const ValueKey('daemon-panel-away')), findsOneWidget);
+      }
+      if (name == 'panel-nest-single-machine') {
+        expect(
+          find.text('all of it can happen on this computer.'),
+          findsOneWidget,
+        );
       }
       await tester.pumpWidget(const SizedBox());
       face.sync(const DaemonWatch());
@@ -877,13 +899,23 @@ void main() {
     await tester.pump(const Duration(minutes: 3));
   });
 
-  /// A brain that has heard a whole session: talk, asks, a brief, a journal
-  /// and machines, and answers the lessons list itself.
-  DaemonBrain pairBrain({bool keysLive = true}) {
+  /// A brain that has heard a whole session, as a hardened harnessd sends it:
+  /// talk, asks with their harness and detail, a lesson waiting, a brief, a
+  /// journal, the dial and machines; it answers the lessons list itself. Its
+  /// clock is the test's, so lines arm as they would.
+  DaemonBrain pairBrain(
+    WidgetTester tester, {
+    bool keysLive = true,
+    String autonomy = 'suggest',
+    List<Map<String, dynamic>> confirms = const [],
+    String? requested,
+    bool asks = true,
+    bool brief = true,
+  }) {
     late final DaemonBrain brain;
-    final now = DateTime.now();
+    var offset = Duration.zero;
     brain = DaemonBrain(
-      now: () => keysLive ? now : now.add(const Duration(minutes: 5)),
+      now: () => tester.binding.clock.now().add(offset),
       send: (type, payload) {
         if (type == 'pair' && payload['verb'] == 'lessons') {
           final requestId = payload['requestId'];
@@ -893,8 +925,8 @@ void main() {
               'show' => {
                 'ok': true,
                 'text':
-                    '---\nname: run-migrations-safely\n---\n'
-                    'Back up the database, then `npm run migrate`.',
+                    '---\nname: tests-need-docker\n---\n'
+                    'Start docker before `npm test` in api.',
               },
               _ => {
                 'ok': true,
@@ -909,10 +941,19 @@ void main() {
                     'learnedBy': 'tim',
                   },
                   {
+                    'id': 'l2',
+                    'kind': 'skill',
+                    'name': 'tests-need-docker',
+                    'status': 'pending',
+                    'description': 'Start docker before the api tests.',
+                    'learnedBy': 'tim',
+                  },
+                  {
                     'id': 'l0',
                     'kind': 'note',
                     'name': 'note-l0',
                     'status': 'approved',
+                    'approved': '2026-09-25',
                     'project': 'api',
                     'description': 'Tests need docker running.',
                     'learnedBy': 'tim',
@@ -937,6 +978,10 @@ void main() {
           'name': 'api',
           'requestId': 'r1',
           'question': 'Bash: npm test',
+          'allow': true,
+          'detail':
+              'Bash command\n\n  npm test -- --runInBand\n  Run the api tests\n\n'
+              'Do you want to proceed?\n> 1. Yes\n  3. No',
           'id': 'need:office:e:1',
           'line': '[y/n/g] api@office Bash: npm test',
           'actions': [
@@ -963,14 +1008,42 @@ void main() {
       ],
       'done': {'count': 0, 'last': []},
       'asks': [
-        {
-          'id': 'ask:7',
-          'line': '[y/n] start codex in ~/api?',
-          'actions': [
-            {'key': 'y', 'label': 'do it', 'choice': 'y'},
-            {'key': 'n', 'label': 'skip', 'choice': 'n'},
-          ],
-        },
+        if (asks) ...[
+          {
+            'id': 'ask:7',
+            'line': '[y/n] start codex in ~/code/api?',
+            'from': 'pair',
+            'verb': 'start_harness',
+            'harness': {
+              'machineId': 'm',
+              'machine': 'laptop',
+              'agentId': null,
+              'name': 'codex',
+            },
+            'detail':
+                'start codex in ~/code/api (mode ask)\nfirst prompt: run the '
+                'migrations on a copy of the database and report what fails',
+            'actions': [
+              {'key': 'y', 'label': 'do it', 'choice': 'y'},
+              {'key': 'n', 'label': 'skip', 'choice': 'n'},
+            ],
+          },
+          {
+            'id': 'lesson:l1:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f',
+            'line':
+                '[y/n/s] teach your agents "run-migrations-safely"? you '
+                'corrected codex.',
+            'detail':
+                '---\nname: run-migrations-safely\ndescription: Back up before '
+                'migrating.\n---\n1. `npm run db:backup`\n2. `npm run migrate`\n'
+                '3. If it fails: `npm run db:restore`',
+            'actions': [
+              {'key': 'y', 'label': 'teach', 'choice': 'y'},
+              {'key': 'n', 'label': 'skip', 'choice': 'n'},
+              {'key': 's', 'label': 'show', 'choice': 's'},
+            ],
+          },
+        ],
       ],
       'acted': [
         {
@@ -994,49 +1067,56 @@ void main() {
           'at': at - 12 * 60000,
         },
       ],
+      'autonomy': autonomy,
+      'autonomyRequested': ?requested,
+      'confirms': confirms,
     });
-    brain.receive('daemon_brief', {
-      'desk': 'd',
-      'line': 'reattached. 2 done, 1 waiting 40m, studio asleep.',
-      'items': [
-        {
-          'id': 'brief:office:r1:1',
-          'kind': 'waiting',
-          'machineId': 'office',
-          'machine': 'office',
-          'agentId': 'a1',
-          'name': 'api',
-          'line': '[y/n/g] api@office: Bash: npm test (40m)',
-          'actions': [
-            {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
-            {'key': 'n', 'label': 'No', 'choice': '3. No'},
-          ],
-        },
-        {
-          'id': 'failed:m:a6',
-          'kind': 'failed',
-          'machineId': 'm',
-          'machine': 'laptop',
-          'agentId': 'a6',
-          'line': 'billing failed: exit 1',
-        },
-        {
-          'id': 'asleep:studio',
-          'kind': 'asleep',
-          'machineId': 'studio',
-          'machine': 'studio',
-          'line': 'studio is asleep.',
-        },
-        {
-          'id': 'done:office:a9',
-          'kind': 'done',
-          'machineId': 'office',
-          'machine': 'office',
-          'agentId': 'a9',
-          'line': 'web@office finished 2 turns: deployed the preview.',
-        },
-      ],
-    });
+    if (brief) {
+      brain.receive('daemon_brief', {
+        'desk': 'd',
+        'line': 'reattached. 2 done, 1 waiting 40m, studio asleep.',
+        'items': [
+          {
+            'id': 'brief:office:r1:1',
+            'kind': 'waiting',
+            'machineId': 'office',
+            'machine': 'office',
+            'agentId': 'a1',
+            'name': 'api',
+            'line': '[y/n/g] api@office: Bash: npm test (40m)',
+            'detail': 'Bash command\n\n  npm test -- --runInBand\n',
+            'actions': [
+              {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+              {'key': 'n', 'label': 'No', 'choice': '3. No'},
+            ],
+          },
+          {
+            'id': 'failed:m:a6',
+            'kind': 'failed',
+            'machineId': 'm',
+            'machine': 'laptop',
+            'agentId': 'a6',
+            'line': 'billing failed: exit 1',
+          },
+          {
+            'id': 'asleep:studio',
+            'kind': 'asleep',
+            'machineId': 'studio',
+            'machine': 'studio',
+            'line': 'studio is asleep.',
+          },
+          {
+            'id': 'done:office:a9',
+            'kind': 'done',
+            'machineId': 'office',
+            'machine': 'office',
+            'agentId': 'a9',
+            'line': 'web@office finished 2 turns: deployed the preview.',
+          },
+        ],
+      });
+    }
+    if (!keysLive) offset = const Duration(minutes: 5);
     return brain;
   }
 
@@ -1063,55 +1143,265 @@ void main() {
         ),
       );
 
-  testWidgets('panel: talk, asks, brief, journal, the dial and lessons', (
-    tester,
-  ) async {
-    final face = await _face(tester, _paired('tim', more: ['vim']));
-    final brain = pairBrain();
-    // A talk: one answered, one on its way.
-    final sent = <String>[];
+  Zoo watching(Zoo zoo) => zoo.copyWith(
+    consent: const ZooConsent(
+      watching: true,
+      at: '2026-09-26T09:00:00.000Z',
+    ),
+  );
+
+  /// A face whose brain lines, talk and tabs are live.
+  Future<(DaemonFace, DaemonBrain)> pairPanel(
+    WidgetTester tester,
+    String tab, {
+    Zoo? zoo,
+    String autonomy = 'suggest',
+    List<Map<String, dynamic>> confirms = const [],
+    String? requested,
+    bool asks = true,
+    bool brief = true,
+  }) async {
+    final face = await _face(
+      tester,
+      watching(zoo ?? _paired('tim', more: ['vim', 'fzf'])),
+    );
+    face.settings.tab = tab;
+    final brain = pairBrain(
+      tester,
+      autonomy: autonomy,
+      confirms: confirms,
+      requested: requested,
+      asks: asks,
+      brief: brief,
+    );
+    face.sync(
+      DaemonWatch(
+        asks: brain.state!.asks.length + brain.state!.confirms.length,
+        needIds: const {'office/a1#r1', 'm/a4#r4'},
+        needs: const {
+          'office/a1#r1': DaemonSubject(
+            'office/a1',
+            who: 'claude@office',
+            q: 'Bash: npm test',
+          ),
+        },
+        away: const [DaemonMachine(name: 'studio', status: 'asleep')],
+        autonomy: autonomy,
+        autonomyRequested: requested,
+      ),
+    );
+    return (face, brain);
+  }
+
+  Future<void> settle(WidgetTester tester) async {
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+  }
+
+  // ── round 4: consent, trust, and a panel you can scan ──────────────────
+
+  testWidgets('panel tab 1: now (the line, what waits, the brief, what tim '
+      'did, the talk)', (tester) async {
+    final (face, brain) = await pairPanel(tester, 'now');
     brain.talkTo('what needs me?');
-    sent.add('t1');
     brain.receive('daemon_say', {
       'id': 'say:1',
       'about': {'machineId': 'm', 'agentId': ''},
       'mood': 'say',
+      'from': 'pair',
       'line': 'api@office waits on npm test, 40m. studio is asleep.',
       'actions': [],
       'ttlMs': 30000,
     });
     brain.talkTo('approve it if the tests are only unit tests');
-    face.sync(
-      const DaemonWatch(
-        asks: 1,
-        needIds: {'office/a1#r1', 'm/a4#r4'},
-        away: [DaemonMachine(name: 'studio', status: 'asleep')],
+    await _capture(
+      tester,
+      'panel-tab-1-now',
+      const Size(560, 2400),
+      act: () => settle(tester),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.text('1:now*'), findsOneWidget);
+    expect(find.text('<tim> start codex in ~/code/api?'), findsOneWidget);
+    expect(find.text('codex@laptop'), findsOneWidget, reason: 'the harness');
+    expect(find.textContaining('first prompt: run the migrations'), findsOneWidget);
+    expect(find.text('web@laptop: Which branch should I use?'), findsOneWidget);
+    expect(find.text('what tim did'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-talk-cost')), findsOneWidget);
+    expect(brain.wasShown('ask:7'), isTrue, reason: 'on screen, so shown');
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('panel tab 2: zoo', (tester) async {
+    final (face, brain) = await pairPanel(
+      tester,
+      'zoo',
+      zoo: _paired(
+        'tim',
+        more: ['vim', 'fzf'],
+        eggs: const [
+          ZooEgg(id: 'e1', kind: 'turn', grantedAt: ''),
+          ZooEgg(id: 'e2', kind: 'week', grantedAt: ''),
+        ],
+        progress: ZooProgress(turns: 108, days: {today: 7}),
       ),
     );
     await _capture(
       tester,
-      'panel-pair',
-      const Size(560, 2300),
+      'panel-tab-2-zoo',
+      const Size(560, 1250),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.text('2:zoo*'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-portrait')), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-panel-zoo')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('panel tab 3: lessons (the proposed one in full, keys '
+      'arming; the rest by terminal)', (tester) async {
+    final (face, brain) = await pairPanel(tester, 'lessons');
+    await _capture(
+      tester,
+      'panel-tab-3-lessons-arming',
+      const Size(560, 1200),
       act: () async {
-        final approve = find.byKey(const ValueKey('daemon-lesson-approve:l1'));
-        await tester.ensureVisible(approve);
-        await tester.tap(approve);
         await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
       },
       (context) => panelFor(context, face, brain),
     );
-    expect(find.byKey(const ValueKey('daemon-talk-input')), findsOneWidget);
-    expect(find.text('waking tim...'), findsOneWidget);
-    expect(find.text('start codex in ~/api?'), findsOneWidget);
-    expect(find.text('web@laptop: Which branch should I use?'), findsOneWidget);
-    expect(find.text('api@office: Bash: npm test (40m)'), findsOneWidget);
-    expect(find.byKey(const ValueKey('daemon-panel-journal')), findsOneWidget);
+    const id = 'lesson:l1:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f';
+    expect(
+      find.byKey(const ValueKey('daemon-key-lesson-ask:$id-y-arming')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('npm run db:restore'), findsOneWidget);
+    expect(find.textContaining('harness pair lessons approve l2'), findsOneWidget);
+    await _capture(
+      tester,
+      'panel-tab-3-lessons',
+      const Size(560, 1200),
+      act: () async {
+        await settle(tester);
+        await tester.tap(find.byKey(const ValueKey('daemon-lesson-show:l2')));
+        await settle(tester);
+      },
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.byKey(const ValueKey('daemon-key-lesson-ask:$id-y')), findsOneWidget);
+    expect(find.textContaining('Start docker before'), findsWidgets);
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('panel tab 4: settings (switches, the dial, the floor, '
+      'consent)', (tester) async {
+    final (face, brain) = await pairPanel(tester, 'settings');
+    await _capture(
+      tester,
+      'panel-tab-4-settings',
+      const Size(560, 1300),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.text('4:settings*'), findsOneWidget);
     expect(find.text('(*) suggest'), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-panel-floor')), findsOneWidget);
     expect(
-      find.text('teach "run-migrations-safely" to every agent?'),
+      find.textContaining('tim watches your harnesses since 2026-09-26'),
       findsOneWidget,
     );
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  const autonomyConfirm = {
+    'id': 'confirm:autonomy:k1',
+    'kind': 'autonomy',
+    'nonce': 'k1',
+    'line':
+        '[y/n] let your daemon act at act-on-key? it stays at suggest until '
+        'you say yes',
+    'detail':
+        'autonomy suggest -> act-on-key\nact-on-key: it drives harnesses it '
+        'started without asking (the floor still holds); the rest wait for '
+        'your key.\nThe floor holds at every level: nothing is deleted, '
+        'restarted, forked or bypassed; a push, force, rm -rf, sudo, deploy, '
+        'publish, drop or merge is never approved; only a one-time yes to an '
+        'allow-class prompt.',
+    'actions': [
+      {'key': 'y', 'label': 'confirm', 'choice': 'y'},
+      {'key': 'n', 'label': 'keep it as it is', 'choice': 'n'},
+    ],
+    'level': 'act-on-key',
+  };
+
+  testWidgets('an autonomy confirm: exactly what changes, keys armed', (
+    tester,
+  ) async {
+    final (face, brain) = await pairPanel(
+      tester,
+      'settings',
+      confirms: [autonomyConfirm],
+      requested: 'act-on-key',
+    );
+    await _capture(
+      tester,
+      'panel-autonomy-confirm',
+      const Size(560, 1500),
+      act: () => settle(tester),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.text('(~) act on key  waits for your yes'), findsOneWidget);
+    expect(
+      find.byKey(
+        const ValueKey('daemon-key-confirm:confirm:autonomy:k1-y'),
+      ),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('a pair.jsonc confirm lists what it turns on', (tester) async {
+    final (face, brain) = await pairPanel(
+      tester,
+      'settings',
+      confirms: [
+        {
+          'id': 'confirm:rules:n2',
+          'kind': 'rules',
+          'nonce': 'n2',
+          'line':
+              '[y/n] use pair.jsonc as it is now? 1 rule, model off, learn '
+              'borrow + export claude; until you say yes, none of it',
+          'detail':
+              'pair.jsonc (1 rule, model off, learn borrow + export claude):\n'
+              '{\n  "learn": { "borrow": true, "export": ["claude"] },\n'
+              '  "rules": [{ "name": "tests in api", "harness": "api*", '
+              '"question": "npm (run )?test", "choice": "Yes" }]\n}',
+          'actions': [
+            {'key': 'y', 'label': 'confirm', 'choice': 'y'},
+            {'key': 'n', 'label': 'keep it as it is', 'choice': 'n'},
+          ],
+        },
+      ],
+    );
+    await _capture(
+      tester,
+      'panel-rules-confirm',
+      const Size(560, 1500),
+      act: () => settle(tester),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.textContaining('learn.borrow'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     face.sync(const DaemonWatch());
     await tester.pump(const Duration(minutes: 3));
@@ -1120,29 +1410,208 @@ void main() {
   testWidgets('panel: the dial at act within rules, a light terminal', (
     tester,
   ) async {
-    final face = await _face(
+    final (face, brain) = await pairPanel(
       tester,
-      _paired('tim').copyWith(autonomy: 'act-within-rules'),
+      'settings',
+      zoo: _paired('tim').copyWith(autonomy: 'act-within-rules'),
+      autonomy: 'act-within-rules',
     );
-    final brain = pairBrain(keysLive: false);
     await _capture(
       tester,
       'panel-autonomy-light',
-      const Size(560, 2100),
+      const Size(560, 1300),
       brightness: Brightness.light,
       (context) => panelFor(context, face, brain),
     );
     expect(find.text('(*) act within rules'), findsOneWidget);
+    expect(find.text('[act within rules]'), findsOneWidget, reason: 'badge');
     await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('what tim did: the journal and what it taught, with revert', (
+    tester,
+  ) async {
+    final (face, brain) = await pairPanel(
+      tester,
+      'now',
+      asks: false,
+      brief: false,
+    );
+    await _capture(
+      tester,
+      'panel-what-tim-did',
+      const Size(560, 900),
+      act: () => settle(tester),
+      (context) => panelFor(context, face, brain),
+    );
+    expect(find.byKey(const ValueKey('daemon-panel-did')), findsOneWidget);
+    expect(find.text('noted for api · 2026-09-25'), findsOneWidget);
+    expect(find.byKey(const ValueKey('daemon-did-revert:l0')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('a say with its detail: the disclosure under the status line, '
+      'keys arming, then armed', (tester) async {
+    final face = await _face(tester, watching(_paired('tim')));
+    final brain = pairBrain(tester);
+    face.sync(
+      const DaemonWatch(
+        needIds: {'office/a1#r1'},
+        needs: {
+          'office/a1#r1': DaemonSubject(
+            'office/a1',
+            who: 'claude@office',
+            q: 'Bash: npm test',
+          ),
+        },
+      ),
+    );
+    const detail =
+        'Bash command\n\n  npm test -- --runInBand\n  Run the api tests\n\n'
+        'Do you want to proceed?\n> 1. Yes\n  2. Yes, and don\'t ask again for '
+        'npm test commands in ~/code/api\n  3. No, and tell Claude what to do '
+        'differently (esc)';
+    final say = DaemonSay.fromJson({
+      'id': 'need:office:e:1',
+      'about': {'machineId': 'office', 'agentId': 'a1', 'requestId': 'r1'},
+      'mood': 'need',
+      'line': '[y/n/g] api@office Bash: npm test',
+      'detail': detail,
+      'harness': {
+        'machineId': 'office',
+        'machine': 'office',
+        'agentId': 'a1',
+        'name': 'api',
+      },
+      'actions': [
+        {'key': 'y', 'label': 'Yes', 'choice': '1. Yes'},
+        {'key': 'n', 'label': 'No', 'choice': '3. No'},
+        {'key': 'g', 'label': 'open', 'choice': 'open'},
+      ],
+      'ttlMs': 5200,
+    })!;
+    face.sayFromBrain(say);
+    Widget scene(BuildContext context) => Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _bar(context, face, 'need, with detail', brain: brain),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: SizedBox(
+            width: workspaceBarCellSizeOf(context).width * 72,
+            child: DaemonDetailNotice(
+              title: 'api@office · exactly what a key does',
+              detail: detail,
+              actions: say.actions,
+              onShown: () => brain.shown(say.id),
+            ),
+          ),
+        ),
+      ],
+    );
+    await _capture(
+      tester,
+      'status-detail-arming',
+      const Size(900, 360),
+      scene,
+    );
+    expect(find.byKey(const ValueKey('daemon-answer-y-arming')), findsOneWidget);
+    expect(brain.wasShown(say.id), isTrue);
+    await tester.pump(DaemonBrain.armAfter);
+    await _capture(
+      tester,
+      'status-detail-armed',
+      const Size(900, 360),
+      scene,
+    );
+    expect(find.byKey(const ValueKey('daemon-answer-y')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    face.sync(const DaemonWatch());
+    await tester.pump(const Duration(minutes: 3));
+  });
+
+  testWidgets('the pair speaking: its nick, no keys; its proposal keys first',
+      (tester) async {
+    final brain = pairBrain(tester, brief: false);
+    Future<DaemonFace> saying(Map<String, dynamic> raw) async {
+      final face = await _face(tester, watching(_paired('tim')));
+      if (raw['mood'] == 'ask') face.sync(const DaemonWatch(asks: 1));
+      face.sayFromBrain(DaemonSay.fromJson(raw)!);
+      return face;
+    }
+
+    final rows = <(String, DaemonFace)>[
+      (
+        'the pair says',
+        await saying({
+          'id': 'say:1',
+          'about': {'machineId': 'm', 'agentId': ''},
+          'mood': 'say',
+          'from': 'pair',
+          'line': 'api waits on npm test, 40m. studio is asleep.',
+          'actions': [],
+          'ttlMs': 30000,
+        }),
+      ),
+      (
+        'a fact (daemon)',
+        await saying({
+          'id': 'set:autonomy:1',
+          'about': {'machineId': 'm', 'agentId': ''},
+          'mood': 'say',
+          'from': 'daemon',
+          'line': 'autonomy suggest -> act-on-key: it drives harnesses it '
+              'started.',
+          'actions': [],
+          'ttlMs': 30000,
+        }),
+      ),
+      (
+        'the pair proposes',
+        await saying({
+          'id': 'ask:7',
+          'about': {'machineId': 'm', 'agentId': ''},
+          'mood': 'ask',
+          'from': 'pair',
+          'line': '[y/n] start codex in ~/code/api?',
+          'actions': [
+            {'key': 'y', 'label': 'do it', 'choice': 'y'},
+            {'key': 'n', 'label': 'skip', 'choice': 'n'},
+          ],
+          'ttlMs': 5200,
+        }),
+      ),
+    ];
+    await _capture(
+      tester,
+      'status-pair-voice',
+      Size(900, 30.0 * rows.length + 20),
+      (context) => Column(
+        children: [
+          for (final (label, face) in rows)
+            _bar(context, face, label, brain: brain),
+        ],
+      ),
+    );
+    expect(find.textContaining('<tim> ', findRichText: true), findsWidgets);
+    await tester.pumpWidget(const SizedBox());
+    for (final (_, face) in rows) {
+      face.sync(const DaemonWatch());
+    }
     await tester.pump(const Duration(minutes: 3));
   });
 
   testWidgets('the brief on return, under the status line', (tester) async {
-    final brain = pairBrain();
+    final brain = pairBrain(tester);
     await _capture(
       tester,
       'brief-notice',
-      const Size(760, 200),
+      const Size(760, 320),
+      act: () => settle(tester),
       (context) => Align(
         alignment: Alignment.topRight,
         child: Padding(
@@ -1150,6 +1619,9 @@ void main() {
           child: DaemonBriefNotice(
             name: 'tim',
             brief: brain.brief!,
+            armed: brain.armed,
+            arming: brain,
+            onShown: brain.shown,
             onAnswer: (_, _, _) {},
           ),
         ),
@@ -1157,8 +1629,132 @@ void main() {
     );
     expect(find.text('api@office: Bash: npm test (40m)'), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-brief-key-0-y')), findsOneWidget);
+    expect(find.textContaining('npm test -- --runInBand'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
+
+  for (final (name, stage) in [
+    ('hatch-consent', HatchStage.consent),
+    ('hatch-consent-suggest', HatchStage.suggest),
+  ]) {
+    testWidgets('the consent after a hatch: $name', (tester) async {
+      await _capture(
+        tester,
+        name,
+        const Size(520, 620),
+        (context) => Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: SizedBox(
+              width: terminalCellSizeOf(context).width * 46,
+              child: DaemonHatchReveal(
+                roster: _roster,
+                egg: egg,
+                result: Future.value(
+                  const ZooHatch(eggId: 'egg1', daemonId: 'tim', shiny: false),
+                ),
+                zoo: () => _paired('tim', version: '0.1'),
+                needsConsent: true,
+                onClose: () {},
+                still: HatchFrame(stage: stage),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.byKey(
+          ValueKey(
+            stage == HatchStage.consent
+                ? 'daemon-consent-watch'
+                : 'daemon-consent-suggest-yes',
+          ),
+        ),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final (name, morph) in [
+    ('hatch-levelup-morph-1', 1),
+    ('hatch-levelup-morph-2', 2),
+    ('hatch-levelup-morph-3', 3),
+    ('hatch-levelup-held', null),
+  ]) {
+    testWidgets('level-up in the reveal: $name', (tester) async {
+      final before = _paired('tim', version: '0.1');
+      final after = before.copyWith(
+        daemons: [
+          const ZooDaemon(
+            id: 'tim',
+            hatchedAt: '2026-09-26T09:42:00Z',
+            egg: 'first',
+            dupes: 1,
+            xp: 150,
+            bond: 2,
+            version: '1.0',
+          ),
+        ],
+      );
+      await _capture(
+        tester,
+        name,
+        const Size(520, 480),
+        (context) => Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: SizedBox(
+              width: terminalCellSizeOf(context).width * 46,
+              child: DaemonHatchReveal(
+                roster: _roster,
+                egg: egg,
+                result: Future.value(
+                  const ZooHatch(
+                    eggId: 'egg1',
+                    daemonId: 'tim',
+                    shiny: false,
+                    duplicate: true,
+                    xp: 150,
+                  ),
+                ),
+                zoo: () => after,
+                before: before,
+                onClose: () {},
+                still: HatchFrame(stage: HatchStage.grew, morph: morph),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.byKey(
+          ValueKey(
+            morph == null
+                ? 'daemon-hatch-portrait'
+                : 'daemon-hatch-morph-$morph',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('daemon-hatch-changelog')),
+        morph == null ? findsOneWidget : findsNothing,
+      );
+      if (morph == null) {
+        expect(
+          find.text(
+            'tim 1.0: split-window -h: a second pane; learned your agents '
+            'by name',
+          ),
+          findsOneWidget,
+        );
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
 
   for (final (name, stage) in [
     ('hatch-duplicate', HatchStage.merged),
