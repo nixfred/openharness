@@ -91,6 +91,18 @@ class DaemonRules {
           ),
       },
       easterWords = [for (final w in raw['easterWords'] as List) w as String],
+      lineSlots = [
+        for (final slot in raw['lineSlots'] as List? ?? defaultLineSlots)
+          slot as String,
+      ],
+      lineExample = {
+        for (final e in (raw['lineExample'] is Map
+                ? raw['lineExample'] as Map
+                : const {})
+            .entries)
+          if (e.value is String || e.value is num)
+            e.key as String: '${e.value}',
+      },
       nest = [for (final n in raw['nest'] as List) n as String],
       egg = [for (final n in raw['egg'] as List) n as String];
 
@@ -119,6 +131,12 @@ class DaemonRules {
   final List<DaemonHabit> habits;
   final Map<String, DaemonEggKind> eggs;
   final List<String> easterWords;
+
+  /// The slots a line template may use (`{who}`, `{q}`, `{recap}`, `{n}`,
+  /// `{summary}`), and sample values for previews when the roster has them.
+  final List<String> lineSlots;
+  final Map<String, String> lineExample;
+  static const defaultLineSlots = ['who', 'q', 'recap', 'n', 'summary'];
   final List<String> nest;
   final List<String> egg;
 
@@ -167,6 +185,14 @@ class DaemonDef {
       lore = raw['lore'] as String,
       first = raw['first'] as String,
       lines = Map<String, String>.from(raw['lines'] as Map),
+      examples = {
+        for (final e in (raw['examples'] as Map? ?? const {}).entries)
+          if (e.value is String) e.key as String: e.value as String,
+      },
+      shinyHex = _hex((raw['shiny'] as Map?)?['hex']) ??
+          _hex((raw['color'] as Map)['shiny']),
+      lightHex = _hex((raw['color'] as Map)['light']) ??
+          _hex(raw['light'] is Map ? (raw['light'] as Map)['hex'] : raw['light']),
       suggest = Map<String, String>.from(raw['suggest'] as Map? ?? const {}),
       eyes = raw['eyes'] == null
           ? null
@@ -202,6 +228,12 @@ class DaemonDef {
   final List<(String, int?)> family;
   final String lore, first;
   final Map<String, String> lines, suggest;
+
+  /// Each mood's line filled with sample values, for previews only.
+  final Map<String, String> examples;
+
+  /// The roster's own shiny and light-theme colours, when it has them.
+  final String? shinyHex, lightHex;
   final Map<String, String>? eyes;
   final String? lid;
   final bool darkOnly;
@@ -214,7 +246,17 @@ class DaemonDef {
   final String turn;
 
   bool get secret => rarity == 'secret';
-  Color get color => Color(0xff000000 | int.parse(hex.substring(1), radix: 16));
+  Color get color => _color(hex)!;
+  Color? get shinyColor => _color(shinyHex);
+  Color? get lightColor => _color(lightHex);
+
+  static String? _hex(Object? value) =>
+      value is String && RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(value)
+      ? value
+      : null;
+  static Color? _color(String? hex) => hex == null
+      ? null
+      : Color(0xff000000 | int.parse(hex.substring(1), radix: 16));
   String line(DaemonMood mood) => lines[mood.name] ?? '';
 
   /// `screen -> tmux -> tim`
