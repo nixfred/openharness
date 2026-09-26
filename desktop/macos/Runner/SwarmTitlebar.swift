@@ -933,7 +933,14 @@ private final class SwarmStripScrollView: NSScrollView {
 
 /// A daemon glyph is at most eight printable ASCII cells. Anything else draws nothing.
 private func validDaemonGlyph(_ value: String?) -> String? {
-  guard let value, value.unicodeScalars.count <= 8,
+  validDaemonText(value, cells: 8)
+}
+
+/// Printable ASCII of at most [cells] cells, or nothing: the slot's ten cells
+/// (the glyph centred on its base sprite, a gutter each side, a shiny `*`) and
+/// the tally beside them (`+3 +1 egg`).
+private func validDaemonText(_ value: String?, cells: Int) -> String? {
+  guard let value, value.unicodeScalars.count <= cells,
         value.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value <= 0x7e }) else { return nil }
   return value
 }
@@ -1217,18 +1224,28 @@ private final class SwarmContextButton: SwarmIconButton {
 }
 
 /// Plain terminal symbols with fixed cell gutters: the daemon's eight cells plus a
-/// one-cell gutter each side. Only this control repaints when its face changes.
+/// one-cell gutter each side, and its tally (`+3 +1 egg`) to their left. Only this
+/// control repaints when its face changes; it lays out again only when the tally's
+/// width does.
 private final class SwarmSymbolButton: SwarmIconButton {
   var glyph = ""
+  /// The ten cells as Flutter drew them: the glyph centred on its version's base
+  /// sprite (so a baton never moves the face) and a shiny `*` in the left gutter.
+  var cells = ""
+  var tally = ""
   let columns = 8
   /// A hatch in flight or its reveal running: drawn at full ink, not clickable.
   var busy = false
   var foreground = NSColor.white
+  var tallyColor = NSColor.secondaryLabelColor
+  /// The grue on a light theme: a black patch behind its eight cells.
+  var patch: NSColor?
   /// The pointer arrived: "I see you". Never moves keyboard focus.
   var onEnter: (() -> Void)?
   private var textFont: NSFont { font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) }
+  private var cellWidth: CGFloat { ceil(workspaceBarTextWidth("m", font: textFont)) }
   var preferredWidth: CGFloat {
-    ceil(workspaceBarTextWidth("m", font: textFont)) * CGFloat(columns + 2)
+    cellWidth * CGFloat(columns + 2 + (tally.isEmpty ? 0 : tally.count + 1))
   }
 
   override func mouseEntered(with event: NSEvent) {
@@ -1237,23 +1254,37 @@ private final class SwarmSymbolButton: SwarmIconButton {
   }
 
   override func draw(_ dirtyRect: NSRect) {
-    guard !glyph.isEmpty else { return }
+    guard !glyph.isEmpty || !cells.isEmpty else { return }
     let ink = isEnabled || busy ? foreground : foreground.withAlphaComponent(0.35)
     let active = isEnabled && (hovered || hasKeyboardFocus || isHighlighted)
-    let attributes: [NSAttributedString.Key: Any] = [
-      .font: active ? workspaceBarEmphasisFont(textFont) : textFont,
-      .foregroundColor: ink, .ligature: 0,
-    ]
-    let size = (glyph as NSString).size(withAttributes: attributes)
-    (glyph as NSString).draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
-      withAttributes: attributes)
+    let drawFont = active ? workspaceBarEmphasisFont(textFont) : textFont
+    let attributes: [NSAttributedString.Key: Any] = [.font: drawFont, .foregroundColor: ink, .ligature: 0]
+    guard !cells.isEmpty else {
+      let size = (glyph as NSString).size(withAttributes: attributes)
+      (glyph as NSString).draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
+        withAttributes: attributes)
+      return
+    }
+    let slotX = bounds.width - cellWidth * CGFloat(columns + 2)
+    let height = (cells as NSString).size(withAttributes: attributes).height
+    if let patch {
+      patch.setFill()
+      NSRect(x: slotX + cellWidth, y: bounds.midY - height / 2, width: cellWidth * CGFloat(columns), height: height).fill()
+    }
+    if !tally.isEmpty {
+      let tallyInk = isEnabled || busy ? tallyColor : tallyColor.withAlphaComponent(0.35)
+      (tally as NSString).draw(at: NSPoint(x: cellWidth, y: bounds.midY - height / 2),
+        withAttributes: [.font: drawFont, .foregroundColor: tallyInk, .ligature: 0])
+    }
+    (cells as NSString).draw(at: NSPoint(x: slotX, y: bounds.midY - height / 2), withAttributes: attributes)
   }
 }
 
-/// The daemon's one line, where the status line's context sits: tmux's yellow
-/// message line. Right-aligned in the bar font, truncated rather than wrapped. A
-/// line from the pair brain may offer answers, drawn after it as `[y] label`;
-/// only those are clickable, and a click answers without taking focus.
+/// The daemon's one line, where the status line's context sits: tmux's message
+/// line, yellow for what needs you and the bar's own dimmer ink for a reply.
+/// Right-aligned in the bar font, truncated rather than wrapped. A line from the
+/// pair brain may offer answers: they come first, as `[y] label`, and only those
+/// are clickable; a click answers without taking focus.
 private final class SwarmVoiceLabel: NSView {
   var text = "" { didSet { if text != oldValue { needsDisplay = true; setAccessibilityLabel(text) } } }
   var actions: [(key: String, label: String)] = [] { didSet { needsDisplay = true } }
@@ -1287,24 +1318,27 @@ private final class SwarmVoiceLabel: NSView {
     NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color, .ligature: 0])
   }
 
-  /// The answers' layout, right-aligned: `[y] run it  [n] not now`.
-  private func layoutActions() -> CGFloat {
+  /// The layout, right-aligned as one run: the answers first (`[y] run it  [n] not
+  /// now`), two cells, then the line, which truncates before an answer does.
+  /// Answers the width cannot hold are dropped from the left. Returns the line's rect.
+  private func layoutActions() -> NSRect {
     let cell = ceil(("m" as NSString).size(withAttributes: [.font: font]).width)
-    var x = bounds.width
+    let widths = actions.map { ceil(attributed("[\($0.key)] \($0.label)").size().width) }
+    let answers = widths.reduce(0, +) + CGFloat(actions.count) * cell + (actions.isEmpty ? 0 : cell)
+    let lineWidth = min(ceil(attributed(text).size().width), max(0, bounds.width - answers))
+    var x = max(0, bounds.width - lineWidth - answers)
     var rects: [(key: String, rect: NSRect)] = []
-    for action in actions.reversed() {
-      let width = ceil(attributed("[\(action.key)] \(action.label)").size().width)
-      x -= width
-      rects.insert((action.key, NSRect(x: x, y: 0, width: width, height: bounds.height)), at: 0)
-      x -= cell
+    for (action, width) in zip(actions, widths) {
+      rects.append((action.key, NSRect(x: x, y: 0, width: width, height: bounds.height)))
+      x += width + cell
     }
     actionRects = rects
-    return actions.isEmpty ? bounds.width : max(0, x)
+    return NSRect(x: bounds.width - lineWidth, y: 0, width: lineWidth, height: bounds.height)
   }
 
   override func draw(_ dirtyRect: NSRect) {
     guard !text.isEmpty, bounds.width > 0 else { actionRects = []; return }
-    let lineWidth = layoutActions()
+    let lineRect = layoutActions()
     for (index, action) in actions.enumerated() where index < actionRects.count {
       let label = attributed("[\(action.key)] \(action.label)")
       let rect = actionRects[index].rect
@@ -1317,7 +1351,7 @@ private final class SwarmVoiceLabel: NSView {
       .font: font, .foregroundColor: color, .ligature: 0, .paragraphStyle: paragraph,
     ])
     let height = ceil(line.size().height)
-    line.draw(with: NSRect(x: 0, y: (bounds.height - height) / 2, width: lineWidth, height: height),
+    line.draw(with: NSRect(x: lineRect.minX, y: (bounds.height - height) / 2, width: lineRect.width, height: height),
       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
   }
 }
@@ -1514,7 +1548,12 @@ private final class SwarmTabStrip: NSView {
     daemonButton.isEnabled = actionsEnabled && !daemonButton.isHidden && !daemonButton.busy
     daemonButton.state = state["open"] as? Bool == true ? .on : .off
     daemonButton.glyph = validDaemonGlyph(state["glyph"] as? String) ?? ""
+    let previousWidth = daemonButton.preferredWidth
+    daemonButton.cells = validDaemonText(state["cell"] as? String, cells: daemonButton.columns + 2) ?? ""
+    daemonButton.tally = validDaemonText(state["tally"] as? String, cells: 16) ?? ""
     daemonButton.foreground = statusColor(state["foreground"], fallback: terminalForeground)
+    daemonButton.tallyColor = statusColor(state["tallyColor"], fallback: terminalForeground.withAlphaComponent(0.62))
+    daemonButton.patch = state["patch"] is NSNumber ? statusColor(state["patch"], fallback: .black) : nil
     let label = state["label"] as? String ?? "Daemon"
     let detail = state["detail"] as? String ?? ""
     daemonButton.toolTip = state["tooltip"] as? String ?? (detail.isEmpty ? label : label + "\n" + detail)
@@ -1531,7 +1570,8 @@ private final class SwarmTabStrip: NSView {
     }
     voiceActive = !voice.isEmpty
     applyStatusVisibility()
-    if wasHidden != daemonButton.isHidden {
+    // Layout runs only when the slot appears or goes, or its tally changes width.
+    if wasHidden != daemonButton.isHidden || previousWidth != daemonButton.preferredWidth {
       needsLayout = true
       needsDisplay = true
       layoutSubtreeIfNeeded()

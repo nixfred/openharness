@@ -98,6 +98,7 @@ import '../state/workspace_onboarding.dart';
 import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
 import '../daemons/daemon_habits.dart';
+import '../daemons/daemon_settings.dart';
 import '../daemons/zoo.dart';
 import '../daemons/zoo_controller.dart';
 import '../widgets/daemon_hatch.dart';
@@ -201,7 +202,14 @@ class _SwarmScreenState extends State<SwarmScreen> {
       );
   late final ZooTransport? _zooTransport =
       widget.zooTransport ?? (kUnderTest ? null : ApiZooTransport(app.api));
-  late final _face = DaemonFace(_zoo, now: widget.daemonClock);
+  late final _daemonSettings = DaemonSettings(
+    storage: kUnderTest ? null : HarnessFileStore.shared,
+  );
+  late final _face = DaemonFace(
+    _zoo,
+    now: widget.daemonClock,
+    settings: _daemonSettings,
+  );
   late final _brain = DaemonBrain(
     send: app.sendDaemonFrame,
     storage: kUnderTest ? null : HarnessFileStore.shared,
@@ -209,6 +217,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   final _brainSubscriptions = <StreamSubscription<Object?>>[];
   DateTime? _awaySince;
   String? _presencePair;
+  String? _presenceFocus;
   DaemonBrief? _lastBrief;
   StreamSubscription<int?>? _zooPushes;
   OverlayEntry? _daemonOverlay;
@@ -376,7 +385,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _onboarding.addListener(_onboardingChanged);
     _zoo.addListener(_zooChanged);
     _face.addListener(_faceChanged);
-    _face.quiet = () =>
+    unawaited(_daemonSettings.load());
+    app.agentPulse.addListener(_face.pulse);
+    _face.dialogOpen = () =>
         _dialogOpen ||
         _spokenPaletteOpen ||
         !_routeIsCurrent ||
@@ -482,8 +493,10 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     _brain.removeListener(_brainChanged);
     _brain.dispose();
+    app.agentPulse.removeListener(_face.pulse);
     _face.removeListener(_faceChanged);
     _face.dispose();
+    _daemonSettings.dispose();
     _zoo.removeListener(_zooChanged);
     if (widget.zoo == null) _zoo.dispose();
     _unregisterDaemon?.call();
@@ -847,24 +860,69 @@ class _SwarmScreenState extends State<SwarmScreen> {
     if (!_zoo.loaded) return;
     final sessions = _sessions;
     final brain = _brain.state;
+    String who(String engine, String machine) =>
+        '${engine.isEmpty ? 'harness' : engine}@$machine';
+    DaemonSubject subjectOf(HarnessSession s, {String? q}) => DaemonSubject(
+      '${s.machineId}/${s.agent.id}',
+      who: who(
+        s.agent.engine ?? '',
+        s.machine.machine.displayName,
+      ),
+      q: q,
+      since: s.question?.since,
+    );
+    final byKey = {
+      for (final s in sessions) '${s.machineId}/${s.agent.id}': s,
+    };
+    final focusedPane = app.focusedPane;
+    final focus = focusedPane?.agentId == null
+        ? null
+        : '${focusedPane!.machineId}/${focusedPane.agentId}';
+    if (focus != _presenceFocus && _brain.active) unawaited(_sendPresence());
+    // What the window sees itself, merged with what the brain sees on every
+    // machine (the same ids, so a question counts once).
+    final needs = <String, DaemonSubject>{
+      for (final s in sessions)
+        if (s.online && s.needsInput)
+          '${s.machineId}/${s.agent.id}#${s.question!.requestId}': subjectOf(
+            s,
+            q: s.question!.prompt,
+          ),
+      for (final need in brain?.needs ?? const <DaemonNeed>[])
+        need.key: DaemonSubject(
+          '${need.machineId}/${need.agentId}',
+          who: need.machine.isEmpty
+              ? null
+              : who(need.engine, need.machine),
+          q: need.question,
+        ),
+    };
+    // A failure is a harness you have open that failed to start or whose last
+    // turn failed. A machine asleep or out of reach is not one: it is shown
+    // calmly in the panel and the face stays as it was.
+    final failed = [
+      for (final s in sessions)
+        if (s.open &&
+            s.online &&
+            (s.agent.launchState == 'failed' ||
+                s.machine.failedTurnAgents.contains(s.agent.id)))
+          subjectOf(s),
+    ];
+    final away = <String>{
+      for (final s in sessions)
+        if (s.open && !s.online) s.machine.machine.displayName,
+      for (final (name, status) in brain?.machines ?? const <(String, String)>[])
+        if (status == 'unreachable' || status == 'off') name,
+    }.toList()..sort();
+    final working = sessions.where((s) => s.online && s.working).length;
     _face.sync(
       DaemonWatch(
-        // What the window sees itself, merged with what the brain sees on
-        // every machine (the same ids, so a question counts once).
-        working:
-            sessions.any((s) => s.online && s.working) ||
-            brain?.working == true,
-        needIds: {
-          for (final s in sessions)
-            if (s.online && s.needsInput)
-              '${s.machineId}/${s.agent.id}#${s.question!.requestId}',
-          for (final need in brain?.needs ?? const <DaemonNeed>[]) need.key,
-        },
-        failing:
-            sessions.any(
-              (s) => s.open && (!s.online || s.agent.launchState == 'failed'),
-            ) ||
-            (brain?.failing.isNotEmpty ?? false),
+        working: working > 0 || brain?.working == true,
+        workingCount: working,
+        needIds: needs.keys.toSet(),
+        needs: needs,
+        failing: failed.isNotEmpty || (brain?.failing.isNotEmpty ?? false),
+        failed: failed,
         turns: {
           for (final machine in app.machineStates.values)
             machine.machine.machineId: machine.completedHarnessTurns,
@@ -873,6 +931,28 @@ class _SwarmScreenState extends State<SwarmScreen> {
           for (final machine in app.machineStates.values)
             machine.machine.machineId: machine.failedHarnessTurns,
         },
+        ended: {
+          for (final machine in app.machineStates.values)
+            machine.machine.machineId: [
+              for (final end in machine.recentTurnEnds)
+                DaemonTurnEnd(
+                  byKey['${machine.machine.machineId}/${end.agentId}'] ==
+                          null
+                      ? DaemonSubject(
+                          '${machine.machine.machineId}/${end.agentId}',
+                        )
+                      : subjectOf(
+                          byKey['${machine.machine.machineId}/${end.agentId}']!,
+                        ),
+                  failed: end.failed,
+                ),
+            ],
+        },
+        idleCount: sessions
+            .where((s) => s.open && s.running && !s.working && !s.needsInput)
+            .length,
+        focus: focus,
+        away: away,
       ),
     );
     for (final key in observedHabits(app, found: _foundSomething)) {
@@ -1451,6 +1531,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     if (call.method == 'daemonLook') {
       _face.look();
+      _face.seen();
       return;
     }
     if (call.method == 'daemonAnswer') {
@@ -2743,7 +2824,13 @@ class _SwarmScreenState extends State<SwarmScreen> {
     return {
       'visible': _face.visible,
       'glyph': _face.glyph,
+      // The ten cells as drawn (centred on the base sprite, a shiny `*` in
+      // the gutter) and the tally beside them (`+3 +1 egg`).
+      'cell': _face.cell,
+      'tally': _face.tally,
       'foreground': daemonSlotInk(_face, theme).withValues(alpha: 1).toARGB32(),
+      'tallyColor': daemonDimInk(theme).toARGB32(),
+      'patch': daemonSlotPatch(_face, theme)?.toARGB32(),
       'open': _daemonOverlay != null,
       'busy': _face.revealing || _zoo.hatchingEgg != null,
       'label': _face.label,
@@ -2754,7 +2841,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
         for (final action in _face.voiceActions)
           {'key': action.key, 'label': action.label},
       ],
-      'voiceColor': theme.yellow.toARGB32(),
+      'voiceColor': (_face.voiceAlert ? theme.yellow : daemonDimInk(theme))
+          .toARGB32(),
     };
   }
 
@@ -2789,7 +2877,11 @@ class _SwarmScreenState extends State<SwarmScreen> {
         return true;
       }
     }
-    _face.noteKey();
+    _face.noteKey(
+      enter:
+          event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter,
+    );
     return false;
   }
 
@@ -2799,7 +2891,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final action = _face.voiceActions.where((a) => a.key == key).firstOrNull;
     if (sayId == null || action == null) return;
     _brain.act(sayId, action.choice);
-    _face.dismissVoice();
+    _face.answered();
   }
 
   void _brainChanged() {
@@ -2814,6 +2906,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
     _daemonOverlay?.markNeedsBuild();
     _syncDaemon();
+    // The brain's state changing is news from agents too.
+    if (_brain.state?.working == true) _face.pulse();
   }
 
   /// `daemon_presence`: whether you are at this window, how long you were
@@ -2822,7 +2916,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
     if (!_brain.active) return;
     final pair = app.isGuest ? _zoo.zoo.pair : null;
     _presencePair = pair;
-    await _brain.presence(active: app.inForeground, away: away, pair: pair);
+    final pane = app.focusedPane;
+    final agentId = pane?.agentId;
+    _presenceFocus = agentId == null ? null : '${pane!.machineId}/$agentId';
+    await _brain.presence(
+      active: app.inForeground,
+      away: away,
+      pair: pair,
+      focusMachineId: agentId == null ? null : pane!.machineId,
+      focusAgentId: agentId,
+    );
   }
 
   /// The brief on return: a short list under the status line.
@@ -3057,6 +3160,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       () => _closeDaemon(restoreFocus: false),
     );
     _face.look();
+    _face.seen();
     if (_native) _syncNative();
     setState(() {});
   }
@@ -5137,8 +5241,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
         for (var index = 0; index < app.swarms.length; index++)
           '${index + 1}:${names[app.swarms[index].id]}',
       ];
+      final tally = _face.tally;
       final daemonSpace = _face.visible
-          ? cell.width * (_face.roster.rules.statusCells + 2)
+          ? cell.width *
+                (_face.roster.rules.statusCells +
+                    2 +
+                    (tally.isEmpty ? 0 : tally.length + 1))
           : 0.0;
       final toolHeight = workspaceBarControlHeight(context);
       final pr = _pullRequest.value;

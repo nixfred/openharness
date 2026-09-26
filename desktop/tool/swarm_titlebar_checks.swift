@@ -366,21 +366,28 @@ private extension SwarmTabStrip {
       ["key": "zz\u{e9}", "label": "bad key"]]
     updateDaemon(daemon)
     _ = voiceLabel.renderedPixels()
+    let voiceCell = ceil(("m" as NSString).size(withAttributes: [.font: voiceLabel.font]).width)
+    let lineWidth = min(ceil(NSAttributedString(string: voiceLabel.text,
+      attributes: [.font: voiceLabel.font, .ligature: 0]).size().width), voiceLabel.bounds.width)
     try checkTitlebar(voiceLabel.actions.map(\.key) == ["y", "n"] && voiceLabel.actionRects.count == 2 &&
       voiceLabel.actionRects[0].rect.maxX < voiceLabel.actionRects[1].rect.minX &&
-      voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width + 0.5,
-      "Answers are drawn right-aligned after the line; a malformed key is dropped")
+      voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width - voiceCell * 2 &&
+      (lineWidth + voiceCell * 2 > voiceLabel.bounds.width - voiceLabel.actionRects[1].rect.maxX ||
+        voiceLabel.actionRects[1].rect.maxX <= voiceLabel.bounds.width - lineWidth),
+      "Answers come first, before the line, right-aligned as one run; a malformed key is dropped")
     events.removeAll()
     var answered: [Any?] = []
     let previousEmit = emit
     emit = { method, arguments in events.append(method); answered.append(arguments) }
     let yes = voiceLabel.actionRects[0].rect
     voiceLabel.answer(at: NSPoint(x: yes.midX, y: yes.midY))
-    voiceLabel.answer(at: NSPoint(x: 1, y: 1))
+    // The line itself sits after the answers, at the right.
+    let onLine = NSPoint(x: voiceLabel.bounds.width - 1, y: 1)
+    voiceLabel.answer(at: onLine)
     emit = previousEmit
     try checkTitlebar(events == ["daemonAnswer"] && (answered.first as? [String: String])?["key"] == "y",
       "Clicking an answer sends exactly that key, and the line itself is not a button")
-    try checkTitlebar(voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: 1, y: 1), to: self)) == nil &&
+    try checkTitlebar(voiceLabel.hitTest(voiceLabel.convert(onLine, to: self)) == nil &&
       voiceLabel.hitTest(voiceLabel.convert(NSPoint(x: yes.midX, y: yes.midY), to: self)) === voiceLabel,
       "Only the answers take the pointer; the rest still drags the window")
     try checkTitlebar(unmoved(), "Answers move nothing in the bar")
@@ -390,6 +397,47 @@ private extension SwarmTabStrip {
     try checkTitlebar(voiceLabel.isHidden && !contextButton.isHidden && !pullRequestButton.isHidden &&
       !focusedModelButton.isHidden && unmoved(),
       "Silence restores the status exactly where it was")
+    // The ten cells as Flutter drew them, the tally beside them, the grue's patch.
+    let cellWidth = ceil(workspaceBarTextWidth("m", font: daemonButton.font!))
+    daemon["glyph"] = "[o o]"
+    daemon["cell"] = "  [o o]   "
+    updateDaemon(daemon)
+    try checkTitlebar(daemonButton.cells == "  [o o]   " && unmoved(),
+      "The slot draws the ten cells it is sent, in the same eight-cell slot")
+    let plainCell = daemonButton.renderedPixels()
+    daemon["cell"] = "  [= =] / "
+    updateDaemon(daemon)
+    try checkTitlebar(unmoved() && daemonButton.renderedPixels() != plainCell,
+      "A work step repaints the slot and moves nothing")
+    daemon["cell"] = "*  [o o]  "
+    updateDaemon(daemon)
+    try checkTitlebar(daemonButton.cells.hasPrefix("*") && unmoved(), "A shiny daemon's * sits in the gutter")
+    daemon["tally"] = "+3 +1 egg"
+    daemon["tallyColor"] = 0xff808080
+    updateDaemon(daemon)
+    try checkTitlebar(abs(daemonButton.frame.width - cellWidth * CGFloat(10 + 1 + 9)) < 0.5 &&
+      daemonButton.frame.maxX == daemonFrame.maxX && contextButton.frame.maxX <= daemonButton.frame.minX,
+      "The tally widens the control to the left and the status makes room")
+    daemon["tally"] = "+3 and far too many words"
+    updateDaemon(daemon)
+    try checkTitlebar(daemonButton.tally.isEmpty && daemonButton.frame == daemonFrame,
+      "A tally that is not short printable ASCII draws nothing")
+    daemon["tally"] = nil
+    daemon["cell"] = "   .   .  "
+    daemon["patch"] = 0xff000000
+    updateDaemon(daemon)
+    let patched = daemonButton.renderedPixels()
+    daemon["patch"] = nil
+    updateDaemon(daemon)
+    try checkTitlebar(daemonButton.patch == nil && patched != daemonButton.renderedPixels() && unmoved(),
+      "The grue's black patch on a light theme draws behind its eight cells")
+    for invalid in ["  [o o]    x", "[\u{f6} \u{f6}]"] {
+      daemon["cell"] = invalid
+      updateDaemon(daemon)
+      try checkTitlebar(daemonButton.cells.isEmpty, "An invalid cell draws nothing")
+    }
+    daemon["cell"] = nil
+    updateDaemon(daemon)
     state["daemon"] = daemon
     state["pullRequest"] = nil
     state["focusedModel"] = nil

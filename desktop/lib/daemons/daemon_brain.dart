@@ -10,7 +10,8 @@
 ///   `daemon_act_result { requestId, id, ok, error?, detail? }`
 /// Out (only on the socket bound to this computer's harnessd):
 ///   `daemon_act { requestId, id, choice }`
-///   `daemon_presence { active, awayMs?, desk, pair? }`
+///   `daemon_presence { active, awayMs?, desk, pair?, focusMachineId?,
+///     focusAgentId? }`: the pane in front of you is never spoken about
 ///
 /// An older harnessd sends none of these; the face then keeps the roster's
 /// lines and the window's own view of its harnesses.
@@ -50,13 +51,14 @@ class DaemonNeed {
     required this.requestId,
     this.machine = '',
     this.name = '',
+    this.engine = '',
     this.question = '',
     this.deny = false,
     this.sayId,
     this.line,
     this.actions = const [],
   });
-  final String machineId, agentId, requestId, machine, name, question;
+  final String machineId, agentId, requestId, machine, name, engine, question;
   final bool deny;
   final String? sayId, line;
   final List<DaemonAction> actions;
@@ -77,6 +79,7 @@ class DaemonNeed {
       requestId: requestId,
       machine: raw['machine'] is String ? raw['machine'] as String : '',
       name: raw['name'] is String ? raw['name'] as String : '',
+      engine: raw['engine'] is String ? raw['engine'] as String : '',
       question: raw['question'] is String ? raw['question'] as String : '',
       deny: raw['deny'] == true,
       sayId: raw['id'] is String ? raw['id'] as String : null,
@@ -307,6 +310,8 @@ class DaemonBrain extends ChangeNotifier {
     required bool active,
     Duration? away,
     String? pair,
+    String? focusMachineId,
+    String? focusAgentId,
   }) async {
     final desk = await this.desk();
     if (_disposed) return;
@@ -315,6 +320,9 @@ class DaemonBrain extends ChangeNotifier {
       if (away != null) 'awayMs': away.inMilliseconds,
       'desk': desk,
       'pair': ?pair,
+      // The harness in front of you: the brain never speaks about it.
+      'focusMachineId': ?focusMachineId,
+      'focusAgentId': ?focusAgentId,
     });
   }
 

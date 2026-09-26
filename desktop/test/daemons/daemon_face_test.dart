@@ -1,13 +1,16 @@
 // The daemon's face: moods in the README's order, blinks only as answers,
-// frames only while agents work, and one line of voice at a time. Every test
-// runs in fake time and ends with no timer left: nothing runs on its own.
+// work frames stepped by agent events, the tally beside the slot, and the
+// interruption rules for its one line. Every test runs in fake time and ends
+// with no timer left: nothing runs on its own.
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/daemons/daemon_brain.dart';
 import 'package:harness/daemons/daemon_face.dart';
+import 'package:harness/daemons/daemon_settings.dart';
 import 'package:harness/daemons/roster.dart';
+import 'package:harness/daemons/roster.g.dart';
 import 'package:harness/daemons/zoo.dart';
 import 'package:harness/daemons/zoo_controller.dart';
 
@@ -26,16 +29,42 @@ class _Clock {
   DateTime call() => value;
 }
 
+/// The roster with tim's lines as templates, the way the roster is moving.
+DaemonRoster _templated() {
+  final raw = jsonDecode(daemonRosterJson) as Map<String, dynamic>;
+  raw['rules']['lineSlots'] = ['who', 'q', 'recap', 'n', 'summary'];
+  final tim = (raw['daemons'] as List).firstWhere((d) => d['id'] == 'tim');
+  tim['lines'] = {
+    ...tim['lines'] as Map,
+    'idle': '{n} idle. nothing needs you.',
+    'need': 'bell in {who}: {q}',
+    'fail': '{who} exited. {recap}',
+    'back': 'welcome back. {summary}',
+  };
+  tim['examples'] = {'idle': '2 idle. nothing needs you.'};
+  return DaemonRoster.parse(jsonEncode(raw));
+}
+
+const _need = DaemonSubject(
+  'office/a1',
+  who: 'codex@office',
+  q: 'run the migration?',
+);
+
 void main() {
   late _Clock clock;
   late ZooController zoo;
   late DaemonFace face;
+  late DaemonSettings settings;
 
   Future<void> mount(
     WidgetTester tester, {
     String id = 'tim',
     String version = '2.0',
+    bool shiny = false,
     Zoo? custom,
+    DaemonRoster? roster,
+    LocalKeyValueStore? settingsStore,
   }) async {
     clock = _Clock();
     final storage = _Memory();
@@ -48,6 +77,7 @@ void main() {
               hatchedAt: '2026-09-26T09:00:00Z',
               egg: 'first',
               version: version,
+              shiny: shiny,
               // Bond and version follow xp: 0.1, 1.0 at level 2, 2.0 at 4.
               xp: const {'0.1': 0, '1.0': 150, '2.0': 600}[version]!,
             ),
@@ -60,10 +90,12 @@ void main() {
       'zoo': seeded.toJson(),
       'seeded': true,
     });
-    zoo = ZooController(storage: storage, now: clock.call);
-    face = DaemonFace(zoo, now: clock.call);
+    zoo = ZooController(storage: storage, now: clock.call, roster: roster);
+    settings = DaemonSettings(storage: settingsStore);
+    face = DaemonFace(zoo, now: clock.call, settings: settings);
     addTearDown(() {
       face.dispose();
+      settings.dispose();
       zoo.dispose();
     });
     zoo.bind('guest');
@@ -77,6 +109,12 @@ void main() {
     await tester.pump(d);
   }
 
+  /// Let every line and hold run out, and the two-minute window pass.
+  Future<void> settle(WidgetTester tester) async {
+    face.sync(const DaemonWatch());
+    await pass(tester, const Duration(minutes: 3));
+  }
+
   testWidgets('nothing shows until the zoo has loaded', (tester) async {
     final zoo = ZooController(storage: _Memory());
     final face = DaemonFace(zoo);
@@ -86,10 +124,12 @@ void main() {
     });
     expect(face.visible, isFalse);
     expect(face.glyph, '');
+    expect(face.cell, '');
     zoo.bind('guest');
     await tester.pump();
     expect(face.visible, isTrue);
     expect(face.glyph, r'\_O_/');
+    expect(face.tally, '', reason: 'before the first hatch the slot is the egg');
   });
 
   testWidgets('moods follow the README precedence', (tester) async {
@@ -103,47 +143,52 @@ void main() {
     face.nap();
     expect(face.mood, DaemonMood.nap);
     expect(face.glyph, r'\[-|-]/z');
-    face.sync(const DaemonWatch(working: true, needIds: {'m/a'}));
+    face.sync(const DaemonWatch(working: true, needIds: {'m/a#1'}));
     expect(face.mood, DaemonMood.need, reason: 'need wins and wakes a nap');
     expect(face.napping, isFalse);
     face.boop();
     expect(face.mood, DaemonMood.boop);
     await pass(tester, const Duration(milliseconds: 900));
     expect(face.mood, DaemonMood.need);
-    face.sync(const DaemonWatch());
-    await pass(tester, const Duration(seconds: 11));
+    await settle(tester);
+  });
+
+  testWidgets('an unreachable machine is calm: it never fails the face', (
+    tester,
+  ) async {
+    await mount(tester);
+    face.sync(const DaemonWatch(away: ['office']));
+    expect(face.mood, DaemonMood.idle);
+    expect(face.away, ['office']);
+    expect(face.tooltip, contains('office is asleep or unreachable.'));
+    expect(face.voice, isNull);
   });
 
   testWidgets('restored state is a baseline, then a new need speaks once', (
     tester,
   ) async {
-    clock = _Clock();
     await mount(tester);
-    // The mount's first sync was the baseline; a restored question is not news
-    // when it was already there at that point.
-    face.sync(const DaemonWatch(needIds: {'m/old'}));
+    face.sync(const DaemonWatch(needIds: {'m/old#1'}));
     expect(face.voice, isNotNull, reason: 'a question after the baseline');
+    expect(face.voiceAlert, isTrue, reason: 'the message yellow');
     await pass(tester, const Duration(seconds: 6));
     expect(face.voice, isNull);
     face.sync(const DaemonWatch());
-    face.sync(const DaemonWatch(needIds: {'m/old'}));
+    await pass(tester, const Duration(minutes: 3));
+    face.sync(const DaemonWatch(needIds: {'m/old#1'}));
     expect(face.voice, isNull, reason: 'a reconnect re-announcing it is not');
-    face.sync(const DaemonWatch());
-    await pass(tester, const Duration(seconds: 11));
+    await settle(tester);
   });
 
-  testWidgets('a finished turn: ack blink, done for 3 s, once per 20 s', (
-    tester,
-  ) async {
+  testWidgets('a finished turn: ack blink, done for 3 s, a +1 beside the '
+      'slot and no line', (tester) async {
     await mount(tester);
     face.sync(const DaemonWatch(turns: {'m': 4}));
     expect(face.mood, DaemonMood.idle, reason: 'a first count is a baseline');
     face.sync(const DaemonWatch(turns: {'m': 5}));
     expect(face.mood, DaemonMood.done);
-    expect(
-      face.voice,
-      'tim: claude finished the refactor. 3 files, tests pass.',
-    );
+    expect(face.voice, isNull, reason: 'a finished turn never takes over');
+    expect(face.tally, '+1');
     expect(face.lid, isNull);
     await pass(tester, const Duration(milliseconds: 170));
     expect(face.lid, '-');
@@ -154,87 +199,195 @@ void main() {
     expect(face.mood, DaemonMood.idle);
     face.sync(const DaemonWatch(turns: {'m': 7}));
     expect(face.mood, DaemonMood.idle, reason: 'the 20 s cooldown');
+    expect(face.tally, '+3', reason: 'every finish counts');
+    expect(face.detail, contains('3 finished since you looked'));
+    face.seen();
+    expect(face.tally, '', reason: 'cleared when you look');
     await pass(tester, const Duration(seconds: 20));
     face.sync(const DaemonWatch(turns: {'m': 8}));
     expect(face.mood, DaemonMood.done);
-    await pass(tester, const Duration(seconds: 11));
+    await settle(tester);
   });
 
-  testWidgets('a failed turn holds fail for 4.2 s', (tester) async {
+  testWidgets('the pane in front of you is never counted or spoken about', (
+    tester,
+  ) async {
     await mount(tester);
+    const here = DaemonSubject('m/a1', who: 'claude@m');
+    const there = DaemonSubject('m/a2', who: 'codex@m');
+    face.sync(const DaemonWatch(turns: {'m': 0}, focus: 'm/a1'));
+    face.sync(
+      const DaemonWatch(
+        turns: {'m': 2},
+        ended: {
+          'm': [DaemonTurnEnd(here), DaemonTurnEnd(there)],
+        },
+        focus: 'm/a1',
+      ),
+    );
+    expect(face.tally, '+1', reason: 'only the one you were not looking at');
+    face.sync(
+      const DaemonWatch(
+        turns: {'m': 2},
+        needIds: {'m/a1#q'},
+        needs: {'m/a1#q': here},
+        focus: 'm/a1',
+      ),
+    );
+    expect(face.mood, DaemonMood.need, reason: 'the face still knows');
+    expect(face.voice, isNull, reason: 'you are looking at it');
+    await settle(tester);
+  });
+
+  testWidgets('a failed turn holds fail for 4.2 s and says who, in yellow', (
+    tester,
+  ) async {
+    await mount(tester, roster: _templated());
     face.sync(const DaemonWatch(fails: {'m': 0}));
-    face.sync(const DaemonWatch(fails: {'m': 1}));
+    face.sync(
+      const DaemonWatch(
+        fails: {'m': 1},
+        ended: {
+          'm': [
+            DaemonTurnEnd(DaemonSubject('m/a1', who: 'claude@m'), failed: true),
+          ],
+        },
+      ),
+    );
     expect(face.mood, DaemonMood.fail);
     expect(face.glyph, r'\[x|x]/');
+    // No recap is known: its clause goes, never a made-up one.
+    expect(face.voice, 'tim: claude@m exited.');
+    expect(face.voiceAlert, isTrue);
     await pass(tester, const Duration(milliseconds: 4100));
     expect(face.mood, DaemonMood.fail);
     await pass(tester, const Duration(milliseconds: 200));
     expect(face.mood, DaemonMood.idle);
-    await pass(tester, const Duration(seconds: 11));
+    await settle(tester);
   });
 
-  testWidgets('work frames run only while working, and stop for Reduce '
-      'Motion and background windows', (tester) async {
+  testWidgets('templates are filled from what the window knows', (
+    tester,
+  ) async {
+    await mount(tester, roster: _templated());
+    face.sync(
+      const DaemonWatch(
+        needIds: {'office/a1#r1'},
+        needs: {'office/a1#r1': _need},
+      ),
+    );
+    expect(face.voice, 'tim: bell in codex@office: run the migration?');
+    await settle(tester);
+    // Without the question, the clause that needs it goes.
+    face.sync(
+      const DaemonWatch(
+        needIds: {'office/a2#r2'},
+        needs: {
+          'office/a2#r2': DaemonSubject('office/a2', who: 'codex@office'),
+        },
+      ),
+    );
+    expect(face.voice, 'tim: bell in codex@office');
+    await settle(tester);
+    // Nothing known at all: the neutral line, never `{who}`.
+    face.sync(const DaemonWatch(needIds: {'office/a3#r3'}));
+    expect(face.voice, 'tim: a harness needs you.');
+    await settle(tester);
+    // The panel's idle line: filled when it can be.
+    face.sync(const DaemonWatch(idleCount: 3));
+    expect(face.currentLine(DaemonMood.idle), '3 idle. nothing needs you.');
+  });
+
+  testWidgets('work frames step once per agent event, at most twice a '
+      'second, and never on their own', (tester) async {
     await mount(tester);
-    face.sync(const DaemonWatch(working: true));
-    final frames = <String>{face.glyph};
-    for (var i = 0; i < 4; i++) {
-      await pass(tester, const Duration(milliseconds: 150));
-      frames.add(face.glyph);
+    face.sync(const DaemonWatch(working: true, workingCount: 2));
+    expect(face.glyph, r'\[=|=]/');
+    await pass(tester, const Duration(seconds: 2));
+    expect(face.glyph, r'\[=|=]/', reason: 'no events, no motion');
+    face.pulse();
+    expect(face.glyph, '|[=|=]|', reason: 'one event, one step');
+    face.pulse();
+    await pass(tester, const Duration(milliseconds: 100));
+    expect(face.glyph, '|[=|=]|', reason: 'at most two steps a second');
+    for (var i = 0; i < 10; i++) {
+      face.pulse();
     }
-    expect(frames, {r'\[=|=]/', '|[=|=]|', r'/[=|=]\', '-[=|=]-'});
+    await pass(tester, const Duration(milliseconds: 400));
+    expect(face.glyph, r'/[=|=]\', reason: 'a burst is one step');
+    await pass(tester, const Duration(seconds: 2));
+    expect(face.glyph, r'/[=|=]\', reason: 'a stalled agent: a still baton');
+    expect(face.steps, 2);
+    // The portrait's parts step with it.
+    expect(face.portraitT, 2 * face.def!.parts.values.first.ms);
+    // Reduce Motion, a background window and the Motion setting stop steps;
+    // the face still changes.
     face.setEnvironment(foreground: true, reduceMotion: true);
     final still = face.glyph;
+    face.pulse();
     await pass(tester, const Duration(seconds: 1));
     expect(face.glyph, still);
     expect(face.mood, DaemonMood.work, reason: 'the face still changes');
-    face.setEnvironment(foreground: false, reduceMotion: false);
-    await pass(tester, const Duration(seconds: 1));
-    expect(face.glyph, still);
     face.setEnvironment(foreground: true, reduceMotion: false);
+    settings.motion = false;
+    face.pulse();
+    await pass(tester, const Duration(seconds: 1));
+    expect(face.steps, 0);
+    settings.motion = true;
+    face.pulse();
+    expect(face.steps, 1);
     face.sync(const DaemonWatch());
-    expect(face.glyph, r'\[o|o]/');
+    expect(face.glyph, r'\[o|o]/', reason: 'rest when work ends');
+    expect(face.steps, 0);
     await pass(tester, const Duration(seconds: 3));
   });
 
-  testWidgets('younger versions borrow the baton while working', (
+  testWidgets('younger versions borrow the baton; the face never shifts', (
     tester,
   ) async {
     await mount(tester, version: '0.1');
+    final idle = face.cell;
     face.sync(const DaemonWatch(working: true));
-    expect(face.glyph, '[==] |');
-    await pass(tester, const Duration(milliseconds: 130));
-    expect(face.glyph, '[==] /');
+    expect(face.glyph, '[= =] |');
+    face.pulse();
+    expect(face.glyph, '[= =] /');
+    expect(face.cell.indexOf('['), idle.indexOf('['));
+    expect(face.cell.length, 10);
     face.sync(const DaemonWatch());
-    expect(face.glyph, '[oo]');
+    expect(face.glyph, '[o o]');
   });
 
-  testWidgets('coming back after 15 minutes: back, then a slow blink', (
-    tester,
-  ) async {
+  testWidgets('a shiny daemon wears a * in the gutter', (tester) async {
+    await mount(tester, shiny: true);
+    expect(face.shiny, isTrue);
+    expect(face.cell, startsWith('*'));
+    expect(face.cell.length, 10);
+    expect(face.cell.substring(1).trim(), r'\[o|o]/');
+  });
+
+  testWidgets('coming back after 15 minutes: the wave, then a slow blink, '
+      'and no line', (tester) async {
     await mount(tester);
     face.setEnvironment(foreground: false, reduceMotion: false);
     await pass(tester, const Duration(minutes: 16));
     face.setEnvironment(foreground: true, reduceMotion: false);
     expect(face.mood, DaemonMood.back);
-    expect(face.voice, startsWith('tim: welcome back.'));
+    expect(face.voice, isNull, reason: 'the brief carries the facts');
     await pass(tester, const Duration(milliseconds: 1300));
     expect(face.mood, DaemonMood.idle);
     await pass(tester, const Duration(milliseconds: 130));
     expect(face.lid, '_');
-    await pass(tester, const Duration(milliseconds: 110));
+    await pass(tester, const Duration(milliseconds: 180));
     expect(face.lid, '-');
-    await pass(tester, const Duration(milliseconds: 300));
+    await pass(tester, const Duration(milliseconds: 520));
     expect(face.lid, '_');
-    await pass(tester, const Duration(milliseconds: 110));
+    await pass(tester, const Duration(milliseconds: 180));
     expect(face.lid, isNull);
-    await pass(tester, const Duration(seconds: 6));
     // A quick switch away is only a look.
     face.setEnvironment(foreground: false, reduceMotion: false);
     await pass(tester, const Duration(minutes: 1));
     face.setEnvironment(foreground: true, reduceMotion: false);
     expect(face.mood, DaemonMood.idle);
-    expect(face.voice, isNull);
     await pass(tester, const Duration(milliseconds: 260));
     expect(face.lid, '-');
     await pass(tester, const Duration(milliseconds: 200));
@@ -258,34 +411,117 @@ void main() {
     await pass(tester, const Duration(milliseconds: 200));
   });
 
-  testWidgets('it never speaks within 2 s of a key or while a dialog is open', (
+  testWidgets('a line nobody asked for waits for Enter, a pane switch or '
+      '8 s without a key, and for a dialog', (tester) async {
+    await mount(tester);
+    face.noteKey();
+    face.sync(const DaemonWatch(needIds: {'m/a#1'}));
+    await pass(tester, const Duration(seconds: 3));
+    expect(face.voice, isNull, reason: 'mid-thought');
+    face.noteKey(enter: true);
+    expect(face.voice, isNotNull, reason: 'Enter ends the thought');
+    await settle(tester);
+
+    face.noteKey();
+    face.sync(const DaemonWatch(needIds: {'m/a#2'}));
+    await pass(tester, const Duration(seconds: 7));
+    expect(face.voice, isNull);
+    await pass(tester, const Duration(seconds: 1));
+    expect(face.voice, isNotNull, reason: '8 s without a key');
+    await settle(tester);
+
+    face.noteKey();
+    face.sync(const DaemonWatch(needIds: {'m/a#3'}, focus: 'm/b'));
+    expect(face.voice, isNotNull, reason: 'a pane switch');
+    await settle(tester);
+
+    var dialog = true;
+    face.dialogOpen = () => dialog;
+    face.sync(const DaemonWatch(needIds: {'m/a#4'}));
+    await pass(tester, const Duration(seconds: 2));
+    expect(face.voice, isNull, reason: 'a dialog is open');
+    dialog = false;
+    await pass(tester, const Duration(milliseconds: 600));
+    expect(face.voice, isNotNull);
+    await settle(tester);
+  });
+
+  testWidgets('replies speak at once, dim', (tester) async {
+    await mount(tester);
+    face.noteKey();
+    face.boop();
+    expect(face.voice, "tim: hey. that's my status line.");
+    expect(face.voiceAlert, isFalse, reason: 'a reply is not the alert yellow');
+    await pass(tester, const Duration(milliseconds: 5200));
+    expect(face.voice, isNull);
+    await settle(tester);
+  });
+
+  testWidgets('at most one line nobody asked for every two minutes', (
     tester,
   ) async {
     await mount(tester);
-    var dialog = true;
-    face.quiet = () => dialog;
+    face.sync(const DaemonWatch(needIds: {'m/a#1'}));
+    expect(face.voice, isNotNull);
+    await pass(tester, const Duration(seconds: 30));
+    face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2'}));
+    expect(face.voice, isNull, reason: 'within two minutes of the last');
+    expect(face.mood, DaemonMood.need, reason: 'the face still says so');
+    await pass(tester, const Duration(minutes: 2));
+    face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2', 'm/c#3'}));
+    expect(face.voice, isNotNull);
+    await settle(tester);
+  });
+
+  testWidgets('an answer given lets the next question through at once', (
+    tester,
+  ) async {
+    await mount(tester);
+    face.sync(const DaemonWatch(needIds: {'m/a#1'}));
+    expect(face.voice, isNotNull);
+    face.answered();
+    expect(face.voice, isNull);
+    face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2'}));
+    expect(face.voice, isNotNull, reason: 'you are already with the daemon');
+    face.dismissVoice();
+    face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2', 'm/c#3'}));
+    expect(face.voice, isNull, reason: 'Escape is not an answer');
+    await settle(tester);
+  });
+
+  testWidgets('Quiet keeps every line in until it is turned off, and is '
+      'kept', (tester) async {
+    final store = _Memory();
+    await mount(tester, settingsStore: store);
+    settings.quiet = true;
+    face.sync(const DaemonWatch(needIds: {'m/a#1'}));
+    expect(face.voice, isNull);
     face.boop();
     expect(face.voice, isNull);
-    await pass(tester, const Duration(seconds: 1));
-    expect(face.voice, isNull);
-    dialog = false;
-    face.noteKey();
-    await pass(tester, const Duration(milliseconds: 600));
-    expect(face.voice, isNull);
-    await pass(tester, const Duration(seconds: 2));
-    expect(face.voice, "tim: hey. that's my status line.");
-    await pass(tester, const Duration(milliseconds: 5200));
-    expect(face.voice, isNull);
+    expect(face.tooltip, contains('Quiet'));
+    await pass(tester, const Duration(minutes: 20));
+    expect(settings.quiet, isTrue, reason: 'unlike a nap, it lasts');
+    await settings.flush();
+    final again = DaemonSettings(storage: store);
+    addTearDown(again.dispose);
+    await again.load();
+    expect(again.quiet, isTrue);
+    expect(again.motion, isTrue);
+    settings.quiet = false;
+    face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2'}));
+    expect(face.voice, isNotNull);
+    await settle(tester);
   });
 
   testWidgets('a stale line expires instead of speaking late', (tester) async {
     await mount(tester);
-    face.quiet = () => true;
-    face.boop();
-    await pass(tester, const Duration(seconds: 12));
-    face.quiet = () => false;
+    face.dialogOpen = () => true;
+    face.sync(const DaemonWatch(needIds: {'m/a#1'}));
+    await pass(tester, const Duration(seconds: 21));
+    face.dialogOpen = () => false;
     await pass(tester, const Duration(seconds: 1));
     expect(face.voice, isNull);
+    await settle(tester);
   });
 
   testWidgets('nap lasts 15 minutes or until a boop', (tester) async {
@@ -326,6 +562,7 @@ void main() {
     expect(face.label, def.id);
     expect(face.glyph, isNot(r'\_o.o_/'));
     expect(face.voice, '${def.id}: ${def.first}');
+    expect(face.voiceAlert, isFalse);
     await pass(tester, const Duration(seconds: 6));
   });
 
@@ -341,9 +578,9 @@ void main() {
     expect(face.glyph, r'\_o.o_/');
     expect(face.eggReady, isTrue);
   });
-  testWidgets('a new egg shows in the slot for a moment and is announced', (
-    tester,
-  ) async {
+
+  testWidgets('a new egg shows in the slot for a moment, then waits beside '
+      'it as +1 egg until it is opened', (tester) async {
     // At 1.0 (150 xp), two days of turns (200 xp) stay below the next level.
     await mount(tester, version: '1.0');
     // A guest's 40th counted turn earns a turn egg; two days at the cap.
@@ -354,16 +591,18 @@ void main() {
     zoo.recordTurns(20, machineId: 'm');
     expect(zoo.zoo.eggs.single.kind, 'turn');
     expect(face.glyph, r'\_O_/');
-    expect(face.voice, 'tim: a turn egg arrived. it waits in the nest.');
-    expect(face.detail, contains('1 egg waiting'));
+    expect(face.voice, isNull, reason: 'an egg is not an interruption');
+    expect(face.tally, '+1 egg');
+    expect(face.tooltip, contains(r'\_O_/ x1 waiting'));
     await pass(tester, const Duration(seconds: 3));
     expect(face.glyph, '[o|o]', reason: 'the daemon comes back');
+    expect(face.tally, '+1 egg', reason: 'the egg still waits');
+    await zoo.hatch(zoo.zoo.eggs.single.id);
+    expect(face.tally, '', reason: 'opened');
     await pass(tester, const Duration(seconds: 6));
   });
 
-  testWidgets('a level-up is a slow blink and one line of changelog', (
-    tester,
-  ) async {
+  testWidgets('a level-up is a slow blink and no line', (tester) async {
     await mount(tester, version: '0.1');
     clock.value = DateTime(2026, 9, 21, 12);
     // 20 turns + the day's 5 = 25 xp; two days reach level 1 (50 xp).
@@ -372,7 +611,7 @@ void main() {
     clock.value = DateTime(2026, 9, 22, 12);
     zoo.recordTurns(20, machineId: 'm');
     expect(zoo.paired!.bond, 1);
-    expect(face.voice, 'tim: bond level 1.');
+    expect(face.voice, isNull);
     await pass(tester, const Duration(milliseconds: 210));
     expect(face.lid, '_', reason: 'a slow blink');
     await pass(tester, const Duration(seconds: 6));
@@ -386,40 +625,49 @@ void main() {
     expect(face.glyph, '[o|o]');
     await pass(tester, const Duration(seconds: 6));
   });
-  testWidgets('with a brain, a roster line waits 2.5 s for the brain\'s own', (
+
+  testWidgets("with a brain, a roster alert waits 2.5 s for the brain's own", (
     tester,
   ) async {
     await mount(tester);
     face.brainActive = true;
-    face.sync(const DaemonWatch(turns: {'m': 1}));
-    face.sync(const DaemonWatch(turns: {'m': 2}));
-    expect(face.mood, DaemonMood.done, reason: 'the face does not wait');
+    face.sync(const DaemonWatch(needIds: {'office/a1#r1'}));
+    expect(face.mood, DaemonMood.need, reason: 'the face does not wait');
     expect(face.voice, isNull, reason: 'the line waits for the brain');
     await pass(tester, const Duration(seconds: 1));
     face.sayFromBrain(
       const DaemonSay(
         id: 's1',
-        line: 'claude finished the auth refactor. 3 files, tests pass.',
-        mood: DaemonMood.done,
+        about: 'office/a1',
+        line: 'codex@office wants to run the migration.',
+        mood: DaemonMood.need,
       ),
     );
-    expect(
-      face.voice,
-      'tim: claude finished the auth refactor. 3 files, tests pass.',
-    );
-    await pass(tester, const Duration(seconds: 6));
-    expect(face.voice, isNull);
+    expect(face.voice, 'tim: codex@office wants to run the migration.');
+    await settle(tester);
     // No brain line in time: the roster's line after 2.5 s.
-    await pass(tester, const Duration(seconds: 20));
-    face.sync(const DaemonWatch(turns: {'m': 3}));
+    face.sync(const DaemonWatch(needIds: {'office/a2#r2'}));
     await pass(tester, const Duration(milliseconds: 2400));
     expect(face.voice, isNull);
     await pass(tester, const Duration(milliseconds: 200));
-    expect(
-      face.voice,
-      'tim: claude finished the refactor. 3 files, tests pass.',
+    expect(face.voice, isNotNull);
+    // The brain's line about the same harness replaces it in place.
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 's2',
+        about: 'office/a2',
+        line: 'codex@office asks which branch.',
+        mood: DaemonMood.need,
+      ),
     );
-    await pass(tester, const Duration(seconds: 6));
+    expect(face.voice, 'tim: codex@office asks which branch.');
+    await settle(tester);
+    // Its other lines (a finished turn) do not take over.
+    face.sayFromBrain(
+      const DaemonSay(id: 's3', line: 'claude finished.', mood: DaemonMood.done),
+    );
+    expect(face.voice, isNull);
+    await settle(tester);
   });
 
   testWidgets(
@@ -443,6 +691,7 @@ void main() {
       face.unsay('q1');
       expect(face.voice, isNull);
       expect(face.voiceActions, isEmpty);
+      await pass(tester, const Duration(minutes: 2));
       face.sayFromBrain(
         const DaemonSay(
           id: 'q2',
@@ -451,12 +700,14 @@ void main() {
           ttl: Duration(seconds: 3),
         ),
       );
+      expect(face.voice, isNotNull);
       await pass(tester, const Duration(seconds: 3));
       expect(face.voice, isNull, reason: 'its ttl ran out');
       face.sayNote('that question changed before the answer landed.');
       expect(
         face.voice,
         'tim: that question changed before the answer landed.',
+        reason: 'a reply to what you did, not held back',
       );
       await pass(tester, const Duration(seconds: 6));
     },

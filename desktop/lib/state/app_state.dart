@@ -337,6 +337,14 @@ class MachineState {
   /// The same turns when they ended with an error: the daemon's `fail`.
   int failedHarnessTurns = 0;
 
+  /// The last few of those turn ends, newest last: which harness finished or
+  /// failed, so the daemon can say who (and not about the pane in front).
+  final recentTurnEnds = <({String agentId, bool failed})>[];
+
+  /// Open harnesses whose last turn failed, until their next turn starts or
+  /// ends well: the daemon's `fail` face while it lasts.
+  final failedTurnAgents = <String>{};
+
   /// Paused harnesses this window resumed: the daemon's `resume` habit.
   int resumedHarnesses = 0;
 
@@ -648,6 +656,12 @@ class AppNotifier extends ChangeNotifier {
     if (_disposed) return;
     foreground.value = state == null || state == AppLifecycleState.resumed;
   }
+
+  /// Bumped once per real agent event (a turn starting or ending, a tool
+  /// starting or ending, output arriving): the daemon steps its work frame on
+  /// it, so a still baton means a stalled agent. Its own notifier, so an event
+  /// never rebuilds the workspace.
+  final agentPulse = ValueNotifier<int>(0);
 
   late final sessionPreviews = SessionPreviewStore(
     canFetch: _canFetchPreview,
@@ -11071,6 +11085,8 @@ class AppNotifier extends ChangeNotifier {
       _watchModelStart(machine, type, event, payload);
     }
     if (SessionPreviewStore.eventTypes.contains(type)) {
+      // A real agent event: the daemon's work frame may step once.
+      if (type != 'user_message') agentPulse.value++;
       final agentId = _eventAgentId(machine, event, payload);
       final agent = machine.agents
           .where((agent) => agent.id == agentId)
@@ -11478,8 +11494,11 @@ class AppNotifier extends ChangeNotifier {
         var changed = false;
         final agentId = _eventAgentId(machine, event, payload);
         if (agentId != null) {
-          if (type == 'turn_started') machine.liveTurnAgents.add(agentId);
-          changed = _markAgentProcessing(machine, agentId);
+          if (type == 'turn_started') {
+            machine.liveTurnAgents.add(agentId);
+            changed = machine.failedTurnAgents.remove(agentId);
+          }
+          changed = _markAgentProcessing(machine, agentId) || changed;
           // Only a START opens a stats turn, for the reason above: a heartbeat
           // is a turn already under way, and counting one would report an agent
           // this app merely reconnected to as work somebody just asked for.
@@ -11531,8 +11550,16 @@ class AppNotifier extends ChangeNotifier {
                 model: agent.gridModel,
               ));
               machine.completedHarnessTurns++;
+              machine.failedTurnAgents.remove(agentId);
             } else if (ownWork) {
               machine.failedHarnessTurns++;
+              machine.failedTurnAgents.add(agentId);
+            }
+            if (ownWork) {
+              machine.recentTurnEnds.add((agentId: agentId, failed: failed));
+              if (machine.recentTurnEnds.length > 16) {
+                machine.recentTurnEnds.removeAt(0);
+              }
             }
             if (live &&
                 agent != null &&
@@ -11617,6 +11644,7 @@ class AppNotifier extends ChangeNotifier {
     terminalThemeStore.removeListener(_announceTerminalThemeEverywhere);
     _localGitProjects.dispose();
     sessionPreviews.dispose();
+    agentPulse.dispose();
     gridPictures.dispose();
     _stopWakeFollowers();
     modelStarts.dispose();
