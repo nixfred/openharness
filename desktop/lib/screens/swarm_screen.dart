@@ -2985,6 +2985,9 @@ class _SwarmScreenState extends State<SwarmScreen> {
   }
 
   void _faceChanged() {
+    // Two lines can read the same (the same command asked twice): the line's
+    // id, not its words, decides whether it is new.
+    if (mounted) _voiceChanged();
     if (!mounted || !_native) return;
     // Faces and frames repaint only the slot; tabs and terminals stay put.
     final payload = _daemonPayload;

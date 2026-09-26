@@ -886,7 +886,7 @@ class DaemonBrain extends ChangeNotifier {
 
   /// This window has drawn [id] and everything a key on it would act on
   /// (its `detail` in full). harnessd hears `daemon_shown` once; the line's
-  /// keys arm [armAfter] later, and listeners hear it then.
+  /// keys arm [armAfter] later. Listeners hear both.
   void shown(String id) {
     if (_disposed || id.isEmpty || _shownAt.containsKey(id)) return;
     if (!send('daemon_shown', {'id': id})) return;
@@ -901,6 +901,8 @@ class DaemonBrain extends ChangeNotifier {
       _armTimers.remove(id);
       if (!_disposed) notifyListeners();
     });
+    // Whatever draws its keys hears that they are not armed yet.
+    notifyListeners();
   }
 
   /// harnessd did not count a key as shown (a new connection, or the key came

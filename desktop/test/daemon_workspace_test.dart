@@ -1725,6 +1725,42 @@ void main() {
       await unmount(tester);
     });
 
+    testWidgets('a second line in the same words is still a new line: it is '
+        'acknowledged and arms on its own', (tester) async {
+      await mount(tester, seed: zooWithTim);
+      await tester.pump();
+      await frame(tester, 'daemon_state', state());
+      Map<String, dynamic> ask(String id) => {
+        'id': id,
+        'about': {'machineId': 'm', 'agentId': ''},
+        'mood': 'ask',
+        'from': 'pair',
+        'line': '[y/n] run the tests in api?',
+        'actions': [
+          {'key': 'y', 'label': 'do it', 'choice': 'y'},
+          {'key': 'n', 'label': 'skip', 'choice': 'n'},
+        ],
+        'ttlMs': 5200,
+      };
+      await frame(tester, 'daemon_say', ask('ask:1'));
+      await arm(tester);
+      await frame(tester, 'daemon_say', ask('ask:2'));
+      await tester.pump();
+      expect(shownIds(), ['ask:1', 'ask:2']);
+      expect(
+        find.byKey(const ValueKey('daemon-answer-y-arming')),
+        findsOneWidget,
+        reason: 'the new line has not armed yet',
+      );
+      await arm(tester);
+      await tester.tap(find.byKey(const ValueKey('daemon-answer-y')));
+      await tester.pump();
+      expect(frames.last.$1, 'daemon_act');
+      expect(frames.last.$2['id'], 'ask:2');
+      await tester.pump(const Duration(minutes: 3));
+      await unmount(tester);
+    });
+
     testWidgets('talk waits when harnessd says so, and says how long', (
       tester,
     ) async {
