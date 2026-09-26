@@ -302,9 +302,15 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
                     horizontal: cell.width * 2,
                     vertical: cell.height,
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: _children(theme, cell, ink, muted, pitch),
+                  // A steady stage: the egg, the silhouette and the banner
+                  // all fit, so the reveal never jumps before the card.
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: cell.height * 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: _children(theme, cell, ink, muted, pitch),
+                    ),
                   ),
                 ),
               ),

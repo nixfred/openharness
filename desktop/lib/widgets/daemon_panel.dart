@@ -350,10 +350,12 @@ class _DaemonPanelState extends State<DaemonPanel> {
   Widget _habitRow(DaemonHabit habit, Set<String> done) {
     final complete = done.contains(habit.key);
     final command = daemonHabitCommands[habit.key];
-    final hint = command == null ? null : widget.shortcut(command);
-    final days = habit.key == 'days' && !complete
-        ? ' (${face.zoo.daysUsed.clamp(0, 3)}/3)'
-        : '';
+    // Days show their count where other habits show their shortcut.
+    final hint = habit.key == 'days'
+        ? '${face.zoo.daysUsed.clamp(0, 3)}/3'
+        : command == null
+        ? null
+        : widget.shortcut(command);
     final row = LayoutBuilder(
       builder: (context, constraints) => Row(
         children: [
@@ -364,7 +366,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
           SizedBox(width: _cell.width),
           Expanded(
             child: Text(
-              '${habit.label}$days',
+              habit.label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: _ink(complete ? _muted : null),
