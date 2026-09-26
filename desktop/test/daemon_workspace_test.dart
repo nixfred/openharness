@@ -241,7 +241,8 @@ void main() {
     for (final what in ['reads', 'writes', 'runs', 'does']) {
       expect(find.text(what), findsOneWidget);
     }
-    expect(find.textContaining('never your keystrokes'), findsOneWidget);
+    expect(find.textContaining('your next prompt'), findsOneWidget);
+    expect(find.textContaining('never a plain terminal'), findsOneWidget);
     expect(find.textContaining('a lesson only with your yes'), findsOneWidget);
     expect(remote.zoo.consent, isNull, reason: 'nothing until an answer');
     await tester.tap(find.byKey(const ValueKey('daemon-consent-watch')));

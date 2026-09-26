@@ -19,8 +19,9 @@ List<(String, String)> daemonConsentRows(String name) => [
   (
     'reads',
     "when your agents' turns start and end, the question one waits on "
-        '(the whole dialog), and each turn\'s short recap. never your '
-        'keystrokes, your terminals or your files.',
+        '(the whole dialog), each turn\'s short recap, and your next prompt '
+        'after a turn, to notice a lesson. never a plain terminal, a '
+        'sub-agent, or your files.',
   ),
   (
     'writes',
