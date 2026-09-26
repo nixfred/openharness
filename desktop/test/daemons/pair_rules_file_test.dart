@@ -36,9 +36,54 @@ void main() {
     );
   });
 
-  test('the template is no rules and no model, with the rules explained', () {
-    expect(_jsonc(pairRulesTemplate), {'model': false, 'rules': []});
+  test('the template is no rules, no model and no learning, explained', () {
+    expect(_jsonc(pairRulesTemplate), {
+      'model': false,
+      'learn': {'borrow': false, 'export': [], 'agentsMd': []},
+      'rules': [],
+    });
     expect(pairRulesTemplate, contains('act within rules'));
+    expect(pairConfigTurnsOn(pairRulesTemplate), isEmpty);
+  });
+
+  test('stripJsonc reads comments and trailing commas as rules.ts does', () {
+    expect(
+      jsonDecode(
+        stripJsonc(
+          '{ // a comment\n "a": "http://x // not a comment", /* b */ '
+          '"b": [1, 2,], "c": "q\\"//",\n}',
+        ),
+      ),
+      {'a': 'http://x // not a comment', 'b': [1, 2], 'c': 'q"//'},
+    );
+  });
+
+  test('a rules confirmation lists every rule, the model and each learning '
+      'opt-in', () {
+    const file = '''// mine
+{
+  "model": true,
+  "learn": { "borrow": true, "export": ["claude", "nope"], "agentsMd": ["~/code/api"] },
+  "rules": [
+    { "name": "tests in api", "harness": "api*", "question": "npm test", "choice": "Yes", },
+    { "question": "^Approve", "choice": "1. Yes", "engine": "codex", "project": "~/code/web" },
+  ],
+}''';
+    // The gate's own detail: `pair.jsonc (<summary>):` and then the file.
+    final lines = pairConfigTurnsOn(
+      'pair.jsonc (2 rules, model on, learn borrow + export claude + '
+      'AGENTS.md in 1 project):\n$file',
+    );
+    expect(lines, [
+      'rule "tests in api": answers "Yes" to /npm test/ (harness api*)',
+      'rule "rule 2": answers "1. Yes" to /^Approve/ (codex, in ~/code/web)',
+      'model: one small model call per new question, on your engine',
+      'learn.borrow: what Hermes, Claude Code and Codex learned on their own '
+          'become lesson candidates',
+      'learn.export: approved skills also written to ~/.claude/skills',
+      'learn.agentsMd: notes may go into AGENTS.md in ~/code/api',
+    ]);
+    expect(pairConfigTurnsOn('pair.jsonc (0 rules):\n{ not json'), isEmpty);
   });
 
   test('a missing file is written once; an existing one is never touched', () async {

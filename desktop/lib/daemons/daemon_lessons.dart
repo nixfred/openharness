@@ -1,12 +1,18 @@
 /// The paired daemon's lessons (`daemons/LEARNING.md`, BRAIN.md "Learning
-/// (L1) as built"), as the panel lists them: pending and approved, with
-/// approve, skip, show and revert. Every one goes through the same local
-/// `pair` request `harness pair lessons ...` uses (`pair/control.ts`
-/// `lessons { action, id?, confirmed? }`), so harnessd decides everything:
-/// the panel only asks. Approving is the person's yes, so it is sent only
-/// after the lesson has been shown and confirmed here (`confirmed: true`,
-/// what the CLI sends after asking at a terminal).
+/// (L1, L2) as built"), as the panel lists them: pending and approved, with
+/// show, skip and revert through the same local `pair` request `harness pair
+/// lessons ...` uses (`pair/control.ts` `lessons { action, id? }`).
+///
+/// Approving is the person's alone (LEARNING.md, "Security"): it needs the
+/// one-time nonce in the id of the lesson's live line (`lesson:<id>:<nonce>`,
+/// in `daemon_state.asks`), keyed from a window that drew the line and its
+/// whole text at least 400 ms before. So the panel teaches a lesson only
+/// through that line's `[y]`; a lesson not being proposed right now is
+/// approved at a terminal (`harness pair lessons approve <id>`). A window's
+/// own `confirmed` would be refused (`NONCE_REQUIRED`).
 library;
+
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
@@ -64,8 +70,14 @@ class DaemonLesson {
 }
 
 class DaemonLessons extends ChangeNotifier {
-  DaemonLessons(this.brain);
+  DaemonLessons(this.brain) {
+    _results = brain.results.listen(_heard);
+  }
   final DaemonBrain brain;
+  late final StreamSubscription<DaemonActResult> _results;
+
+  /// What approves [id] from a terminal, for a lesson not proposed now.
+  static String approveCommand(String id) => 'harness pair lessons approve $id';
 
   List<DaemonLesson> _lessons = const [];
   bool _loaded = false, _busy = false, _disposed = false;
@@ -106,6 +118,8 @@ class DaemonLessons extends ChangeNotifier {
       'UNSUPPORTED' => 'this harnessd does not keep lessons yet.',
       'UNREACHABLE' || 'TIMEOUT' => 'harnessd did not answer.',
       'NOT_FOUND' => 'that lesson is gone.',
+      'NONCE_REQUIRED' || 'PERSON_ONLY' || 'UNVERIFIED' =>
+        'only you approve a lesson: its [y] while it is proposed, or a terminal.',
       final String code => code.toLowerCase().replaceAll('_', ' '),
       _ => 'that did not go through.',
     };
@@ -152,27 +166,34 @@ class DaemonLessons extends ChangeNotifier {
     _notify();
   }
 
-  /// Approve: only after it has been shown and the person confirmed it.
-  Future<void> approve(String id) => _act('approve', id, confirmed: true);
+  /// A key on a lesson's line (from the status line, the brief or the
+  /// panel) taught or skipped it: say so, and read the list again.
+  void _heard(DaemonActResult result) {
+    if (_disposed || !result.id.startsWith('lesson:') || !result.ok) return;
+    final learned = result.learned, skipped = result.skipped;
+    if (learned == null && skipped == null) return;
+    _message = learned != null
+        ? 'learned "$learned". every harness session will load it.'
+        : 'skipped "$skipped". it will not come back.';
+    _shownId = null;
+    _shownText = null;
+    unawaited(refresh());
+  }
+
   Future<void> skip(String id) => _act('skip', id);
+
+  /// `harness pair lessons revert`: one git revert, and every agent forgets
+  /// it. Not the person's-only kind: a window may ask.
   Future<void> revert(String id) => _act('revert', id);
 
-  Future<void> _act(String action, String id, {bool confirmed = false}) async {
-    final result = await _ask({
-      'action': action,
-      'id': id,
-      if (confirmed) 'confirmed': true,
-    });
+  Future<void> _act(String action, String id) async {
+    final result = await _ask({'action': action, 'id': id});
     if (_disposed) return;
     final name = _lessons.where((l) => l.id == id).firstOrNull?.name ?? id;
     _message = result['ok'] == true
         ? switch (action) {
-            'approve' =>
-              result['line'] is String
-                  ? result['line'] as String
-                  : 'learned "$name".',
             'skip' => 'skipped "$name". it will not come back.',
-            'revert' => 'took "$name" back.',
+            'revert' => 'took "$name" back. every agent forgets it.',
             _ => null,
           }
         : _words(result);
@@ -186,6 +207,7 @@ class DaemonLessons extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_results.cancel());
     super.dispose();
   }
 }

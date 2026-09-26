@@ -337,7 +337,7 @@ void main() {
       );
     });
 
-    test('the autonomy dial: four levels, suggest by default, unknown '
+    test('the autonomy dial: four levels, watch by default, unknown '
         'dropped, carried by a seed', () {
       expect(zooAutonomyLevels, [
         'watch',
@@ -345,8 +345,8 @@ void main() {
         'act-on-key',
         'act-within-rules',
       ]);
-      expect(Zoo.empty.autonomy, 'suggest');
-      expect(Zoo.fromJson({'autonomy': 'yolo'}, roster).autonomy, 'suggest');
+      expect(Zoo.empty.autonomy, 'watch');
+      expect(Zoo.fromJson({'autonomy': 'yolo'}, roster).autonomy, 'watch');
       var zoo = apply(Zoo.empty, [
         {'op': 'zoo.autonomy', 'level': 'act-on-key'},
         {'op': 'zoo.autonomy', 'level': 'bypass'},
@@ -360,11 +360,11 @@ void main() {
           'op': 'zoo.seed',
           'zoo': const Zoo(
             habits: ['turn'],
-            autonomy: 'watch',
+            autonomy: 'suggest',
           ).toJson(),
         },
       ]).zoo;
-      expect(zoo.autonomy, 'watch');
+      expect(zoo.autonomy, 'suggest');
       zoo = apply(const Zoo(autonomy: 'act-within-rules'), [
         {
           'op': 'zoo.seed',
@@ -374,6 +374,45 @@ void main() {
         },
       ]).zoo;
       expect(zoo.autonomy, 'act-within-rules');
+    });
+
+    test('consent: never asked is null; a yes starts the dial at watch; a '
+        'seed never carries it', () {
+      expect(Zoo.empty.consent, isNull);
+      expect(Zoo.empty.watching, isFalse);
+      var zoo = apply(const Zoo(autonomy: 'act-on-key'), [
+        {'op': 'zoo.consent', 'watching': true},
+        {'op': 'zoo.consent', 'watching': 'yes'},
+      ]).zoo;
+      expect(zoo.watching, isTrue);
+      expect(zoo.autonomy, 'watch', reason: 'suggest is a second step');
+      expect(zoo.consent!.at, startsWith('2026-09-26T'));
+      final read = Zoo.fromJson(zoo.toJson(), roster);
+      expect(read.consent!.watching, isTrue);
+      expect(read.consent!.at, zoo.consent!.at);
+      zoo = apply(zoo.copyWith(autonomy: 'suggest'), [
+        {'op': 'zoo.consent', 'watching': false},
+      ]).zoo;
+      expect(zoo.watching, isFalse);
+      expect(zoo.consent, isNotNull, reason: 'answered: no');
+      expect(zoo.autonomy, 'suggest', reason: 'a no leaves the dial');
+      expect(
+        Zoo.fromJson({
+          'consent': {'watching': 'yes', 'at': 1},
+        }, roster).consent,
+        isNull,
+      );
+      // A guest's answer stays the guest's: the account asks its own.
+      zoo = apply(Zoo.empty, [
+        {
+          'op': 'zoo.seed',
+          'zoo': {
+            'habits': ['turn'],
+            'consent': {'watching': true, 'at': '2026-09-01T00:00:00Z'},
+          },
+        },
+      ]).zoo;
+      expect(zoo.consent, isNull);
     });
 
     test('unknown daemons, eggs and habits are dropped on read', () {
@@ -730,27 +769,39 @@ void main() {
       addTearDown(account.dispose);
       account.bind('account:u1', remote: remote);
       await pumpEventQueue();
-      account.autonomy('watch');
-      expect(account.zoo.autonomy, 'watch', reason: 'shown at once');
-      account.autonomy('watch');
+      account.autonomy('suggest');
+      expect(account.zoo.autonomy, 'suggest', reason: 'shown at once');
+      account.autonomy('suggest');
       account.autonomy('nonsense');
       await account.flush();
       expect(remote.batches.single, [
-        {'op': 'zoo.autonomy', 'level': 'watch'},
+        {'op': 'zoo.autonomy', 'level': 'suggest'},
       ]);
-      expect(remote.zoo.autonomy, 'watch');
+      expect(remote.zoo.autonomy, 'suggest');
+      // Consent: shown at once, sent once, the dial back at watch.
+      account.consent(watching: true);
+      account.consent(watching: true);
+      expect(account.zoo.watching, isTrue);
+      expect(account.zoo.autonomy, 'watch');
+      await account.flush();
+      expect(remote.batches.last, [
+        {'op': 'zoo.consent', 'watching': true},
+      ]);
+      expect(remote.zoo.watching, isTrue);
 
       final guest = controller();
       addTearDown(guest.dispose);
       guest.bind('guest');
       await pumpEventQueue();
       guest.autonomy('act-on-key');
+      guest.consent(watching: false);
       await guest.flush();
       final again = controller();
       addTearDown(again.dispose);
       again.bind('guest');
       await pumpEventQueue();
       expect(again.zoo.autonomy, 'act-on-key');
+      expect(again.zoo.consent!.watching, isFalse, reason: 'kept locally');
     });
 
     test('first sign-in seeds the guest zoo once', () async {

@@ -20,7 +20,9 @@
 ///   silences everything.
 /// - **The pair brain's lines** (`daemon_say`) are shown exactly as sent,
 ///   keys first (`[y/n/g] api@office Bash: npm test`), for their `ttlMs`:
-///   their keys work only while the line shows.
+///   their keys work only while the line shows, and only once the window has
+///   drawn it and its `detail` (the daemon's `daemon_shown` rule). A line the
+///   pair harness wrote (`from: 'pair'`) is drawn as it speaking.
 library;
 
 import 'dart:async';
@@ -79,6 +81,8 @@ class DaemonWatch {
     this.asks = 0,
     this.doneCount,
     this.doneLast = const [],
+    this.autonomy,
+    this.autonomyRequested,
   });
 
   /// Any agent is working, and how many.
@@ -119,6 +123,10 @@ class DaemonWatch {
   /// window counts its own otherwise. And the last few, as lines.
   final int? doneCount;
   final List<String> doneLast;
+
+  /// The level the daemon acts at (`daemon_state.autonomy`), and a higher one
+  /// waiting for the person's yes. Null without a brain that says.
+  final String? autonomy, autonomyRequested;
 }
 
 enum _LineKind {
@@ -204,6 +212,7 @@ class DaemonFace extends ChangeNotifier {
   List<DaemonSubject> _failed = const [];
   List<DaemonMachine> _away = const [];
   int _asks = 0;
+  String? _autonomy, _autonomyRequested;
   int? _brainDone;
   List<String> _doneLast = const [];
   String? _focus;
@@ -414,6 +423,26 @@ class DaemonFace extends ChangeNotifier {
   /// The harness the line being spoken is about (its `[g]` opens it).
   DaemonAbout? get voiceTarget => _spoken?.target;
 
+  /// What a key on the line being spoken would do, in full: shown under it
+  /// before its keys arm.
+  String? get voiceDetail => _spoken?.detail;
+
+  /// The harness the line being spoken names, by name and machine.
+  DaemonHarness? get voiceHarness => _spoken?.harness;
+
+  /// The pair harness wrote the line being spoken (drawn as it speaking).
+  bool get voiceFromPair => _spoken?.fromPair ?? false;
+
+  /// The line being spoken waits for a yes to a setting: its keys are
+  /// `daemon_confirm`.
+  ({String kind, String nonce})? get voiceConfirm => _spoken?.confirm;
+
+  /// The level the daemon acts at, as harnessd says; null without a brain.
+  String? get autonomy => _autonomy;
+
+  /// A higher level the zoo asks for, waiting for the person's yes.
+  String? get autonomyRequested => _autonomyRequested;
+
   static const moodWords = {
     DaemonMood.idle: 'content',
     DaemonMood.work: 'agents working',
@@ -467,6 +496,12 @@ class DaemonFace extends ChangeNotifier {
           '${eggLook(eggs.first)} x${eggs.length} waiting. Click to open.',
         for (final machine in _away)
           daemonMachineLine(machine.name, machine.status),
+        // Above `suggest` it acts on its own for you: always said.
+        if (daemonAutonomyAboveSuggest(_autonomy))
+          'autonomy: ${daemonAutonomyLabel(_autonomy!)}',
+        if (_autonomyRequested case final asked?
+            when asked != _autonomy)
+          'asks for ${daemonAutonomyLabel(asked)}: waiting for your yes',
         if (quiet) 'Quiet: it says nothing until you turn Quiet off.',
       ].join('\n');
     }
@@ -617,6 +652,11 @@ class DaemonFace extends ChangeNotifier {
         watch.asks != _asks ||
         watch.doneCount != _brainDone ||
         !listEquals(watch.doneLast, _doneLast);
+    final dialChanged =
+        watch.autonomy != _autonomy ||
+        watch.autonomyRequested != _autonomyRequested;
+    _autonomy = watch.autonomy;
+    _autonomyRequested = watch.autonomyRequested;
     _asks = watch.asks;
     _brainDone = watch.doneCount;
     _doneLast = watch.doneLast;
@@ -634,7 +674,10 @@ class DaemonFace extends ChangeNotifier {
     // Restored state, imported history and reconnects are baselines.
     if (!_baselined || def == null) {
       _baselined = def != null;
-      _update(before: before, force: awayChanged || countsChanged);
+      _update(
+        before: before,
+        force: awayChanged || countsChanged || dialChanged,
+      );
       return;
     }
     final d = def!;
@@ -682,7 +725,8 @@ class DaemonFace extends ChangeNotifier {
     }
     _update(
       before: before,
-      force: finished.isNotEmpty || awayChanged || countsChanged,
+      force:
+          finished.isNotEmpty || awayChanged || countsChanged || dialChanged,
     );
   }
 
@@ -1015,6 +1059,10 @@ class DaemonFace extends ChangeNotifier {
       actions: say.actions,
       ttl: say.ttl ?? voiceFor,
       exact: true,
+      detail: say.detail,
+      harness: say.harness,
+      fromPair: say.fromPair,
+      confirm: say.confirm,
     );
     final spoken = _spoken;
     // The same line again (the model's better words): in place.
@@ -1238,6 +1286,10 @@ class _Line {
     this.holdUntil,
     this.exact = false,
     this.target,
+    this.detail,
+    this.harness,
+    this.fromPair = false,
+    this.confirm,
   });
   final String line;
   final DateTime at;
@@ -1259,4 +1311,11 @@ class _Line {
 
   /// A roster line waiting for the brain's words until then.
   final DateTime? holdUntil;
+
+  /// A brain line's full `detail`, the harness it names, whether the pair
+  /// harness wrote it, and the setting it waits on.
+  final String? detail;
+  final DaemonHarness? harness;
+  final bool fromPair;
+  final ({String kind, String nonce})? confirm;
 }

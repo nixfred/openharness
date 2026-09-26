@@ -20,6 +20,48 @@ final _sentenceBreak = RegExp(r'(?<=[.!?])\s+');
 /// spaces (zsh's `[1]  + done  {who}` columns).
 final _clauseBreak = RegExp(r'(,\s+|;\s+|:\s+|\s+-\s+|\s{2,})');
 
+/// The autonomy dial's levels as a person reads them (`daemons/BRAIN.md`,
+/// "Autonomy dial").
+const daemonAutonomyLabels = {
+  'watch': 'watch',
+  'suggest': 'suggest',
+  'act-on-key': 'act on key',
+  'act-within-rules': 'act within rules',
+};
+
+String daemonAutonomyLabel(String level) =>
+    daemonAutonomyLabels[level] ?? level;
+
+/// Whether [level] lets the daemon act on its own (above `suggest`): the
+/// badge shows then, in the slot's tooltip and the panel.
+bool daemonAutonomyAboveSuggest(String? level) =>
+    level == 'act-on-key' || level == 'act-within-rules';
+
+/// What each version brought, as the lookbook's growth section writes it
+/// (`daemons/lookbook.html`, "growth"): tim's own log. A daemon without one
+/// says the bond it reached.
+const _changelogs = <String, Map<String, List<String>>>{
+  'tim': {
+    '0.1': ['one pane', 'says hello'],
+    '1.0': ['split-window -h: a second pane', 'learned your agents by name'],
+    '2.0': ['added arms, for waving', 'in-jokes from your logbook'],
+  },
+};
+
+/// The changelog line a level-up shows: `tim 1.0: split-window -h: a second
+/// pane; learned your agents by name`.
+String daemonChangelog(
+  DaemonDef def,
+  String version, {
+  required int bond,
+  required int xp,
+}) {
+  final log = _changelogs[def.id]?[version];
+  return log == null || log.isEmpty
+      ? '${def.id} $version: bond level $bond, $xp xp.'
+      : '${def.id} $version: ${log.join('; ')}';
+}
+
 /// What a line may say when its own words cannot be filled.
 const neutralDaemonLines = <DaemonMood, String>{
   DaemonMood.idle: 'nothing needs you.',
@@ -61,8 +103,11 @@ String? fillDaemonLine(String template, Map<String, String?> values) {
       kept.add(fill(sentence));
       continue;
     }
+    // What is left of a sentence that lost a slot must still hold a fact:
+    // a label (`E37:`) or voice v3's tag at the end (`(bell)`, `woof`) is
+    // not a line on its own.
     final reduced = _dropClauses(sentence, missing);
-    if (reduced != null) kept.add(fill(reduced));
+    if (reduced != null && _slot.hasMatch(reduced)) kept.add(fill(reduced));
   }
   final line = kept.join(' ').trim();
   // Nothing left, or only punctuation and a label: not worth a line.

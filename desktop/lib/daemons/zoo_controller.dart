@@ -333,7 +333,7 @@ class ZooController extends ChangeNotifier {
           if (next.owns(op['id'] as String)) {
             next = next.copyWith(pair: op['id'] as String);
           }
-        case 'zoo.nickname':
+        case 'zoo.nickname' || 'zoo.autonomy' || 'zoo.consent':
           next = applyZooOps(
             roster,
             next,
@@ -420,6 +420,20 @@ class ZooController extends ChangeNotifier {
       return;
     }
     _show(_zoo.copyWith(autonomy: level));
+    _sendLater(op);
+  }
+
+  /// The first-day answer (`zoo.consent`): whether the daemon may watch at
+  /// all. Yes starts the dial at `watch`; `suggest` is a second, separate
+  /// step. A guest's is kept locally and heard in `daemon_presence`.
+  void consent({required bool watching}) {
+    if (!loaded || _zoo.consent?.watching == watching) return;
+    final op = {'op': 'zoo.consent', 'watching': watching};
+    if (!isAccount) {
+      _applyLocal([op]);
+      return;
+    }
+    _show(applyZooOps(roster, _zoo, [op], random: _random, now: _now()).zoo);
     _sendLater(op);
   }
 

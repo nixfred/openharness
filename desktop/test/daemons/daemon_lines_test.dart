@@ -53,6 +53,26 @@ void main() {
     // A label with nothing after it is not a line.
     expect(fillDaemonLine('E37: {who} wants to write.', const {}), isNull);
     expect(fillDaemonLine('{who}: {q}', const {}), isNull);
+    // Voice v3: facts first, a short tag at the end. Without the facts the
+    // tag alone is not a line.
+    expect(fillDaemonLine('{who}: {q}  (bell)', const {}), isNull);
+    expect(
+      fillDaemonLine('{who}: {q}  (bell)', who),
+      'codex@office  (bell)',
+    );
+    expect(
+      fillDaemonLine('{who} failed: {recap}  [exit 1]', const {}),
+      isNull,
+    );
+    for (final d in daemonRoster.daemons) {
+      for (final mood in [DaemonMood.need, DaemonMood.fail]) {
+        expect(
+          daemonLine(d, mood, const {}),
+          neutralDaemonLines[mood],
+          reason: '${d.id} ${mood.name}: nothing known, the neutral line',
+        );
+      }
+    }
     // Only the sentence that needs the slot goes.
     expect(
       fillDaemonLine('{who} is waiting: {q}. you there?', const {}),

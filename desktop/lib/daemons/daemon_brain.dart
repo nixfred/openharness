@@ -111,6 +111,88 @@ class DaemonAbout {
   }
 }
 
+/// The harness a proposal or a line is about, named the way the person names
+/// it (`protocol.ts` `DaemonHarness`): every approval shows it.
+@immutable
+class DaemonHarness {
+  const DaemonHarness({
+    required this.name,
+    this.machineId = '',
+    this.machine = '',
+    this.agentId,
+  });
+  final String machineId, machine, name;
+  final String? agentId;
+
+  /// `api@office`.
+  String get label => machine.isEmpty ? name : '$name@$machine';
+
+  static DaemonHarness? fromJson(Object? raw) {
+    if (raw is! Map || raw['name'] is! String) return null;
+    return DaemonHarness(
+      machineId: _str(raw['machineId']),
+      machine: _str(raw['machine']),
+      agentId: _opt(raw['agentId']),
+      name: raw['name'] as String,
+    );
+  }
+}
+
+/// A setting that waits for the person's yes at a window (`pair/gate.ts`):
+/// a raise of the dial above `suggest`, or a pair.jsonc that turns rules, the
+/// model or a learning opt-in on. Answered with `daemon_confirm`, never
+/// `daemon_act`.
+@immutable
+class DaemonConfirm {
+  const DaemonConfirm({
+    required this.kind,
+    required this.nonce,
+    this.id = '',
+    this.line = '',
+    this.detail = '',
+    this.actions = const [],
+    this.at,
+    this.level,
+  });
+
+  /// `autonomy` or `rules`.
+  final String kind, nonce;
+
+  /// `confirm:<kind>:<nonce>`: what `daemon_shown` names.
+  final String id;
+  final String line;
+
+  /// Exactly what a yes turns on: the level and what it lets the daemon do,
+  /// or the whole pair.jsonc.
+  final String detail;
+  final List<DaemonAction> actions;
+  final DateTime? at;
+
+  /// On an autonomy request: the level asked for.
+  final String? level;
+
+  /// The id the daemon records a line under: `confirm:<kind>:<nonce>`.
+  static String idFor(String kind, String nonce) => 'confirm:$kind:$nonce';
+
+  static DaemonConfirm? fromJson(Object? raw) {
+    if (raw is! Map || raw['kind'] is! String || raw['nonce'] is! String) {
+      return null;
+    }
+    final kind = raw['kind'] as String, nonce = raw['nonce'] as String;
+    if (kind.isEmpty || nonce.isEmpty) return null;
+    return DaemonConfirm(
+      kind: kind,
+      nonce: nonce,
+      id: _opt(raw['id']) ?? idFor(kind, nonce),
+      line: _str(raw['line']),
+      detail: _str(raw['detail']),
+      actions: _actions(raw['actions']),
+      at: _at(raw['at']),
+      level: _opt(raw['level']),
+    );
+  }
+}
+
 /// The mood a `daemon_say` was sent with (`protocol.ts` `DaemonMood`).
 /// `auto` (a rule or the pair acted) is drawn like done, `say` (the pair
 /// talking) like idle, `ask` (a proposal waiting for your key) like need.
@@ -148,14 +230,25 @@ class DaemonNeed {
     this.engine = '',
     this.question = '',
     this.deny = false,
+    this.allow = false,
+    this.options = const [],
+    this.detail,
     this.since,
     this.sayId,
     this.line,
     this.actions = const [],
   });
   final String machineId, agentId, requestId, machine, name, engine, question;
-  final bool deny;
+  final bool deny, allow;
+  final List<String> options;
+
+  /// The whole dialog as painted: the exact command, or the edit's preview.
+  /// What a `[y]` on its line would approve, shown in full before a key.
+  final String? detail;
   final DateTime? since;
+
+  /// `api@office`.
+  String get who => machine.isEmpty ? name : '$name@$machine';
 
   /// Its line and keys, only while its line shows (the brain drops them
   /// after `ttlMs`; after that the need is listed for you to open).
@@ -184,6 +277,12 @@ class DaemonNeed {
       engine: _str(raw['engine']),
       question: _str(raw['question']),
       deny: raw['deny'] == true,
+      allow: raw['allow'] == true,
+      options: [
+        for (final o in raw['options'] is List ? raw['options'] as List : [])
+          if (o is String) o,
+      ],
+      detail: _opt(raw['detail']),
       since: _at(raw['since']),
       sayId: _opt(raw['id']),
       line: _opt(raw['line']),
@@ -289,16 +388,48 @@ class DaemonDone {
 }
 
 /// A proposal waiting for your key (`daemon_state.asks`): the pair wants to
-/// do something and the dial says to ask. Its keys work for ten minutes.
+/// do something and the dial says to ask, or a lesson waits for the person.
+/// Its keys work for ten minutes. One proposal, one key: there are no
+/// batches.
 @immutable
 class DaemonAsk {
   const DaemonAsk({
     required this.id,
     required this.line,
     this.actions = const [],
+    this.detail,
+    this.harness,
+    this.from,
+    this.verb,
+    this.at,
   });
   final String id, line;
   final List<DaemonAction> actions;
+
+  /// What a key would do, exactly and in full: the command, the whole
+  /// prompt, a start's folder and first prompt; a lesson's whole text.
+  final String? detail;
+
+  /// The harness it is about, by name and machine.
+  final DaemonHarness? harness;
+
+  /// `pair` when the pair harness asks (a model's request, not a fact).
+  final String? from;
+  final String? verb;
+  final DateTime? at;
+
+  bool get fromPair => from == 'pair';
+
+  /// A lesson's line: `lesson:<lessonId>:<nonce>`. Its id is a one-time
+  /// nonce, sent only to windows: a key on it is the person's alone.
+  bool get isLesson => id.startsWith('lesson:');
+
+  /// The lesson it proposes, for a lesson's line.
+  String? get lessonId {
+    if (!isLesson) return null;
+    final parts = id.split(':');
+    return parts.length >= 3 && parts[1].isNotEmpty ? parts[1] : null;
+  }
 
   static DaemonAsk? fromJson(Object? raw) {
     if (raw is! Map || raw['id'] is! String || raw['line'] is! String) {
@@ -308,6 +439,11 @@ class DaemonAsk {
       id: raw['id'] as String,
       line: raw['line'] as String,
       actions: _actions(raw['actions']),
+      detail: _opt(raw['detail']),
+      harness: DaemonHarness.fromJson(raw['harness']),
+      from: _opt(raw['from']),
+      verb: _opt(raw['verb']),
+      at: _at(raw['at']),
     );
   }
 }
@@ -362,10 +498,21 @@ class DaemonBrainState {
     this.doneLast = const [],
     this.asks = const [],
     this.acted = const [],
+    this.autonomy,
+    this.autonomyRequested,
+    this.confirms = const [],
   });
 
   /// The daemon the brain pairs with; null means "use the roster lines".
   final String? pair;
+
+  /// The level the daemon acts at right now, and a higher one the zoo asks
+  /// for that waits for the person's yes (`pair/gate.ts`). Null from a
+  /// harnessd that predates the gate.
+  final String? autonomy, autonomyRequested;
+
+  /// What waits for the person's yes: a raise of the dial, a pair.jsonc.
+  final List<DaemonConfirm> confirms;
   final List<DaemonNeed> needs;
 
   /// Harnesses working (not waiting on a question), on every machine.
@@ -405,6 +552,9 @@ class DaemonBrainState {
       doneLast: _list(done['last'], DaemonDone.fromJson),
       asks: _list(raw['asks'], DaemonAsk.fromJson),
       acted: _list(raw['acted'], DaemonActed.fromJson),
+      autonomy: _opt(raw['autonomy']),
+      autonomyRequested: _opt(raw['autonomyRequested']),
+      confirms: _list(raw['confirms'], DaemonConfirm.fromJson),
     );
   }
 }
@@ -419,12 +569,32 @@ class DaemonSay {
     this.mood,
     this.actions = const [],
     this.ttl,
+    this.from,
+    this.detail,
+    this.harness,
+    this.confirm,
   });
   final String id, line;
   final DaemonAbout? about;
   final DaemonSayMood? mood;
   final List<DaemonAction> actions;
   final Duration? ttl;
+
+  /// Who is speaking: `pair` is the pair harness (a model's words or
+  /// request, drawn as it speaking); absent is the daemon's own facts.
+  final String? from;
+
+  /// What a key on this line would do, exactly and in full. Shown with the
+  /// line before `daemon_shown`; `line` is only its one-line summary.
+  final String? detail;
+
+  /// The harness it is about, by name and machine.
+  final DaemonHarness? harness;
+
+  /// A setting waiting for the person's yes: its keys are `daemon_confirm`.
+  final ({String kind, String nonce})? confirm;
+
+  bool get fromPair => from == 'pair';
 
   /// `machineId/agentId` of the harness it is about, if any.
   String? get aboutKey => about?.key;
@@ -433,13 +603,33 @@ class DaemonSay {
     final id = raw['id'], line = raw['line'];
     if (id is! String || line is! String || line.trim().isEmpty) return null;
     final ttl = raw['ttlMs'];
+    final mood = DaemonSayMood.named(raw['mood']);
+    final from = _opt(raw['from']);
+    final confirm = raw['confirm'];
     return DaemonSay(
       id: id,
       line: line.trim(),
       about: DaemonAbout.fromJson(raw['about']),
-      mood: DaemonSayMood.named(raw['mood']),
-      actions: _actions(raw['actions']),
+      mood: mood,
+      // The pair talking never carries a key, whatever it sends (BRAIN.md,
+      // "Security" 5): only a proposal of its own does.
+      actions: from == 'pair' && mood == DaemonSayMood.say
+          ? const []
+          : _actions(raw['actions']),
       ttl: ttl is num && ttl > 0 ? Duration(milliseconds: ttl.toInt()) : null,
+      from: from,
+      detail: _opt(raw['detail']),
+      harness: DaemonHarness.fromJson(raw['harness']),
+      confirm:
+          confirm is Map &&
+              confirm['kind'] is String &&
+              confirm['nonce'] is String &&
+              (confirm['nonce'] as String).isNotEmpty
+          ? (
+              kind: confirm['kind'] as String,
+              nonce: confirm['nonce'] as String,
+            )
+          : null,
     );
   }
 }
@@ -458,6 +648,7 @@ class DaemonBriefItem {
     this.name,
     this.actions = const [],
     this.text,
+    this.detail,
   });
   final String id, kind, machineId, machine, line;
   final String? agentId, name;
@@ -465,6 +656,13 @@ class DaemonBriefItem {
 
   /// A `lesson` item's full text (the SKILL.md or note), shown on `[s]`.
   final String? text;
+
+  /// What a waiting item's `[y]` would approve, in full.
+  final String? detail;
+
+  /// Everything a key on it would act on, to show before its keys arm: the
+  /// dialog, or a lesson's whole text.
+  String? get shows => detail ?? text;
 
   /// The harness it is about, when it is about one.
   DaemonAbout? get about => agentId == null || machineId.isEmpty
@@ -483,8 +681,30 @@ class DaemonBriefItem {
       line: raw['line'] as String,
       actions: _actions(raw['actions']),
       text: raw['text'] is String ? raw['text'] as String : null,
+      detail: _opt(raw['detail']),
     );
   }
+}
+
+/// What a key on a line did (`daemon_act_result`), for whoever showed it: a
+/// lesson learned or skipped, its text, or why nothing happened.
+@immutable
+class DaemonActResult {
+  const DaemonActResult({
+    required this.id,
+    required this.ok,
+    this.error,
+    this.detail,
+    this.learned,
+    this.skipped,
+    this.lesson,
+  });
+  final String id;
+  final bool ok;
+  final String? error, detail;
+
+  /// On a lesson's line: the name taught or skipped, or its text for `[s]`.
+  final String? learned, skipped, lesson;
 }
 
 @immutable
@@ -550,10 +770,24 @@ class DaemonBrain extends ChangeNotifier {
   /// The talk keeps this many turns for the panel.
   static const talkKept = 8;
 
+  /// A line's keys arm this long after the window said it drew it: the
+  /// daemon's own 400 ms (`pair/shown.ts` `ARM_MS`), and a margin for the
+  /// acknowledgement's trip, so a key the window offers is never too soon.
+  static const armAfter = Duration(milliseconds: 450);
+
+  /// Lines remembered as shown at once; the oldest go first (their keys
+  /// stopped working long before).
+  static const shownKept = 500;
+
   DaemonBrainState? _state;
   DaemonBrief? _brief;
   final _pendingActs = <String, String>{}; // requestId -> say id
+  final _pendingConfirms = <String, String>{}; // requestId -> confirm id
   final _requests = <String, Completer<Map<String, dynamic>>>{};
+
+  /// When this window acknowledged each line as drawn (`daemon_shown`).
+  final _shownAt = <String, DateTime>{};
+  final _armTimers = <String, Timer>{};
 
   /// How long a `pair` request waits for its answer.
   static const requestTimeout = Duration(seconds: 15);
@@ -561,12 +795,16 @@ class DaemonBrain extends ChangeNotifier {
   final _unsaid = StreamController<String>.broadcast(sync: true);
   final _errors = StreamController<String>.broadcast(sync: true);
   final _opens = StreamController<DaemonAbout>.broadcast(sync: true);
+  final _results = StreamController<DaemonActResult>.broadcast(sync: true);
   String? _desk;
   bool _disposed = false;
 
   String? _talkRequest;
   DaemonTalkPhase _talkPhase = DaemonTalkPhase.idle;
   String? _talkError;
+  String? _talkCost;
+  DateTime? _talkRetryAt;
+  Timer? _talkRetryTimer;
   String? _pairAgentId;
   final _talk = <DaemonTalkEntry>[];
 
@@ -587,14 +825,32 @@ class DaemonBrain extends ChangeNotifier {
   /// A harness to open: the brain answered `[g]` with it.
   Stream<DaemonAbout> get opens => _opens.stream;
 
+  /// What each key did (a lesson learned or skipped, or why not).
+  Stream<DaemonActResult> get results => _results.stream;
+
   DaemonTalkPhase get talkPhase => _talkPhase;
   String? get talkError => _talkError;
+
+  /// What a talk costs, as harnessd says it with every answer.
+  String? get talkCost => _talkCost;
+
+  /// How long until the talk box takes words again (six a minute, sixty an
+  /// hour), or null when it does now.
+  Duration? get talkWait {
+    final at = _talkRetryAt;
+    if (at == null) return null;
+    final left = at.difference(_now());
+    return left > Duration.zero ? left : null;
+  }
 
   /// The pair harness's agent id on this computer, once a talk reached it.
   String? get pairAgentId => _pairAgentId;
 
   /// The talk so far, oldest first: what you said and what it answered.
   List<DaemonTalkEntry> get talk => List.unmodifiable(_talk);
+
+  /// The level the daemon acts at now (the badge), when harnessd says.
+  String? get autonomy => _state?.autonomy;
 
   /// A stable id for this computer's desk, so a brief is not repeated.
   Future<String> desk() async {
@@ -615,6 +871,46 @@ class DaemonBrain extends ChangeNotifier {
     bytes,
     (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
   ).join();
+
+  // ── shown, then armed ───────────────────────────────────────────────────
+
+  /// Whether this window said it drew [id].
+  bool wasShown(String id) => _shownAt.containsKey(id);
+
+  /// Whether a key on [id] counts now: this window drew it, and its detail,
+  /// at least [armAfter] ago. Until then its keys are drawn but do nothing.
+  bool armed(String id) {
+    final at = _shownAt[id];
+    return at != null && !_now().isBefore(at.add(armAfter));
+  }
+
+  /// This window has drawn [id] and everything a key on it would act on
+  /// (its `detail` in full). harnessd hears `daemon_shown` once; the line's
+  /// keys arm [armAfter] later, and listeners hear it then.
+  void shown(String id) {
+    if (_disposed || id.isEmpty || _shownAt.containsKey(id)) return;
+    if (!send('daemon_shown', {'id': id})) return;
+    _shownAt[id] = _now();
+    while (_shownAt.length > shownKept) {
+      final oldest = _shownAt.keys.first;
+      _shownAt.remove(oldest);
+      _armTimers.remove(oldest)?.cancel();
+    }
+    _armTimers[id]?.cancel();
+    _armTimers[id] = Timer(armAfter, () {
+      _armTimers.remove(id);
+      if (!_disposed) notifyListeners();
+    });
+  }
+
+  /// harnessd did not count a key as shown (a new connection, or the key came
+  /// a moment early): acknowledge the line again, and arm it again.
+  void _showAgain(String id) {
+    _shownAt.remove(id);
+    _armTimers.remove(id)?.cancel();
+    shown(id);
+    if (!_disposed) notifyListeners();
+  }
 
   /// A local frame from this computer's harnessd.
   void receive(String type, Map<String, dynamic> payload) {
@@ -644,20 +940,48 @@ class DaemonBrain extends ChangeNotifier {
         notifyListeners();
       case 'daemon_act_result':
         final requestId = payload['requestId'];
-        if (requestId is! String || _pendingActs.remove(requestId) == null) {
-          return;
-        }
+        if (requestId is! String) return;
+        final id = _pendingActs.remove(requestId);
+        if (id == null) return;
+        final error = _opt(payload['error']);
+        _results.add(
+          DaemonActResult(
+            id: id,
+            ok: payload['ok'] == true,
+            error: error,
+            detail: _opt(payload['detail']),
+            learned: _opt(payload['learned']),
+            skipped: _opt(payload['skipped']),
+            lesson: _opt(payload['lesson']),
+          ),
+        );
         if (payload['ok'] == true) {
           final about = DaemonAbout.fromJson(payload['open']);
           if (about?.key != null) _opens.add(about!);
           return;
         }
-        final detail = payload['detail'];
-        _errors.add(
-          detail is String && detail.isNotEmpty
-              ? detail
-              : actError(payload['error'] as String?),
+        if (error == 'NOT_SHOWN' || error == 'TOO_SOON') _showAgain(id);
+        _errors.add(actError(error, _opt(payload['detail'])));
+      case 'daemon_confirm_result':
+        final requestId = payload['requestId'];
+        if (requestId is! String) return;
+        final id = _pendingConfirms.remove(requestId);
+        if (id == null) return;
+        final error = _opt(payload['error']);
+        _results.add(
+          DaemonActResult(
+            id: id,
+            ok: payload['ok'] == true,
+            error: error,
+            detail: _opt(payload['detail']),
+          ),
         );
+        if (payload['ok'] == true) {
+          notifyListeners();
+          return;
+        }
+        if (error == 'NOT_SHOWN' || error == 'TOO_SOON') _showAgain(id);
+        _errors.add(actError(error, _opt(payload['detail'])));
       case 'pair_result':
         final requestId = payload['requestId'];
         if (requestId is! String) return;
@@ -668,6 +992,9 @@ class DaemonBrain extends ChangeNotifier {
         final requestId = payload['requestId'];
         if (_talkRequest == null || requestId != _talkRequest) return;
         _talkRequest = null;
+        _talkCost = _opt(payload['cost']) ?? _talkCost;
+        final retry = payload['retryAfterMs'];
+        if (retry is num && retry > 0) _holdTalk(retry.toInt());
         if (payload['ok'] == true) {
           _talkError = null;
           _pairAgentId = _opt(payload['agentId']) ?? _pairAgentId;
@@ -678,41 +1005,80 @@ class DaemonBrain extends ChangeNotifier {
               : DaemonTalkPhase.sent;
         } else {
           _talkPhase = DaemonTalkPhase.failed;
-          final detail = payload['detail'];
-          _talkError = detail is String && detail.isNotEmpty
-              ? detail
-              : talkErrorWords(payload['error'] as String?);
+          _talkError = talkErrorWords(
+            payload['error'] as String?,
+            _opt(payload['detail']),
+          );
         }
         notifyListeners();
     }
   }
 
-  static String actError(String? code) => switch (code) {
-    'STALE_QUESTION' => 'that question changed before the answer landed.',
-    'GONE' => 'that is gone.',
+  /// No more talk until [ms] from now: the box says how long, and opens
+  /// again by itself.
+  void _holdTalk(int ms) {
+    _talkRetryAt = _now().add(Duration(milliseconds: ms));
+    _talkRetryTimer?.cancel();
+    _talkRetryTimer = Timer(Duration(milliseconds: ms), () {
+      _talkRetryTimer = null;
+      _talkRetryAt = null;
+      if (!_disposed) notifyListeners();
+    });
+  }
+
+  /// Why a key did nothing, in one line. The window's own words for what it
+  /// knows; harnessd's `detail` for anything newer.
+  static String actError(String? code, [String? detail]) => switch (code) {
+    'STALE_QUESTION' =>
+      'that question changed before the answer landed. nothing was typed.',
+    'GONE' => 'that is gone: answered, or its time ran out.',
+    'STALE_CONFIRM' => 'that request is no longer waiting.',
+    'NOT_SHOWN' || 'TOO_SOON' => 'a moment: read it, then press again.',
+    'PERSON_ONLY' =>
+      'only you teach a lesson, and this daemon cannot tell it was you. '
+          'approve it at a terminal.',
+    'INSIDE_HARNESS' => 'a key from inside a harness never teaches a lesson.',
+    'NONCE_REQUIRED' || 'UNVERIFIED' =>
+      'that needs you: press its key on its line, or run it at a terminal.',
     'PAIR_OFF' => 'pairing is off.',
     'NOT_OFFERED' => 'that answer was not offered.',
     'DENY_CLASS' => 'that one needs you at the harness.',
+    'NOT_ALLOW_CLASS' =>
+      'only a read, test, build or in-project edit gets a yes from here. '
+          'open it.',
+    'REMOTE_ANSWERS_ONLY' =>
+      'on another machine only a read, test or build is answered from here. '
+          'open it.',
+    'RATE_LIMITED' => 'too many answers at once. try again in a minute.',
     'PERSISTENT' => 'only you can choose an answer for more than this once.',
-    'AUTONOMY_WATCH' => 'the daemon only watches. change it in the panel.',
+    'AUTONOMY_WATCH' => 'it only watches. turn the dial in its panel.',
     'UNTOUCHABLE' => 'the daemon never drives that one.',
+    'UI_ONLY' || 'LOCAL_SOCKET_REQUIRED' =>
+      'keys count only from a window on this computer.',
     'UNSUPPORTED' => 'harnessd cannot answer that yet.',
     final String code when code.startsWith('MACHINE_') =>
       'that machine is ${code.substring(8).toLowerCase()}.',
-    _ => 'the answer did not go through.',
+    _ => detail ?? 'the answer did not go through.',
   };
 
-  static String talkErrorWords(String? code) => switch (code) {
-    'PAIR_OFF' => 'nothing is paired: pair a daemon first.',
-    'NO_ENGINE' => 'the pair runs on Claude Code or Codex; neither is here.',
-    'INSTALL_FAILED' => 'the pair harness could not be installed. try again.',
-    'EMPTY' => 'say something first.',
-    'UNSUPPORTED' => 'this harnessd cannot talk yet. update it.',
-    _ => 'the words did not reach it.',
-  };
+  static String talkErrorWords(String? code, [String? detail]) =>
+      switch (code) {
+        'PAIR_OFF' => 'nothing is paired: pair a daemon first.',
+        'NO_ENGINE' => 'the pair runs on Claude Code or Codex; neither is here.',
+        'INSTALL_FAILED' =>
+          'the pair harness could not be installed. try again.',
+        'EMPTY' => 'say something first.',
+        'RATE_LIMITED' => 'six talks a minute, sixty an hour.',
+        'UI_ONLY' => 'talk comes only from a window on this computer.',
+        'UNSUPPORTED' => 'this harnessd cannot talk yet. update it.',
+        _ => detail ?? 'the words did not reach it.',
+      };
 
   /// Answer a line (or an ask, or a brief item) with one of its actions.
+  /// Only once it is armed: this window drew it, and what it would do, a
+  /// moment ago (BRAIN.md, "Security" 1). Nothing is sent before that.
   bool act(String sayId, String choice) {
+    if (_disposed || sayId.isEmpty || !armed(sayId)) return false;
     final requestId = _id(12);
     final sent = send('daemon_act', {
       'requestId': requestId,
@@ -721,6 +1087,27 @@ class DaemonBrain extends ChangeNotifier {
     });
     if (sent) {
       _pendingActs[requestId] = sayId;
+    } else {
+      _errors.add('harnessd is not reachable.');
+    }
+    return sent;
+  }
+
+  /// The person's answer to a setting that waits for it (`pair/gate.ts`): a
+  /// raise of the dial, or pair.jsonc as it is now. Only once the request is
+  /// armed, like any key.
+  bool confirm(String kind, String nonce, {required bool accept}) {
+    final id = DaemonConfirm.idFor(kind, nonce);
+    if (_disposed || !armed(id)) return false;
+    final requestId = _id(12);
+    final sent = send('daemon_confirm', {
+      'requestId': requestId,
+      'kind': kind,
+      'nonce': nonce,
+      'accept': accept,
+    });
+    if (sent) {
+      _pendingConfirms[requestId] = id;
     } else {
       _errors.add('harnessd is not reachable.');
     }
@@ -754,10 +1141,11 @@ class DaemonBrain extends ChangeNotifier {
   }
 
   /// Your words to the paired daemon: harnessd starts, resumes or reaches the
-  /// pair harness, and its answer comes back as a `daemon_say` (`say`).
+  /// pair harness, and its answer comes back as a `daemon_say` (`say`). Not
+  /// while harnessd asked to wait ([talkWait]).
   bool talkTo(String text) {
     final words = text.trim();
-    if (_disposed || words.isEmpty) return false;
+    if (_disposed || words.isEmpty || talkWait != null) return false;
     final requestId = _id(12);
     final sent = send('daemon_talk', {'requestId': requestId, 'text': words});
     _remember((you: true, text: words));
@@ -789,13 +1177,14 @@ class DaemonBrain extends ChangeNotifier {
 
   /// Whether you are at this window, and for how long you were away, with the
   /// pane in front of you (null clears it: the brain says nothing about what
-  /// you are looking at). A guest adds which daemon its local zoo pairs and
-  /// its dial.
+  /// you are looking at). A guest adds which daemon its local zoo pairs, its
+  /// dial and whether the person agreed to being watched.
   Future<void> presence({
     required bool active,
     Duration? away,
     String? pair,
     String? autonomy,
+    bool? consent,
     String? focusMachineId,
     String? focusAgentId,
   }) async {
@@ -807,6 +1196,7 @@ class DaemonBrain extends ChangeNotifier {
       'desk': desk,
       'pair': ?pair,
       'autonomy': ?autonomy,
+      'consent': ?consent,
       'focusMachineId': focusAgentId == null ? null : focusMachineId,
       'focusAgentId': focusAgentId,
     });
@@ -830,11 +1220,17 @@ class DaemonBrain extends ChangeNotifier {
     send('daemon_presence', {'desk': desk, 'doneSeen': true});
   }
 
-  /// A guest's local zoo changed its pair or dial: the brain hears it.
-  Future<void> guest({String? pair, String? autonomy}) async {
+  /// A guest's local zoo changed its pair, dial or consent: the brain hears
+  /// it.
+  Future<void> guest({String? pair, String? autonomy, bool? consent}) async {
     final desk = await this.desk();
     if (_disposed) return;
-    send('daemon_presence', {'desk': desk, 'pair': pair, 'autonomy': autonomy});
+    send('daemon_presence', {
+      'desk': desk,
+      'pair': pair,
+      'autonomy': autonomy,
+      'consent': ?consent,
+    });
   }
 
   /// A new account or harnessd: nothing heard so far still holds.
@@ -842,6 +1238,12 @@ class DaemonBrain extends ChangeNotifier {
     _state = null;
     _brief = null;
     _pendingActs.clear();
+    _pendingConfirms.clear();
+    _shownAt.clear();
+    for (final timer in _armTimers.values) {
+      timer.cancel();
+    }
+    _armTimers.clear();
     for (final waiting in _requests.values) {
       if (!waiting.isCompleted) waiting.complete({'ok': false, 'error': 'GONE'});
     }
@@ -849,6 +1251,9 @@ class DaemonBrain extends ChangeNotifier {
     _talkRequest = null;
     _talkPhase = DaemonTalkPhase.idle;
     _talkError = null;
+    _talkRetryTimer?.cancel();
+    _talkRetryTimer = null;
+    _talkRetryAt = null;
     _pairAgentId = null;
     _talk.clear();
     if (!_disposed) notifyListeners();
@@ -863,10 +1268,16 @@ class DaemonBrain extends ChangeNotifier {
       }
     }
     _requests.clear();
+    for (final timer in _armTimers.values) {
+      timer.cancel();
+    }
+    _armTimers.clear();
+    _talkRetryTimer?.cancel();
     unawaited(_said.close());
     unawaited(_unsaid.close());
     unawaited(_errors.close());
     unawaited(_opens.close());
+    unawaited(_results.close());
     super.dispose();
   }
 }

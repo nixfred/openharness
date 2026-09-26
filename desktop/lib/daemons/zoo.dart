@@ -44,8 +44,28 @@ bool validNickname(String? value) =>
 /// "Autonomy dial"; `backend/src/lib/zoo.ts` `ZOO_AUTONOMY_LEVELS`).
 const zooAutonomyLevels = ['watch', 'suggest', 'act-on-key', 'act-within-rules'];
 
-/// What a zoo that never set the dial means.
-const zooDefaultAutonomy = 'suggest';
+/// What a zoo that never set the dial means: it watches and tells you
+/// (`backend/src/lib/zoo.ts` `ZOO_DEFAULT_AUTONOMY`). `suggest` and above are
+/// the person's own choice, after the first-day consent.
+const zooDefaultAutonomy = 'watch';
+
+/// The person's first-day answer to their daemon watching (`daemons/README.md`,
+/// "What your daemon sees"): until it is yes, no harnessd senses anything.
+/// Null in a zoo: never asked yet.
+class ZooConsent {
+  const ZooConsent({required this.watching, required this.at});
+  final bool watching;
+
+  /// When it was answered (ISO time).
+  final String at;
+
+  Map<String, dynamic> toJson() => {'watching': watching, 'at': at};
+
+  static ZooConsent? fromJson(Object? raw) =>
+      raw is Map && raw['watching'] is bool && raw['at'] is String
+      ? ZooConsent(watching: raw['watching'] as bool, at: raw['at'] as String)
+      : null;
+}
 
 bool isZooAutonomy(Object? value) =>
     value is String && zooAutonomyLevels.contains(value);
@@ -389,6 +409,7 @@ class Zoo {
     this.eggs = const [],
     this.pair,
     this.autonomy = zooDefaultAutonomy,
+    this.consent,
     this.habits = const [],
     this.firstEgg = false,
     this.setupEgg = false,
@@ -405,6 +426,13 @@ class Zoo {
 
   /// The pair's autonomy dial, one of [zooAutonomyLevels].
   final String autonomy;
+
+  /// Whether the person agreed to their daemon watching, and when; null
+  /// until they answered the first-day screen.
+  final ZooConsent? consent;
+
+  /// The daemon may watch: the person said yes.
+  bool get watching => consent?.watching == true;
   final List<String> habits;
   final bool firstEgg;
 
@@ -445,6 +473,7 @@ class Zoo {
     List<ZooEgg>? eggs,
     String? pair,
     String? autonomy,
+    ZooConsent? consent,
     List<String>? habits,
     bool? firstEgg,
     bool? setupEgg,
@@ -456,6 +485,7 @@ class Zoo {
     eggs: eggs ?? this.eggs,
     pair: pair ?? this.pair,
     autonomy: autonomy ?? this.autonomy,
+    consent: consent ?? this.consent,
     habits: habits ?? this.habits,
     firstEgg: firstEgg ?? this.firstEgg,
     setupEgg: setupEgg ?? this.setupEgg,
@@ -469,6 +499,7 @@ class Zoo {
     'eggs': [for (final e in eggs) e.toJson()],
     'pair': pair,
     'autonomy': autonomy,
+    'consent': consent?.toJson(),
     'habits': habits,
     'firstEgg': firstEgg,
     'setupEgg': setupEgg,
@@ -511,6 +542,7 @@ class Zoo {
       autonomy: isZooAutonomy(raw['autonomy'])
           ? raw['autonomy'] as String
           : zooDefaultAutonomy,
+      consent: ZooConsent.fromJson(raw['consent']),
       habits: <String>{
         for (final h in raw['habits'] as List? ?? const [])
           if (h is String && habitKeys.contains(h)) h,
@@ -685,6 +717,7 @@ class _ZooRules {
       eggs = [...zoo.eggs],
       pair = zoo.pair,
       autonomy = zoo.autonomy,
+      consent = zoo.consent,
       habits = [...zoo.habits],
       firstEgg = zoo.firstEgg,
       setupEgg = zoo.setupEgg,
@@ -707,6 +740,7 @@ class _ZooRules {
   List<ZooEgg> eggs;
   String? pair;
   String autonomy;
+  ZooConsent? consent;
   List<String> habits;
   bool firstEgg, setupEgg;
   int pity;
@@ -726,6 +760,7 @@ class _ZooRules {
     eggs: eggs,
     pair: pair,
     autonomy: autonomy,
+    consent: consent,
     habits: habits,
     firstEgg: firstEgg,
     setupEgg: setupEgg,
@@ -897,6 +932,13 @@ class _ZooRules {
         // A level the server does not know is dropped.
         final level = op['level'];
         if (isZooAutonomy(level)) autonomy = level as String;
+      case 'zoo.consent':
+        final watching = op['watching'];
+        if (watching is! bool || consent?.watching == watching) return;
+        // Agreeing to be watched starts at `watch`: the person opts into
+        // `suggest` and above afterwards.
+        if (watching) autonomy = 'watch';
+        consent = ZooConsent(watching: watching, at: _stamp);
       case 'zoo.nickname':
         final id = op['id'], nickname = op['nickname'];
         final at = daemons.indexWhere((d) => d.id == id);

@@ -262,6 +262,12 @@ void main() {
     final opens = <DaemonAbout>[];
     brain.errors.listen(errors.add);
     brain.opens.listen(opens.add);
+    // Every line here was drawn a moment ago: its keys are armed.
+    for (final id in ['s1', 's2', 'ask:1', 's3']) {
+      brain.shown(id);
+    }
+    now = now.add(DaemonBrain.armAfter);
+    sent.clear();
     expect(brain.act('s1', '1'), isTrue);
     final (type, payload) = sent.single;
     expect(type, 'daemon_act');
@@ -282,7 +288,7 @@ void main() {
       'detail': 'The dialog changed before the answer; nothing was typed.',
     });
     expect(errors, [
-      'The dialog changed before the answer; nothing was typed.',
+      'that question changed before the answer landed. nothing was typed.',
     ]);
     brain.act('s2', 'g');
     brain.receive('daemon_act_result', {
@@ -306,6 +312,15 @@ void main() {
       'error': 'AUTONOMY_WATCH',
     });
     expect(errors.last, contains('only watches'));
+    // A code this window has no words for: harnessd's own.
+    brain.act('ask:1', 'y');
+    brain.receive('daemon_act_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': false,
+      'error': 'SOMETHING_NEW',
+      'detail': 'A newer harnessd says why.',
+    });
+    expect(errors.last, 'A newer harnessd says why.');
     reachable = false;
     expect(brain.act('s3', 'y'), isFalse);
     expect(errors.last, 'harnessd is not reachable.');
@@ -410,5 +425,299 @@ void main() {
     final again = DaemonBrain(send: (_, _) => true, storage: storage);
     addTearDown(again.dispose);
     expect(await again.desk(), desk);
+  });
+
+  test('shown, then armed: daemon_shown once, keys 450 ms later, nothing '
+      'sent before', () {
+    var changes = 0;
+    brain.addListener(() => changes++);
+    expect(brain.armed('need:1'), isFalse);
+    expect(brain.act('need:1', 'y'), isFalse, reason: 'never shown');
+    expect(sent, isEmpty);
+    brain.shown('need:1');
+    brain.shown('need:1');
+    brain.shown('');
+    expect(sent.map((s) => (s.$1, s.$2['id'])), [
+      ('daemon_shown', 'need:1'),
+    ], reason: 'once per line');
+    expect(brain.wasShown('need:1'), isTrue);
+    now = now.add(const Duration(milliseconds: 400));
+    expect(brain.armed('need:1'), isFalse, reason: 'a margin past 400 ms');
+    expect(brain.act('need:1', 'y'), isFalse);
+    now = now.add(const Duration(milliseconds: 50));
+    expect(brain.armed('need:1'), isTrue);
+    expect(brain.act('need:1', 'y'), isTrue);
+    expect(sent.last.$1, 'daemon_act');
+    // harnessd did not count it (a new connection): shown again, re-armed.
+    final errors = <String>[];
+    brain.errors.listen(errors.add);
+    brain.receive('daemon_act_result', {
+      'requestId': sent.last.$2['requestId'],
+      'id': 'need:1',
+      'ok': false,
+      'error': 'NOT_SHOWN',
+    });
+    expect((sent.last.$1, sent.last.$2['id']), ('daemon_shown', 'need:1'));
+    expect(brain.armed('need:1'), isFalse);
+    expect(errors.single, 'a moment: read it, then press again.');
+    expect(changes, greaterThan(0));
+    // A reset (a new harnessd) forgets what was shown.
+    now = now.add(DaemonBrain.armAfter);
+    expect(brain.armed('need:1'), isTrue);
+    brain.reset();
+    expect(brain.armed('need:1'), isFalse);
+    expect(brain.wasShown('need:1'), isFalse);
+  });
+
+  test('the hardened frames: detail, harness, the pair, confirms, the dial',
+      () {
+    final said = <DaemonSay>[];
+    brain.said.listen(said.add);
+    brain.receive('daemon_say', {
+      'id': 'ask:7',
+      'about': {'machineId': 'm', 'agentId': ''},
+      'mood': 'ask',
+      'from': 'pair',
+      'line': '[y/n] start codex in ~/api?',
+      'detail': 'start codex in ~/code/api\nfirst prompt: run the tests',
+      'harness': {
+        'machineId': 'm',
+        'machine': 'laptop',
+        'agentId': null,
+        'name': 'api',
+      },
+      'actions': [
+        {'key': 'y', 'label': 'do it', 'choice': 'y'},
+        {'key': 'n', 'label': 'skip', 'choice': 'n'},
+      ],
+      'ttlMs': 5200,
+    });
+    // The pair talking never carries a key, whatever it sends.
+    brain.receive('daemon_say', {
+      'id': 'say:3',
+      'about': {'machineId': 'm', 'agentId': ''},
+      'mood': 'say',
+      'from': 'pair',
+      'line': 'y) sure, done.',
+      'actions': [
+        {'key': 'y', 'label': 'yes', 'choice': 'y'},
+      ],
+      'ttlMs': 5200,
+    });
+    brain.receive('daemon_say', {
+      'id': 'confirm:autonomy:k1',
+      'about': {'machineId': 'm', 'agentId': ''},
+      'mood': 'ask',
+      'from': 'daemon',
+      'line': '[y/n] let your daemon act at act-on-key? it stays at suggest '
+          'until you say yes',
+      'detail': 'autonomy suggest -> act-on-key',
+      'confirm': {'kind': 'autonomy', 'nonce': 'k1'},
+      'actions': [
+        {'key': 'y', 'label': 'confirm', 'choice': 'y'},
+        {'key': 'n', 'label': 'keep it as it is', 'choice': 'n'},
+      ],
+      'ttlMs': 5200,
+    });
+    expect(said[0].fromPair, isTrue);
+    expect(said[0].detail, contains('first prompt: run the tests'));
+    expect(said[0].harness!.label, 'api@laptop');
+    expect(said[0].actions, hasLength(2), reason: 'a proposal has its keys');
+    expect(said[1].fromPair, isTrue);
+    expect(said[1].actions, isEmpty);
+    expect(said[2].confirm, (kind: 'autonomy', nonce: 'k1'));
+    expect(said[2].fromPair, isFalse);
+    brain.receive('daemon_state', {
+      'pair': 'tim',
+      'needs': [
+        {
+          'machineId': 'office',
+          'machine': 'office',
+          'agentId': 'a1',
+          'name': 'api',
+          'requestId': 'r1',
+          'question': 'Bash: npm test',
+          'allow': true,
+          'options': ['1. Yes', '3. No'],
+          'detail': 'Bash command\n  npm test\nDo you want to proceed?',
+        },
+      ],
+      'working': 0,
+      'failing': [],
+      'machines': [],
+      'done': {'count': 0, 'last': []},
+      'asks': [
+        {
+          'id': 'lesson:ab12:ffee',
+          'line': '[y/n/s] teach your agents "x"?',
+          'detail': '---\nname: x\n---\nBack up first.',
+          'actions': [
+            {'key': 'y', 'label': 'teach', 'choice': 'y'},
+          ],
+        },
+      ],
+      'acted': [],
+      'autonomy': 'suggest',
+      'autonomyRequested': 'act-on-key',
+      'confirms': [
+        {
+          'id': 'confirm:autonomy:k1',
+          'kind': 'autonomy',
+          'nonce': 'k1',
+          'line': '[y/n] let your daemon act at act-on-key?',
+          'detail': 'autonomy suggest -> act-on-key',
+          'actions': [
+            {'key': 'y', 'label': 'confirm', 'choice': 'y'},
+          ],
+          'at': 1790000000000,
+          'level': 'act-on-key',
+        },
+        {'kind': 'rules'},
+      ],
+    });
+    final state = brain.state!;
+    expect(state.needs.single.detail, contains('npm test'));
+    expect(state.needs.single.allow, isTrue);
+    expect(state.needs.single.options, ['1. Yes', '3. No']);
+    expect(state.needs.single.who, 'api@office');
+    expect(state.asks.single.isLesson, isTrue);
+    expect(state.asks.single.lessonId, 'ab12');
+    expect(state.asks.single.detail, contains('Back up first.'));
+    expect(state.autonomy, 'suggest');
+    expect(brain.autonomy, 'suggest');
+    expect(state.autonomyRequested, 'act-on-key');
+    expect(state.confirms.single.level, 'act-on-key');
+    expect(state.confirms.single.id, 'confirm:autonomy:k1');
+    expect(DaemonConfirm.idFor('rules', 'n2'), 'confirm:rules:n2');
+    brain.receive('daemon_brief', {
+      'line': 'x',
+      'items': [
+        {
+          'id': 'b1',
+          'kind': 'waiting',
+          'line': '[y/n/g] api',
+          'detail': 'the whole dialog',
+        },
+        {
+          'id': 'lesson:ab12:ffee',
+          'kind': 'lesson',
+          'line': '[y/n] teach',
+          'text': 'the lesson',
+        },
+      ],
+    });
+    expect(brain.brief!.items[0].shows, 'the whole dialog');
+    expect(brain.brief!.items[1].shows, 'the lesson');
+  });
+
+  test('a confirmation is daemon_confirm, only once armed; its answer and '
+      "a lesson key's are heard", () {
+    final errors = <String>[];
+    final results = <DaemonActResult>[];
+    brain.errors.listen(errors.add);
+    brain.results.listen(results.add);
+    expect(brain.confirm('autonomy', 'k1', accept: true), isFalse);
+    expect(sent, isEmpty);
+    brain.shown('confirm:autonomy:k1');
+    now = now.add(DaemonBrain.armAfter);
+    expect(brain.confirm('autonomy', 'k1', accept: true), isTrue);
+    final confirm = sent.last;
+    expect(confirm.$1, 'daemon_confirm');
+    expect(confirm.$2['kind'], 'autonomy');
+    expect(confirm.$2['nonce'], 'k1');
+    expect(confirm.$2['accept'], isTrue);
+    brain.receive('daemon_confirm_result', {
+      'requestId': confirm.$2['requestId'],
+      'kind': 'autonomy',
+      'nonce': 'k1',
+      'ok': true,
+      'accepted': true,
+    });
+    expect(results.last.ok, isTrue);
+    expect(errors, isEmpty);
+    brain.confirm('autonomy', 'k1', accept: false);
+    brain.receive('daemon_confirm_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': false,
+      'error': 'STALE_CONFIRM',
+    });
+    expect(errors.last, 'that request is no longer waiting.');
+    // A lesson's key: learned, skipped, its text; and the person-only codes.
+    brain.shown('lesson:ab12:ffee');
+    now = now.add(DaemonBrain.armAfter);
+    brain.act('lesson:ab12:ffee', 'y');
+    brain.receive('daemon_act_result', {
+      'requestId': sent.last.$2['requestId'],
+      'id': 'lesson:ab12:ffee',
+      'ok': true,
+      'learned': 'run-migrations-safely',
+    });
+    expect(results.last.learned, 'run-migrations-safely');
+    brain.act('lesson:ab12:ffee', 's');
+    brain.receive('daemon_act_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': true,
+      'lesson': 'the text',
+    });
+    expect(results.last.lesson, 'the text');
+    for (final (code, words) in [
+      ('PERSON_ONLY', 'approve it at a terminal'),
+      ('INSIDE_HARNESS', 'never teaches a lesson'),
+      ('GONE', 'its time ran out'),
+      ('TOO_SOON', 'a moment'),
+      ('NOT_ALLOW_CLASS', 'open it'),
+      ('REMOTE_ANSWERS_ONLY', 'another machine'),
+    ]) {
+      brain.act('lesson:ab12:ffee', 'n');
+      brain.receive('daemon_act_result', {
+        'requestId': sent.last.$2['requestId'],
+        'ok': false,
+        'error': code,
+        'detail': 'harnessd words',
+      });
+      expect(errors.last, contains(words), reason: code);
+      now = now.add(DaemonBrain.armAfter);
+    }
+  });
+
+  test('talk says what it costs, and waits when harnessd asks it to', () {
+    brain.talkTo('hi');
+    brain.receive('daemon_talk_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': true,
+      'sent': true,
+      'cost':
+          'Each talk is a turn of your pair harness on its engine: it spends '
+          'your model usage.',
+    });
+    expect(brain.talkCost, contains('spends your model usage'));
+    expect(brain.talkWait, isNull);
+    brain.talkTo('again');
+    brain.receive('daemon_talk_result', {
+      'requestId': sent.last.$2['requestId'],
+      'ok': false,
+      'error': 'RATE_LIMITED',
+      'detail': 'Six talks a minute, sixty an hour.',
+      'retryAfterMs': 42000,
+      'cost': 'x',
+    });
+    expect(brain.talkPhase, DaemonTalkPhase.failed);
+    expect(brain.talkError, 'six talks a minute, sixty an hour.');
+    expect(brain.talkWait, const Duration(seconds: 42));
+    final before = sent.length;
+    expect(brain.talkTo('please'), isFalse, reason: 'the box waits');
+    expect(sent, hasLength(before));
+    now = now.add(const Duration(seconds: 42));
+    expect(brain.talkWait, isNull);
+    expect(brain.talkTo('please'), isTrue);
+  });
+
+  test('a guest says whether the person agreed to being watched', () async {
+    await brain.presence(active: true, pair: 'tim', consent: true);
+    expect(sent.last.$2['consent'], isTrue);
+    await brain.guest(pair: 'tim', autonomy: 'watch', consent: false);
+    expect(sent.last.$2['consent'], isFalse);
+    await brain.presence(active: true);
+    expect(sent.last.$2.containsKey('consent'), isFalse, reason: 'signed in');
   });
 }

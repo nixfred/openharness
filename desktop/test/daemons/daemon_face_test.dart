@@ -174,6 +174,74 @@ void main() {
     expect(face.voice, isNull);
   });
 
+  testWidgets('the dial above suggest is in the tooltip, and a raise that '
+      'waits for a yes', (tester) async {
+    await mount(tester);
+    face.sync(const DaemonWatch(autonomy: 'suggest'));
+    expect(face.tooltip, isNot(contains('autonomy')));
+    var changes = 0;
+    face.addListener(() => changes++);
+    face.sync(
+      const DaemonWatch(
+        autonomy: 'suggest',
+        autonomyRequested: 'act-within-rules',
+      ),
+    );
+    expect(changes, greaterThan(0), reason: 'the tooltip changed');
+    expect(
+      face.tooltip,
+      contains('asks for act within rules: waiting for your yes'),
+    );
+    face.sync(const DaemonWatch(autonomy: 'act-on-key'));
+    expect(face.tooltip, contains('autonomy: act on key'));
+    expect(face.autonomy, 'act-on-key');
+  });
+
+  testWidgets('a brain line carries its detail, harness, speaker and setting',
+      (tester) async {
+    await mount(tester);
+    face.sayFromBrain(
+      DaemonSay.fromJson({
+        'id': 'confirm:rules:n1',
+        'about': {'machineId': 'm', 'agentId': ''},
+        'mood': 'ask',
+        'from': 'daemon',
+        'line': '[y/n] use pair.jsonc as it is now?',
+        'detail': 'pair.jsonc (1 rule):\n{}',
+        'confirm': {'kind': 'rules', 'nonce': 'n1'},
+        'actions': [
+          {'key': 'y', 'label': 'confirm', 'choice': 'y'},
+          {'key': 'n', 'label': 'keep it as it is', 'choice': 'n'},
+        ],
+        'ttlMs': 5200,
+      })!,
+    );
+    expect(face.voice, '[y/n] use pair.jsonc as it is now?');
+    expect(face.voiceAlert, isTrue, reason: 'it asks: yellow');
+    expect(face.voiceDetail, startsWith('pair.jsonc (1 rule)'));
+    expect(face.voiceConfirm, (kind: 'rules', nonce: 'n1'));
+    expect(face.voiceFromPair, isFalse);
+    face.dismissVoice();
+    face.sayFromBrain(
+      DaemonSay.fromJson({
+        'id': 'ask:2',
+        'about': {'machineId': 'm', 'agentId': ''},
+        'mood': 'ask',
+        'from': 'pair',
+        'line': '[y/n] send "run the tests" to api?',
+        'harness': {'machineId': 'm', 'machine': 'laptop', 'name': 'api'},
+        'detail': 'send to api@laptop:\nrun the tests',
+        'actions': [
+          {'key': 'y', 'label': 'send', 'choice': 'y'},
+        ],
+        'ttlMs': 5200,
+      })!,
+    );
+    expect(face.voiceFromPair, isTrue);
+    expect(face.voiceHarness!.label, 'api@laptop');
+    await settle(tester);
+  });
+
   testWidgets('restored state is a baseline, then a new need speaks once', (
     tester,
   ) async {
@@ -511,12 +579,16 @@ void main() {
     expect(face.tooltip, contains('Quiet'));
     await pass(tester, const Duration(minutes: 20));
     expect(settings.quiet, isTrue, reason: 'unlike a nap, it lasts');
+    // The panel's last tab is kept the same way; an unknown one is not.
+    settings.tab = 'lessons';
+    settings.tab = 'nonsense';
     await settings.flush();
     final again = DaemonSettings(storage: store);
     addTearDown(again.dispose);
     await again.load();
     expect(again.quiet, isTrue);
     expect(again.motion, isTrue);
+    expect(again.tab, 'lessons');
     settings.quiet = false;
     face.sync(const DaemonWatch(needIds: {'m/a#1', 'm/b#2'}));
     expect(face.voice, isNotNull);
