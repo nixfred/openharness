@@ -218,6 +218,45 @@ void main() {
       );
     });
 
+    test('the autonomy dial: four levels, suggest by default, unknown '
+        'dropped, carried by a seed', () {
+      expect(zooAutonomyLevels, [
+        'watch',
+        'suggest',
+        'act-on-key',
+        'act-within-rules',
+      ]);
+      expect(Zoo.empty.autonomy, 'suggest');
+      expect(Zoo.fromJson({'autonomy': 'yolo'}, roster).autonomy, 'suggest');
+      var zoo = apply(Zoo.empty, [
+        {'op': 'zoo.autonomy', 'level': 'act-on-key'},
+        {'op': 'zoo.autonomy', 'level': 'bypass'},
+      ]).zoo;
+      expect(zoo.autonomy, 'act-on-key');
+      expect(Zoo.fromJson(zoo.toJson(), roster).autonomy, 'act-on-key');
+      // A guest's dial goes with its seed; a seed without one keeps the
+      // account's.
+      zoo = apply(Zoo.empty, [
+        {
+          'op': 'zoo.seed',
+          'zoo': const Zoo(
+            habits: ['turn'],
+            autonomy: 'watch',
+          ).toJson(),
+        },
+      ]).zoo;
+      expect(zoo.autonomy, 'watch');
+      zoo = apply(const Zoo(autonomy: 'act-within-rules'), [
+        {
+          'op': 'zoo.seed',
+          'zoo': {
+            'habits': ['turn'],
+          },
+        },
+      ]).zoo;
+      expect(zoo.autonomy, 'act-within-rules');
+    });
+
     test('unknown daemons, eggs and habits are dropped on read', () {
       final zoo = Zoo.fromJson({
         'daemons': [
@@ -504,6 +543,35 @@ void main() {
       again.bind('guest');
       await pumpEventQueue();
       expect(again.paired?.id, hatched.daemonId);
+    });
+
+    test('the dial is posted as zoo.autonomy; a guest keeps it', () async {
+      final remote = FakeZooTransport();
+      final account = controller();
+      addTearDown(account.dispose);
+      account.bind('account:u1', remote: remote);
+      await pumpEventQueue();
+      account.autonomy('watch');
+      expect(account.zoo.autonomy, 'watch', reason: 'shown at once');
+      account.autonomy('watch');
+      account.autonomy('nonsense');
+      await account.flush();
+      expect(remote.batches.single, [
+        {'op': 'zoo.autonomy', 'level': 'watch'},
+      ]);
+      expect(remote.zoo.autonomy, 'watch');
+
+      final guest = controller();
+      addTearDown(guest.dispose);
+      guest.bind('guest');
+      await pumpEventQueue();
+      guest.autonomy('act-on-key');
+      await guest.flush();
+      final again = controller();
+      addTearDown(again.dispose);
+      again.bind('guest');
+      await pumpEventQueue();
+      expect(again.zoo.autonomy, 'act-on-key');
     });
 
     test('first sign-in seeds the guest zoo once', () async {

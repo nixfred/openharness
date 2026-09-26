@@ -15,6 +15,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/local_key_value_store.dart';
+import 'package:harness/daemons/daemon_brain.dart';
 import 'package:harness/daemons/daemon_face.dart';
 import 'package:harness/daemons/render.dart';
 import 'package:harness/daemons/roster.dart';
@@ -645,7 +646,12 @@ void main() {
       'panel-away-calm',
       _paired('tim'),
       Brightness.dark,
-      const DaemonWatch(away: ['office', 'studio']),
+      const DaemonWatch(
+        away: [
+          DaemonMachine(name: 'office', status: 'asleep'),
+          DaemonMachine(name: 'studio', status: 'unreachable'),
+        ],
+      ),
       null,
     ),
     (

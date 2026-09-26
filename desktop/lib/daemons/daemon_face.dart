@@ -16,7 +16,11 @@
 ///   every two minutes, never about the pane in front of you, and only after
 ///   Enter, a pane switch or 8 s without a key. Finished turns become `+3`
 ///   beside the daemon, cleared when you look. Replies (a boop, its first
-///   words, why an answer failed) are dim. Quiet silences everything.
+///   words, why an answer failed, the pair answering you) are dim. Quiet
+///   silences everything.
+/// - **The pair brain's lines** (`daemon_say`) are shown exactly as sent,
+///   keys first (`[y/n/g] api@office Bash: npm test`), for their `ttlMs`:
+///   their keys work only while the line shows.
 library;
 
 import 'dart:async';
@@ -72,6 +76,9 @@ class DaemonWatch {
     this.idleCount = 0,
     this.focus,
     this.away = const [],
+    this.asks = 0,
+    this.doneCount,
+    this.doneLast = const [],
   });
 
   /// Any agent is working, and how many.
@@ -99,16 +106,40 @@ class DaemonWatch {
   /// The pane in front of you, `machineId/agentId`: never spoken about.
   final String? focus;
 
-  /// Machines that are asleep or unreachable, by name: shown calmly.
-  final List<String> away;
+  /// Machines that are asleep, out of reach or otherwise not there: shown
+  /// calmly, never as a failure (`offline` when only the window can tell).
+  final List<DaemonMachine> away;
+
+  /// Proposals from the pair waiting for your key (`daemon_state.asks`): it
+  /// asks you something, so the face is `need`.
+  final int asks;
+
+  /// The brain's count of turns finished since you looked
+  /// (`daemon_state.done.count`, every machine), when there is a brain; the
+  /// window counts its own otherwise. And the last few, as lines.
+  final int? doneCount;
+  final List<String> doneLast;
 }
 
 enum _LineKind {
-  /// Something needs you or failed: the message line, in yellow.
+  /// Something needs you or failed: the message line, in yellow. Nobody
+  /// asked for it: at most one every two minutes, never mid-thought.
   alert,
 
-  /// You asked (a boop, a hatch, an answer): dim, in the status line's ink.
-  reply,
+  /// The pair asks for your key on something you asked it to do: yellow,
+  /// and at once (its keys work only while it shows).
+  ask,
+
+  /// Something a rule or the pair did on its own (`auto`): dim, and like an
+  /// alert nobody asked for it.
+  report,
+
+  /// You asked (a boop, a hatch, an answer, a talk): dim, in the status
+  /// line's ink, at once.
+  reply;
+
+  bool get yellow => this == alert || this == ask;
+  bool get unsolicited => this == alert || this == report;
 }
 
 class DaemonFace extends ChangeNotifier {
@@ -171,7 +202,10 @@ class DaemonFace extends ChangeNotifier {
   Set<String> _needIds = const {};
   Map<String, DaemonSubject> _needs = const {};
   List<DaemonSubject> _failed = const [];
-  List<String> _away = const [];
+  List<DaemonMachine> _away = const [];
+  int _asks = 0;
+  int? _brainDone;
+  List<String> _doneLast = const [];
   String? _focus;
   final _heardNeeds = <String>{};
   final _turns = <String, int>{}, _fails = <String, int>{};
@@ -179,6 +213,14 @@ class DaemonFace extends ChangeNotifier {
 
   // The tally: finished turns since you looked, and while you were away.
   int _doneCount = 0, _doneWhileAway = 0;
+  Timer? _seenTimer;
+
+  /// You looked at the `+n`: the brain hears `doneSeen`.
+  VoidCallback? onSeen;
+
+  /// Coming back to the window is a look at the `+n`, once it has been in
+  /// front this long.
+  static const seenAfterFocus = Duration(seconds: 4);
 
   // Held faces.
   DaemonMood? _held;
@@ -237,7 +279,8 @@ class DaemonFace extends ChangeNotifier {
 
   DaemonMood get mood {
     if (_booped) return DaemonMood.boop;
-    if (_needIds.isNotEmpty) return DaemonMood.need;
+    // A harness waiting on you, or the pair asking for your key.
+    if (_needIds.isNotEmpty || _asks > 0) return DaemonMood.need;
     if (napping) return DaemonMood.nap;
     if (_held case final held?) return held;
     if (_working) return DaemonMood.work;
@@ -279,11 +322,15 @@ class DaemonFace extends ChangeNotifier {
   /// Eggs waiting to be hatched.
   int get eggsWaiting => zoo.zoo.eggs.length;
 
-  /// Finished turns since you last looked.
-  int get doneCount => _doneCount;
+  /// Finished turns since you last looked: the brain's count, across every
+  /// machine, when there is one; the window's own otherwise.
+  int get doneCount => _brainDone ?? _doneCount;
 
-  /// Machines asleep or unreachable, by name.
-  List<String> get away => _away;
+  /// The last few that finished, as lines (`api@office finished: ...`).
+  List<String> get doneLast => _doneLast;
+
+  /// Machines asleep, out of reach or otherwise not there.
+  List<DaemonMachine> get away => _away;
 
   /// The slot shows the daemon itself (not a new egg's moment in the nest).
   bool get showsDaemon => def != null && !_showsArrival;
@@ -339,13 +386,15 @@ class DaemonFace extends ChangeNotifier {
   String get tally {
     if (!visible || _revealing || def == null) return '';
     final eggs = eggsWaiting;
+    final done = doneCount;
     return [
-      if (_doneCount > 0) '+$_doneCount',
+      if (done > 0) '+$done',
       if (eggs > 0) '+$eggs ${eggs == 1 ? 'egg' : 'eggs'}',
     ].join(' ');
   }
 
-  /// `tim: bell in codex@office: run the migration?` while it speaks.
+  /// `tim: bell in codex@office: run the migration?` while it speaks; a line
+  /// from the pair brain exactly as sent (`[y/n/g] api@office: npm test`).
   String? get voice => _voice.value;
 
   /// Only the spoken line, for what swaps the status line's context: it does
@@ -354,7 +403,7 @@ class DaemonFace extends ChangeNotifier {
 
   /// Whether the line being spoken is an alert (needs you, failed): the
   /// message yellow. Otherwise it is a reply, in the status line's own ink.
-  bool get voiceAlert => _spoken?.kind == _LineKind.alert;
+  bool get voiceAlert => _spoken?.kind.yellow ?? false;
 
   /// The brain's answers offered with the line being spoken: `[y] [n]`.
   List<DaemonAction> get voiceActions => _spoken?.actions ?? const [];
@@ -384,8 +433,9 @@ class DaemonFace extends ChangeNotifier {
     final d = def;
     if (d != null) {
       final eggs = eggsWaiting;
+      final done = doneCount;
       return '${d.id} ${daemon!.version}, ${moodWords[mood]}'
-          '${_doneCount == 0 ? '' : ', $_doneCount finished since you looked'}'
+          '${done == 0 ? '' : ', $done finished since you looked'}'
           '${eggs == 0 ? '' : ', $eggs ${eggs == 1 ? 'egg' : 'eggs'} waiting'}';
     }
     if (eggReady) {
@@ -401,15 +451,19 @@ class DaemonFace extends ChangeNotifier {
     final d = def;
     if (d != null) {
       final eggs = zoo.zoo.eggs;
+      final done = doneCount;
       return [
         '$name · ${moodWords[mood]}',
         '${d.id} ${daemon!.version}',
-        if (_doneCount > 0)
-          '+$_doneCount: ${_doneCount == 1 ? 'a turn' : 'turns'} finished '
+        if (done > 0)
+          '+$done: ${done == 1 ? 'a turn' : 'turns'} finished '
               'since you looked',
+        if (done > 0)
+          for (final line in _doneLast.take(3)) '  $line',
         if (eggs.isNotEmpty)
           '${eggLook(eggs.first)} x${eggs.length} waiting. Click to open.',
-        for (final machine in _away) '$machine is asleep or unreachable.',
+        for (final machine in _away)
+          daemonMachineLine(machine.name, machine.status),
         if (quiet) 'Quiet: it says nothing until you turn Quiet off.',
       ].join('\n');
     }
@@ -449,7 +503,7 @@ class DaemonFace extends ChangeNotifier {
               : subject != null
               ? '1'
               : null,
-        DaemonMood.done => _doneCount > 0 ? '$_doneCount' : null,
+        DaemonMood.done => doneCount > 0 ? '$doneCount' : null,
         _ => null,
       },
       'summary': mood == DaemonMood.back ? _summary() : null,
@@ -507,6 +561,8 @@ class DaemonFace extends ChangeNotifier {
         _awayAt = _now();
         _doneWhileAway = 0;
       }
+      _seenTimer?.cancel();
+      _seenTimer = null;
       _stopBlink();
     } else if (!was) {
       final away = _awayAt;
@@ -516,6 +572,14 @@ class DaemonFace extends ChangeNotifier {
       } else {
         look(force: true);
       }
+      // Back at the window: the `+n` has been seen once it had a moment.
+      _seenTimer?.cancel();
+      _seenTimer = doneCount == 0
+          ? null
+          : Timer(seenAfterFocus, () {
+              _seenTimer = null;
+              if (_foreground) seen();
+            });
     }
     if (!motionEnabled) _stopBlink();
     _update(force: true);
@@ -534,8 +598,21 @@ class DaemonFace extends ChangeNotifier {
     _needIds = watch.needIds;
     _needs = watch.needs;
     _idleCount = watch.idleCount;
-    final awayChanged = !listEquals(watch.away, _away);
+    final awayChanged =
+        watch.away.length != _away.length ||
+        [
+          for (var i = 0; i < _away.length; i++)
+            watch.away[i].name != _away[i].name ||
+                watch.away[i].status != _away[i].status,
+        ].any((changed) => changed);
     _away = watch.away;
+    final countsChanged =
+        watch.asks != _asks ||
+        watch.doneCount != _brainDone ||
+        !listEquals(watch.doneLast, _doneLast);
+    _asks = watch.asks;
+    _brainDone = watch.doneCount;
+    _doneLast = watch.doneLast;
     final focusChanged = watch.focus != _focus;
     _focus = watch.focus;
     _heardNeeds.addAll(watch.needIds);
@@ -550,7 +627,7 @@ class DaemonFace extends ChangeNotifier {
     // Restored state, imported history and reconnects are baselines.
     if (!_baselined || def == null) {
       _baselined = def != null;
-      _update(before: before, force: awayChanged);
+      _update(before: before, force: awayChanged || countsChanged);
       return;
     }
     final d = def!;
@@ -596,7 +673,10 @@ class DaemonFace extends ChangeNotifier {
         _hold(DaemonMood.done);
       }
     }
-    _update(before: before, force: finished.isNotEmpty || awayChanged);
+    _update(
+      before: before,
+      force: finished.isNotEmpty || awayChanged || countsChanged,
+    );
   }
 
   static String _aboutOf(String needId) {
@@ -674,11 +754,15 @@ class DaemonFace extends ChangeNotifier {
     }
   }
 
-  /// You looked at the slot (hover, its panel): the tally of finished turns
-  /// has been seen.
+  /// You looked at the slot (hover, its panel, the window coming back): the
+  /// tally of finished turns has been seen, here and by the brain.
   void seen() {
-    if (_disposed || _doneCount == 0) return;
+    if (_disposed || doneCount == 0) return;
     _doneCount = 0;
+    if ((_brainDone ?? 0) > 0) {
+      _brainDone = 0;
+      onSeen?.call();
+    }
     notifyListeners();
   }
 
@@ -864,8 +948,10 @@ class DaemonFace extends ChangeNotifier {
     String? about,
   }) {
     if (line.isEmpty || quiet) return;
+    _dropExpired();
     // A reply never pushes aside an alert waiting to be said.
-    if (kind == _LineKind.reply && _pendingVoice?.kind == _LineKind.alert) {
+    if (kind == _LineKind.reply &&
+        (_pendingVoice?.kind.unsolicited ?? false)) {
       return;
     }
     final now = _now();
@@ -882,37 +968,86 @@ class DaemonFace extends ChangeNotifier {
     _trySpeak();
   }
 
-  /// The brain's line (`daemon_say`). Only a harness waiting on you, a
-  /// failure, or a line offering answers takes over the status line; the
-  /// brain's other lines (a finished turn, a return) are carried by the tally
-  /// and the brief. A line about the one already spoken replaces it in place.
+  /// The brain's line (`daemon_say`), shown exactly as sent, keys first, for
+  /// its `ttlMs`. `need` and `fail` take over the status line in yellow like
+  /// the window's own alerts; `ask` (the pair wants your key) is yellow and at
+  /// once; `say` (the pair answering you) is a dim reply; `auto` (a rule or
+  /// the pair acted) is dim, and the face shows it as done. A finished turn
+  /// or a return is never a line (the tally and the brief carry them). A
+  /// second line with the same id replaces it in place, with the time the
+  /// brain says it has left.
   void sayFromBrain(DaemonSay say) {
-    if (_disposed || def == null || quiet) return;
-    final alert =
-        say.mood == DaemonMood.need ||
-        say.mood == DaemonMood.fail ||
-        say.actions.isNotEmpty;
-    if (!alert) return;
+    if (_disposed || def == null) return;
+    final mood = say.mood;
+    if (mood == DaemonSayMood.auto) {
+      // It did something on its own: a moment of `done`, and an ack.
+      _hold(DaemonMood.done);
+      _blink('ack', delay: const Duration(milliseconds: 160));
+      _update(force: true);
+    }
+    if (quiet) return;
+    _dropExpired();
+    final kind = switch (mood) {
+      DaemonSayMood.need || DaemonSayMood.fail => _LineKind.alert,
+      DaemonSayMood.ask => _LineKind.ask,
+      DaemonSayMood.auto => _LineKind.report,
+      DaemonSayMood.say => _LineKind.reply,
+      // An older brain's line with answers still needs you.
+      _ when say.actions.isNotEmpty => _LineKind.alert,
+      _ => null,
+    };
+    if (kind == null) return;
     final line = _Line(
       say.line,
       at: _now(),
-      mood: say.mood,
-      kind: _LineKind.alert,
-      about: say.about,
+      mood: mood?.face,
+      kind: kind,
+      about: say.aboutKey,
       sayId: say.id,
       actions: say.actions,
-      ttl: say.ttl,
+      ttl: say.ttl ?? voiceFor,
+      exact: true,
     );
     final spoken = _spoken;
+    // The same line again (the model's better words): in place.
+    if (spoken != null && spoken.sayId == say.id) {
+      _show(line, countsAsUnsolicited: false);
+      return;
+    }
+    if (_pendingVoice?.sayId == say.id) {
+      _pendingVoice = line;
+      _trySpeak();
+      return;
+    }
+    // A roster alert about the same harness is replaced by the brain's words.
     if (spoken != null &&
         spoken.kind == _LineKind.alert &&
-        say.about != null &&
-        spoken.about == say.about) {
+        spoken.sayId == null &&
+        line.about != null &&
+        spoken.about == line.about) {
       _show(line, countsAsUnsolicited: false);
+      return;
+    }
+    // A reply never pushes aside an alert waiting to be said (the talk keeps
+    // it in the panel). A proposal does: its keys work only while it shows,
+    // and the need it displaces stays on the face and in the panel.
+    if (kind == _LineKind.reply &&
+        (_pendingVoice?.kind.unsolicited ?? false)) {
       return;
     }
     _pendingVoice = line;
     _trySpeak();
+  }
+
+  /// A line still waiting whose time ran out while it waited is gone.
+  void _dropExpired() {
+    final pending = _pendingVoice;
+    if (pending != null &&
+        _now().difference(pending.at) >= (pending.ttl ?? voiceExpires)) {
+      _pendingVoice = null;
+      _pendingTimer?.cancel();
+      _pendingTimer = null;
+    }
   }
 
   /// A line of the window's own, such as why an answer did not go through.
@@ -952,9 +1087,9 @@ class DaemonFace extends ChangeNotifier {
     final pending = _pendingVoice;
     if (pending == null || _disposed) return;
     final now = _now();
-    final unsolicited = pending.kind == _LineKind.alert;
+    final unsolicited = pending.kind.unsolicited;
     final stale =
-        now.difference(pending.at) > (pending.ttl ?? voiceExpires) ||
+        now.difference(pending.at) >= (pending.ttl ?? voiceExpires) ||
         (pending.mood == DaemonMood.need &&
             pending.sayId == null &&
             _needIds.isEmpty) ||
@@ -979,7 +1114,8 @@ class DaemonFace extends ChangeNotifier {
         when unsolicited && now.difference(key) < typingQuiet) {
       // Never mid-thought: after Enter, a pane switch or 8 s without a key.
       wait = typingQuiet - now.difference(key);
-    } else if (dialogOpen() || !_foreground) {
+    } else if ((pending.kind != _LineKind.ask && dialogOpen()) ||
+        !_foreground) {
       wait = const Duration(milliseconds: 500);
     }
     if (wait != null) {
@@ -991,11 +1127,18 @@ class DaemonFace extends ChangeNotifier {
   }
 
   void _show(_Line line, {required bool countsAsUnsolicited}) {
+    // A brain line's keys work only while the brain still holds it: it shows
+    // for what is left of its `ttlMs` since it arrived.
+    final showFor = line.sayId != null
+        ? (line.ttl ?? voiceFor) - _now().difference(line.at)
+        : line.actions.isEmpty
+        ? voiceFor
+        : line.ttl ?? askFor;
+    if (showFor <= Duration.zero) return;
     _spoken = line;
     if (countsAsUnsolicited) _lastUnsolicited = _now();
-    _voice.value = '$name: ${line.line}';
+    _voice.value = line.exact ? line.line : '$name: ${line.line}';
     _voiceTimer?.cancel();
-    final showFor = line.actions.isEmpty ? voiceFor : line.ttl ?? askFor;
     _voiceTimer = Timer(showFor, _silence);
     notifyListeners();
   }
@@ -1065,6 +1208,7 @@ class DaemonFace extends ChangeNotifier {
       _backTimer,
       _voiceTimer,
       _pendingTimer,
+      _seenTimer,
     ]) {
       timer?.cancel();
     }
@@ -1084,11 +1228,16 @@ class _Line {
     this.actions = const [],
     this.ttl,
     this.holdUntil,
+    this.exact = false,
   });
   final String line;
   final DateTime at;
   final _LineKind kind;
   final DaemonMood? mood;
+
+  /// Shown exactly as sent (the brain's line, keys first), not as
+  /// `name: line`.
+  final bool exact;
 
   /// `machineId/agentId` of the harness it is about, when it is about one.
   final String? about;

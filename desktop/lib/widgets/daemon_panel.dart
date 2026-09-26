@@ -549,7 +549,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
         Text(
           [
             for (final machine in face.away)
-              '$machine is asleep or unreachable. its harnesses wait.',
+              daemonMachineLine(machine.name, machine.status),
           ].join('\n'),
           key: const ValueKey('daemon-panel-away'),
           style: _ink(_muted),

@@ -791,13 +791,14 @@ void main() {
     );
     final question = {
       'id': 'q1',
-      'about': 'office/a1',
+      'about': {'machineId': 'office', 'agentId': 'a1', 'requestId': 'r1'},
       'mood': 'need',
-      'line': 'codex@office wants to run the migration.',
+      'line': '[y/n] codex@office wants to run the migration.',
       'actions': [
         {'key': 'y', 'label': 'run it', 'choice': '1'},
         {'key': 'n', 'label': 'not now', 'choice': '3'},
       ],
+      'ttlMs': 5200,
     };
 
     testWidgets('its state drives the face; its line offers answers', (
@@ -816,9 +817,12 @@ void main() {
             'name': 'migration',
           },
         ],
-        'working': false,
+        'working': 0,
         'failing': [],
         'machines': [],
+        'done': {'count': 0, 'last': []},
+        'asks': [],
+        'acted': [],
       });
       expect(glyph(tester), '[? ?]', reason: 'a harness on another machine');
       expect(frames.first.$1, 'daemon_presence');
@@ -833,11 +837,12 @@ void main() {
       expect(frames.last.$2['focusAgentId'], 'a3');
       expect(frames.last.$2['focusMachineId'], 'm');
       await frame(tester, 'daemon_say', question);
+      // Exactly as sent, keys first; each key its own button.
       expect(
-        find.text('tim: codex@office wants to run the migration.'),
+        find.text('codex@office wants to run the migration.'),
         findsOneWidget,
       );
-      expect(find.text('[y] run it'), findsOneWidget);
+      expect(find.byKey(const ValueKey('daemon-answer-n')), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('daemon-answer-y')));
       await tester.pump();
       expect(frames.last.$1, 'daemon_act');

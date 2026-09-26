@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart' show TerminalTheme;
 
+import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
 import '../daemons/roster.dart';
 import '../shared/theme/app_theme.dart';
@@ -207,11 +208,13 @@ class DaemonSlotButton extends StatelessWidget {
 }
 
 /// The daemon's one line where the status line's context sits: tmux's
-/// message line. An alert (a harness needs you, a failure) is in the
-/// message yellow; a reply (a boop, its first words) in the status line's own
-/// ink, dimmer. [fallback] shows whenever it is silent. A line from the pair
-/// brain may offer answers: they come first, as `[y] label`, and are
-/// clickable (also ⌘⌥ plus the key, handled by the workspace).
+/// message line. An alert (a harness needs you, a failure, the pair asking
+/// for your key) is in the message yellow; a reply (a boop, its first words,
+/// the pair answering you) in the status line's own ink, dimmer. [fallback]
+/// shows whenever it is silent. A line from the pair brain is drawn exactly
+/// as sent, keys first (`[y/n/g] api@office: npm test`): each offered key in
+/// that bracket is clickable (also ⌘⌥ plus the key, handled by the
+/// workspace), and only while the line shows.
 class DaemonVoiceLine extends StatelessWidget {
   const DaemonVoiceLine({
     super.key,
@@ -230,54 +233,117 @@ class DaemonVoiceLine extends StatelessWidget {
       if (voice == null) return fallback;
       final theme = currentTerminalTheme();
       final ink = face.voiceAlert ? theme.yellow : daemonDimInk(theme);
-      final style = workspaceBarTextStyle(
+      TextStyle style([bool emphasized = false]) => workspaceBarTextStyle(
         color: ink,
+        emphasized: emphasized,
       ).copyWith(fontFeatures: daemonTextFeatures);
-      final line = Semantics(
-        liveRegion: true,
-        child: Text(
-          voice,
-          key: const ValueKey('daemon-voice'),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.right,
-          style: style,
-        ),
-      );
       final actions = face.voiceActions;
-      if (actions.isEmpty) return line;
-      final cell = workspaceBarCellSizeOf(context);
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          for (final action in actions) ...[
-            WorkspaceBarControl(
-              key: ValueKey('daemon-answer-${action.key}'),
-              label: action.label,
-              tooltip: '${action.label} ⌘⌥${action.key.toUpperCase()}',
-              onPressed: onAnswer == null ? null : () => onAnswer!(action.key),
-              builder: (context, emphasized) => SizedBox(
-                height: workspaceBarControlHeight(context),
-                child: Center(
-                  widthFactor: 1,
-                  child: Text(
-                    '[${action.key}] ${action.label}',
-                    style: workspaceBarTextStyle(
-                      color: ink,
-                      emphasized: emphasized,
-                    ).copyWith(fontFeatures: daemonTextFeatures),
+      final split = actions.isEmpty
+          ? (keys: const <String>[], rest: voice)
+          : splitDaemonKeys(voice, actions);
+      final rest = Text(
+        split.rest,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.right,
+        style: style(),
+      );
+      return Semantics(
+        key: const ValueKey('daemon-voice'),
+        liveRegion: true,
+        label: voice,
+        child: split.keys.isEmpty
+            ? ExcludeSemantics(child: rest)
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  DaemonKeys(
+                    keys: split.keys,
+                    actions: actions,
+                    style: style,
+                    onAnswer: onAnswer,
+                    chord: true,
                   ),
-                ),
+                  Flexible(child: ExcludeSemantics(child: rest)),
+                ],
               ),
-            ),
-            SizedBox(width: cell.width),
-          ],
-          SizedBox(width: cell.width),
-          Flexible(child: line),
-        ],
       );
     },
   );
+}
+
+/// A line's keys, first, as the brain writes them: `[y/n/g] `. Each key that
+/// is offered is its own small button ([onAnswer] with the key); a key that
+/// is not (a brief's `[y]` after its minute) is drawn and does nothing.
+class DaemonKeys extends StatelessWidget {
+  const DaemonKeys({
+    super.key,
+    required this.keys,
+    required this.actions,
+    required this.style,
+    this.onAnswer,
+    this.live = true,
+    this.chord = false,
+    this.idPrefix = 'daemon-answer',
+  });
+  final List<String> keys;
+  final List<DaemonAction> actions;
+  final TextStyle Function([bool emphasized]) style;
+  final ValueChanged<String>? onAnswer;
+
+  /// Whether y and n still work (g always opens).
+  final bool live;
+
+  /// The tooltip names the ⌘⌥ chord (only the status line's line has one).
+  final bool chord;
+  final String idPrefix;
+
+  @override
+  Widget build(BuildContext context) {
+    final height = workspaceBarControlHeight(context);
+    Widget text(String value) => SizedBox(
+      height: height,
+      child: Center(
+        widthFactor: 1,
+        child: Text(value, style: style()),
+      ),
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        text('['),
+        for (final (i, key) in keys.indexed) ...[
+          if (i > 0) text('/'),
+          if (actions.where((a) => a.key == key).firstOrNull
+              case final action?
+              when onAnswer != null && (live || key == 'g'))
+            WorkspaceBarControl(
+              key: ValueKey('$idPrefix-$key'),
+              label: action.label,
+              tooltip: chord
+                  ? '${action.label} ⌘⌥${key.toUpperCase()}'
+                  : action.label,
+              onPressed: () => onAnswer!(key),
+              builder: (context, emphasized) => SizedBox(
+                height: height,
+                child: Center(
+                  widthFactor: 1,
+                  child: Text(
+                    key,
+                    style: style(emphasized).copyWith(
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ),
+            )
+          else
+            text(key),
+        ],
+        text('] '),
+      ],
+    );
+  }
 }
 
 /// A card (card.mjs's lines) as selectable text: the portrait rows in the

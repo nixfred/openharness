@@ -157,10 +157,20 @@ void main() {
     tester,
   ) async {
     await mount(tester);
-    face.sync(const DaemonWatch(away: ['office']));
+    face.sync(
+      const DaemonWatch(
+        away: [
+          DaemonMachine(name: 'office', status: 'offline'),
+          DaemonMachine(name: 'laptop', status: 'asleep'),
+          DaemonMachine(name: 'studio', status: 'unreachable'),
+        ],
+      ),
+    );
     expect(face.mood, DaemonMood.idle);
-    expect(face.away, ['office']);
+    expect(face.away.map((m) => m.name), ['office', 'laptop', 'studio']);
     expect(face.tooltip, contains('office is asleep or unreachable.'));
+    expect(face.tooltip, contains('laptop is asleep. its harnesses wait.'));
+    expect(face.tooltip, contains('studio is out of reach.'));
     expect(face.voice, isNull);
   });
 
@@ -638,78 +648,210 @@ void main() {
     face.sayFromBrain(
       const DaemonSay(
         id: 's1',
-        about: 'office/a1',
-        line: 'codex@office wants to run the migration.',
-        mood: DaemonMood.need,
+        about: DaemonAbout('office', 'a1', requestId: 'r1'),
+        line: '[g] bell in codex@office: run the migration?',
+        mood: DaemonSayMood.need,
+        actions: [(key: 'g', label: 'open', choice: 'open')],
+        ttl: Duration(milliseconds: 5200),
       ),
     );
-    expect(face.voice, 'tim: codex@office wants to run the migration.');
+    expect(
+      face.voice,
+      '[g] bell in codex@office: run the migration?',
+      reason: 'exactly as sent, keys first',
+    );
     await settle(tester);
     // No brain line in time: the roster's line after 2.5 s.
     face.sync(const DaemonWatch(needIds: {'office/a2#r2'}));
     await pass(tester, const Duration(milliseconds: 2400));
     expect(face.voice, isNull);
     await pass(tester, const Duration(milliseconds: 200));
-    expect(face.voice, isNotNull);
+    expect(face.voice, startsWith('tim: '));
     // The brain's line about the same harness replaces it in place.
     face.sayFromBrain(
       const DaemonSay(
         id: 's2',
-        about: 'office/a2',
+        about: DaemonAbout('office', 'a2'),
         line: 'codex@office asks which branch.',
-        mood: DaemonMood.need,
+        mood: DaemonSayMood.need,
       ),
     );
-    expect(face.voice, 'tim: codex@office asks which branch.');
+    expect(face.voice, 'codex@office asks which branch.');
     await settle(tester);
-    // Its other lines (a finished turn) do not take over.
+    // Its finished turns and returns do not take over.
     face.sayFromBrain(
-      const DaemonSay(id: 's3', line: 'claude finished.', mood: DaemonMood.done),
+      const DaemonSay(
+        id: 's3',
+        line: 'claude finished.',
+        mood: DaemonSayMood.done,
+      ),
+    );
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 's4',
+        line: 'reattached. 2 done.',
+        mood: DaemonSayMood.back,
+      ),
     );
     expect(face.voice, isNull);
     await settle(tester);
   });
 
-  testWidgets(
-    'a line with answers stays until answered, withdrawn or its ttl',
-    (tester) async {
-      await mount(tester);
-      const say = DaemonSay(
+  testWidgets('a brain line shows for its ttlMs, keys working only while it '
+      'shows; the same id replaces it in place', (tester) async {
+    await mount(tester);
+    const say = DaemonSay(
+      id: 'q1',
+      about: DaemonAbout('office', 'a1', requestId: 'r1'),
+      line: '[y/n/g] api@office Bash: npm test',
+      mood: DaemonSayMood.need,
+      actions: [
+        (key: 'y', label: 'Yes', choice: '1. Yes'),
+        (key: 'n', label: 'No', choice: '3. No'),
+        (key: 'g', label: 'open', choice: 'open'),
+      ],
+      ttl: Duration(milliseconds: 5200),
+    );
+    face.sayFromBrain(say);
+    expect(face.voice, '[y/n/g] api@office Bash: npm test');
+    expect(face.voiceAlert, isTrue);
+    expect(face.voiceActions.map((a) => a.key), ['y', 'n', 'g']);
+    expect(face.voiceSayId, 'q1');
+    await pass(tester, const Duration(seconds: 3));
+    // The model's better words, with the time the brain says is left.
+    face.sayFromBrain(
+      const DaemonSay(
         id: 'q1',
-        line: 'codex@office wants to run the migration.',
-        mood: DaemonMood.need,
+        about: DaemonAbout('office', 'a1', requestId: 'r1'),
+        line: '[y/n/g] api@office wants to run the tests.',
+        mood: DaemonSayMood.need,
+        actions: [(key: 'y', label: 'Yes', choice: '1. Yes')],
+        ttl: Duration(milliseconds: 2200),
+      ),
+    );
+    expect(face.voice, '[y/n/g] api@office wants to run the tests.');
+    await pass(tester, const Duration(milliseconds: 2100));
+    expect(face.voice, isNotNull);
+    await pass(tester, const Duration(milliseconds: 200));
+    expect(face.voice, isNull, reason: 'its ttl ran out: the keys with it');
+    expect(face.voiceActions, isEmpty);
+    await pass(tester, const Duration(minutes: 2));
+    face.sayFromBrain(say);
+    face.unsay('q1');
+    expect(face.voice, isNull, reason: 'withdrawn');
+    await pass(tester, const Duration(minutes: 2));
+    // A line that waited (a key was just pressed) shows only what is left.
+    face.noteKey();
+    face.sayFromBrain(say);
+    await pass(tester, const Duration(seconds: 6));
+    expect(face.voice, isNull, reason: 'its keys died while it waited');
+    face.sayNote('that question changed before the answer landed.');
+    expect(
+      face.voice,
+      'tim: that question changed before the answer landed.',
+      reason: 'a reply to what you did, not held back',
+    );
+    await settle(tester);
+  });
+
+  testWidgets('ask: yellow at once, even mid-thought; the face needs you '
+      'while asks wait', (tester) async {
+    await mount(tester);
+    face.sync(const DaemonWatch(asks: 1));
+    expect(face.mood, DaemonMood.need, reason: 'the pair asks you something');
+    face.noteKey();
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 'ask:1',
+        about: DaemonAbout('m', ''),
+        line: '[y/n] start codex in ~/api?',
+        mood: DaemonSayMood.ask,
         actions: [
-          (key: 'y', label: 'run it', choice: '1'),
-          (key: 'n', label: 'not now', choice: '3'),
+          (key: 'y', label: 'do it', choice: 'y'),
+          (key: 'n', label: 'skip', choice: 'n'),
         ],
-      );
-      face.sayFromBrain(say);
-      expect(face.voiceActions.map((a) => a.key), ['y', 'n']);
-      expect(face.voiceSayId, 'q1');
-      await pass(tester, const Duration(seconds: 10));
-      expect(face.voice, isNotNull, reason: 'a question outlasts 5.2 s');
-      face.unsay('q1');
-      expect(face.voice, isNull);
-      expect(face.voiceActions, isEmpty);
-      await pass(tester, const Duration(minutes: 2));
-      face.sayFromBrain(
-        const DaemonSay(
-          id: 'q2',
-          line: 'claude asks which branch.',
-          actions: [(key: 'y', label: 'main', choice: 'main')],
-          ttl: Duration(seconds: 3),
-        ),
-      );
-      expect(face.voice, isNotNull);
-      await pass(tester, const Duration(seconds: 3));
-      expect(face.voice, isNull, reason: 'its ttl ran out');
-      face.sayNote('that question changed before the answer landed.');
-      expect(
-        face.voice,
-        'tim: that question changed before the answer landed.',
-        reason: 'a reply to what you did, not held back',
-      );
-      await pass(tester, const Duration(seconds: 6));
-    },
-  );
+        ttl: Duration(milliseconds: 5200),
+      ),
+    );
+    expect(face.voice, '[y/n] start codex in ~/api?');
+    expect(face.voiceAlert, isTrue);
+    face.sync(const DaemonWatch());
+    expect(face.mood, DaemonMood.idle);
+    await settle(tester);
+  });
+
+  testWidgets('say is the pair answering you: dim, at once; auto is what it '
+      'did: done, dim, and counted as a line nobody asked for', (
+    tester,
+  ) async {
+    await mount(tester);
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 'say:1',
+        about: DaemonAbout('m', ''),
+        line: 'two harnesses wait; api since 40m.',
+        mood: DaemonSayMood.say,
+        ttl: Duration(seconds: 30),
+      ),
+    );
+    expect(face.voice, 'two harnesses wait; api since 40m.');
+    expect(face.voiceAlert, isFalse);
+    expect(face.mood, DaemonMood.idle);
+    await settle(tester);
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 'auto:1',
+        about: DaemonAbout('office', 'a1'),
+        line: 'rule: api@office answered "1. Yes"',
+        mood: DaemonSayMood.auto,
+        ttl: Duration(milliseconds: 5200),
+      ),
+    );
+    expect(face.mood, DaemonMood.done, reason: 'drawn like done');
+    expect(face.voice, 'rule: api@office answered "1. Yes"');
+    expect(face.voiceAlert, isFalse);
+    await pass(tester, const Duration(seconds: 6));
+    // Within two minutes, another line nobody asked for waits its turn.
+    face.sayFromBrain(
+      const DaemonSay(
+        id: 'auto:2',
+        line: 'rule: web answered "1. Yes"',
+        mood: DaemonSayMood.auto,
+      ),
+    );
+    expect(face.voice, isNull);
+    await settle(tester);
+  });
+
+  testWidgets('the brain counts finished turns everywhere; a look clears it '
+      'and tells the brain', (tester) async {
+    await mount(tester);
+    var told = 0;
+    face.onSeen = () => told++;
+    face.sync(
+      const DaemonWatch(
+        doneCount: 3,
+        doneLast: ['api@office finished: tests pass.'],
+      ),
+    );
+    expect(face.tally, '+3');
+    expect(face.tooltip, contains('api@office finished: tests pass.'));
+    face.seen();
+    expect(face.tally, '');
+    expect(told, 1);
+    face.seen();
+    expect(told, 1, reason: 'nothing left to clear');
+    // Back at the window: seen once it has been in front a moment.
+    face.sync(const DaemonWatch(doneCount: 2));
+    face.setEnvironment(foreground: false, reduceMotion: false);
+    await pass(tester, const Duration(minutes: 1));
+    face.setEnvironment(foreground: true, reduceMotion: false);
+    expect(face.tally, '+2');
+    await pass(tester, const Duration(seconds: 3));
+    expect(face.tally, '+2');
+    await pass(tester, const Duration(seconds: 2));
+    expect(face.tally, '');
+    expect(told, 2);
+    await settle(tester);
+  });
 }

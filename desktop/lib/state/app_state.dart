@@ -11236,6 +11236,7 @@ class AppNotifier extends ChangeNotifier {
       case 'daemon_unsay':
       case 'daemon_brief':
       case 'daemon_act_result':
+      case 'daemon_talk_result':
         // Only from the loopback socket bound to this computer's harnessd.
         if (machine.usesLocalTransport) {
           _daemonFrames.add((type: type, payload: payload));

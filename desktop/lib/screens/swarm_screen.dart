@@ -217,6 +217,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
   final _brainSubscriptions = <StreamSubscription<Object?>>[];
   DateTime? _awaySince;
   String? _presencePair;
+  String? _presenceAutonomy;
   String? _presenceFocus;
   DaemonBrief? _lastBrief;
   StreamSubscription<int?>? _zooPushes;
@@ -396,6 +397,8 @@ class _SwarmScreenState extends State<SwarmScreen> {
     _zooPushes = app.zooPushes.listen(_zoo.pushed);
     // The pair brain, when this computer's harnessd has one.
     _brain.addListener(_brainChanged);
+    // A look at the `+n` clears the brain's count too.
+    _face.onSeen = () => unawaited(_brain.doneSeen());
     _brainSubscriptions.addAll([
       app.daemonFrames.listen((f) => _brain.receive(f.type, f.payload)),
       _brain.said.listen(_face.sayFromBrain),
@@ -878,7 +881,16 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final focus = focusedPane?.agentId == null
         ? null
         : '${focusedPane!.machineId}/${focusedPane.agentId}';
-    if (focus != _presenceFocus && _brain.active) unawaited(_sendPresence());
+    if (focus != _presenceFocus && _brain.active) {
+      // The pane in front changed: the brain never speaks about it.
+      _presenceFocus = focus;
+      unawaited(
+        _brain.focus(
+          machineId: focusedPane?.machineId,
+          agentId: focusedPane?.agentId,
+        ),
+      );
+    }
     // What the window sees itself, merged with what the brain sees on every
     // machine (the same ids, so a question counts once).
     final needs = <String, DaemonSubject>{
@@ -890,11 +902,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
           ),
       for (final need in brain?.needs ?? const <DaemonNeed>[])
         need.key: DaemonSubject(
-          '${need.machineId}/${need.agentId}',
+          need.harness,
           who: need.machine.isEmpty
               ? null
               : who(need.engine, need.machine),
           q: need.question,
+          since: need.since,
         ),
     };
     // A failure is a harness you have open that failed to start or whose last
@@ -908,13 +921,23 @@ class _SwarmScreenState extends State<SwarmScreen> {
                 s.machine.failedTurnAgents.contains(s.agent.id)))
           subjectOf(s),
     ];
-    final away = <String>{
+    // Machines not there, calmly: the brain's word for each (asleep, out of
+    // reach, unlinked, ...) over what the window alone can tell (offline).
+    final awayByName = <String, DaemonMachine>{
       for (final s in sessions)
-        if (s.open && !s.online) s.machine.machine.displayName,
-      for (final (name, status) in brain?.machines ?? const <(String, String)>[])
-        if (status == 'unreachable' || status == 'off') name,
-    }.toList()..sort();
+        if (s.open && !s.online)
+          s.machine.machine.displayName: DaemonMachine(
+            name: s.machine.machine.displayName,
+            machineId: s.machineId,
+            status: 'offline',
+          ),
+      for (final machine in brain?.machines ?? const <DaemonMachine>[])
+        if (machine.away && !machine.local) machine.name: machine,
+    };
+    final away = awayByName.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
     final working = sessions.where((s) => s.online && s.working).length;
+    final paired = _brain.paired;
     _face.sync(
       DaemonWatch(
         working: working > 0 || brain?.working == true,
@@ -953,6 +976,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
             .length,
         focus: focus,
         away: away,
+        asks: paired ? brain!.asks.length : 0,
+        doneCount: paired ? brain!.doneCount : null,
+        doneLast: [
+          if (paired)
+            for (final done in brain!.doneLast) done.line,
+        ],
       ),
     );
     for (final key in observedHabits(app, found: _foundSomething)) {
@@ -2919,10 +2948,12 @@ class _SwarmScreenState extends State<SwarmScreen> {
     final pane = app.focusedPane;
     final agentId = pane?.agentId;
     _presenceFocus = agentId == null ? null : '${pane!.machineId}/$agentId';
+    _presenceAutonomy = app.isGuest ? _zoo.zoo.autonomy : null;
     await _brain.presence(
       active: app.inForeground,
       away: away,
       pair: pair,
+      autonomy: _presenceAutonomy,
       focusMachineId: agentId == null ? null : pane!.machineId,
       focusAgentId: agentId,
     );
@@ -2990,9 +3021,17 @@ class _SwarmScreenState extends State<SwarmScreen> {
       _lastHabits = habits;
       _lastEggId = egg?.id;
     }
-    // A guest's pair lives in its local zoo; the brain hears of a change.
-    if (app.isGuest && _brain.active && _zoo.zoo.pair != _presencePair) {
-      unawaited(_sendPresence());
+    // A guest's pair and dial live in its local zoo; the brain hears of a
+    // change.
+    if (app.isGuest &&
+        _brain.active &&
+        (_zoo.zoo.pair != _presencePair ||
+            _zoo.zoo.autonomy != _presenceAutonomy)) {
+      _presencePair = _zoo.zoo.pair;
+      _presenceAutonomy = _zoo.zoo.autonomy;
+      unawaited(
+        _brain.guest(pair: _presencePair, autonomy: _presenceAutonomy),
+      );
     }
     if (_zoo.loaded != _zooWasLoaded) {
       _zooWasLoaded = _zoo.loaded;

@@ -365,6 +365,19 @@ class ZooController extends ChangeNotifier {
     _sendLater(op);
   }
 
+  /// Turn the pair's autonomy dial (`zoo.autonomy`). A guest's is kept in
+  /// its local zoo, and the brain hears it in `daemon_presence`.
+  void autonomy(String level) {
+    if (!loaded || !isZooAutonomy(level) || _zoo.autonomy == level) return;
+    final op = {'op': 'zoo.autonomy', 'level': level};
+    if (!isAccount) {
+      _applyLocal([op]);
+      return;
+    }
+    _show(_zoo.copyWith(autonomy: level));
+    _sendLater(op);
+  }
+
   /// Rename, or clear with null. Answers false for a name the rules refuse.
   bool nickname(String id, String? nickname) {
     if (!loaded || !_zoo.owns(id)) return false;

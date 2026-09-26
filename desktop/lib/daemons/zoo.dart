@@ -21,6 +21,18 @@ bool validNickname(String? value) =>
     value.trim().length <= 24 &&
     _printable.hasMatch(value);
 
+// ── the autonomy dial ────────────────────────────────────────────────────────
+
+/// How much the paired daemon may do on its own (`daemons/BRAIN.md`,
+/// "Autonomy dial"; `backend/src/lib/zoo.ts` `ZOO_AUTONOMY_LEVELS`).
+const zooAutonomyLevels = ['watch', 'suggest', 'act-on-key', 'act-within-rules'];
+
+/// What a zoo that never set the dial means.
+const zooDefaultAutonomy = 'suggest';
+
+bool isZooAutonomy(Object? value) =>
+    value is String && zooAutonomyLevels.contains(value);
+
 // ── days, weeks and levels ───────────────────────────────────────────────────
 
 /// A local calendar day, `YYYY-MM-DD`, that exists, in years 2000–2999.
@@ -295,6 +307,7 @@ class Zoo {
     this.daemons = const [],
     this.eggs = const [],
     this.pair,
+    this.autonomy = zooDefaultAutonomy,
     this.habits = const [],
     this.firstEgg = false,
     this.pity = 0,
@@ -307,6 +320,9 @@ class Zoo {
   final List<ZooDaemon> daemons;
   final List<ZooEgg> eggs;
   final String? pair;
+
+  /// The pair's autonomy dial, one of [zooAutonomyLevels].
+  final String autonomy;
   final List<String> habits;
   final bool firstEgg;
   final int pity;
@@ -338,6 +354,7 @@ class Zoo {
     List<ZooDaemon>? daemons,
     List<ZooEgg>? eggs,
     String? pair,
+    String? autonomy,
     List<String>? habits,
     bool? firstEgg,
     int? pity,
@@ -347,6 +364,7 @@ class Zoo {
     daemons: daemons ?? this.daemons,
     eggs: eggs ?? this.eggs,
     pair: pair ?? this.pair,
+    autonomy: autonomy ?? this.autonomy,
     habits: habits ?? this.habits,
     firstEgg: firstEgg ?? this.firstEgg,
     pity: pity ?? this.pity,
@@ -358,6 +376,7 @@ class Zoo {
     'daemons': [for (final d in daemons) d.toJson()],
     'eggs': [for (final e in eggs) e.toJson()],
     'pair': pair,
+    'autonomy': autonomy,
     'habits': habits,
     'firstEgg': firstEgg,
     'pity': pity,
@@ -383,6 +402,9 @@ class Zoo {
       daemons: daemons,
       eggs: eggs.take(maxEggs).toList(),
       pair: pair is String && daemons.any((d) => d.id == pair) ? pair : null,
+      autonomy: isZooAutonomy(raw['autonomy'])
+          ? raw['autonomy'] as String
+          : zooDefaultAutonomy,
       habits: <String>{
         for (final h in raw['habits'] as List? ?? const [])
           if (h is String && habitKeys.contains(h)) h,
@@ -494,6 +516,7 @@ class _ZooRules {
     : daemons = [...zoo.daemons],
       eggs = [...zoo.eggs],
       pair = zoo.pair,
+      autonomy = zoo.autonomy,
       habits = [...zoo.habits],
       firstEgg = zoo.firstEgg,
       pity = zoo.pity,
@@ -514,6 +537,7 @@ class _ZooRules {
   List<ZooDaemon> daemons;
   List<ZooEgg> eggs;
   String? pair;
+  String autonomy;
   List<String> habits;
   bool firstEgg;
   int pity;
@@ -532,6 +556,7 @@ class _ZooRules {
     daemons: daemons,
     eggs: eggs,
     pair: pair,
+    autonomy: autonomy,
     habits: habits,
     firstEgg: firstEgg,
     pity: pity,
@@ -650,6 +675,10 @@ class _ZooRules {
       case 'zoo.pair':
         final id = op['id'];
         if (id is String && daemons.any((d) => d.id == id)) pair = id;
+      case 'zoo.autonomy':
+        // A level the server does not know is dropped.
+        final level = op['level'];
+        if (isZooAutonomy(level)) autonomy = level as String;
       case 'zoo.nickname':
         final id = op['id'], nickname = op['nickname'];
         final at = daemons.indexWhere((d) => d.id == id);
@@ -688,6 +717,11 @@ class _ZooRules {
           ];
         }
         pair = seed.pair ?? seed.daemons.firstOrNull?.id;
+        // The guest's dial, if it set a real one; else the account's stays.
+        final raw = op['zoo'];
+        if (raw is Map && isZooAutonomy(raw['autonomy'])) {
+          autonomy = seed.autonomy;
+        }
         habits = [...seed.habits];
         firstEgg = seed.firstEgg;
         pity = seed.pity;
