@@ -53,16 +53,15 @@ void main() {
         f['out'],
         reason: '${f['id']} ${f['v']} ${f['mood']} t=${f['t']} lid=${f['lid']}',
       );
-      // What the status cell draws fits the eight cells plus both gutters.
-      // (A six-cell 1.0 sprite with a borrowed baton reaches into the right
-      // gutter: the reference pads it to eleven, the last one blank.)
+      // A status cell is always exactly the eight cells plus both gutters (a
+      // six-cell 1.0 sprite with a borrowed baton runs into the right one).
       expect(
         statusCell(
           roster,
           out,
           baseWidth(roster, d, roster.versionIndex(f['v'] as String)),
-        ).trimRight().length,
-        lessThanOrEqualTo(roster.rules.statusCells + 2),
+        ).length,
+        roster.rules.statusCells + 2,
       );
       checked++;
     }
@@ -108,7 +107,15 @@ void main() {
         f['out'],
         reason: '${f['id']} ${f['v']} ${f['mood']} t=${f['t']}',
       );
+      expect((f['out'] as String).length, roster.rules.statusCells + 2);
     }
+    // The widest case: a six-cell sprite centred one cell in, plus a baton,
+    // ends on the right gutter (the old port padded it to eleven).
+    expect(
+      statusCell(roster, '[=|==] |', 6),
+      ' ' * 2 + '[=|==] |',
+      reason: 'ten cells, the baton in the right gutter',
+    );
     // A borrowed baton or a nap's z grows to the right: the face stays put.
     final tim = roster.byId('tim')!;
     final idle = statusCell(roster, '[oo]', baseWidth(roster, tim, 0));

@@ -316,25 +316,21 @@ class DaemonFace extends ChangeNotifier {
     );
   }
 
-  /// The slot's ten cells: the glyph centred on the version's base sprite (so
-  /// a baton or a nap's `z` never moves the face), a gutter each side, and a
-  /// shiny daemon's `*` in the left gutter.
+  /// The slot's ten cells, exactly: the glyph centred on the version's base
+  /// sprite (so a baton or a nap's `z` never moves the face), a gutter each
+  /// side (a borrowed baton may run into the right one), and a shiny daemon's
+  /// `*` in the left gutter.
   String get cell {
     final g = glyph;
     if (g.isEmpty) return '';
     final d = def;
     final daemonShown = d != null && !_showsArrival;
-    var c = statusCell(
+    final c = statusCell(
       roster,
       g,
       daemonShown ? baseWidth(roster, d, versionIndex) : null,
     );
-    final width = roster.rules.statusCells + 2;
-    if (c.length > width && c.substring(width).trim().isEmpty) {
-      c = c.substring(0, width);
-    }
-    if (daemonShown && shiny) c = '*${c.substring(1)}';
-    return c;
+    return daemonShown && shiny ? '*${c.substring(1)}' : c;
   }
 
   /// Beside the slot: `+3` turns finished since you looked, `+1 egg` while
