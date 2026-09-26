@@ -1,0 +1,97 @@
+# Daemons on the desktop
+
+The contract is [daemons/README.md](../../daemons/README.md): the roster, the
+art rules, moods, blinks, voice, the zoo, habits and hatching. This page only
+says where the desktop keeps each part and what it chose where the contract
+leaves room. It replaces the local "terminal companion" (six species, canned
+chat, a local blind box), which is gone.
+
+## Where things live
+
+| part | file |
+|---|---|
+| roster (generated, never edited) | `lib/daemons/roster.g.dart` |
+| roster as Dart values | `lib/daemons/roster.dart` |
+| renderer, nest, egg frames, banner, card | `lib/daemons/render.dart` (a port of `daemons/tools/render.mjs`) |
+| zoo shape, rules, local draw | `lib/daemons/zoo.dart` |
+| zoo state: account, guest, seed | `lib/daemons/zoo_controller.dart` |
+| moods, blinks, frames, voice | `lib/daemons/daemon_face.dart` |
+| first-egg habit signals | `lib/daemons/daemon_habits.dart` |
+| Flutter status slot, voice line, notices | `lib/widgets/daemon_slot.dart` |
+| hatch reveal | `lib/widgets/daemon_hatch.dart` |
+| panel | `lib/widgets/daemon_panel.dart` |
+| native status slot and voice line | `macos/Runner/SwarmTitlebar.swift` (`SwarmSymbolButton`, `SwarmVoiceLabel`) |
+
+`test/daemons/render_frames_test.dart` checks every frame in
+`daemons/frames.json` byte for byte. Change the roster, run
+`node daemons/tools/generate.mjs`, and that test tells you whether the Dart
+port still draws what the reference draws.
+
+## The zoo
+
+An account's zoo is read and changed exactly as the desk is: `GET /api/zoo`
+and `POST /api/zoo/ops` through the local harnessd (its Unix socket, TCP as the
+fallback), refreshed by the `zoo_changed` local frame only when its revision is
+news. Writes are queued and retried; every op is idempotent. Habits, pair and
+nickname show at once and are confirmed by the answer; eggs and draws are the
+server's.
+
+A guest keeps a local zoo (`daemons.zoo.v1.local` in the app's local store)
+with the same shape and rules, drawn on the client. It is sent once with
+`zoo.seed` the first time an account's zoo answers. A harnessd that predates
+the zoo answers 404; the window then uses the local zoo too, and seeds it when
+the account's zoo appears.
+
+Nothing is drawn until the window knows whose zoo it is and the first read has
+answered. A signed-in window waits for its profile (the old code keyed its
+first reads by a temporary scope and flashed other progress at boot).
+
+## First-egg habits
+
+Each is reported once with `zoo.habit`.
+
+| key | signal in this app |
+|---|---|
+| `turn` | a turn ends without error in a harness open in a pane here |
+| `split` | a tab holds two or more different harnesses |
+| `find` | something is opened from the Cmd-O finder |
+| `elsewhere` | **not reported**: the app cannot tell which device started a harness; harnessd or the server has to |
+| `machine` | another computer of the account is connected (signed in only) |
+| `store` | a turn ends in a Store harness |
+| `resume` | a paused harness is resumed from this window |
+| `days` | the window is in front on three different local days (kept locally per account) |
+
+The panel lists all eight with their shortcuts; Enter on one opens the place
+to practise it.
+
+## Status slot
+
+Eight cells plus a one-cell gutter each side, far right of the status bar, in
+the bar's font with ligatures off. The nest (`\_O_/`, `~\_O_/~`, `\_.._/`,
+`\_o.o_/`) warms toward the terminal's yellow; a paired daemon draws in its
+xterm colour, moved toward legible only where the background would swallow it.
+The grue shows up only on a dark terminal.
+
+Clicking a ready egg hatches it; nothing hatches on its own. Otherwise a click
+boops the daemon and opens its panel. Hover is a look. Native updates carry the
+face in `daemonState` and repaint only the slot; hover comes back as
+`daemonLook`.
+
+While a hatch reveal runs, the slot keeps the egg and neither the Flutter bar
+nor native hears the hatchling's name, colour or face until the reveal has
+finished (the card is up) or been closed.
+
+## Voice
+
+The daemon's one line replaces the status line's context for 5.2 s, in the
+terminal's yellow, as tmux's message line does. It is held until 2 s after the
+last key and while a dialog, picker or the reveal is open, and dropped if it
+is still waiting after 10 s.
+
+## Performance
+
+`SwarmScreen` reads only Reduce Motion from `MediaQuery`, so a resize no longer
+rebuilds the workspace. Session rows are built once per tick and shared by the
+toolbar, the badge, the native payload and the daemon. There is no idle timer:
+timers only end a held face, run a blink, step work frames while agents work,
+end a nap and clear a spoken line.
