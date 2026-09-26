@@ -4,6 +4,7 @@ import 'package:xterm/xterm.dart' show TerminalTheme;
 
 import '../daemons/daemon_brain.dart';
 import '../daemons/daemon_face.dart';
+import '../daemons/daemon_lines.dart';
 import '../daemons/render.dart';
 import '../daemons/roster.dart';
 import '../daemons/zoo.dart';
@@ -296,6 +297,14 @@ class _DaemonPanelState extends State<DaemonPanel> {
     ],
   );
 
+  /// On the terminal background the nest warms toward yellow as habits are
+  /// done (the status line draws it in its own ink).
+  Color get _nestInk {
+    if (face.revealing || face.eggReady) return _theme.yellow;
+    final progress = (face.zoo.habitsDone / face.zoo.habitsNeeded).clamp(0, 1);
+    return Color.lerp(_theme.foreground, _theme.yellow, .28 + .72 * progress)!;
+  }
+
   // ── before the first hatch: the nest and its habits ─────────────────────────
 
   List<Widget> _nest(List<String> order) {
@@ -322,7 +331,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
               face.glyph,
               key: const ValueKey('daemon-panel-nest'),
               semanticsLabel: egg != null ? 'Ready to hatch' : 'An egg',
-              style: _ink(daemonSlotInk(face, _theme)),
+              style: _ink(_nestInk),
             ),
           ),
           Expanded(
@@ -420,54 +429,93 @@ class _DaemonPanelState extends State<DaemonPanel> {
     final isPair = viewing.id == zoo.pair || zoo.pair == null;
     final mood = isPair ? face.mood : DaemonMood.idle;
     final colour = daemonColor(def, _theme, shiny: viewing.shiny);
+    final backdrop = daemonBackdrop(def);
     final name = viewing.nickname ?? def.id;
     final portrait = renderPortrait(
       roster,
       def,
       viewing.version,
       mood,
-      t: isPair ? face.t : 0,
+      t: isPair ? face.portraitT : 0,
       lid: isPair ? face.lid : null,
       motion: isPair && face.motionEnabled,
     );
-    final line = isPair && face.voice != null
-        ? face.voice!
-        : '$name: ${def.line(mood)}';
+    final portraitRows = portraitFor(roster, def, viewing.version).length;
+    final card = zooCardLines(
+      roster,
+      def,
+      version: viewing.version,
+      shiny: viewing.shiny,
+      nickname: viewing.nickname,
+      hatchedAt: viewing.hatchedAt,
+      egg: viewing.egg,
+    );
+    // The line: what it is saying, else the line for its mood now. Only a
+    // harness waiting on you or a failure is the alert yellow.
+    final spoken = isPair ? face.voice : null;
+    final line = spoken ?? '$name: ${_lineFor(def, mood, isPair)}';
+    final alert = spoken != null
+        ? face.voiceAlert
+        : mood == DaemonMood.need || mood == DaemonMood.fail;
 
-    for (final d in roster.daemons) {
+    for (final d in _shelfOrder) {
       if (zoo.owns(d.id)) order.add('zoo:${d.id}');
     }
-    for (final egg in zoo.eggs) {
-      order.add('egg:${egg.id}');
+    for (final kind in _eggKinds) {
+      order.add('egg:$kind');
     }
     if (!isPair) order.add('pair');
-    order.add('rename');
+    order
+      ..add('rename')
+      ..add('card');
+    if (_showCard) order.add('copy');
     if (isPair) order.add('nap');
+    order
+      ..add('quiet')
+      ..add('motion');
 
     return [
       _title(
         viewing.nickname == null ? def.id : '${viewing.nickname} (${def.id})',
       ),
       SizedBox(height: _cell.height),
-      Container(
-        width: double.infinity,
-        color: def.darkOnly
-            ? const Color(0xff000000)
-            : Color.lerp(_theme.background, _theme.foreground, .03),
-        padding: EdgeInsets.symmetric(vertical: _cell.height / 2),
-        alignment: Alignment.center,
-        child: Text(
-          portrait.join('\n'),
-          key: const ValueKey('daemon-portrait'),
-          semanticsLabel:
-              '$name ${viewing.version}, ${DaemonFace.moodWords[mood]}',
-          style: _ink(colour).copyWith(height: 1.15),
+      if (_showCard)
+        Container(
+          width: double.infinity,
+          color: Color.lerp(_theme.background, _theme.foreground, .03),
+          alignment: Alignment.center,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: DaemonCardText(
+              key: const ValueKey('daemon-card-text'),
+              lines: card,
+              portraitRows: portraitRows,
+              style: _ink(),
+              colour: colour,
+              backdrop: backdrop,
+            ),
+          ),
+        )
+      else
+        Container(
+          width: double.infinity,
+          color:
+              backdrop ??
+              Color.lerp(_theme.background, _theme.foreground, .03),
+          padding: EdgeInsets.symmetric(vertical: _cell.height / 2),
+          alignment: Alignment.center,
+          child: Text(
+            portrait.join('\n'),
+            key: const ValueKey('daemon-portrait'),
+            semanticsLabel:
+                '$name ${viewing.version}, ${DaemonFace.moodWords[mood]}',
+            style: _ink(colour).copyWith(height: 1.15),
+          ),
         ),
-      ),
       SizedBox(height: _cell.height),
       Text(
-        '#${def.n.toString().padLeft(2, '0')} ${def.id} ${viewing.version}'
-        ' · ${viewing.shiny ? 'shiny ' : ''}${def.rarity}'
+        '${cardNumber(roster, def)} ${def.id} ${viewing.version}'
+        ' · ${viewing.shiny ? '* shiny ' : ''}${def.rarity}'
         '${isPair ? ' · paired' : ''}',
         key: const ValueKey('daemon-panel-identity'),
         style: _ink(),
@@ -492,9 +540,21 @@ class _DaemonPanelState extends State<DaemonPanel> {
         child: Text(
           line,
           key: const ValueKey('daemon-panel-line'),
-          style: _ink(_theme.yellow),
+          style: _ink(alert ? _theme.yellow : _muted),
         ),
       ),
+      // Asleep or out of reach is not a failure: said calmly, once.
+      if (face.away.isNotEmpty) ...[
+        SizedBox(height: _cell.height / 2),
+        Text(
+          [
+            for (final machine in face.away)
+              '$machine is asleep or unreachable. its harnesses wait.',
+          ].join('\n'),
+          key: const ValueKey('daemon-panel-away'),
+          style: _ink(_muted),
+        ),
+      ],
       if (widget.brief case final brief?
           when brief.line.isNotEmpty || brief.items.isNotEmpty) ...[
         SizedBox(height: _cell.height),
@@ -509,26 +569,18 @@ class _DaemonPanelState extends State<DaemonPanel> {
         ),
       ],
       SizedBox(height: _cell.height),
-      Text(
-        'zoo ${zoo.daemons.map((d) => d.id).toSet().length}/${roster.daemons.length}'
-        ' · ${_progressLine()}',
-        key: const ValueKey('daemon-panel-progress'),
-        style: _ink(_muted),
-      ),
-      Wrap(
-        spacing: _cell.width,
-        children: [
-          for (final d in roster.daemons) _zooEntry(d, viewing.id),
-          for (final egg in zoo.eggs)
-            _action(
-              'egg:${egg.id}',
-              roster.rules.eggs[egg.kind]?.look ?? r'\_O_/',
-              () => widget.onHatch(egg),
-              color: _theme.yellow,
-              tooltip: 'Hatch this ${eggName(egg.kind)}',
-            ),
-        ],
-      ),
+      ..._shelf(viewing.id),
+      SizedBox(height: _cell.height / 2),
+      ..._meters(),
+      if (_eggKinds.isNotEmpty) ...[
+        SizedBox(height: _cell.height / 2),
+        Wrap(
+          spacing: _cell.width * 2,
+          children: [
+            for (final kind in _eggKinds) _eggButton(kind),
+          ],
+        ),
+      ],
       SizedBox(height: _cell.height),
       if (_renaming) ...[
         TextField(
@@ -555,7 +607,7 @@ class _DaemonPanelState extends State<DaemonPanel> {
           onSubmitted: (_) => _rename(viewing),
         ),
         Text('enter saves · empty clears · esc cancels', style: _ink(_muted)),
-      ] else
+      ] else ...[
         Wrap(
           spacing: _cell.width * 2,
           children: [
@@ -565,6 +617,22 @@ class _DaemonPanelState extends State<DaemonPanel> {
                 setState(() => _viewing = null);
               }, tooltip: 'Put ${def.id} in your status line'),
             _action('rename', '[ rename ]', () => _beginRename(viewing)),
+            _action(
+              'card',
+              _showCard ? '[ portrait ]' : '[ card ]',
+              () => setState(() {
+                _showCard = !_showCard;
+                _copyNote = null;
+              }),
+              tooltip: 'The card people share, as a code block',
+            ),
+            if (_showCard)
+              _action(
+                'copy',
+                '[ copy ]',
+                () => _copy(card),
+                tooltip: 'Copy the card as a fenced code block',
+              ),
             if (isPair)
               _action(
                 'nap',
@@ -576,8 +644,49 @@ class _DaemonPanelState extends State<DaemonPanel> {
               ),
           ],
         ),
+        Wrap(
+          spacing: _cell.width * 2,
+          children: [
+            _action(
+              'quiet',
+              face.quiet ? '[ quiet: on ]' : '[ quiet: off ]',
+              () => face.settings.quiet = !face.quiet,
+              tooltip: face.quiet
+                  ? 'It says nothing until you turn this off.'
+                  : 'Say nothing in the status line until turned off.',
+            ),
+            _action(
+              'motion',
+              face.settings.motion ? '[ motion: on ]' : '[ motion: off ]',
+              () => face.settings.motion = !face.settings.motion,
+              tooltip: face.settings.motion
+                  ? 'Work frames step with agent events; blinks answer you.'
+                  : 'Nothing moves. The face still changes with the mood.',
+            ),
+          ],
+        ),
+        if (_copyNote != null) Text(_copyNote!, style: _ink(_muted)),
+      ],
     ];
   }
+
+  bool _showCard = false;
+  String? _copyNote;
+
+  Future<void> _copy(List<String> card) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: cardCodeBlock(card)));
+      if (mounted) setState(() => _copyNote = 'Copied as a code block.');
+    } catch (_) {
+      if (mounted) setState(() => _copyNote = 'Could not copy.');
+    }
+  }
+
+  /// The line for [mood] now: filled from what the window knows; the
+  /// roster's example only while nothing is going on.
+  String _lineFor(DaemonDef def, DaemonMood mood, bool isPair) => isPair
+      ? face.currentLine(mood)
+      : daemonPreviewLine(def, mood, const {});
 
   /// `bond 2 · 160/300 xp`: levels come from counted turns (README,
   /// "Earning eggs and growing"); the version follows the level.
@@ -589,55 +698,180 @@ class _DaemonPanelState extends State<DaemonPanel> {
     return 'bond ${daemon.bond} · ${daemon.xp}${next == null ? '' : '/$next'} xp';
   }
 
-  /// How close the next egg from work is, and today's counted turns.
-  String _progressLine() {
-    final earn = roster.rules.earn;
-    final progress = zoo.progress;
-    final left = earn.turnEvery - progress.turns % earn.turnEvery;
-    final today = progress.days[localDayOf(DateTime.now())] ?? 0;
-    return 'turn egg in $left · today $today/${earn.dailyCap}';
+  // ── the zoo: a box back ─────────────────────────────────────────────────────
+
+  /// The drop's numbered slots in order, then its secrets.
+  List<DaemonDef> get _shelfOrder {
+    final drop = roster.drops.first.id;
+    return [
+      for (final d in roster.daemons)
+        if (d.drop == drop && !d.secret) d,
+      for (final d in roster.daemons)
+        if (d.drop == drop && d.secret) d,
+    ];
   }
 
-  Widget _zooEntry(DaemonDef d, String viewing) {
-    final owned = zoo.daemons.where((z) => z.id == d.id).lastOrNull;
-    if (owned == null) {
+  static const _slotCells = 10, _perRow = 4;
+
+  /// Like the back of a blind box: `#01`…`#09` and `#S`, each owned one as
+  /// its sprite at its version in its colour (`x2` for a duplicate), each
+  /// empty one `[ ? ]`, a secret `[ ! ]`.
+  List<Widget> _shelf(String viewing) {
+    final order = _shelfOrder;
+    final regulars = order.where((d) => !d.secret).toList();
+    final have = regulars.where((d) => zoo.owns(d.id)).length;
+    final secret = order.any((d) => d.secret && zoo.owns(d.id));
+    final drop = roster.drops.first;
+    return [
+      Text(
+        'zoo · drop ${drop.n} ${drop.name}  $have/${regulars.length}'
+        '${secret ? '  +secret' : ''}',
+        key: const ValueKey('daemon-panel-zoo'),
+        style: _ink(_muted),
+      ),
+      SizedBox(height: _cell.height / 2),
+      for (var i = 0; i < order.length; i += _perRow)
+        Padding(
+          padding: EdgeInsets.only(bottom: _cell.height / 2),
+          child: Row(
+            children: [
+              for (final d in order.skip(i).take(_perRow)) _slot(d, viewing),
+            ],
+          ),
+        ),
+    ];
+  }
+
+  Widget _slot(DaemonDef d, String viewing) {
+    final owned = zoo.daemons.where((z) => z.id == d.id).toList();
+    final number = cardNumber(roster, d).split('/').first;
+    final faint = _theme.foreground.withValues(alpha: .35);
+    Widget cell(List<Widget> rows) => SizedBox(
+      width: _cell.width * _slotCells,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: rows,
+      ),
+    );
+    if (owned.isEmpty) {
       return Tooltip(
         message: d.secret ? 'A secret. Not yet hatched.' : 'Not yet hatched',
-        child: SizedBox(
-          height: _cell.height,
-          child: Text(
-            d.secret ? '[!]' : '[?]',
+        child: cell([
+          Text(number, style: _ink(faint)),
+          Text(
+            d.secret ? '[ ! ]' : '[ ? ]',
             key: ValueKey('daemon-zoo-${d.id}'),
             semanticsLabel: d.secret ? 'A secret' : 'Not yet hatched',
-            style: _ink(_theme.foreground.withValues(alpha: .35)),
+            style: _ink(faint),
           ),
-        ),
+          Text('', style: _ink()),
+        ]),
       );
     }
+    final first = owned.first;
     final selected = d.id == viewing;
+    final sprite = renderSprite(
+      roster,
+      d,
+      roster.versionIndex(first.version),
+      DaemonMood.idle,
+      motion: false,
+    );
+    final backdrop = daemonBackdrop(d);
     return Tooltip(
       message:
-          '${owned.nickname ?? d.id} ${owned.version}'
+          '${first.nickname ?? d.id} ${first.version}'
+          '${owned.length > 1 ? ' · x${owned.length}' : ''}'
           '${d.id == zoo.pair ? ' · paired' : ''}',
-      child: TextButton(
-        key: ValueKey('daemon-zoo-${d.id}'),
-        focusNode: _node('zoo:${d.id}'),
-        onPressed: () => setState(() => _viewing = d.id),
-        style: _buttonStyle.copyWith(
-          backgroundColor: WidgetStatePropertyAll(
-            selected ? _theme.selection.withValues(alpha: .35) : null,
+      child: SizedBox(
+        width: _cell.width * _slotCells,
+        child: TextButton(
+          key: ValueKey('daemon-zoo-${d.id}'),
+          focusNode: _node('zoo:${d.id}'),
+          onPressed: () => setState(() => _viewing = d.id),
+          style: _buttonStyle.copyWith(
+            fixedSize: WidgetStatePropertyAll(
+              Size(_cell.width * (_slotCells - 1), _cell.height * 3),
+            ),
+            backgroundColor: WidgetStatePropertyAll(
+              selected ? _theme.selection.withValues(alpha: .35) : null,
+            ),
           ),
-        ),
-        child: Text(
-          renderSprite(
-            roster,
-            d,
-            roster.versionIndex(owned.version),
-            DaemonMood.idle,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('$number ${d.id}', style: _ink(_muted)),
+              Text(
+                '${first.shiny ? '*' : ''}$sprite',
+                semanticsLabel: '${d.id} ${first.version}',
+                style: _ink(
+                  daemonColor(d, _theme, shiny: first.shiny),
+                ).copyWith(backgroundColor: backdrop),
+              ),
+              Text(
+                '${first.version}${owned.length > 1 ? ' x${owned.length}' : ''}',
+                style: _ink(_muted),
+              ),
+            ],
           ),
-          style: _ink(daemonColor(d, _theme, shiny: owned.shiny)),
         ),
       ),
+    );
+  }
+
+  /// Toward the next earned egg: counted turns to the next turn egg, and
+  /// today's count against the daily cap.
+  List<Widget> _meters() {
+    final earn = roster.rules.earn;
+    final progress = zoo.progress;
+    final into = progress.turns % earn.turnEvery;
+    final today = progress.days[localDayOf(DateTime.now())] ?? 0;
+    String bar(int value, int of) {
+      const width = 20;
+      final filled = of <= 0 ? 0 : (value * width / of).floor().clamp(0, width);
+      return '[${'#' * filled}${'-' * (width - filled)}]';
+    }
+
+    String row(String label, int value, int of) =>
+        '${label.padRight(10)}${bar(value, of)}  '
+        '${'$value/$of'.padLeft(5)}';
+    return [
+      Text(
+        [
+          row('next egg', into, earn.turnEvery),
+          row('today', today.clamp(0, earn.dailyCap), earn.dailyCap),
+          if (today >= earn.dailyCap)
+            "today's turns are counted. more tomorrow.",
+        ].join('\n'),
+        key: const ValueKey('daemon-panel-progress'),
+        semanticsLabel:
+            '${earn.turnEvery - into} counted turns to the next egg. '
+            '$today of ${earn.dailyCap} turns counted today.',
+        style: _ink(_muted),
+      ),
+    ];
+  }
+
+  // ── eggs waiting: one look per kind, with a count ───────────────────────────
+
+  List<String> get _eggKinds => [
+    for (final egg in zoo.eggs)
+      if (!zoo.eggs
+          .takeWhile((e) => e != egg)
+          .any((e) => e.kind == egg.kind))
+        egg.kind,
+  ];
+
+  Widget _eggButton(String kind) {
+    final eggs = zoo.eggs.where((e) => e.kind == kind).toList();
+    return _action(
+      'egg:$kind',
+      '${face.eggLook(eggs.first)} x${eggs.length}',
+      () => widget.onHatch(eggs.first),
+      color: _theme.foreground,
+      tooltip: 'Open a ${eggName(kind)} (${eggs.length} waiting)',
     );
   }
 }
