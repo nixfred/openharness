@@ -53,8 +53,17 @@ void main() {
         f['out'],
         reason: '${f['id']} ${f['v']} ${f['mood']} t=${f['t']} lid=${f['lid']}',
       );
-      // The status cell is always the eight cells plus both gutters.
-      expect(statusCell(roster, out).length, roster.rules.statusCells + 2);
+      // What the status cell draws fits the eight cells plus both gutters.
+      // (A six-cell 1.0 sprite with a borrowed baton reaches into the right
+      // gutter: the reference pads it to eleven, the last one blank.)
+      expect(
+        statusCell(
+          roster,
+          out,
+          baseWidth(roster, d, roster.versionIndex(f['v'] as String)),
+        ).trimRight().length,
+        lessThanOrEqualTo(roster.rules.statusCells + 2),
+      );
       checked++;
     }
     expect(checked, sprites.length);
@@ -79,12 +88,78 @@ void main() {
     }
   });
 
-  test('status cell centres the sprite with one cell of gutter', () {
+  test('every status cell matches the reference: centred on the base '
+      'sprite', () {
+    final cells = frames['cells'] as List;
+    expect(cells, hasLength(greaterThan(400)));
+    for (final raw in cells) {
+      final f = raw as Map;
+      final d = roster.byId(f['id'] as String)!;
+      final vi = roster.versionIndex(f['v'] as String);
+      final sprite = renderSprite(
+        roster,
+        d,
+        vi,
+        daemonMoodNamed(f['mood'] as String)!,
+        t: f['t'] as int,
+      );
+      expect(
+        statusCell(roster, sprite, baseWidth(roster, d, vi)),
+        f['out'],
+        reason: '${f['id']} ${f['v']} ${f['mood']} t=${f['t']}',
+      );
+    }
+    // A borrowed baton or a nap's z grows to the right: the face stays put.
+    final tim = roster.byId('tim')!;
+    final idle = statusCell(roster, '[oo]', baseWidth(roster, tim, 0));
+    final working = statusCell(roster, '[==] |', baseWidth(roster, tim, 0));
+    expect(idle.indexOf('['), working.indexOf('['));
+    // Without a base width it centres the sprite as drawn.
     expect(statusCell(roster, '[oo]'), '   [oo]   ');
-    // Odd widths lean left, as render.mjs rounds.
-    expect(statusCell(roster, r'\[o|o]/'), r' \[o|o]/  ');
-    expect(statusCell(roster, '><(((o>'), ' ><(((o>  ');
     expect(statusCell(roster, ';:(oo):;'), ' ;:(oo):; ');
+  });
+
+  test('every card matches card.mjs', () {
+    final cards = frames['cards'] as List;
+    expect(cards, hasLength(roster.daemons.length * 6));
+    for (final raw in cards) {
+      final f = raw as Map;
+      final d = roster.byId(f['id'] as String)!;
+      final out = cardLines(
+        roster,
+        d,
+        version: f['version'] as String,
+        shiny: f['shiny'] == true,
+        serial: f['serial'] as int?,
+        nickname: f['nickname'] as String?,
+        hatched: f['hatched'] as String?,
+        egg: f['egg'] as String?,
+      );
+      expect(out, [
+        for (final l in f['out'] as List) l as String,
+      ], reason: '${f['id']} ${f['version']} shiny=${f['shiny']}');
+      expect(out.every((l) => l.length == cardWidth), isTrue);
+    }
+    // Secrets sit outside the numbered set.
+    expect(cardNumber(roster, roster.byId('tim')!), '#01/09');
+    expect(cardNumber(roster, roster.byId('tldr')!), '#09/09');
+    expect(cardNumber(roster, roster.byId('grue')!), '#S/09');
+    expect(
+      rarityStamp(roster, roster.byId('vim')!, shiny: true),
+      '[ SHINY RARE ]  #05/09',
+    );
+    // The zoo's card reads its date from hatchedAt and its egg kind.
+    final zooCard = zooCardLines(
+      roster,
+      roster.byId('tim')!,
+      version: '1.0',
+      nickname: 'pip',
+      hatchedAt: '2026-09-26T09:42:00Z',
+      egg: 'week',
+    );
+    expect(zooCard, contains('|   pip the tim 1.0                      |'));
+    expect(zooCard, contains('|   hatched 2026-09-26, week egg         |'));
+    expect(cardCodeBlock(zooCard), startsWith('```\n.---'));
   });
 
   test('nest stages follow habits done', () {
@@ -100,44 +175,6 @@ void main() {
         r'\_o.o_/',
       ],
     );
-  });
-
-  test('the card matches the README', () {
-    final card = daemonCard(
-      roster,
-      roster.byId('tim')!,
-      shiny: false,
-      eggKind: 'first',
-      hatchedAt: DateTime.utc(2026, 9, 26, 9, 42),
-    );
-    expect(
-      card,
-      r'''
-.----------------------------------------.
-| #01/10  DROP 1: UNIX            COMMON |
-|                                        |
-|  [oo]    tim 0.1                       |
-|  screen -> tmux -> tim                 |
-|                                        |
-|  "oh hi. i'm tim. tmux, improved.      |
-|  what are we building?"                |
-|                                        |
-|  hatched 2026-09-26, first egg         |
-'----------------------------------------'
-'''
-          .trim(),
-    );
-    for (final d in roster.daemons) {
-      final lines = daemonCard(
-        roster,
-        d,
-        shiny: true,
-        eggKind: 'easter',
-        hatchedAt: DateTime.utc(2026),
-      ).split('\n');
-      expect(lines.every((l) => l.length == 42), isTrue, reason: d.id);
-      expect(lines.every((l) => RegExp(r'^[\x20-\x7e]*$').hasMatch(l)), isTrue);
-    }
   });
 
   test('banner draws every drop 1 name with the lookbook face', () {

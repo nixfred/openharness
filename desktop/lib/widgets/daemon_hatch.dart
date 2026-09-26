@@ -237,16 +237,20 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     widget.onClose();
   }
 
-  String? get _card {
+  /// The hatchling's card (card.mjs): at 0.1, with the day it hatched and
+  /// the egg it came from.
+  List<String>? get _card {
     final def = _def, hatch = _hatch;
     if (def == null || hatch == null) return null;
-    final owned = widget.zoo().daemons.where((d) => d.id == def.id);
-    return daemonCard(
+    final owned = widget.zoo().daemons.where((d) => d.id == def.id).lastOrNull;
+    return zooCardLines(
       roster,
       def,
+      version: roster.rules.versions.first,
       shiny: hatch.shiny,
-      eggKind: widget.egg.kind,
-      hatchedAt: owned.isEmpty ? DateTime.now() : owned.last.hatchedDate,
+      hatchedAt:
+          owned?.hatchedAt ?? DateTime.now().toUtc().toIso8601String(),
+      egg: widget.egg.kind,
     );
   }
 
@@ -254,7 +258,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     final card = _card;
     if (card == null) return;
     try {
-      await Clipboard.setData(ClipboardData(text: '```\n$card\n```'));
+      await Clipboard.setData(ClipboardData(text: cardCodeBlock(card)));
       if (mounted) setState(() => _copyNote = 'Copied as a code block.');
     } catch (_) {
       if (mounted) setState(() => _copyNote = 'Could not copy.');
@@ -426,7 +430,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: SelectableText(
-                card,
+                card.join('\n'),
                 key: const ValueKey('daemon-hatch-card'),
                 style: ink.copyWith(fontSize: (ink.fontSize ?? 13) * .92),
               ),

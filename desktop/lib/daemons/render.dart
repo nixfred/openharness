@@ -11,6 +11,8 @@
 /// nest, the egg while it hatches, the banner name and the copyable card.
 library;
 
+import 'dart:math';
+
 import 'roster.dart';
 
 final _placeholder = RegExp(r'\{([a-zA-Z]+)\}');
@@ -98,13 +100,22 @@ List<String> renderPortrait(
     _fill(line, roster, d, mood, t: t, lid: lid, motion: motion),
 ];
 
-/// The status cell: the sprite centred in statusCells, with one cell of gutter
-/// each side.
-String statusCell(DaemonRoster roster, String sprite) {
-  final pad = roster.rules.statusCells - sprite.length;
-  final left = (pad / 2).floor(), right = (pad / 2).ceil();
-  return ' ${' ' * (left < 0 ? 0 : left)}$sprite${' ' * (right < 0 ? 0 : right)} ';
+/// The status cell: statusCells wide plus one cell of gutter each side. The
+/// sprite is centred on its [baseWidth] (the version's sprite, before a
+/// borrowed baton or a nap's `z` is added), so those additions grow to the
+/// right and the face never shifts a cell.
+String statusCell(DaemonRoster roster, String sprite, [int? baseWidth]) {
+  final cells = roster.rules.statusCells;
+  final base = baseWidth ?? sprite.length;
+  final left = max(0, ((cells - min(base, cells)) / 2).floor());
+  final right = max(0, cells - left - sprite.length);
+  return ' ${' ' * left}$sprite${' ' * right} ';
 }
+
+/// The base width [statusCell] centres on: the version's sprite in its idle
+/// mood.
+int baseWidth(DaemonRoster roster, DaemonDef d, int versionIndex) =>
+    renderSprite(roster, d, versionIndex, DaemonMood.idle, motion: false).length;
 
 /// The hatchling before it has colour: every drawn cell becomes `#`.
 String silhouette(String sprite) => sprite.replaceAll(RegExp(r'[^ ]'), '#');
@@ -193,9 +204,23 @@ List<String> bannerRows(String word) => [
     ].join(' '),
 ].where((line) => line.trim().isNotEmpty).toList();
 
-// ── the card ─────────────────────────────────────────────────────────────────
+// ── the card (a port of `daemons/tools/card.mjs`) ───────────────────────────
 
-/// Words wrapped the way the lookbook wraps them.
+const cardWidth = 42;
+const _cardInner = cardWidth - 4;
+
+/// `#03/09`, or `#S/09` for a secret: secrets sit outside the numbered set.
+String cardNumber(DaemonRoster roster, DaemonDef d) {
+  final set = [
+    for (final x in roster.daemons)
+      if (!x.secret && x.drop == d.drop) x,
+  ];
+  final of = set.length.toString().padLeft(2, '0');
+  if (d.secret) return '#S/$of';
+  return '#${(set.indexOf(d) + 1).toString().padLeft(2, '0')}/$of';
+}
+
+/// Words wrapped the way card.mjs wraps them.
 List<String> wrapWords(String text, int width) {
   final out = <String>[];
   var line = '';
@@ -213,47 +238,88 @@ List<String> wrapWords(String text, int width) {
 
 String eggName(String kind) => '$kind egg';
 
-/// The hatch card, 42 columns, as it copies into Slack or GitHub. Laid out as
-/// the README's example (the contract), one cell further left than the
-/// lookbook's draft.
-String daemonCard(
+/// The card as lines of printable ASCII, 42 columns wide: the portrait at its
+/// version, the number (secrets `#S/09`), the rarity, the name with a nickname
+/// and serial when there are any, the family, the first words and the hatched
+/// line. Never a live mood: a card is a portrait, not a presence indicator.
+List<String> cardLines(
   DaemonRoster roster,
   DaemonDef d, {
-  required bool shiny,
-  required String eggKind,
-  required DateTime hatchedAt,
+  String? version,
+  bool shiny = false,
+  int? serial,
+  String? nickname,
+  String? hatched,
+  String? egg,
 }) {
-  const w = 42, inner = w - 4;
+  final v = version ?? roster.rules.versions.first;
+  final drop = roster.drop(d.drop);
   String row(String s) {
-    final padded = s.padRight(inner);
-    return '| ${padded.substring(0, inner)} |';
+    final padded = s.padRight(_cardInner);
+    return '| ${padded.substring(0, _cardInner)} |';
   }
 
-  final drop = roster.drop(d.drop);
   final head =
-      '#${d.n.toString().padLeft(2, '0')}/${roster.dropSize(d.drop)}  '
-      'DROP ${drop?.n ?? 1}: ${(drop?.name ?? d.drop).toUpperCase()}';
+      '${cardNumber(roster, d)}  DROP ${drop?.n ?? 1}: '
+      '${(drop?.name ?? d.drop).toUpperCase()}';
   final rarity = '${shiny ? 'SHINY ' : ''}${d.rarity.toUpperCase()}';
-  final gap = inner - head.length - rarity.length;
-  final date = hatchedAt.toIso8601String().substring(0, 10);
+  final name =
+      '${nickname != null && nickname.isNotEmpty ? '$nickname the ' : ''}'
+      '${d.id} $v'
+      '${serial != null ? '  #${serial.toString().padLeft(4, '0')}' : ''}';
+  final portrait = renderPortrait(roster, d, v, DaemonMood.idle, motion: false);
+  final width = portrait.fold(0, (w, l) => max(w, l.length));
+  final pad = max(0, ((_cardInner - width) / 2).floor());
+  final hasHatched = (hatched != null && hatched.isNotEmpty) ||
+      (egg != null && egg.isNotEmpty);
   return [
-    '.${'-' * (w - 2)}.',
-    row('$head${' ' * (gap < 1 ? 1 : gap)}$rarity'),
+    '.${'-' * (cardWidth - 2)}.',
+    row('$head${' ' * max(1, _cardInner - head.length - rarity.length)}$rarity'),
     row(''),
-    // The sprite in its eight cells, so every name lines up.
-    row(
-      ' ${renderSprite(roster, d, 0, DaemonMood.idle).padRight(8)}${d.id} 0.1',
-    ),
-    row(' ${d.familyLine}'),
+    for (final l in portrait) row('${' ' * pad}$l'),
     row(''),
-    for (final line in wrapWords('"${d.first}"', inner - 2)) row(' $line'),
+    row('  $name'),
+    row('  ${d.familyLine}'),
     row(''),
-    row(' hatched $date, ${eggName(eggKind)}'),
-    "'${'-' * (w - 2)}'",
-  ].join('\n');
+    for (final l in wrapWords('"${d.first}"', _cardInner - 2)) row('  $l'),
+    if (hasHatched) ...[
+      row(''),
+      row(
+        '  hatched ${hatched ?? ''}'
+                '${egg != null && egg.isNotEmpty ? ', ${eggName(egg)}' : ''}'
+            .replaceFirst(RegExp(r'\s+,'), ','),
+      ),
+    ],
+    "'${'-' * (cardWidth - 2)}'",
+  ];
 }
 
-/// `[ SHINY RARE ]  #05/10`
+/// The card for a daemon in the zoo: at its version, with its nickname, the
+/// day it hatched and the egg it came from.
+List<String> zooCardLines(
+  DaemonRoster roster,
+  DaemonDef d, {
+  required String version,
+  bool shiny = false,
+  String? nickname,
+  String? hatchedAt,
+  String? egg,
+}) => cardLines(
+  roster,
+  d,
+  version: version,
+  shiny: shiny,
+  nickname: nickname,
+  hatched: hatchedAt == null || hatchedAt.length < 10
+      ? null
+      : hatchedAt.substring(0, 10),
+  egg: egg,
+);
+
+/// A card as it copies: a fenced code block.
+String cardCodeBlock(List<String> lines) => '```\n${lines.join('\n')}\n```';
+
+/// `[ SHINY RARE ]  #05/09`
 String rarityStamp(DaemonRoster roster, DaemonDef d, {required bool shiny}) =>
-    '[ ${shiny ? '* SHINY * ' : ''}${d.rarity.toUpperCase()} ]  '
-    '#${d.n.toString().padLeft(2, '0')}/${roster.dropSize(d.drop)}';
+    '[ ${shiny ? 'SHINY ' : ''}${d.rarity.toUpperCase()} ]  '
+    '${cardNumber(roster, d)}';
