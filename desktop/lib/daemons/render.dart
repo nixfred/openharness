@@ -165,26 +165,31 @@ const _banner = <String, List<String>>{
   'g': ['   ', ' _ ', '(_|', ' _|'],
   'h': ['|  ', '|_ ', '| |', '   '],
   'i': [' ', '.', '|', ' '],
+  'k': ['|  ', '|/ ', r'|\ ', '   '],
   'l': ['|', '|', '|', ' '],
   'm': ['     ', ' _ _ ', '| | |', '     '],
   'n': ['   ', ' _ ', '| |', '   '],
+  'o': ['   ', ' _ ', '(_)', '   '],
   'p': ['   ', ' _ ', '|_)', '|  '],
+  'q': ['   ', ' _ ', '(_|', '  |'],
   'r': ['  ', ' _', '| ', '  '],
   's': ['  ', ' _', '_>', '  '],
   't': ['   ', '_|_', ' |_', '   '],
   'u': ['   ', '   ', '|_|', '   '],
   'v': ['  ', '  ', r'\/', '  '],
+  'w': ['    ', '    ', r'\/\/', '    '],
   'x': ['  ', '  ', '><', '  '],
+  'y': ['   ', '   ', r'\_|', ' _|'],
   'z': ['  ', '_ ', '/_', '  '],
 };
 
-/// A name as the banner draws it, blank rows dropped. Letters the face does
-/// not have draw as `?`.
+/// A name as the banner draws it, blank rows dropped. A character the face
+/// does not have is drawn as itself on the baseline row.
 List<String> bannerRows(String word) => [
   for (var row = 0; row < 4; row++)
     [
       for (final ch in word.split(''))
-        (_banner[ch] ?? const ['?', '?', '?', '?'])[row],
+        (_banner[ch] ?? [' ', ' ', ch, ' '])[row],
     ].join(' '),
 ].where((line) => line.trim().isNotEmpty).toList();
 
@@ -235,7 +240,10 @@ String daemonCard(
     '.${'-' * (w - 2)}.',
     row('$head${' ' * (gap < 1 ? 1 : gap)}$rarity'),
     row(''),
-    row(' ${renderSprite(roster, d, 0, DaemonMood.idle)}    ${d.id} 0.1'),
+    // The sprite in its eight cells, so every name lines up.
+    row(
+      ' ${renderSprite(roster, d, 0, DaemonMood.idle).padRight(8)}${d.id} 0.1',
+    ),
     row(' ${d.familyLine}'),
     row(''),
     for (final line in wrapWords('"${d.first}"', inner - 2)) row(' $line'),

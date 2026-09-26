@@ -34,7 +34,8 @@ class HatchFrame {
 /// cracks and pops; the 0.1 sprite appears as `#` in the faint colour for
 /// 850 ms, fills with its colour and blinks; its name types in as a small
 /// banner; the rarity stamp and first words appear; then the card, which
-/// copies as a fenced code block. A secret's reveal starts pitch black.
+/// copies as a fenced code block. A secret's reveal (a daemon that shows
+/// only in the dark) starts pitch black.
 /// Reduce Motion goes straight to the card.
 ///
 /// It floats beside the status slot, takes keyboard focus while it is open,
@@ -173,7 +174,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     }
     final def = _def!;
     final sprite = renderSprite(roster, def, 0, DaemonMood.idle);
-    if (def.secret && !widget.reduceMotion) {
+    if (def.darkOnly && !widget.reduceMotion) {
       _show(() => _stage = HatchStage.pitch);
       if (!await _wait(1600)) return;
     }
@@ -274,7 +275,7 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
         final cell = terminalCellSizeOf(context);
         final def = _def;
         final pitch =
-            def?.secret == true &&
+            def?.darkOnly == true &&
             _stage != HatchStage.failed &&
             _stage != HatchStage.egg;
         final background = pitch ? const Color(0xff000000) : theme.background;
