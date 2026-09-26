@@ -201,7 +201,7 @@ Widget _bar(BuildContext context, DaemonFace face, String caption) {
       children: [
         SizedBox(width: cell.width),
         SizedBox(
-          width: cell.width * 16,
+          width: cell.width * 20,
           child: Text(
             caption,
             style: workspaceBarTextStyle(
@@ -427,13 +427,13 @@ void main() {
     (
       'hatch-7-banner',
       'tim',
-      const HatchFrame(stage: HatchStage.banner, bannerRows: 3),
+      const HatchFrame(stage: HatchStage.banner, bannerRows: 5),
       Brightness.dark,
     ),
     (
       'hatch-8-card',
       'tim',
-      const HatchFrame(stage: HatchStage.card, bannerRows: 3),
+      const HatchFrame(stage: HatchStage.card, bannerRows: 5),
       Brightness.dark,
     ),
     // The rarity, told at the crack.
@@ -479,19 +479,19 @@ void main() {
     (
       'hatch-secret-card',
       'grue',
-      const HatchFrame(stage: HatchStage.card, bannerRows: 3),
+      const HatchFrame(stage: HatchStage.card, bannerRows: 5),
       Brightness.dark,
     ),
     (
       'hatch-legendary-card',
       'fzf',
-      const HatchFrame(stage: HatchStage.card, bannerRows: 3),
+      const HatchFrame(stage: HatchStage.card, bannerRows: 5),
       Brightness.dark,
     ),
     (
       'hatch-rare-card-light',
       'zsh',
-      const HatchFrame(stage: HatchStage.card, bannerRows: 3),
+      const HatchFrame(stage: HatchStage.card, bannerRows: 5),
       Brightness.light,
     ),
   ];
@@ -548,7 +548,7 @@ void main() {
               ),
               zoo: () => _paired('bat', shiny: true),
               onClose: () {},
-              still: const HatchFrame(stage: HatchStage.card, bannerRows: 3),
+              still: const HatchFrame(stage: HatchStage.card, bannerRows: 5),
             ),
           ),
         ),

@@ -187,45 +187,29 @@ String eggPopFrame(DaemonRoster roster, {bool sparks = false}) {
   return rows.join('\n');
 }
 
-// ── the banner: a small FIGlet-style face, ported from the lookbook ──────────
+// ── the banner: a daemon's name in the face from daemons/banner.json ──────────
 
-const _banner = <String, List<String>>{
-  'a': ['   ', ' _.', '(_|', '   '],
-  'b': ['|  ', '|_ ', '|_)', '   '],
-  'c': ['  ', ' _', '(_', '  '],
-  'd': ['  |', ' _|', '(_|', '   '],
-  'e': ['   ', ' _ ', '(/_', '   '],
-  'f': ['  _', '_|_', ' | ', '   '],
-  'g': ['   ', ' _ ', '(_|', ' _|'],
-  'h': ['|  ', '|_ ', '| |', '   '],
-  'i': [' ', '.', '|', ' '],
-  'k': ['|  ', '|/ ', r'|\ ', '   '],
-  'l': ['|', '|', '|', ' '],
-  'm': ['     ', ' _ _ ', '| | |', '     '],
-  'n': ['   ', ' _ ', '| |', '   '],
-  'o': ['   ', ' _ ', '(_)', '   '],
-  'p': ['   ', ' _ ', '|_)', '|  '],
-  'q': ['   ', ' _ ', '(_|', '  |'],
-  'r': ['  ', ' _', '| ', '  '],
-  's': ['  ', ' _', '_>', '  '],
-  't': ['   ', '_|_', ' |_', '   '],
-  'u': ['   ', '   ', '|_|', '   '],
-  'v': ['  ', '  ', r'\/', '  '],
-  'w': ['    ', '    ', r'\/\/', '    '],
-  'x': ['  ', '  ', '><', '  '],
-  'y': ['   ', '   ', r'\_|', ' _|'],
-  'z': ['  ', '_ ', '/_', '  '],
-};
+/// A daemon's name as a banner (render.mjs `renderBanner`): every glyph padded
+/// to its own widest row, `gap` columns between letters, blank rows dropped.
+/// A character the face does not have is drawn as its blank.
+List<String> renderBanner(DaemonBanner banner, String word) {
+  final blank = banner.glyphs[' '] ?? List.filled(banner.rows, '');
+  final glyphs = [
+    for (final ch in word.toLowerCase().split(''))
+      if (banner.glyphs[ch] ?? blank case final g)
+        [
+          for (final r in g)
+            r.padRight(g.fold(0, (w, row) => max(w, row.length))),
+        ],
+  ];
+  return [
+    for (var r = 0; r < banner.rows; r++)
+      glyphs.map((g) => g[r]).join(' ' * banner.gap).trimRight(),
+  ].where((line) => line.trim().isNotEmpty).toList();
+}
 
-/// A name as the banner draws it, blank rows dropped. A character the face
-/// does not have is drawn as itself on the baseline row.
-List<String> bannerRows(String word) => [
-  for (var row = 0; row < 4; row++)
-    [
-      for (final ch in word.split(''))
-        (_banner[ch] ?? [' ', ' ', ch, ' '])[row],
-    ].join(' '),
-].where((line) => line.trim().isNotEmpty).toList();
+/// A name as the reveal's banner draws it.
+List<String> bannerRows(String word) => renderBanner(daemonBanner, word);
 
 // ── the card (a port of `daemons/tools/card.mjs`) ───────────────────────────
 

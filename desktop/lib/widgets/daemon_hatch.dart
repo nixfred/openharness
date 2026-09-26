@@ -498,13 +498,9 @@ class _DaemonHatchRevealState extends State<DaemonHatchReveal> {
     };
     final rows = bannerRows(def.id);
     final card = _stage == HatchStage.card ? _card : null;
-    // A larger face with room between its rows: at the body's size and line
-    // height the letters touched and read as noise.
-    final banner = ink.copyWith(
-      fontSize: (ink.fontSize ?? 13) * 1.5,
-      height: 1.3,
-      fontWeight: FontWeight.w500,
-    );
+    // The shared banner face (daemons/banner.json), monospace, at a line
+    // height that keeps its rows from touching.
+    final banner = ink.copyWith(height: 1.15);
     return [
       if (_stage == HatchStage.pitch)
         Padding(

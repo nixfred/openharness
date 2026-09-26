@@ -177,12 +177,19 @@ void main() {
     );
   });
 
-  test('banner draws every drop 1 name with the lookbook face', () {
-    expect(bannerRows('tim'), ['_|_ .  _ _ ', ' |_ | | | |']);
+  test('every banner matches renderBanner in the shared face', () {
+    final banners = frames['banners'] as List;
+    expect(banners, hasLength(roster.daemons.length));
+    for (final raw in banners) {
+      final f = raw as Map;
+      expect(renderBanner(daemonBanner, f['id'] as String), [
+        for (final l in f['out'] as List) l as String,
+      ], reason: f['id'] as String);
+      expect(bannerRows(f['id'] as String), f['out']);
+    }
+    // Every row fits the reveal's 42 columns at its own size.
     for (final d in roster.daemons) {
-      final rows = bannerRows(d.id);
-      expect(rows, isNotEmpty);
-      expect(rows.join().contains('?'), isFalse, reason: d.id);
+      expect(bannerRows(d.id).every((r) => r.length <= 42), isTrue);
     }
     expect(silhouette('[oo]'), '####');
     expect(silhouette('o   o'), '#   #');
