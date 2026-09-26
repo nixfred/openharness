@@ -18,14 +18,17 @@ chat, a local blind box), which is gone.
 | zoo shape, rules, local draw | `lib/daemons/zoo.dart` |
 | zoo state: account, guest, seed | `lib/daemons/zoo_controller.dart` |
 | moods, blinks, work steps, tally, voice | `lib/daemons/daemon_face.dart` |
+| the pair brain's frames, talk and `pair` requests | `lib/daemons/daemon_brain.dart` |
+| lessons (list, show, approve, skip, revert) | `lib/daemons/daemon_lessons.dart` |
+| `pair.jsonc`: where it is, the file written when missing | `lib/daemons/pair_rules_file.dart` |
 | first-egg habit signals | `lib/daemons/daemon_habits.dart` |
-| colours, Flutter status slot, voice line, card text, notices | `lib/widgets/daemon_slot.dart` |
+| colours, Flutter status slot, voice line and its keys, card text, notices, the brief notice | `lib/widgets/daemon_slot.dart` |
 | hatch reveal | `lib/widgets/daemon_hatch.dart` |
-| panel | `lib/widgets/daemon_panel.dart` |
+| panel | `lib/widgets/daemon_panel.dart`, the pair brain's sections in `daemon_panel_pair.dart` |
 | native status slot and voice line | `macos/Runner/SwarmTitlebar.swift` (`SwarmSymbolButton`, `SwarmVoiceLabel`) |
 
 `test/daemons/render_frames_test.dart` checks every sprite, portrait, status
-cell, card and banner in `daemons/frames.json` byte for byte. Change the
+cell, card, nest and banner in `daemons/frames.json` byte for byte. Change the
 roster, run `node daemons/tools/generate.mjs`, and that test tells you whether
 the Dart port still draws what the reference draws.
 `test/daemon_review_render_test.dart` draws the slot, the reveal and the panel
@@ -41,7 +44,15 @@ nickname show at once and are confirmed by the answer; eggs and draws are the
 server's.
 
 A guest keeps a local zoo (`daemons.zoo.v1.local` in the app's local store)
-with the same shape and rules, drawn on the client. It is sent once with
+with the same shape and rules (economy v2, `backend/src/lib/zoo.ts`), drawn on
+the client: regulars first and secrets only from eggs whose `weights.secret`
+is above 0 (drop 1: night and easter), the pity counting only those eggs and
+guaranteeing the secret at `secretGuaranteeAt`; only released drops draw; a
+duplicate merges into the one you have (`+duplicateXp`, `dupes`, a shiny one
+makes yours shiny, never pairs); a guest's daemons are `origin: local` and
+carry no serial; easter words are kept as their sha256; a zoo stored with two
+records of one daemon reads as one. The autonomy dial is zoo state too
+(`zoo.autonomy`). It is sent once with
 `zoo.seed` the first time an account's zoo answers. A harnessd that predates
 the zoo answers 404; the window then uses the local zoo too, and seeds it when
 the account's zoo appears.
@@ -63,17 +74,23 @@ never sends `zoo.turn` (the turns would count twice). A guest's turns are
 counted by the app (a live `turn_started`, then a `turn_ended` without error or
 interrupt, not a sub-agent, terminal or the pair harness) and applied to the
 local zoo with the server's rules: 20 a local day, a turn egg every 40, week,
-marathon, night and history eggs, held eggs when the nest is full, and xp for
-the pair (levels 0–4 on `rules.bond.levels`, 1.0 at level 2, 2.0 at level 4).
+marathon, night and history eggs, held eggs when the nest is full (past 64,
+`overflowXp` for the pair), and xp for the pair (levels 0–4 on
+`rules.bond.levels`, 1.0 at level 2, 2.0 at level 4). A turn that finishes
+after the window has been away or idle for `earn.night.awayMinutes` is an
+away turn, which is what night eggs count (22:00 to 06:59, named by the day
+the night began). The app does not measure a guest's turn minutes, so long
+turns count once.
 
 The paired daemon draws at its `version`. A new egg sits in the status slot for
 3 s (an ack blink, no line), then the daemon returns and `+1 egg` stays beside
 it until the egg is opened; the tooltip shows one egg look and a count
 (`\_O_/ x2 waiting`). A level-up is a slow blink, no line. Before the first
 hatch the slot shows the waiting egg itself: the first egg's ready face, or
-its kind's `look`. The panel shows the bond, xp toward the next level, and two
-meters: counted turns toward the next turn egg, and today's count against the
-daily cap.
+its kind's `look` (the setup egg is `\_$_/`). The panel shows the bond, xp
+toward the next level, and meters: counted turns toward the next turn egg,
+today's count against the daily cap, and habits toward the setup egg until it
+comes.
 
 Nothing is drawn until the window knows whose zoo it is and the first read has
 answered. A signed-in window waits for its profile (the old code keyed its
@@ -81,7 +98,13 @@ first reads by a temporary scope and flashed other progress at boot).
 
 ## First-egg habits
 
-Each is reported once with `zoo.habit`.
+Each is reported once with `zoo.habit`. The first egg comes at
+`firstEgg.need` habits with every `firstEgg.require` among them (today: a
+finished turn and any two more), the setup egg at `setupEgg.need` (6). The
+nest is render.mjs `nestStage` (ported, checked against `frames.nests`):
+without the required habit at most need - 1 count. Every count, threshold
+and the checklist's words (`finish a turn in a harness, and any 2 more`, the
+required habit marked `needed`) come from the roster, never from the code.
 
 | key | signal in this app |
 |---|---|
@@ -102,8 +125,9 @@ to practise it.
 Eight cells plus a one-cell gutter each side, far right of the status bar, in
 the bar's font with ligatures off. The face sends its ten cells as drawn
 (`statusCell` centred on the version's base sprite, so a borrowed baton or a
-nap's `z` grows to the right and the face never shifts); a six-cell 1.0 sprite
-with a baton reaches into the right gutter, as the reference pads it.
+nap's `z` grows to the right and the face never shifts). A status cell is
+always exactly ten cells (render.mjs fills and cuts to `statusCells + 2`): a
+six-cell 1.0 sprite with a baton runs into the right gutter and ends there.
 
 **Colour.** The slot is drawn in the status line's own text colour, whatever
 the daemon: daemon colours fail contrast on a green tmux bar and on the yellow
@@ -117,14 +141,18 @@ Every terminal scheme the app ships today is dark, so the light rules wait for
 a light scheme; `debugDaemonTerminalTheme` draws them now for the review
 captures and `test/daemons/daemon_colors_test.dart` (Solarized Light).
 
-**Shiny.** A `*` in the slot's left gutter; the roster's `shiny.hex` (else the
-colour brighter and more saturated) in the panel, card and reveal; the card
-reads `SHINY <RARITY>`.
+**Shiny.** A `*` in the slot's left gutter; the roster's `shiny.hex` (every
+daemon has one now; else the colour brighter and more saturated) on the
+terminal background: panel, zoo, card and reveal; the card reads
+`SHINY <RARITY>`.
 
-**Tally.** Dim, left of the cells: `+3` turns finished since you looked (a
-turn in the pane in front of you is already seen), cleared by a hover or
-opening the panel; `+1 egg` while eggs wait, until they are opened. Native
-lays out again only when the tally's width changes.
+**Tally.** Dim, left of the cells: `+3` turns finished since you looked,
+cleared by a hover, opening the panel, or coming back to the window (after
+4 s in front); `+1 egg` while eggs wait, until they are opened. With a pair
+brain the `+n` is its `daemon_state.done.count` (every machine; the tooltip
+names the last few) and a look sends `daemon_presence { doneSeen: true }`;
+without one the window counts what it sees (a turn in the pane in front of you
+is already seen). Native lays out again only when the tally's width changes.
 
 Clicking a ready egg hatches it; nothing hatches on its own. Otherwise a click
 boops the daemon and opens its panel. Hover is a look. Native updates carry the
@@ -179,47 +207,92 @@ may show the roster's `examples`; every other line is filled from real values.
 
 ## The pair brain
 
-When this computer's harnessd has a pair brain ([daemons/BRAIN.md](../../daemons/BRAIN.md))
-it sends local frames, heard only from the loopback socket bound to this
-computer's own harnessd (`AppNotifier.daemonFrames`); `daemon_*` frames are
-sent only on that socket, never a relayed one (an older daemon forwards unknown
-frames from a relayed socket to the cloud). `lib/daemons/daemon_brain.dart`
-holds what was heard.
+When this computer's harnessd has a pair brain ([daemons/BRAIN.md](../../daemons/BRAIN.md),
+frame shapes in `cli/src/pair/protocol.ts`) it sends local frames, heard only
+from the loopback socket bound to this computer's own harnessd
+(`AppNotifier.daemonFrames`: `daemon_*`, `pair_result`); `daemon_*` and
+`pair` frames are sent only on that socket, never a relayed one.
+`lib/daemons/daemon_brain.dart` holds what was heard.
 
-- `daemon_state` is merged into the face's inputs: its needs (same ids as the
-  window's own questions, `machineId/agentId#requestId`), working and failing,
-  across every machine. Without it the face works from this window alone.
-- `daemon_say` replaces the roster line: with a brain, a roster alert waits
-  up to 2.5 s for it, and a brain line about the harness already spoken
-  replaces it in place. Only `need`, `fail` or a line with answers takes over;
-  the brain's other lines (a finished turn, a return) are left to the tally
-  and the brief. The rules above hold for it too. Its answers come first, as
-  `[y] run it`, clickable in the Flutter bar and natively, and ⌘⌥ plus the key
-  answers from anywhere in the window while the line shows. A line with
-  answers stays up until answered, withdrawn (`daemon_unsay`) or its `ttlMs`
-  (30 s by default).
-- `daemon_act { requestId, id, choice }` goes out on a click or chord;
-  a failed `daemon_act_result` becomes one line (`STALE_QUESTION`'s detail, or
-  a worded code).
-- `daemon_presence { active, awayMs, desk, pair?, focusMachineId?,
-  focusAgentId? }` goes out when the brain is first heard, when the window
-  loses or regains the front, and when the pane in front changes; `desk` is a
-  random id kept per computer, and a guest adds its local zoo's pair.
-- `daemon_state.machines` with status `unreachable` or `off`, and open
-  harnesses on a machine this window cannot reach, are shown calmly in the
-  panel (`office is asleep or unreachable. its harnesses wait.`) and never
-  make the face `fail`; only a failed start or a harness whose last turn
-  failed (until its next turn) does.
-- `daemon_brief` shows as a short list under the status line on return (10 s)
-  and in the panel until the next one.
-
-Not done: idle detection for presence (only blur and focus are reported).
+- `daemon_state` (`pair`, `needs`, `working` as a count, `failing`,
+  `machines` with their status, `done { count, last }`, `asks`, `acted`) is
+  merged into the face's inputs: its needs (same ids as the window's own
+  questions, `machineId/agentId#requestId`), work and failures across every
+  machine; `asks` make the face `need` (it asks you something); `done.count`
+  is the `+n`. `pair: null` keeps the roster's lines.
+- **Keys first.** A `daemon_say` is shown exactly as sent (`[y/n/g] api@office
+  Bash: npm test`), for what is left of its `ttlMs` (5.2 s) since it arrived:
+  its keys work only while the line shows, on the brain's clock. The offered
+  keys in the leading bracket are the buttons, in Flutter and natively (the
+  native label draws the line as sent and hit-tests those cells), and ⌘⌥ plus
+  the key answers from anywhere in the window. `[g]` opens the harness here
+  (`revealAgentFromAlert`), which is the window's to do; y, n and s go out as
+  `daemon_act`. A second `daemon_say` with the same id replaces the line in
+  place with the time the brain says is left.
+- **Moods.** `need` and `fail` take over the status line in the message
+  yellow like the window's own alerts (at most one line nobody asked for every
+  two minutes, never about the pane in front of you, never mid-thought).
+  `ask` (a proposal, a lesson) is yellow, draws `need`, and shows at once, even
+  mid-thought or behind a dialog: its keys are short-lived. `auto` (a rule or
+  the pair acted) holds `done` with an ack blink and says it dimly, counted as
+  a line nobody asked for; it is also in the panel's journal. `say` (the pair
+  answering you) is a dim reply and draws idle. `done` and `back` are never a
+  line: the tally and the brief carry them.
+- **The asks list** in the panel keeps what the line could not: every
+  proposal in `daemon_state.asks` with its y/n (a proposal's keys work for its
+  ten minutes), and every need, with its keys while its line shows and `[g]`
+  after (the brain drops a need's keys with its line: a late `y` must never
+  land on the next dialog). A focused row answers y, n, s or g from the
+  keyboard.
+- **Talk.** The panel's talk box, and the keymap's **Talk to daemon**
+  (`app.daemon_talk`, ⌘⌥T: ⌘⌥Space is macOS's Finder search, and ⌘⌥ plus
+  y, n, s or g answers lines), send `daemon_talk { requestId, text }`. The
+  panel says the pair harness is waking, starting (a new conversation),
+  resuming or reached, or why not (`daemon_talk_result`), and keeps the last
+  few turns; its answers arrive as `say` lines. **Open the conversation**
+  focuses the `autonomous/pair` harness's pane (the agent the talk reached,
+  else the one this machine lists).
+- **Autonomy.** The panel's dial: watch, suggest (the default), act on key,
+  act within rules, one line each, posted as `zoo.autonomy { level }` (a
+  guest's is kept locally and sent as `daemon_presence.autonomy`), with the
+  floor beside it (never pushes, deletes, force-pushes or bypasses
+  permissions) and `[ rules: ~/.config/harness/pair.jsonc ]`, which writes a
+  commented file meaning "no rules" when there is none and opens it the way
+  `keybindings.jsonc` is opened (there is no in-app editor pane).
+- **The brief** (`daemon_brief`, at most five items) shows under the status
+  line on return, each item as sent, keys first; it stays up while its keys
+  work (a minute) when an item has any, else 10 s, and is in the panel until
+  the next one. A `lesson` item (a lesson's `[s]`) shows the lesson's text.
+- **Lessons** ([daemons/LEARNING.md](../../daemons/LEARNING.md)): a proposal
+  is a `daemon_say` `ask` with `[y/n/s]`. The panel lists pending and
+  approved lessons through the same local `pair` request `harness pair
+  lessons` uses (`{ verb: 'lessons', action }` → `pair_result`): show, approve
+  (only after the lesson is shown and you confirm; sent with
+  `confirmed: true`, as the CLI does after asking at a terminal), skip,
+  revert.
+- **Presence** (`daemon_presence`): `active` and `awayMs` when the window
+  loses or regains the front, and when it goes idle in front (no key or
+  pointer for five minutes: `active: false` with how long; the next input is
+  `active: true` with the whole absence), so harnessd knows away turns and
+  briefs a return; a focus-only frame whenever the pane in front changes,
+  `focusAgentId: null` when there is none (the brain never speaks about what
+  you are looking at); `doneSeen` on a look; a guest adds its local zoo's
+  `pair` and `autonomy`.
+- Machines `asleep`, `unreachable`, `unlinked`, `old` or `off`, and open
+  harnesses on a machine this window cannot reach, are said calmly in the
+  panel (`studio is asleep. its harnesses wait.`) and never make the face
+  `fail`; only a failed start or a harness whose last turn failed does.
 
 ## The reveal
 
 The egg wobbles until harnessd answers, then tells the rarity at the crack: a
 rare's shell glows cyan, a legendary's pop throws yellow `*'.` sparks, and a
-secret's stage goes black before the crack (light ink on it, on any theme). The
+secret's stage goes black before the crack (light ink on it, on any theme).
+A duplicate (`hatched[].duplicate`) has no reveal of a new name: after the pop
+it shows yours, `vim x2 · +150 xp`, `another vim. +150 xp.` (and `yours is
+shiny now.` for a shiny one), then, if it grew, `vim grew: bond 2 · 1.0` at
+its new version; no new card. A new daemon's card carries the server's serial
+(`#0042`); a guest's has none. The
 0.1 **portrait** appears as `#` in the faint colour for 1200 ms, fills with its
 colour and blinks; the name types in, in the shared face from
 `daemons/banner.json` (`renderBanner`) at a line height of 1.15 so its rows
@@ -231,20 +304,24 @@ point; Reduce Motion goes straight to the card.
 
 The paired (or selected) daemon's live portrait, identity (`#01/09 tim 2.0 ·
 common · paired`), bond, family, lore and its line (yellow only when something
-needs you or failed), a calm line for each machine asleep or out of reach, the
-brief, then the zoo as a box back: `#01`..`#09` and `#S`, each owned daemon as
+needs you or failed), a calm line for each machine not there; with a pair
+brain, the talk box, the asks, the brief and the journal; then the zoo as a
+box back: `#01`..`#09` and `#S`, each owned daemon as
 its sprite at its version in its colour with `x2` for duplicates, each empty
 slot `[ ? ]` (a secret `[ ! ]`). Under it, the meters toward the next earned
 egg, and the waiting eggs, one look per kind with a count. `[ card ]` shows the
 card (card.mjs at the daemon's version, with its nickname, hatch date and egg)
 in place of the portrait, and `[ copy ]` copies it as a fenced code block.
-`[ quiet ]` and `[ motion ]` switch the two settings.
+`[ quiet ]` and `[ motion ]` switch the two settings. Last, the autonomy
+dial and the lessons. Focus follows the page (j/k).
 
 ## The finder
 
-Typing an easter word (`rules.easterWords`, today `xyzzy`) in Cmd-O answers
-with a result row, `Nothing happens.`, that Return never takes, and sends
-`zoo.easter { word }` once from this window.
+The roster ships only `rules.easterHashes` (sha256 of each lowercased word).
+Typing `xyzzy`, the one classic the window knows by heart, in Cmd-O answers
+with a result row, `Nothing happens.`, that Return never takes; any query whose
+hash is an easter hash is sent as `zoo.easter { word }` once from this
+window.
 
 ## Performance
 
