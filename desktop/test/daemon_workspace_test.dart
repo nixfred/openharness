@@ -81,9 +81,11 @@ void main() {
   }
 
   final slot = find.byKey(const ValueKey('daemon-slot'));
+  /// What the slot's ten cells draw, without the gutters.
   String glyph(WidgetTester tester) => tester
       .widget<Text>(find.byKey(const ValueKey('daemon-slot-glyph')))
-      .data!;
+      .data!
+      .trim();
 
   testWidgets('nothing shows until the profile and the zoo have loaded', (
     tester,
@@ -328,16 +330,18 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(glyph(tester), '[oo]');
+    expect(glyph(tester), '[o o]');
     await tester.tap(slot);
     await tester.pump();
     expect(find.byKey(const ValueKey('daemon-panel')), findsOneWidget);
     expect(find.byKey(const ValueKey('daemon-portrait')), findsOneWidget);
     expect(find.textContaining('screen -> tmux -> tim'), findsOneWidget);
     expect(find.textContaining('Named the way vim was'), findsOneWidget);
-    // The zoo: two owned, the rest unknown, the secret marked.
-    expect(find.text('[?]'), findsNWidgets(7));
-    expect(find.text('[!]'), findsOneWidget);
+    // The zoo's box back: two owned, the rest numbered and unknown, the
+    // secret marked.
+    expect(find.text('[ ? ]'), findsNWidgets(7));
+    expect(find.text('[ ! ]'), findsOneWidget);
+    expect(find.text('#08 fzf'), findsOneWidget);
     // Move to fzf and pair it.
     await key(tester, LogicalKeyboardKey.keyJ);
     await tester.pump();
@@ -365,7 +369,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('daemon-nap')));
     // The click that opened the panel was a boop; it wins for 900 ms.
     await tester.pump(const Duration(seconds: 1));
-    expect(glyph(tester), ';:(--):;');
+    expect(glyph(tester), '> ;-;-;z');
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pump();
     expect(find.byKey(const ValueKey('daemon-panel')), findsNothing);
@@ -410,7 +414,7 @@ void main() {
     });
     await tester.pump();
     await tester.pump();
-    expect(glyph(tester), '[oo]');
+    expect(glyph(tester), '[o o]');
     await tester.tap(slot);
     await tester.pump();
     await key(tester, LogicalKeyboardKey.escape);
@@ -468,6 +472,283 @@ void main() {
       },
     );
   }
+  const zooOfTim = Zoo(
+    daemons: [ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first')],
+    pair: 'tim',
+    habits: _habits5,
+    firstEgg: true,
+  );
+
+  testWidgets('a machine that is asleep or out of reach is calm: the face '
+      'never fails for it, the panel says so', (tester) async {
+    await mount(tester, seed: zooOfTim);
+    await tester.pump();
+    // The fixture's machine is not connected: an open harness on it is away.
+    app.adoptSessionForTest(terminal('a0', []));
+    app.notifyListeners();
+    await tester.pump();
+    expect(glyph(tester), '[o o]', reason: 'not x eyes');
+    await tester.tap(slot);
+    await tester.pump();
+    expect(
+      find.text('Test host is asleep or unreachable. its harnesses wait.'),
+      findsOneWidget,
+    );
+    await key(tester, LogicalKeyboardKey.escape);
+    await unmount(tester);
+  });
+
+  testWidgets('a failed turn in an open harness is a failure', (tester) async {
+    app.stateOf('m')!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    await mount(tester, seed: zooOfTim);
+    await tester.pump();
+    app.adoptSessionForTest(terminal('a0', []));
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_started',
+      'agentId': 'a0',
+    });
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_ended',
+      'agentId': 'a0',
+      'payload': {'error': 'exit 1'},
+    });
+    await tester.pump();
+    expect(glyph(tester), '[x x]');
+    await tester.pump(const Duration(seconds: 5));
+    expect(glyph(tester), '[x x]', reason: 'its last turn failed');
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_started',
+      'agentId': 'a0',
+    });
+    await tester.pump();
+    expect(glyph(tester), startsWith('[= =]'), reason: 'a new turn');
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_ended',
+      'agentId': 'a0',
+    });
+    await tester.pump();
+    expect(glyph(tester), '[^ ^]', reason: 'it ended well');
+    await unmount(tester);
+  });
+
+  testWidgets('agent events step the work frame, at most twice a second; '
+      'a quiet agent is a still baton', (tester) async {
+    app.stateOf('m')!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    await mount(tester, seed: zooOfTim);
+    await tester.pump();
+    app.adoptSessionForTest(terminal('a0', []));
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_started',
+      'agentId': 'a0',
+    });
+    await tester.pump();
+    final first = glyph(tester);
+    expect(first, startsWith('[= =]'));
+    await tester.pump(const Duration(seconds: 3));
+    expect(glyph(tester), first, reason: 'no events, no motion');
+    await app.handleMachineEventForTest('m', {
+      'type': 'tool_start',
+      'agentId': 'a0',
+      'payload': {'tool': 'Bash'},
+    });
+    await tester.pump();
+    final second = glyph(tester);
+    expect(second, isNot(first), reason: 'one event, one step');
+    for (var i = 0; i < 5; i++) {
+      await app.handleMachineEventForTest('m', {
+        'type': 'text_delta',
+        'agentId': 'a0',
+        'payload': {'content': 'x'},
+      });
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(glyph(tester), second, reason: 'at most two steps a second');
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(glyph(tester), isNot(second));
+    await app.handleMachineEventForTest('m', {
+      'type': 'turn_ended',
+      'agentId': 'a0',
+    });
+    await tester.pump();
+    await unmount(tester);
+  });
+
+  testWidgets('finished turns are a +N beside the slot, cleared when you '
+      'look; Quiet and Motion are switches in the panel', (tester) async {
+    app.stateOf('m')!
+      ..nodeOnline = true
+      ..connectionStatus = ConnectionStatus.connected;
+    await mount(tester, seed: zooOfTim);
+    await tester.pump();
+    app.adoptSessionForTest(terminal('a0', []));
+    app.adoptSessionForTest(terminal('a1', []));
+    await tester.pump();
+    // a1 is in front: its turn is seen already; a0's is not.
+    for (final id in ['a0', 'a1']) {
+      await app.handleMachineEventForTest('m', {
+        'type': 'turn_started',
+        'agentId': id,
+      });
+      await app.handleMachineEventForTest('m', {
+        'type': 'turn_ended',
+        'agentId': id,
+      });
+    }
+    await tester.pump();
+    final focused = app.focusedPane!.agentId;
+    expect(focused, isNotNull);
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('daemon-slot-tally')))
+          .data,
+      '+1',
+    );
+    expect(find.byKey(const ValueKey('daemon-voice')), findsNothing);
+    await tester.tap(slot);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('daemon-slot-tally')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('daemon-quiet')));
+    await tester.pump();
+    expect(find.text('[ quiet: on ]'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('daemon-motion')));
+    await tester.pump();
+    expect(find.text('[ motion: off ]'), findsOneWidget);
+    await key(tester, LogicalKeyboardKey.escape);
+    await tester.pump(const Duration(seconds: 3));
+    expect(
+      find.byKey(const ValueKey('daemon-voice')),
+      findsNothing,
+      reason: "Quiet: not even the boop's reply",
+    );
+    await unmount(tester);
+  });
+
+  testWidgets('xyzzy in Cmd-O: "Nothing happens." and one zoo.easter', (
+    tester,
+  ) async {
+    await mount(tester, seed: zooOfTim);
+    await tester.pump();
+    await key(tester, LogicalKeyboardKey.keyO, cmd: true);
+    await tester.pump();
+    final input = find.byKey(const ValueKey('swarm-search-input'));
+    await tester.enterText(input, 'xyzzy');
+    await tester.pump(const Duration(milliseconds: 100));
+    // A result row, not a place to go.
+    final note = find.byKey(const ValueKey('swarm-search-line:note:xyzzy'));
+    expect(note, findsOneWidget);
+    expect(
+      find.descendant(of: note, matching: find.text('Nothing happens.')),
+      findsOneWidget,
+    );
+    await tester.enterText(input, 'xyzz');
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Nothing happens.'), findsNothing);
+    await tester.enterText(input, 'XYZZY');
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(note, findsOneWidget);
+    await key(tester, LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('swarm-search-input')),
+      findsOneWidget,
+      reason: 'Return never takes the note',
+    );
+    await zoo.flush();
+    final easter = remote.batches
+        .expand((b) => b)
+        .where((op) => op['op'] == 'zoo.easter')
+        .toList();
+    expect(easter, [
+      {'op': 'zoo.easter', 'word': 'xyzzy'},
+    ]);
+    await key(tester, LogicalKeyboardKey.escape);
+    await unmount(tester);
+  });
+
+  testWidgets('after the third hatch, any key skips to the card', (
+    tester,
+  ) async {
+    await mount(
+      tester,
+      seed: const Zoo(
+        daemons: [
+          ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first'),
+          ZooDaemon(id: 'fish', hatchedAt: '', egg: 'turn'),
+          ZooDaemon(id: 'ping', hatchedAt: '', egg: 'turn'),
+        ],
+        pair: 'tim',
+        habits: _habits5,
+        firstEgg: true,
+        eggs: [ZooEgg(id: 'egg4', kind: 'turn', grantedAt: '')],
+      ),
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('daemon-slot-tally')))
+          .data,
+      '+1 egg',
+      reason: 'an egg waits beside the slot until it is opened',
+    );
+    await tester.tap(slot);
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('daemon-egg:turn')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('daemon-hatch')), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 200));
+    await key(tester, LogicalKeyboardKey.space);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('daemon-hatch-card')), findsOneWidget);
+    await key(tester, LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('daemon-slot-tally')), findsNothing);
+    await unmount(tester);
+  });
+
+  testWidgets('native hears the ten cells and the tally', (tester) async {
+    final states = <Map>[];
+    const channel = MethodChannel('harness/swarm_tabs');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'daemonState') states.add(call.arguments as Map);
+      if (call.method == 'update') {
+        final daemon = (call.arguments as Map?)?['daemon'];
+        if (daemon is Map) states.add(daemon);
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await mount(
+      tester,
+      native: true,
+      seed: const Zoo(
+        daemons: [
+          ZooDaemon(id: 'tim', hatchedAt: '', egg: 'first', shiny: true),
+        ],
+        pair: 'tim',
+        habits: _habits5,
+        firstEgg: true,
+        eggs: [ZooEgg(id: 'e1', kind: 'week', grantedAt: '')],
+      ),
+    );
+    await tester.pump();
+    expect(states.last['cell'], '* [o o]   ');
+    expect(states.last['tally'], '+1 egg');
+    expect(states.last['patch'], isNull, reason: 'a dark theme');
+    await unmount(tester);
+  });
+
   group('the pair brain', () {
     late List<(String, Map<String, dynamic>)> frames;
     setUp(() {
@@ -520,7 +801,7 @@ void main() {
     ) async {
       await mount(tester, seed: zooWithTim);
       await tester.pump();
-      expect(glyph(tester), '[oo]');
+      expect(glyph(tester), '[o o]');
       await frame(tester, 'daemon_state', {
         'pair': 'tim',
         'needs': [
@@ -535,11 +816,18 @@ void main() {
         'failing': [],
         'machines': [],
       });
-      expect(glyph(tester), '[??]', reason: 'a harness on another machine');
+      expect(glyph(tester), '[? ?]', reason: 'a harness on another machine');
       expect(frames.first.$1, 'daemon_presence');
       expect(frames.first.$2['active'], isTrue);
       expect(frames.first.$2['desk'], isA<String>());
       expect(frames.first.$2.containsKey('pair'), isFalse, reason: 'signed in');
+      // The pane in front of you is never spoken about: the brain hears it.
+      app.adoptSessionForTest(terminal('a3', []));
+      app.notifyListeners();
+      await tester.pump();
+      expect(frames.last.$1, 'daemon_presence');
+      expect(frames.last.$2['focusAgentId'], 'a3');
+      expect(frames.last.$2['focusMachineId'], 'm');
       await frame(tester, 'daemon_say', question);
       expect(
         find.text('tim: codex@office wants to run the migration.'),

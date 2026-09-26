@@ -100,6 +100,7 @@ class ZooController extends ChangeNotifier {
   bool _seeded = false;
   Zoo _local = Zoo.empty;
   final _days = <String>{};
+  final _easterAsked = <String>{};
   bool _hintSeen = false;
   String? _hatchingEgg;
   Future<void> _queue = Future.value();
@@ -146,6 +147,7 @@ class ZooController extends ChangeNotifier {
     _retry = null;
     _failures = 0;
     _days.clear();
+    _easterAsked.clear();
     _hintSeen = false;
     final generation = ++_generation;
     notifyListeners();
@@ -384,18 +386,22 @@ class ZooController extends ChangeNotifier {
     return true;
   }
 
-  void easter(String word) {
+  /// An easter word typed (`xyzzy` in Cmd-O). Sent once: a word already
+  /// used, or already asked for from this window, is not sent again.
+  bool easter(String word) {
     if (!loaded ||
         _zoo.easter.contains(word) ||
-        !roster.rules.easterWords.contains(word)) {
-      return;
+        !roster.rules.easterWords.contains(word) ||
+        !_easterAsked.add(word)) {
+      return false;
     }
     final op = {'op': 'zoo.easter', 'word': word};
     if (!isAccount) {
       _applyLocal([op]);
-      return;
+      return true;
     }
     _sendLater(op);
+    return true;
   }
 
   /// Open an egg. The draw happens on the server for an account (here only

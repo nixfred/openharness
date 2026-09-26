@@ -268,6 +268,7 @@ class SwarmDestination {
     this.members = const {},
     this.isStore = false,
     this.isCreate = false,
+    this.isNote = false,
     this.task,
     Iterable<String?> searchFields = const [],
     int titleFields = 1,
@@ -322,6 +323,10 @@ class SwarmDestination {
 
   /// What the create row would start the new harness on: what was typed.
   final String? task;
+
+  /// A line the box answers with, not a place to go (`xyzzy`: "Nothing
+  /// happens."). Return never takes it.
+  final bool isNote;
   final bool current;
   final List<String> fields;
   bool get isProject => projectId != null;
@@ -333,6 +338,7 @@ class SwarmDestination {
       !isGroup &&
       !isCommand &&
       !isCreate &&
+      !isNote &&
       !isModel &&
       !isStoreEntry &&
       pickerQuery == null;

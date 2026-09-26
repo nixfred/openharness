@@ -836,7 +836,9 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                             // Every command wore the same ⌘: a column
                             // of identical marks says nothing. Its
                             // own key, at the right, says something.
-                            row.isCommand || row.pickerQuery != null
+                            row.isCommand ||
+                                    row.isNote ||
+                                    row.pickerQuery != null
                                 ? const SizedBox(width: 2)
                                 : row.isCreate
                                 ? const Icon(
@@ -1306,8 +1308,9 @@ class _SearchRowContentState extends State<_SearchRowContent> {
           ? widget.search.modelRowAction(row)
           : null;
       final style = terminalContentStyle(
-        color:
-            !widget.enabled ||
+        color: row.isNote
+            ? muted
+            : !widget.enabled ||
                 (row.isModel &&
                     !widget.search.isModelDownloadsRow(row) &&
                     !widget.search.canSelectModel(row) &&

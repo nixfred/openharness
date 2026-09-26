@@ -3640,6 +3640,7 @@ class _SwarmScreenState extends State<SwarmScreen> {
       selectOnEmptyQuery: split != null,
       // Results read downward from the input.
       resultsFromBottom: false,
+      noteFor: _easterNote,
       split: split,
       placement:
           placement ??
@@ -3733,9 +3734,18 @@ class _SwarmScreenState extends State<SwarmScreen> {
     }
   }
 
+  /// The daemons' easter words (`rules.easterWords`): the box answers as the
+  /// old adventure did, and the word is sent to the zoo once.
+  String? _easterNote(String query) =>
+      _zoo.roster.rules.easterWords.contains(query.trim().toLowerCase())
+      ? 'Nothing happens.'
+      : null;
+
   void _syncSearch() {
     final search = _search;
     if (search == null) return;
+    final word = search.query.trim().toLowerCase();
+    if (_zoo.roster.rules.easterWords.contains(word)) _zoo.easter(word);
     if (_machineSearchVisible != search.isMachineMode) {
       _machineSearchVisible = search.isMachineMode;
       if (_machineSearchVisible) unawaited(search.refreshMachineResources());
