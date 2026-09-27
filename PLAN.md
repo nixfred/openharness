@@ -148,3 +148,7 @@ Suggested PR order: adopt panes (1), attention state + /api/attention (2), gate 
 ## Status 2026-09-26 (nixfred 0.1.0)
 
 Phase 1: all eight shipped in nixfred/ (bar widget QML pending Test Drive result below). Phase 2: adopt panes and attention events shipped; recap export shipped; notify-send with Show action shipped (no WM urgency flag). Phase 3: gate, spend brake, panic stop, glyph/label accessibility shipped. Phase 4: capabilities + placement, loop defer + lease, checkpoints shipped; dispatcher is a library only; clipboard/file drop not started; worktree lock/CI wake not started. Phase 5: audit journal, spans, bundles, recording shipped; memory and PAI skills harnesses shipped. Phase 6: not started by design.
+
+## Status 2026-09-27 (after Mike Gannotti review)
+
+Shipped on nixfred/main: gate lanes; Hermes profile re-resolve (OH-F1); attention kanban; collision alarm with branch locks; every tool call journaled; Hermes health check and doctor stamp; CI-failure wake library; battery mode; harness loops; lane on the attention payload; collision badge in Harness Pulse. In progress: Hermes session backend (paneless profile sessions), Hermes attention plugin skeleton. Not carried: his PR #233 (conflicts, Flutter).

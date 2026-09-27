@@ -82,3 +82,10 @@ the session notes) and lives outside git because it is 3 MB of text.
 
 Device art needs a firmware build (Phase 6). Bar and desktop items need no firmware and can ship in
 the next cut: face-in-ring, spend arc, fleet glyph, middle-click panic stop, pane glow, theme following.
+
+## Added 2026-09-27 (from Mike Gannotti's flow)
+
+- Collision badge on the bar: a red pulsing triangle right after the daemon hexagon, with a count when more than one alert is live and a tooltip listing them. Present only while an alert is inside its hour, so a quiet bar stays quiet. Same alert on the device as a card with both agents' rings side by side.
+- Lane glyph: each agent's policy lane (planner, checker, drafter, publisher) rides on the attention payload as `lane`; the bar shows its first letter in the ring's tooltip and, on the device, as a small tag under the agent name. Role and state read together: a publisher waiting is different from a planner waiting.
+- Hermes health arcs: one arc per Hermes profile on the machines screen, green, amber or red, with writers count and memory as the two numbers under it. Red pulses once when a second writer appears.
+- Approvals batching (device, Phase 6): when several agents wait on permission, one screen lists them as pills; a tap approves one, a long press approves all in a lane.

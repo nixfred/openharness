@@ -177,7 +177,10 @@ export class Nixfred {
   snapshot(): AttentionRow[] { return this.attention.snapshot(this.deps.sessions(), this.deps.machineName()) }
 
   attentionPayload(): Record<string, unknown> {
-    const agents = this.snapshot()
+    // Each agent carries the name of the first policy lane its name matches (planner, publisher ...),
+    // so the bar and the device can show the role beside the state.
+    const lanes = this.policy.lanes ?? []
+    const agents = this.snapshot().map((row) => ({ ...row, lane: lanes.find((l) => { try { return new RegExp(l.agent, 'i').test(row.name) } catch { return false } })?.name ?? null }))
     return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents, alerts: this.collisions.recent() }
   }
 
