@@ -15,8 +15,73 @@
   <a href="#how-it-works">How it works</a> ·
   <a href="#beyond-code">Beyond code</a> ·
   <a href="#domain-specific-harnesses-dsh">Harnesses</a> ·
-  <a href="#harness-device">Device</a>
+  <a href="#harness-device">Device</a> ·
+  <a href="#this-fork-nixfredopenharness">This fork</a>
 </p>
+
+## This fork: nixfred/openharness
+
+This is Fred Nix's fork of [autonomous-ai/openharness](https://github.com/autonomous-ai/openharness),
+branch `nixfred/main`. It tracks upstream and adds features for running a fleet of agents on
+Omarchy Linux across several machines. Everything upstream does still works the same way; the
+additions are opt-in or quiet until something needs a person. Nothing here has been submitted
+upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
+[PLAN.md](PLAN.md), [nixfred/README.md](nixfred/README.md) (every command),
+[nixfred/DESIGN.md](nixfred/DESIGN.md) (the visual system).
+
+**Knowing what needs you**
+
+- Every agent has a typed state (working, waiting, permission, failed, done, idle, offline) with a
+  glyph and a word, served at `GET /api/attention` and pushed to the app. `harness attention
+  [--kanban]` prints it.
+- Desktop notification with a "Show me" action when an agent waits, needs permission or fails.
+  On battery, only permission and failure interrupt.
+- The desktop app draws a breathing border on a pane whose agent is waiting on you.
+- **Harness Pulse**, an Omarchy bar widget: one animated ring per agent, a spend arc on its edge,
+  your face inside the ring of an agent waiting on you, a collision badge, and hold-the-hexagon
+  for two seconds to stop every agent.
+
+**Brakes**
+
+- Destructive-action gate (`harness gate`): a per-machine policy asks before `git push`, hard
+  resets, `rm -rf`, `sudo`, `curl | sh`, writes under `~/.claude`, and refuses disk writes and
+  secrets paths. Per-agent lanes: "the planner never pushes, the publisher asks before merging".
+- Spend brake (`harness spend`): per-agent and per-day dollar and token caps that hold the pane.
+- Panic stop (`harness stop-all`, or the bar).
+- Loop policy: `/loop` jobs wait on battery, closed lid, busy GPU or quiet hours, and run on one
+  machine at a time.
+
+**The fleet**
+
+- `harness adopt %N`: a tmux pane the daemon did not start becomes an agent without a restart.
+- Every Hermes profile session appears, pane or not (Hermes Desktop bots, Bot Mode, gateway).
+- `harness dispatch`: hand a bounded job to another linked machine and get the branch, diff and
+  summary back.
+- `harness clip push`: clipboard or a file to another machine, end to end encrypted.
+- Machine capabilities and placement (`harness capabilities`, `harness placement`): GPU memory
+  and load, power, heat, lid, toolchains.
+- Drift alarm (`harness collisions`, `harness lock`): two agents on one file, folder or branch
+  inside an hour, and branch locks.
+- CI-failure wake: a failing check on an agent's branch is delivered into its pane once, with
+  the log tail.
+
+**Record and review**
+
+- Append-only, secret-redacted audit journal and OpenTelemetry spans.
+- Task checkpoints, review bundles, tmux recording with pinned moments and asciicast export.
+- Hermes health (`harness hermes`): store writers, memory budget, profile isolation, doctor
+  after updates.
+
+**Omarchy side** ([nixfred/](nixfred/)): the bar widget, Claude Code hooks (turn breadcrumbs,
+questions to iMessage), a second-opinion review tool, three domain harnesses
+(Omarchy/Quickshell, Larry memory, PAI skills), a Hermes attention plugin, and Omarchy theme
+colours for the app.
+
+**Fixes carried ahead of upstream**: the Hermes profile race after upstream #191 (a new
+profile's first session could read the wrong store forever).
+
+**Not yet**: device firmware changes (they wait on signed firmware), wiring the Omarchy palette
+into the app theme, approval batching on the device.
 
 ### Every agent, side by side
 
