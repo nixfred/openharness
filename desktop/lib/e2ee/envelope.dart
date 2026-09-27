@@ -47,6 +47,8 @@ const Set<String> encryptedDownTypes = {
   'usage_read',
   // The pane colours this client paints with, for the machine's tmux sessions (cli/src/lib/hostTheme.ts).
   'theme_set',
+  // What somebody searches their conversations for (cli/src/lib/sessionSearch/).
+  'session_search',
   'device_e2ee_pair',
   'e2ee_pairings_list',
   'e2ee_pairing_unpair',

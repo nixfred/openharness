@@ -11,12 +11,14 @@ import '../shared/theme/app_type.dart';
 import '../shared/theme/status_line_style.dart';
 import '../state/app_state.dart';
 import '../state/harness_sessions.dart';
+import '../state/session_content_search.dart';
 import '../state/swarm_navigation.dart';
 import '../state/swarm_search.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
 import 'engine_identity.dart';
+import 'search_result_text.dart' show SessionSnippetText;
 import 'swarm_preview_scroll.dart';
 
 typedef _PreviewAgent = ({MachineState machine, Agent agent});
@@ -68,6 +70,7 @@ class SwarmSearchPreview extends StatefulWidget {
 class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
   Timer? _warm;
   String? _selectedId;
+  SessionContentHit? _found;
   late SwarmPreviewScrollController _scroll;
   AppNotifier get app => widget.search.app;
 
@@ -100,6 +103,9 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
 
   void _changed() {
     final row = widget.search.selected;
+    // A machine's answer can land after the selection: show where it found it.
+    final found = row == null ? null : widget.search.contentHitFor(row.id);
+    if (!identical(found, _found)) setState(() => _found = found);
     if (_selectedId == row?.id) return;
     _selectedId = row?.id;
     setState(() {});
@@ -278,6 +284,7 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                       item: agents.single,
                       dense: widget.compactHeader,
                       terminal: widget.terminal,
+                      found: widget.search.contentHitFor(row.id),
                     ),
                   ),
           ),
@@ -301,12 +308,17 @@ class _AgentPreview extends StatelessWidget {
     this.compact = false,
     this.dense = false,
     this.terminal = false,
+    this.found,
   });
   final AppNotifier app;
   final _PreviewAgent item;
   final bool compact;
   final bool dense;
   final bool terminal;
+
+  /// Where the machine's session index found the searched words in this
+  /// conversation, when that is how it matched.
+  final SessionContentHit? found;
 
   @override
   Widget build(BuildContext context) {
@@ -488,6 +500,30 @@ class _AgentPreview extends StatelessWidget {
                 ? 16
                 : 26,
           ),
+          if (found case final found? when found.field != 'name') ...[
+            Text(
+              [
+                switch (found.field) {
+                  'answer' => 'Found in an answer',
+                  'tools' => 'Found in a command or file',
+                  _ => 'Found in what you asked',
+                },
+                if (found.at case final at?)
+                  '${harnessActivityAge(at, DateTime.now())} ago',
+              ].join(' · '),
+              style: terminal
+                  ? muted
+                  : muted.copyWith(fontWeight: FontWeight.w500),
+            ),
+            if (!terminal) const SizedBox(height: 7),
+            SessionSnippetText(
+              found,
+              key: ValueKey('preview-found:${found.destinationId}'),
+              style: body,
+              maxLines: null,
+            ),
+            SizedBox(height: terminal ? cell.height : 24),
+          ],
           if (waiting != null) ...[
             Container(
               width: double.infinity,

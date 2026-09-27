@@ -70,6 +70,8 @@ import '../ws/ws_pool.dart';
 import 'pane_preset.dart';
 import 'pane_arrangement.dart';
 import 'pending_question.dart';
+import 'search_when.dart';
+import 'session_content_search.dart';
 import 'session_preview.dart';
 import '../usage/models_menu_controller.dart';
 import '../usage/remote_usage.dart';
@@ -6977,6 +6979,46 @@ class AppNotifier extends ChangeNotifier {
       if (state.isLocalMachine) return state.machine.displayName;
     }
     return localHostnameOrNull();
+  }
+
+  /// Machines whose daemon can be asked what was said in their sessions now.
+  Iterable<String> get searchableMachineIds => [
+    for (final machine in machineStates.values)
+      if (machine.connectionStatus == ConnectionStatus.connected &&
+          !machine.needsLink &&
+          machine.nodeOnline != false)
+        machine.machine.machineId,
+  ];
+
+  /// Every turn of every session on [machineId], searched by its daemon
+  /// (`session_search`, cli/src/lib/sessionSearch/). Null when the machine
+  /// cannot answer: offline, or a CLI that predates the request, which goes
+  /// silent rather than refusing it — hence the short timeout.
+  Future<List<SessionContentHit>?> searchSessions(
+    String machineId,
+    String query, {
+    SearchWhen? when,
+    int limit = 30,
+  }) async {
+    if (!searchableMachineIds.contains(machineId)) return null;
+    try {
+      final reply = await _conn(machineId).request(
+        'session_search',
+        payload: {
+          'query': query,
+          'limit': limit,
+          if (when != null) ...{
+            'from': when.from.millisecondsSinceEpoch,
+            'to': when.to.millisecondsSinceEpoch,
+          },
+        },
+        timeout: const Duration(seconds: 4),
+      );
+      if (reply['error'] != null) return null;
+      return SessionContentHit.listFromReply(machineId, reply);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<MachineUsage?> _readMachineUsage(MachineState machine) async {

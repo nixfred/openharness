@@ -363,6 +363,8 @@ export const ENCRYPTED_RPC_RESULT_TYPES = new Set<string>([
   // targeted at the requester rather than broadcast — and so a daemon that predates the type is
   // told apart by silence, exactly like `usage_read`.
   'theme_set_result',
+  // Session search hits: what was said in this machine's conversations, around the searched words.
+  'session_search_result',
 ])
 /** Client→adapter frames that carry or can trigger adapter-local user data. */
 export const ENCRYPTED_DOWN_TYPES = new Set<string>([
@@ -385,6 +387,9 @@ export const ENCRYPTED_DOWN_TYPES = new Set<string>([
   // The desktop's pane colours for this machine's tmux sessions (lib/hostTheme.ts). Same trap as
   // above if missing: the envelope would never be opened and the app would wait out its timeout.
   'theme_set',
+  // What somebody is searching their conversations for (lib/sessionSearch/). Same trap as above if
+  // missing: the envelope would never be opened and the app would wait out its timeout.
+  'session_search',
   'device_e2ee_pair', 'e2ee_pairings_list', 'e2ee_pairing_unpair',
   'e2ee_pairings_unpair_all', 'e2ee_browser_link_create',
   // Remote terminal control is always pairwise E2EE. The relay may route by outer type/connId but must

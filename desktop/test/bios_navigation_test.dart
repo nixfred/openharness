@@ -51,9 +51,10 @@ void main() {
       'a12',
     ]);
     search.setQuery('Agent 1');
+    // The harness named exactly that leads; the rest keep activity order.
     expect(
       search.rows.where((row) => !row.isCreate).map((row) => row.agentId),
-      ['a10', 'a11', 'a1', 'a12'],
+      ['a1', 'a10', 'a11', 'a12'],
     );
 
     final ordinary = SwarmSearchController(app, recent, adding: true);

@@ -761,7 +761,7 @@ class _AgentPickerState extends State<AgentPicker> {
       if (needle.isEmpty || text == null) return const [];
       final field = text.toLowerCase();
       return field.contains(needle)
-          ? [(field: field, term: needle, title: title)]
+          ? [(field: field, term: needle, title: title, strict: false)]
           : const [];
     }
 

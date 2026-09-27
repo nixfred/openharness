@@ -1,0 +1,292 @@
+/**
+ * Keeps the session search index in step with the transcripts on this machine.
+ *
+ * One path for everything: a pass reads a transcript from where the last pass stopped — the opening
+ * of its last turn, which may have grown since — through the engine's normalizer into the index. The
+ * first pass over a session is the backfill; every later one is an increment of a turn or two. A sweep
+ * shortly after boot and every few minutes after catches up anything missed; a turn starting or ending
+ * in a live session asks for its pass right away, so what was just said is searchable a second later.
+ *
+ * The daemon's thread is shared with every terminal it streams, so passes run one at a time, read in
+ * 1 MB chunks, skip tool output unparsed, and yield to the event loop every few milliseconds.
+ */
+
+import { stat } from 'node:fs/promises'
+import { performance } from 'node:perf_hooks'
+
+import type { LiveEvent } from '../normalize.js'
+import { forEachLine, lineNormalizer, lineTime, skipPredicate } from './transcript.js'
+import { TurnCollector } from './turns.js'
+import type { IndexedSession, SearchHit, SessionSearchStore } from './store.js'
+
+export interface SearchSource {
+  agentId: string
+  sessionId: string
+  engine: string
+  transcriptPath: string | null
+  /** What the session is called — name, title, folder — searchable beside what was said in it. */
+  header: string
+  /**
+   * When the conversation last moved (epoch ms), from stamps that move only with it — never the
+   * registry's bookkeeping time. Newest sessions are indexed first, and a database-backed history
+   * is read again when this moves.
+   */
+  updatedAt: number
+  /**
+   * The whole history, for an engine that keeps it in a database rather than a transcript file
+   * (OpenCode, Kilo, Hermes, Devin). Read in full when the session changed: there is no offset to
+   * resume from.
+   */
+  readHistory?: () => Promise<readonly LiveEvent[]>
+}
+
+export interface SessionSearchResult {
+  hits: SearchHit[]
+  /** Sessions in the index, and sessions still waiting for their first pass. */
+  indexed: number
+  pending: number
+  tookMs: number
+}
+
+export interface SessionSearchIndexOptions {
+  store: SessionSearchStore
+  /** Every session this machine can index: live agents and stopped ones. */
+  sources: () => SearchSource[]
+  /**
+   * Every agent this machine knows, indexable right now or not. An agent's sessions leave the index
+   * only when the agent does — never because its current session has no transcript for a moment
+   * (a `/clear` between sessions), since its earlier ones cannot be read back once dropped.
+   * Defaults to the agents of `sources`.
+   */
+  agents?: () => Iterable<string>
+  log?: (line: string) => void
+  /** Between full sweeps. */
+  sweepEveryMs?: number
+  /** How long a pass may hold the thread before yielding. */
+  sliceMs?: number
+  /** How long after a turn event its session's pass runs: a burst of events is one pass. */
+  touchDelayMs?: number
+}
+
+const NO_TURN_DELETE = Number.MAX_SAFE_INTEGER
+
+/** The folders a session ran in, as a person would name them: the last two path segments. */
+export function folderWords(cwd: string | null | undefined): string {
+  if (!cwd) return ''
+  return cwd.split(/[\\/]+/).filter(Boolean).slice(-2).reverse().join(' ')
+}
+
+export class SessionSearchIndex {
+  private readonly queue = new Set<string>()
+  /** Sessions with a turn event since their last pass: a database history has no size to compare. */
+  private readonly dirty = new Set<string>()
+  private readonly touches = new Map<string, NodeJS.Timeout>()
+  private sources = new Map<string, SearchSource>()
+  private sourcesReadAt = 0
+  private running = false
+  private stopped = false
+  private sweepTimer: NodeJS.Timeout | null = null
+  private sliceStart = 0
+
+  constructor(private readonly opts: SessionSearchIndexOptions) {}
+
+  /** The first sweep after `delayMs` (boot has other work), then one every `sweepEveryMs`. */
+  start(delayMs = 15_000): void {
+    const every = this.opts.sweepEveryMs ?? 10 * 60_000
+    const first = setTimeout(() => {
+      this.sweep()
+      this.sweepTimer = setInterval(() => this.sweep(), every)
+      this.sweepTimer.unref?.()
+    }, delayMs)
+    first.unref?.()
+    this.sweepTimer = first
+  }
+
+  stop(): void {
+    this.stopped = true
+    if (this.sweepTimer) clearTimeout(this.sweepTimer)
+    for (const timer of this.touches.values()) clearTimeout(timer)
+    this.touches.clear()
+    this.queue.clear()
+  }
+
+  /** A turn started or ended in this session: index it shortly. */
+  touch(sessionId: string): void {
+    if (this.stopped) return
+    this.dirty.add(sessionId)
+    const pending = this.touches.get(sessionId)
+    if (pending) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      this.touches.delete(sessionId)
+      this.refreshSources()
+      if (!this.sources.has(sessionId)) this.refreshSources(true)
+      // Ahead of a sweep's backlog: what somebody just said is what they are likeliest to look for.
+      const rest = [...this.queue].filter((id) => id !== sessionId)
+      this.queue.clear()
+      this.queue.add(sessionId)
+      for (const id of rest) this.queue.add(id)
+      void this.drain()
+    }, this.opts.touchDelayMs ?? 1_500)
+    timer.unref?.()
+    this.touches.set(sessionId, timer)
+  }
+
+  /** Queue every known session, newest first; drop sessions whose agent no longer exists. */
+  sweep(): void {
+    if (this.stopped) return
+    this.refreshSources(true)
+    const agents = new Set(this.opts.agents?.() ?? [...this.sources.values()].map((source) => source.agentId))
+    for (const sessionId of this.opts.store.sessionIds()) {
+      // An agent's earlier sessions (before a /clear) stay findable while the agent exists.
+      const indexed = this.opts.store.session(sessionId)
+      if (indexed && !agents.has(indexed.agentId)) this.opts.store.removeSession(sessionId)
+    }
+    const newest = [...this.sources.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    for (const source of newest) this.queue.add(source.sessionId)
+    void this.drain()
+  }
+
+  search(query: string, options: { limit?: number; from?: number; to?: number } = {}): SessionSearchResult {
+    const started = performance.now()
+    const hits = this.opts.store.search(query, options)
+    const indexed = this.opts.store.counts().sessions
+    return { hits, indexed, pending: this.queue.size, tookMs: Math.round((performance.now() - started) * 10) / 10 }
+  }
+
+  /** Runs queued passes one at a time until the queue is empty. */
+  async drain(): Promise<void> {
+    if (this.running) return
+    this.running = true
+    try {
+      while (!this.stopped && this.queue.size) {
+        const sessionId = this.queue.values().next().value as string
+        this.queue.delete(sessionId)
+        const source = this.sources.get(sessionId)
+        if (!source) continue
+        try {
+          await this.pass(source)
+        } catch (error) {
+          this.opts.log?.(`[search] ${sessionId.slice(0, 8)} index pass failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } finally {
+      this.running = false
+    }
+  }
+
+  private refreshSources(force = false): void {
+    if (!force && Date.now() - this.sourcesReadAt < 5_000) return
+    const next = new Map<string, SearchSource>()
+    for (const source of this.opts.sources()) {
+      if (!source.sessionId) continue
+      const known = next.get(source.sessionId)
+      // One session can be listed live and stopped at once: the fresher record wins.
+      if (!known || source.updatedAt > known.updatedAt) next.set(source.sessionId, source)
+    }
+    this.sources = next
+    this.sourcesReadAt = Date.now()
+  }
+
+  /** One pass over one session: from where the last one stopped, or from the start. */
+  async pass(source: SearchSource): Promise<void> {
+    const store = this.opts.store
+    const existing = store.session(source.sessionId)
+    const dirty = this.dirty.delete(source.sessionId)
+    if (!source.transcriptPath && source.readHistory) return this.historyPass(source, existing, dirty)
+    const normalize = source.transcriptPath ? lineNormalizer(source.engine, source.sessionId) : null
+    const file = source.transcriptPath && normalize ? await stat(source.transcriptPath).catch(() => null) : null
+    const header = source.header
+    if (!file || !source.transcriptPath || !normalize) {
+      // Nothing to read (a terminal, a database-backed engine, a missing file): its name is still findable.
+      if (existing?.header === header && existing.agentId === source.agentId) return
+      store.writeSession({
+        sessionId: source.sessionId, agentId: source.agentId, engine: source.engine,
+        path: existing?.path ?? source.transcriptPath ?? '', header,
+        size: existing?.size ?? 0, mtime: existing?.mtime ?? 0,
+        resumeOffset: existing?.resumeOffset ?? 0, resumeTurn: existing?.resumeTurn ?? 0,
+        lastAt: existing?.lastAt ?? (source.updatedAt || null), turns: 0,
+      }, NO_TURN_DELETE, [])
+      return
+    }
+    const path = source.transcriptPath
+    const mtime = Math.floor(file.mtimeMs)
+    const samePath = existing?.path === path
+    if (samePath && existing.size === file.size && existing.mtime === mtime) {
+      if (existing.header !== header || existing.agentId !== source.agentId) {
+        store.writeSession({ ...existing, header, agentId: source.agentId }, NO_TURN_DELETE, [])
+      }
+      return
+    }
+    // A file that shrank was rewritten: start over. One that grew picks up at its last turn.
+    const resume = samePath && file.size >= existing.size && existing.resumeOffset <= file.size
+    const from = resume ? existing.resumeOffset : 0
+    const fromTurn = resume ? existing.resumeTurn : 0
+    const collector = new TurnCollector(fromTurn)
+    let lastAt: number | null = null
+    this.sliceStart = performance.now()
+    const { end } = await forEachLine(path, from, async ({ text, offset }) => {
+      const at = lineTime(text) ?? lastAt
+      if (at !== null && (lastAt === null || at > lastAt)) lastAt = at
+      collector.feed(normalize(text), offset, at)
+      await this.pace()
+    }, { skip: skipPredicate(source.engine), shouldStop: () => this.stopped })
+    if (this.stopped) return
+    const { closed, open } = collector.finish()
+    const session: IndexedSession = {
+      sessionId: source.sessionId, agentId: source.agentId, engine: source.engine, path, header,
+      size: file.size, mtime,
+      resumeOffset: open ? open.offset : end,
+      resumeTurn: open ? open.turn : collector.next,
+      lastAt: lastAt ?? (resume ? existing.lastAt : null) ?? mtime,
+      turns: 0,
+    }
+    store.writeSession(session, fromTurn, open ? [...closed, open] : closed)
+    if (!resume) {
+      this.opts.log?.(`[search] indexed ${source.sessionId.slice(0, 8)} · ${source.engine} · ${closed.length + (open ? 1 : 0)} turns · ${Math.round(file.size / 1024)} KB`)
+    }
+  }
+
+  /**
+   * A database-backed session, read whole the first time, after each turn event (`touch`), and when
+   * its activity stamp moved — which catches a turn whose event was lost to a restart. What it read
+   * is fingerprinted, so the session counts as worked on only when its conversation changed.
+   */
+  private async historyPass(source: SearchSource, existing: IndexedSession | undefined, dirty: boolean): Promise<void> {
+    const store = this.opts.store
+    const stamp = source.updatedAt
+    if (existing && !dirty && existing.mtime === stamp) {
+      if (existing.header !== source.header || existing.agentId !== source.agentId) {
+        store.writeSession({ ...existing, header: source.header, agentId: source.agentId }, NO_TURN_DELETE, [])
+      }
+      return
+    }
+    const events = await source.readHistory!()
+    if (this.stopped) return
+    const collector = new TurnCollector(0)
+    for (let at = 0; at < events.length; at += 200) {
+      collector.feed(events.slice(at, at + 200), 0, null)
+      await this.pace()
+    }
+    const { closed, open } = collector.finish()
+    const turns = open ? [...closed, open] : closed
+    // The size field holds the fingerprint: how much conversation there was when last read.
+    const fingerprint = turns.reduce((sum, turn) => sum + turn.ask.length + turn.answer.length + turn.tools.length + 1, 0)
+    if (existing && existing.size === fingerprint && existing.mtime === stamp
+      && existing.header === source.header && existing.agentId === source.agentId) return
+    const changed = !existing || existing.size !== fingerprint
+    store.writeSession({
+      sessionId: source.sessionId, agentId: source.agentId, engine: source.engine, path: '',
+      header: source.header, size: fingerprint, mtime: stamp, resumeOffset: 0, resumeTurn: 0,
+      // Its turns carry no time: the session's is its activity stamp, or now for a turn just seen.
+      lastAt: !changed ? existing!.lastAt : dirty ? Math.max(Date.now(), stamp) : stamp || null,
+      turns: 0,
+    }, 0, turns)
+    if (!existing) this.opts.log?.(`[search] indexed ${source.sessionId.slice(0, 8)} · ${source.engine} · ${turns.length} turns`)
+  }
+
+  private async pace(): Promise<void> {
+    if (performance.now() - this.sliceStart < (this.opts.sliceMs ?? 12)) return
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    this.sliceStart = performance.now()
+  }
+}

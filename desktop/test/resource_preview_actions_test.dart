@@ -585,6 +585,9 @@ void main() {
       expect(choices.single.action, SwarmSearchAction.addHere);
       expect(choices.single.destination.agentId, 'task');
       expect(app.panes, isEmpty);
+      // The machines are connected, so the typed words also went to their
+      // session indexes after a pause; let that pause run out.
+      await tester.pump(const Duration(milliseconds: 200));
     },
   );
 

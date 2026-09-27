@@ -23,6 +23,7 @@ import '../shared/theme/app_theme.dart' as grid;
 import '../shared/widgets/app_dialog.dart';
 import '../state/app_state.dart';
 import '../state/swarm_navigation.dart';
+import '../state/session_content_search.dart';
 import '../state/swarm_search.dart';
 import '../models/model_search_catalog.dart';
 import '../state/harness_sessions.dart' show SessionFilter, harnessActivityAge;
@@ -1258,10 +1259,15 @@ class _SearchRowContent extends StatefulWidget {
 }
 
 class _SearchRowContentState extends State<_SearchRowContent> {
-  late (String, bool) _query;
+  late (String, bool, SessionContentHit?) _query;
 
-  (String, bool) get _currentQuery =>
-      (widget.search.matchQuery, widget.search.isHelpMode);
+  /// What this row draws from the search: its words, and what a machine's
+  /// session index found in its conversation, which can land after the words.
+  (String, bool, SessionContentHit?) get _currentQuery => (
+    widget.search.wordsQuery,
+    widget.search.isHelpMode,
+    widget.search.contentHitFor(widget.row.id),
+  );
 
   @override
   void initState() {
@@ -1295,7 +1301,18 @@ class _SearchRowContentState extends State<_SearchRowContent> {
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     final row = widget.row;
-    final matches = searchResultMatches(row, swarmQueryTerms(_query.$1));
+    final terms = swarmQueryTerms(_query.$1);
+    final matches = searchResultMatches(row, terms);
+    // Found in what was said rather than in the row's own name and context:
+    // the second line shows where, instead of the context that did not match.
+    final hit = widget.search.contentHitFor(row.id);
+    final snippet =
+        hit != null &&
+            hit.snippet.isNotEmpty &&
+            hit.field != 'name' &&
+            (terms.isEmpty || matches.length < terms.take(12).toSet().length)
+        ? hit
+        : null;
     if (widget.bios) {
       final theme = terminalThemeFor(
         grid.AppTheme.palette.value,
@@ -1334,6 +1351,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
         label: row.isCreate
             ? '${row.title}\n$detail'
             : '${row.title}\n${row.terminalDetail ?? row.detail}'
+                  '${snippet == null ? '' : ', Found in conversation: ${snippet.plainSnippet}'}'
                   '${modelAction == null ? '' : ', $modelAction'}'
                   '${widget.unavailableReason == null ? '' : ', ${widget.unavailableReason}'}'
                   '${row.shortcut == null ? '' : ', Shortcut ${row.shortcut}'}'
@@ -1352,15 +1370,36 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   children: [
                     // Match Cmd-N's empty two-cell gutter.
                     SizedBox(width: cell.width * 2),
-                    Expanded(
-                      child: row.isCreate
-                          ? Text(row.title, style: style, maxLines: 1)
-                          : SearchResultText(
-                              row.title,
-                              matches: matches.where((match) => match.title),
-                              style: style,
-                            ),
-                    ),
+                    if (widget.singleLine && snippet != null) ...[
+                      // One line per result: the name, then where the words
+                      // were said, the way fzf shows the matching line.
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: constraints.maxWidth * .4,
+                        ),
+                        child: SearchResultText(
+                          row.title,
+                          matches: matches.where((match) => match.title),
+                          style: style,
+                        ),
+                      ),
+                      SizedBox(width: cell.width * 2),
+                      Expanded(
+                        child: SessionSnippetText(
+                          snippet,
+                          style: terminalContentStyle(color: muted),
+                        ),
+                      ),
+                    ] else
+                      Expanded(
+                        child: row.isCreate
+                            ? Text(row.title, style: style, maxLines: 1)
+                            : SearchResultText(
+                                row.title,
+                                matches: matches.where((match) => match.title),
+                                style: style,
+                              ),
+                      ),
                     if (modelAction != null) ...[
                       SizedBox(width: cell.width * 2),
                       Text(
@@ -1411,7 +1450,9 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                 ),
               ),
             ),
-            if (!widget.singleLine && !row.isCommand && detail.isNotEmpty)
+            if (!widget.singleLine &&
+                !row.isCommand &&
+                (detail.isNotEmpty || snippet != null))
               Padding(
                 padding: EdgeInsets.only(
                   left: cell.width * 3,
@@ -1421,11 +1462,16 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   height: cell.height,
                   child: Align(
                     alignment: Alignment.centerLeft,
-                    child: SearchResultText(
-                      detail,
-                      matches: matches.where((match) => !match.title),
-                      style: terminalContentStyle(color: muted),
-                    ),
+                    child: snippet != null
+                        ? SessionSnippetText(
+                            snippet,
+                            style: terminalContentStyle(color: muted),
+                          )
+                        : SearchResultText(
+                            detail,
+                            matches: matches.where((match) => !match.title),
+                            style: terminalContentStyle(color: muted),
+                          ),
                   ),
                 ),
               ),
@@ -1441,7 +1487,14 @@ class _SearchRowContentState extends State<_SearchRowContent> {
     final detailText = widget.terminal
         ? row.terminalDetail ?? row.detail
         : row.detail;
-    final detail = widget.terminal && row.promptContext != null
+    final detail = snippet != null
+        ? SessionSnippetText(
+            snippet,
+            style: widget.terminal
+                ? boxMonoStyle(color: kBoxFaint)
+                : boxMonoStyle(color: Colors.white54),
+          )
+        : widget.terminal && row.promptContext != null
         ? PromptContextView(
             contextData: row.promptContext!,
             matches: matches.where((match) => !match.title),
