@@ -119,6 +119,19 @@ person who put this device in front of Fred). Three things he said, three things
 - Battery mode: when the machine is on battery, a waiting agent shows on the bar and device but only
   permission and failure pop a desktop notification. `harness loops` lists the loop policy, live
   leases and the capability line.
+- Fleet dispatcher, end to end: `harness dispatch --machine=<id> --repo=</path/on/that/machine> "brief"`
+  hands a bounded job to a linked machine over the daemon's own E2EE relay session (the same pool the
+  window uses), creates the agent there on its own branch, and reads the result back off the worker's
+  own text: the worker prints one `DISPATCH_RESULT: {json}` line and the controller parses it at turn
+  end. No new wire type and no change on the worker side. `harness dispatches` lists records; each
+  finished job is appended to `data/dispatches.jsonl` and pops a desktop notice.
+- Known flake: the wiring spec's spend-brake case failed twice out of about twenty runs, only when the
+  whole suite ran alongside it; 11 consecutive runs of the file alone pass. Not understood yet.
+- Clipboard and file drop between paired machines: `harness clip push --machine=<id> [text]` or
+  `--file=<path>` (25 MB cap). Sealed end to end as a machine request (registered in
+  applicationFrames.ts; core.ts is a pinned interop keystone and is untouched). Text lands on the
+  remote clipboard (wl-copy, xclip or pbcopy), files under ~/Downloads/harness-drop with basename-only
+  names and no overwrite. With no text or file, the local clipboard is what gets sent.
 - His open upstream PR #233 (per-computer tab profile) no longer merges cleanly on current main
   (conflicts in desktop/lib/state/app_state.dart and screens/swarm_screen.dart); not carried here
   because the Flutter side cannot be built on this host. Worth telling him.

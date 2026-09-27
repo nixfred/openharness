@@ -64,6 +64,10 @@ export interface NixfredDeps {
   sendToAgent?: (agentId: string, text: string) => void
   hookPort: () => number
   now?: () => number
+  /** Write to this machine's clipboard (default: wl-copy, xclip or pbcopy, whichever is present). */
+  clipWrite?: (text: string) => Promise<void>
+  /** Where pushed files land (default ~/Downloads/harness-drop or HARNESS_DROP_DIR). */
+  dropDir?: string
 }
 
 /** A live, E2EE-terminated link to one linked machine, as the daemon's relay pool hands it out. */
@@ -158,6 +162,71 @@ export class Nixfred {
 
   /** Installed by the daemon once its relay pool exists (it is built after this object). */
   setRelayLink(fn: (machineId: string) => Promise<RelayLink>): void { this.relayLink = fn }
+
+  // ── clipboard and file drop between paired machines ────────────────────────────────────────────
+
+  private async clipWrite(text: string): Promise<void> {
+    if (this.deps.clipWrite) return this.deps.clipWrite(text)
+    const { spawn } = await import('node:child_process')
+    const candidates: Array<[string, string[]]> = process.platform === 'darwin' ? [['pbcopy', []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']]]
+    for (const [cmd, args] of candidates) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] })
+        child.on('error', () => resolve(false))
+        child.on('exit', (code) => resolve(code === 0))
+        child.stdin.end(text)
+      })
+      if (ok) return
+    }
+    throw new Error('no clipboard tool (wl-copy, xclip or pbcopy) worked')
+  }
+
+  /** A paired machine pushed text or a file here. Text goes to the clipboard; a file lands in the drop folder. */
+  async clipReceive(push: { text?: string; file?: { name: string; base64: string }; from: string }): Promise<{ ok: true; detail: string } | { ok: false; error: string }> {
+    try {
+      if (push.file) {
+        const dir = this.deps.dropDir ?? process.env.HARNESS_DROP_DIR ?? join(process.env.HOME ?? '/tmp', 'Downloads', 'harness-drop')
+        await fsp.mkdir(dir, { recursive: true })
+        // Basename only, then a conservative character set, then no leading dots: a name can never
+        // climb out of the drop folder or hide as a dotfile.
+        const base = push.file.name.split(/[\\/]/).filter(Boolean).pop() ?? 'file'
+        const safe = base.replace(/[^\w.@ -]+/g, '_').replace(/^\.+/, '').slice(0, 120) || 'file'
+        let target = join(dir, safe)
+        for (let i = 1; existsSync(target); i += 1) target = join(dir, safe.replace(/(\.[^.]*)?$/, `-${i}$1`))
+        await fsp.writeFile(target, Buffer.from(push.file.base64, 'base64'))
+        this.log({ kind: 'command', name: 'clip-file', detail: `${push.from} -> ${target}` })
+        void notifyAttention({ agentName: `file from ${push.from}`, machine: this.deps.machineName(), state: 'waiting', detail: target }).catch(() => {})
+        return { ok: true, detail: target }
+      }
+      if (push.text !== undefined) {
+        await this.clipWrite(push.text)
+        this.log({ kind: 'command', name: 'clip-text', detail: `${push.from}: ${push.text.length} chars` })
+        return { ok: true, detail: `${push.text.length} chars on the clipboard` }
+      }
+      return { ok: false, error: 'CLIP_EMPTY' }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /** Push text or a file to a linked machine over the relay link; waits for its reply. */
+  async clipPush(machineId: string, push: { text?: string; file?: { name: string; base64: string } }, timeoutMs = 15_000): Promise<Record<string, unknown>> {
+    if (!this.relayLink) throw new Error('clip push is not available: no relay link')
+    const link = await this.relayLink(machineId)
+    const requestId = `clip-${this.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    try {
+      const reply = new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => { off(); reject(new Error(`no reply from ${machineId} in ${timeoutMs} ms`)) }, timeoutMs)
+        const off = link.onFrame((f) => {
+          if (f.type === 'clip_push_result' && f.payload.requestId === requestId) { clearTimeout(timer); off(); resolve(f.payload) }
+        })
+      })
+      await link.send({ type: 'clip_push', payload: { requestId, ...push, from: this.deps.machineName() } })
+      const out = await reply
+      this.log({ kind: 'command', name: 'clip-push', detail: `${machineId}: ${push.file ? push.file.name : `${push.text?.length ?? 0} chars`} -> ${out.error ?? out.detail ?? 'ok'}` })
+      return out
+    } finally { link.close() }
+  }
 
   /** Hand a bounded job to a linked machine; returns at once with a record that fills in as it runs. */
   async dispatch(machineId: string, job: JobSpec): Promise<DispatchRecord> {
@@ -520,6 +589,13 @@ export class Nixfred {
         return this.dispatch(str('machine'), job)
       }
       case 'dispatches': return { dispatches: [...this.dispatches.values()].sort((a, b) => b.startedAt - a.startedAt) }
+      case 'clip-push': {
+        const file = args.file && typeof args.file === 'object' ? args.file as { name: string; base64: string } : undefined
+        const text = typeof args.text === 'string' ? args.text : undefined
+        if (!str('machine') || (!file && text === undefined)) throw new Error('clip-push needs machine and text or file')
+        return this.clipPush(str('machine'), { ...(text !== undefined ? { text } : {}), ...(file ? { file } : {}) })
+      }
+      case 'clip-receive': return this.clipReceive({ text: typeof args.text === 'string' ? args.text : undefined, file: args.file && typeof args.file === 'object' ? args.file as { name: string; base64: string } : undefined, from: 'local' })
       case 'hermes-health': { const r = await hermesHealth(this.hermesDeps()); return { ...r, lines: describeHermesHealth(r) } }
       case 'hermes-doctor-done': return stampHermesDoctor(this.hermesDeps())
       case 'capabilities': return { ...(await this.capabilities(0)), line: describeCapabilities(await this.capabilities()) }

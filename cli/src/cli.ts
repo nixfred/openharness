@@ -2816,6 +2816,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backend.runtimeProfileProvider = (session) => runtimeProfiles.selectedModel(session)
   backend.dshFrameProvider = dshFrameContext
   backend.onDshRemove = (id) => removeDsh(id)
+  backend.onClipPush = (push) => nixfred.clipReceive(push)
   // `harness remote` names the tile it was typed in by its tmux pane; the registry knows whose it is.
   backend.onTerminalHandoff = (tmuxPane) => registry.advertised()
     .find((session) => session.tmuxPane === tmuxPane
@@ -6521,6 +6522,28 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
       break
     }
     case 'dispatches': break
+    case 'clip': {
+      // harness clip push --machine=<id> [--file=path] [text]; with neither text nor file, the local clipboard is sent.
+      if (args[0] !== 'push' || !flag('machine')) { console.error('Usage: harness clip push --machine=<machineId> [--file=<path>] [text]'); process.exit(1) }
+      action = 'clip-push'
+      const filePath = flag('file')
+      if (filePath) {
+        const { readFileSync: rf, statSync: st } = await import('node:fs')
+        if (st(filePath).size > 25 * 1024 * 1024) { console.error('✗ file is over 25 MB'); process.exit(1) }
+        body = { machine: flag('machine'), file: { name: filePath.split('/').pop() ?? 'file', base64: rf(filePath).toString('base64') } }
+      } else {
+        let text = args.slice(1).join(' ')
+        if (!text) {
+          const { execFileSync } = await import('node:child_process')
+          for (const [cmd, a] of [['wl-paste', ['--no-newline']], ['xclip', ['-selection', 'clipboard', '-o']], ['pbpaste', []]] as Array<[string, string[]]>) {
+            try { text = execFileSync(cmd, a, { encoding: 'utf8', timeout: 3000 }); break } catch { /* next tool */ }
+          }
+        }
+        if (!text) { console.error('✗ nothing to push: give text, --file, or put something on the clipboard'); process.exit(1) }
+        body = { machine: flag('machine'), text }
+      }
+      break
+    }
     case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
     default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
@@ -7431,7 +7454,7 @@ switch (cmd) {
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
   case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
-  case 'dispatch': case 'dispatches':
+  case 'dispatch': case 'dispatches': case 'clip':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

@@ -140,6 +140,33 @@ describe('Nixfred wiring', () => {
     expect(listed[0]?.finishedAt).not.toBeNull()
   })
 
+  it('receives a clip push: text to the clipboard, a file into the drop folder without overwriting', async () => {
+    const clip: string[] = []
+    const n2 = new Nixfred({ ...deps(), clipWrite: async (t) => { clip.push(t) }, dropDir: join(dir, 'drop') })
+    expect(await n2.clipReceive({ text: 'hello from vic', from: 'vic' })).toEqual({ ok: true, detail: '14 chars on the clipboard' })
+    expect(clip).toEqual(['hello from vic'])
+    const b64 = Buffer.from('payload').toString('base64')
+    const first = await n2.clipReceive({ file: { name: '../evil name.txt', base64: b64 }, from: 'vic' })
+    const second = await n2.clipReceive({ file: { name: '../evil name.txt', base64: b64 }, from: 'vic' })
+    expect(first).toMatchObject({ ok: true, detail: join(dir, 'drop', 'evil name.txt') })
+    expect(second).toMatchObject({ ok: true, detail: join(dir, 'drop', 'evil name-1.txt') })
+    expect(readFileSync(join(dir, 'drop', 'evil name.txt'), 'utf8')).toBe('payload')
+    expect(await n2.clipReceive({ from: 'vic' })).toEqual({ ok: false, error: 'CLIP_EMPTY' })
+  })
+
+  it('pushes text to a linked machine and returns its reply', async () => {
+    const link: { push: ((f: { type: string; payload: Record<string, unknown> }) => void) | null } = { push: null }
+    const sentFrames: Array<{ type: string; payload: Record<string, unknown> }> = []
+    nix.setRelayLink(async () => ({
+      send: async (f) => { sentFrames.push(f); setTimeout(() => link.push?.({ type: 'clip_push_result', payload: { requestId: f.payload.requestId, ok: true, detail: '5 chars on the clipboard' } }), 5) },
+      onFrame: (cb) => { link.push = cb; return () => { link.push = null } },
+      close: () => {},
+    }))
+    const out = await nix.clipPush('m-2', { text: 'hello' })
+    expect(out).toMatchObject({ ok: true, detail: '5 chars on the clipboard' })
+    expect(sentFrames[0]).toMatchObject({ type: 'clip_push', payload: { text: 'hello', from: 'gus' } })
+  })
+
   it('exposes the local command surface', async () => {
     const status = await nix.command('gate-status', {}) as { enabled: boolean; rules: number; installed: boolean }
     expect(status).toMatchObject({ enabled: true, installed: false })
