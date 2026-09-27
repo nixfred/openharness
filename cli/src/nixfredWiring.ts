@@ -31,6 +31,7 @@ import { listPins, pin, startRecording, stopRecording, toAsciicast } from './nix
 import { installGateHook, uninstallGateHook, gateHookInstalled } from './lib/hooks.js'
 import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
 import { CiWatcher, parsePrChecks } from './nixfred/ciWatch.js'
+import { DISPATCH_RESULT_TYPE, createRemoteAgentBackend, jobPrompt, type DispatchResult, type JobSpec, type MachineLink, type WireFrame } from './nixfred/remoteOrchestratorBackend.js'
 import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
 import { listHermesHomes } from './engines/hermes/home.js'
 
@@ -65,6 +66,61 @@ export interface NixfredDeps {
   now?: () => number
 }
 
+/** A live, E2EE-terminated link to one linked machine, as the daemon's relay pool hands it out. */
+export interface RelayLink {
+  send(frame: WireFrame): Promise<void>
+  onFrame(cb: (frame: WireFrame) => void): () => void
+  close(): void
+}
+
+export interface DispatchRecord {
+  id: string
+  machineId: string
+  job: JobSpec
+  startedAt: number
+  finishedAt: number | null
+  agentId: string | null
+  result: DispatchResult | null
+  error: string | null
+}
+
+const DISPATCH_RESULT_RE = /DISPATCH_RESULT:\s*(\{[\s\S]*\})/
+
+/**
+ * Turn a relay link into the MachineLink the dispatcher library expects, and synthesize the
+ * `dispatch_result` frame from the worker's own text: the remote agent prints one
+ * `DISPATCH_RESULT: {json}` line, which arrives here as text_delta events; at turn_ended for that
+ * agent the line is parsed and re-emitted as if the worker had sent a result frame. No new wire type,
+ * no worker-side change, and the relay never sees the plaintext.
+ */
+export function machineLinkFromRelay(machineId: string, link: RelayLink): MachineLink & { close(): void } {
+  const text = new Map<string, string>()
+  const listeners = new Set<(f: WireFrame) => void>()
+  const emit = (f: WireFrame): void => { for (const cb of listeners) cb(f) }
+  const off = link.onFrame((frame) => {
+    const p = frame.payload ?? {}
+    const agentId = typeof p.agentId === 'string' ? p.agentId : ''
+    if (frame.type === 'text_delta' && agentId && typeof p.content === 'string') {
+      text.set(agentId, ((text.get(agentId) ?? '') + p.content).slice(-20_000))
+    } else if (frame.type === 'turn_ended' && agentId) {
+      const m = DISPATCH_RESULT_RE.exec(text.get(agentId) ?? '')
+      text.delete(agentId)
+      if (m) {
+        let parsed: Record<string, unknown> = {}
+        try { parsed = JSON.parse(m[1]!) as Record<string, unknown> } catch { parsed = { summary: 'DISPATCH_RESULT line was not valid JSON', ok: false } }
+        emit({ type: DISPATCH_RESULT_TYPE, payload: { agentId, ...parsed } })
+      }
+    }
+    emit(frame)
+  })
+  return {
+    machineId,
+    send: (frame) => { void link.send(frame) },
+    onFrame: (cb) => { listeners.add(cb); return () => { listeners.delete(cb) } },
+    close: () => { off(); link.close() },
+  }
+}
+
 const exec = (cmd: string, args: string[], opts: { cwd?: string } = {}, timeout = 15_000): Promise<string> =>
   new Promise((resolve, reject) => {
     execFile(cmd, args, { cwd: opts.cwd, timeout, maxBuffer: 8 << 20 }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))))
@@ -97,6 +153,40 @@ export class Nixfred {
   private branchTimer: NodeJS.Timeout | null = null
   readonly ci: CiWatcher
   private ciTimer: NodeJS.Timeout | null = null
+  private relayLink: ((machineId: string) => Promise<RelayLink>) | null = null
+  private readonly dispatches = new Map<string, DispatchRecord>()
+
+  /** Installed by the daemon once its relay pool exists (it is built after this object). */
+  setRelayLink(fn: (machineId: string) => Promise<RelayLink>): void { this.relayLink = fn }
+
+  /** Hand a bounded job to a linked machine; returns at once with a record that fills in as it runs. */
+  async dispatch(machineId: string, job: JobSpec): Promise<DispatchRecord> {
+    if (!this.relayLink) throw new Error('dispatch is not available: no relay link')
+    const id = `d-${this.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    job = { ...job, machineId }
+    const record: DispatchRecord = { id, machineId, job, startedAt: this.now(), finishedAt: null, agentId: null, result: null, error: null }
+    this.dispatches.set(id, record)
+    this.log({ kind: 'command', name: 'dispatch', detail: `${id} -> ${machineId}: ${job.brief.slice(0, 120)}` })
+    void (async () => {
+      let link: (MachineLink & { close(): void }) | null = null
+      try {
+        link = machineLinkFromRelay(machineId, await this.relayLink!(machineId))
+        const backend = createRemoteAgentBackend(link, { now: this.now })
+        const created = await backend.create({ engine: job.engine, cwd: job.repo, prompt: jobPrompt(job), branchName: job.branchName, ...(job.dsh ? { dsh: job.dsh } : {}) })
+        record.agentId = created.agentId
+        record.result = await backend.awaitResult(created.agentId, { timeoutMs: job.timeoutMs ?? 60 * 60 * 1000 })
+      } catch (err) {
+        record.error = err instanceof Error ? err.message : String(err)
+      } finally {
+        record.finishedAt = this.now()
+        link?.close()
+        this.log({ kind: 'command', name: 'dispatch-done', detail: `${id}: ${record.error ?? record.result?.summary ?? ''}`.slice(0, 300) })
+        void notifyAttention({ agentName: `dispatch ${id}`, machine: machineId, state: record.error ? 'failed' : 'waiting', detail: (record.error ?? record.result?.summary ?? 'done').slice(0, 120) }).catch(() => {})
+        void fsp.appendFile(this.file('dispatches.jsonl'), JSON.stringify(record) + '\n').catch(() => {})
+      }
+    })()
+    return record
+  }
 
   constructor(private readonly deps: NixfredDeps) {
     this.now = deps.now ?? Date.now
@@ -424,6 +514,12 @@ export class Nixfred {
       case 'locks': return { locks: this.collisions.listLocks() }
       case 'branches': await this.pollBranches(); return { alerts: this.collisions.recent() }
       case 'ci': return { wakes: await this.pollCi() }
+      case 'dispatch': {
+        const job: JobSpec = { machineId: str('machine'), brief: str('brief'), repo: str('repo'), engine: str('engine') || 'claude', branchName: str('branch') || `dispatch/${this.now().toString(36)}`, ...(str('dsh') ? { dsh: str('dsh') } : {}) }
+        if (!job.brief || !job.repo || !str('machine')) throw new Error('dispatch needs machine, repo and brief')
+        return this.dispatch(str('machine'), job)
+      }
+      case 'dispatches': return { dispatches: [...this.dispatches.values()].sort((a, b) => b.startedAt - a.startedAt) }
       case 'hermes-health': { const r = await hermesHealth(this.hermesDeps()); return { ...r, lines: describeHermesHealth(r) } }
       case 'hermes-doctor-done': return stampHermesDoctor(this.hermesDeps())
       case 'capabilities': return { ...(await this.capabilities(0)), line: describeCapabilities(await this.capabilities()) }

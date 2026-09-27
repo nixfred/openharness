@@ -4085,6 +4085,27 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     relayIdentityStore.getIdentity(),
     new MachinePeerStore(),
   )
+  // The fleet dispatcher rides the same pool the window uses to reach a linked machine: one
+  // E2EE-terminated session per machine, frames fanned out to whoever attached.
+  nixfred.setRelayLink(async (machineId) => {
+    const listeners = new Set<(frame: { type: string; payload: Record<string, unknown> }) => void>()
+    const sink = {
+      sendFrame: (frame: Record<string, unknown>) => {
+        const payload = (frame.payload && typeof frame.payload === 'object' ? frame.payload : {}) as Record<string, unknown>
+        // The event correlator puts agentId on the frame and in the payload; keep it reachable either way.
+        const shaped = { type: String(frame.type ?? ''), payload: typeof frame.agentId === 'string' && !payload.agentId ? { ...payload, agentId: frame.agentId } : payload }
+        for (const cb of listeners) cb(shaped)
+        return true
+      },
+      sendBinary: () => true,
+    }
+    const session = await relayPool.acquire(machineId, env.AUTONOMOUS_ENV, { type: 'machine_select', payload: { machineId } }, sink, () => { listeners.clear() })
+    return {
+      send: (frame) => session.send(frame as unknown as Record<string, unknown>),
+      onFrame: (cb) => { listeners.add(cb); return () => { listeners.delete(cb) } },
+      close: () => session.detach(),
+    }
+  })
   // Spoken tasks go to the WINDOW to be routed, not to the copy of the router in this process.
   //
   // Built here because both ends need it: the local socket hands it the window's replies, and the cable
@@ -6493,6 +6514,13 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
     case 'branches': break
     case 'ci': break
     case 'loops': break
+    case 'dispatch': {
+      const brief = args.join(' ')
+      if (!brief || !flag('machine') || !flag('repo')) { console.error('Usage: harness dispatch --machine=<machineId> --repo=</path/on/that/machine> [--engine=claude] [--branch=name] [--dsh=id] "brief"'); process.exit(1) }
+      body = { machine: flag('machine'), repo: flag('repo'), engine: flag('engine') ?? 'claude', branch: flag('branch') ?? '', dsh: flag('dsh') ?? '', brief }
+      break
+    }
+    case 'dispatches': break
     case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
     default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
@@ -7403,6 +7431,7 @@ switch (cmd) {
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
   case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
+  case 'dispatch': case 'dispatches':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

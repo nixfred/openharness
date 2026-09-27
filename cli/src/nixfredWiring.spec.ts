@@ -114,6 +114,32 @@ describe('Nixfred wiring', () => {
     expect(await nix.command('unlock', { repo: '/tmp/proj', branch: 'feature' })).toEqual({ removed: true })
   })
 
+  it('dispatches a job over a relay link and reads the result off the worker text', async () => {
+    type F = { type: string; payload: Record<string, unknown> }
+    const sentFrames: F[] = []
+    const link: { push: ((f: F) => void) | null } = { push: null }
+    nix.setRelayLink(async () => ({
+      send: async (f) => {
+        sentFrames.push(f)
+        if (f.type === 'agent_create') setTimeout(() => link.push?.({ type: 'agent_create_result', payload: { requestId: f.payload.requestId, creationId: f.payload.creationId, agentId: 'remote-1' } }), 5)
+      },
+      onFrame: (cb) => { link.push = cb; return () => { link.push = null } },
+      close: () => {},
+    }))
+    const rec = await nix.dispatch('m-2', { machineId: 'm-2', brief: 'add a README badge', repo: '/srv/proj', engine: 'claude', branchName: 'badge' })
+    expect(rec.finishedAt).toBeNull()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(sentFrames[0]?.type).toBe('agent_create')
+    expect(String(sentFrames[0]?.payload.prompt)).toContain('DISPATCH_RESULT:')
+    link.push?.({ type: 'text_delta', payload: { agentId: 'remote-1', content: 'Done. DISPATCH_RESULT: {"branch":"badge","diffStat":"1 file changed","summary":"README badge added","ok":true}\n' } })
+    link.push?.({ type: 'turn_ended', payload: { agentId: 'remote-1' } })
+    await new Promise((r) => setTimeout(r, 40))
+    const listed = (await nix.command('dispatches', {}) as { dispatches: Array<typeof rec> }).dispatches
+    expect(listed[0]?.agentId).toBe('remote-1')
+    expect(listed[0]?.result).toMatchObject({ ok: true, branch: 'badge', summary: 'README badge added' })
+    expect(listed[0]?.finishedAt).not.toBeNull()
+  })
+
   it('exposes the local command surface', async () => {
     const status = await nix.command('gate-status', {}) as { enabled: boolean; rules: number; installed: boolean }
     expect(status).toMatchObject({ enabled: true, installed: false })
