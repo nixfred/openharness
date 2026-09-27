@@ -53,11 +53,36 @@ def fetch_once():
     return None, "; ".join(errors) or "unreachable"
 
 
+def stop_all():
+    """Panic stop: POST /api/stop-all. Prints one JSON line, exit 0 on success, 1 otherwise."""
+    headers = {"Host": f"127.0.0.1:{PORT}", "Content-Type": "application/json", "x-adapter-local": "1"}
+    conns = []
+    if os.path.exists(SOCK):
+        conns.append(lambda: UnixHTTPConnection(SOCK))
+    conns.append(lambda: http.client.HTTPConnection("127.0.0.1", PORT, timeout=5.0))
+    for make in conns:
+        try:
+            c = make()
+            c.request("POST", "/api/stop-all", body="{}", headers=headers)
+            r = c.getresponse()
+            body = r.read().decode("utf-8", "replace")
+            c.close()
+            print(body, flush=True)
+            return 0 if r.status == 200 else 1
+        except (OSError, http.client.HTTPException):
+            continue
+    print(json.dumps({"error": "unreachable"}), flush=True)
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--stop-all", action="store_true")
     a = ap.parse_args()
+    if a.stop_all:
+        sys.exit(stop_all())
     interval = max(0.5, a.interval)
     down_since = None
     while True:

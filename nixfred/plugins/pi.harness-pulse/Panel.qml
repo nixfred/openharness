@@ -32,6 +32,7 @@ Panel {
 
   property var agents: []
   property var alerts: []
+  property string lastStop: ""
   property string hostname: ""
   property string lastError: ""
   property bool daemonUp: false
@@ -105,6 +106,54 @@ Panel {
       color: root.daemonUp ? Color.foreground : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
       font.pixelSize: root.ringSize * 0.7
       Behavior on color { ColorAnimation { duration: root.reducedMotion ? 0 : 220 } }
+
+      // Hold-to-stop: press and hold the hexagon for two seconds to cancel every agent turn on this
+      // machine. A red ring drains around the hexagon while held; release early and nothing happens.
+      property real hold: 0
+      NumberAnimation on hold {
+        id: holdAnim
+        running: false
+        from: 0; to: 1; duration: 2000
+        onFinished: { if (statusGlyph.hold >= 1) { stopAll.running = true; statusGlyph.hold = 0 } }
+      }
+      onHoldChanged: holdCanvas.requestPaint()
+      Canvas {
+        id: holdCanvas
+        anchors.centerIn: parent
+        width: root.ringSize + 4; height: root.ringSize + 4
+        visible: statusGlyph.hold > 0
+        renderStrategy: Canvas.Cooperative
+        onPaint: {
+          var ctx = getContext("2d"); ctx.reset()
+          var c = width / 2
+          ctx.beginPath(); ctx.lineWidth = 2; ctx.lineCap = "round"
+          ctx.strokeStyle = (root.theme && root.theme.red) ? root.theme.red : Color.urgent
+          ctx.arc(c, c, c - 1.5, -Math.PI / 2, -Math.PI / 2 + (1 - statusGlyph.hold) * Math.PI * 2)
+          ctx.stroke()
+        }
+      }
+      MouseArea {
+        anchors.fill: parent
+        enabled: root.daemonUp
+        hoverEnabled: true
+        onPressed: { statusGlyph.hold = 0; holdAnim.restart() }
+        onReleased: { holdAnim.stop(); statusGlyph.hold = 0 }
+        onCanceled: { holdAnim.stop(); statusGlyph.hold = 0 }
+        ToolTip.visible: containsMouse && !pressed
+        ToolTip.delay: 500
+        ToolTip.text: root.lastStop !== "" ? root.lastStop : "Hold 2 s to stop every agent on " + (root.hostname || "this machine")
+      }
+    }
+    Process {
+      id: stopAll
+      command: ["python3", root.helperPath, "--stop-all"]
+      running: false
+      stdout: SplitParser {
+        onRead: function (line) {
+          try { var d = JSON.parse(line); root.lastStop = d.cancelled ? "Stopped " + d.cancelled.length + " agent(s)" : "Stop failed: " + (d.error || "unknown") }
+          catch (e) { root.lastStop = "Stop failed" }
+        }
+      }
     }
     Item { width: 4; height: 1 }
 

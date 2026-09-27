@@ -152,3 +152,7 @@ Phase 1: all eight shipped in nixfred/ (bar widget QML pending Test Drive result
 ## Status 2026-09-27 (after Mike Gannotti review)
 
 Shipped on nixfred/main: gate lanes; Hermes profile re-resolve (OH-F1); attention kanban; collision alarm with branch locks; every tool call journaled; Hermes health check and doctor stamp; CI-failure wake library; battery mode; harness loops; lane on the attention payload; collision badge in Harness Pulse. In progress: Hermes session backend (paneless profile sessions), Hermes attention plugin skeleton. Not carried: his PR #233 (conflicts, Flutter).
+
+## Status 2026-09-27 late (nixfred 0.1.2)
+
+Dispatcher end to end, sealed clipboard/file drop, spend arc and avatar-in-ring on the bar (VM-validated), command reference. Open: hold-to-stop on the bar, Flutter pane glow (no SDK), Phase 6 firmware, approvals batching (device), PR #233 carry.
