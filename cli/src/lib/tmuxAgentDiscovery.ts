@@ -7,6 +7,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import { isAdoptedPane } from './adoptedPanes.js'
 import {
   agentAliasOwner,
   agentCommandOwnershipSnapshot,
@@ -145,7 +146,8 @@ export async function listTmuxPanes(): Promise<TmuxPaneInventory> {
     if (isNoTmuxServerError(result.error)) return { ok: true, panes: [] }
     return result
   }
-  return { ok: true, panes: parsePanes(result.stdout).filter((pane) => isHarnessSession(pane.tmuxSessionName)) }
+  // Two whitelists: sessions this daemon named, and panes a person adopted by id (`harness adopt`).
+  return { ok: true, panes: parsePanes(result.stdout).filter((pane) => isHarnessSession(pane.tmuxSessionName) || isAdoptedPane(pane.tmuxPane, pane.tmuxSessionName)) }
 }
 
 export interface AdoptedLegacySession { from: string; to: string; paneId: string }

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "pi.harness-pulse",
+  "name": "Harness Pulse",
+  "version": "0.1.0",
+  "author": "Fred Nix",
+  "description": "One ring per coding agent on every linked Harness machine. Working sweeps, waiting breathes toward you, permission asks in red, done fills to a dot, failed flashes twice then holds. Reads the local Harness daemon's attention feed; nothing leaves the machine.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Harness Pulse",
+    "description": "Agent attention rings for OpenHarness: which agent is working, which one is waiting on you, which one finished.",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 1,
+      "maxAgents": 8,
+      "reducedMotion": false,
+      "showMachine": true,
+      "focusWindowClass": "harness",
+      "ringSize": 18
+    }
+  }
+}

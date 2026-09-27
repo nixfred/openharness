@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# harness-changelog-x <pr-number> [owner/repo]
+# After a merge: append one line to CHANGE.log in the repo root and write an X post draft to
+# ~/.claude/X-QUEUE/<date>-<repo>-<pr>.md. Facts only, no pomp, bare URL, no 280 cap. Never posts.
+set -eu
+
+pr="${1:-}"; [ -n "$pr" ] || { echo "usage: harness-changelog-x <pr-number> [owner/repo]" >&2; exit 2; }
+repo="${2:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+json="$(gh pr view "$pr" -R "$repo" --json number,title,author,url,mergedAt,state)"
+state="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+[ "$state" = "MERGED" ] || { echo "PR #$pr is $state, not MERGED" >&2; exit 1; }
+title="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["title"])')"
+login="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["author"]["login"])')"
+url="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')"
+date="$(date +%F)"
+
+# CONTRIBUTORS.x maps github login to a verified X handle, one "login @handle" per line.
+handle=""
+if [ -f "$root/CONTRIBUTORS.x" ]; then
+  handle="$(awk -v l="$login" '$1==l {print $2; exit}' "$root/CONTRIBUTORS.x")"
+fi
+who="$login${handle:+ ($handle)}"
+
+line="$date  #$pr  $title  by $who"
+printf '%s\n' "$line" >> "$root/CHANGE.log"
+echo "CHANGE.log: $line"
+
+name="${repo##*/}"
+q="$HOME/.claude/X-QUEUE"; mkdir -p "$q"
+out="$q/$date-$name-$pr.md"
+{
+  echo "# X post draft: $name #$pr"
+  echo
+  echo "$name: $title${handle:+, from $handle}."
+  echo
+  echo "$url"
+  echo
+  echo "<!-- facts only, no pomp; verify the handle before posting; no 280 cap applies -->"
+} > "$out"
+echo "X draft: $out"

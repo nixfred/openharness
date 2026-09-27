@@ -1,0 +1,32 @@
+{
+  "spec": 1,
+  "id": "nixfred/omarchy-quickshell",
+  "name": "Omarchy Quickshell",
+  "category": "Desktop",
+  "author": "Fred Nix",
+  "description": "Build and test Omarchy bar plugins (Quickshell, QML, Hyprland) with a pinned toolchain, qmllint, and Test Drive VM screenshots in the live viewer. Never touches the live desktop.",
+  "engine": "claude",
+  "workspace": {
+    "template": "template",
+    "marker": "manifest.json",
+    "init": "toolchain/init-workspace.sh"
+  },
+  "agent": {
+    "instructions": "AGENTS.md",
+    "skills": [
+      "skills"
+    ],
+    "env": {
+      "OMARCHY_HARNESS_TOOLCHAIN": "${dsh}/toolchain"
+    }
+  },
+  "toolchain": {
+    "setup": "toolchain/setup.sh",
+    "doctor": "toolchain/doctor.sh"
+  },
+  "viewer": {
+    "use": "autonomous/web-viewer",
+    "url": "http://127.0.0.1:${port}/?file=shots/index.html"
+  },
+  "verdict": ".harness/verdict.json"
+}

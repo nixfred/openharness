@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# harness-second-opinion [codex|grok|kimi] [--staged]
+# Send the working-tree diff (or the staged diff) to a different model for an independent review.
+set -eu
+
+model="${1:-codex}"
+staged=""
+for a in "$@"; do [ "$a" = "--staged" ] && staged="--staged"; done
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not in a git repo" >&2; exit 2; }
+diff="$(git diff $staged)"
+if [ -z "$diff" ]; then echo "no ${staged:+staged }changes to review" >&2; exit 1; fi
+
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+{
+  cat <<'PROMPT'
+You are a second reviewer on a code change written by another AI. Review only the diff below.
+Report real defects first (correctness, security, data loss, races), each as FILE:LINE, one sentence,
+the triggering condition, and a fix. Then any missing test. Skip style, naming and refactor notes.
+Be specific; if the diff looks correct, say so in one line. Plain prose, no markdown tables, no em dashes.
+
+PROMPT
+  printf '%s\n' "$diff"
+} > "$tmp"
+
+case "$model" in
+  codex)
+    codex exec --skip-git-repo-check - < "$tmp"
+    ;;
+  grok)
+    grok --prompt-file "$tmp" --output-format plain --no-subagents --no-plan --max-turns 8 < /dev/null
+    ;;
+  kimi)
+    python3 - "$tmp" <<'PY'
+import json, sys, urllib.request
+cfg = {}
+for line in open(__import__('os').path.expanduser('~/.env')):
+    if '=' in line and not line.startswith('#'):
+        k, v = line.strip().split('=', 1); cfg[k] = v.strip('"\'')
+key = cfg.get('KIMI_API_KEY')
+if not key:
+    sys.exit('KIMI_API_KEY missing in ~/.env')
+base = cfg.get('KIMI_BASE_URL', 'https://api.kimi.com/coding/v1').rstrip('/')
+body = {'model': 'k3-256k', 'temperature': 1,
+        'messages': [{'role': 'user', 'content': open(sys.argv[1]).read()}]}
+req = urllib.request.Request(base + '/chat/completions', data=json.dumps(body).encode(),
+                             headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+try:
+    with urllib.request.urlopen(req, timeout=600) as r:
+        d = json.loads(r.read())
+except urllib.error.HTTPError as e:
+    sys.exit('kimi HTTP %s: %s' % (e.code, e.read().decode(errors='replace')[:300]))
+print(d['choices'][0]['message']['content'])
+PY
+    ;;
+  *)
+    echo "usage: harness-second-opinion [codex|grok|kimi] [--staged]" >&2; exit 2
+    ;;
+esac

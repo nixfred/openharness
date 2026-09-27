@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "pi.hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "author": "Fred Nix",
+  "description": "Starter bar widget. Rename the id, then make it do one thing well.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Hello",
+    "description": "Starter widget from the Omarchy Quickshell harness.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "label": "hello",
+      "reducedMotion": false
+    }
+  }
+}

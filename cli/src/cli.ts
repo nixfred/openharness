@@ -226,6 +226,7 @@ import {
 import { probeGatewayRuntime } from './lib/gatewayRuntime.js'
 import { probeGridAssignment, sameGridAssignment } from './lib/gridAssignment.js'
 import { agentFrame, type AgentFrame } from './lib/agentFrame.js'
+import { Nixfred, type NixfredSessionLike } from './nixfredWiring.js'
 import { agentTokenUsage } from './lib/agentTokenUsage.js'
 import { SessionInputController } from './lib/sessionInput.js'
 import { DeviceResultJournal } from './lib/autonomous-device/resultJournal.js'
@@ -2196,6 +2197,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     deviceMessage = message,
   ): void => {
     console.log(`[turn] ${sid(sessionId)} aborted by ${engine} error · ${preview(message)}`)
+    nixfred.attention.failed(agentIdFor(sessionId), message)
     backend.send({ type: 'error', agentId: agentIdFor(sessionId), dbSessionId: sessionId, payload: { message } })
     backend.sendCommander({
       type: 'commander_event',
@@ -2635,7 +2637,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // Hold the working state across the gap too: the CLI needs a moment to move to the next question, and
     // that gap is exactly where the stale recap used to flash back.
     const target = payload.sessionId || payload.agentId
-    if (typeof target === 'string' && target) showAwaitingAnswer(target)
+    if (typeof target === 'string' && target) { showAwaitingAnswer(target); nixfred.attention.answered(agentIdFor(target)) }
     void questions.answer(payload)
   }
   const questionWatcher = new QuestionWatcher({
@@ -2643,8 +2645,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     capture: captureTerminal,
     hasDevice: () => someoneCanAnswer(),
     isDriving: (sessionId) => questions.isDriving(sessionId),
-    onQuestion: (sessionId, requestId, shaped) => {
+    onQuestion: (sessionId, requestId, shaped, permission) => {
       deviceInput.setUserAction(agentIdFor(sessionId), true)
+      nixfred.attention.question(agentIdFor(sessionId), permission === true, shaped[0]?.q ?? '')
       questions.remember(requestId, sessionId)
       showAwaitingAnswer(sessionId)
       const asked = {
@@ -2894,11 +2897,13 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // The phone notifies on neither. Absent = false, so a client that predates these reads every end as
       // it always did.
       if (event.type === 'turn_ended') {
+        if (!opts?.resumed && !opts?.replay) nixfred.attention.turnEnded(agentId, { aborted: event.payload.aborted === true })
         if (opts?.resumed || opts?.replay) frame.replay = true
         if (isSubagentSession(sessionId)) frame.subagent = true
       }
       backend.send(frame)
       if (event.type === 'turn_started') {
+        if (!opts?.resumed && !opts?.replay) nixfred.attention.turnStarted(agentId, event.payload.userMessage)
         turnStartedAt.set(sessionId, Date.now())
         console.log(`[turn] ${sid(sessionId)} started · engine=${registry.bySession(sessionId)?.engine ?? 'claude'} · bytes=${Buffer.byteLength(event.payload.userMessage, 'utf8')}`)
         input.onTurnStarted(agentIdFor(sessionId), event.payload.userMessage)
@@ -3630,8 +3635,29 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   }
 
 
+  // The nixfred additions (attention, gate, spend brake, loops, audit, local commands). Built here so the
+  // hook server below can hand it tool-start, and everything after can tap it. See nixfredWiring.ts.
+  const nixfredSession = (s: RegisteredSession): NixfredSessionLike => ({
+    agentId: s.agentId, sessionId: s.sessionId, engine: s.engine, active: s.active, tmuxPane: s.tmuxPane,
+    cwd: s.cwd ?? undefined, transcriptPath: s.transcriptPath ?? undefined, model: (s as { model?: string | null }).model ?? null, name: projectDisplayName(s),
+  })
+  const nixfred = new Nixfred({
+    machineId: () => backend.machineId,
+    machineName: () => terminalHintMachineName(),
+    sessions: () => registry.advertised().map(nixfredSession),
+    sendLocal: (frame) => backend.sendLocal(frame),
+    sendError: (agentId, dbSessionId, message) => backend.send({ type: 'error', agentId, dbSessionId, payload: { message } }),
+    cancelAgent: (agentId, confirmed) => cancelAgent(agentId, confirmed),
+    tokenUsage: (s) => { const r = registry.resolve(s.agentId); return r ? agentTokenUsage.get(r) : null },
+    hookPort: () => hookPort,
+  })
+
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(env.PORT, {
     onCommandBar: commandBarService,
+    onAttention: () => nixfred.attentionPayload(),
+    onStopAll: (except) => nixfred.stopAll(except),
+    onAdopt: (pane, engine) => nixfred.adopt(pane, engine),
+    onNixfred: (action, args) => nixfred.command(action, args),
     onAutonomousDeviceRequest: async (method, target, body) => {
       if (!autonomousDeviceService) return { status: 503, body: { error: { code: 'UNAVAILABLE', message: 'Autonomous device service is starting' } } }
       return autonomousDeviceLocalRequest({
@@ -3751,10 +3777,14 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
     onToolStart: ({ sessionId, toolUseId, toolName, input: toolInput }) => {
       if (toolName === 'Task') onCursorTaskStart(sessionId, toolUseId, toolInput)
+      // The destructive-action gate: classify against the machine policy; the verdict rides back to the
+      // hook script, which turns ask/deny into the engine's own permission prompt.
+      return nixfred.gate(sessionId, agentIdFor(sessionId), toolName, toolInput)
     },
     onTurnStop: ({ sessionId, status }) => {
       const session = registry.resolve(sessionId)
       if (!session) return
+      if (status === 'error') nixfred.attention.failed(session.agentId, 'engine ended the turn with an error')
       if (session.engine === 'cursor') {
         void (async () => {
           await cursorTaskHooks.wait(sessionId)
@@ -4087,7 +4117,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // The window looked at a harness, so the dial's drawer row for it is stale.
     // The dial's own tap already reaches the window (`agent.open`); this is the
     // return leg, and the pair is what keeps the badge and the pill equal.
-    onAgentSeen: (agentId) => { void cableRef?.agentSeen(agentId) },
+    onAgentSeen: (agentId) => { nixfred.attention.seen(agentId); void cableRef?.agentSeen(agentId) },
     // Agents the window has a tile for. A finished turn on one of these is
     // already in front of the person, so the dial updates its tile in silence
     // rather than beeping about something being looked at.
@@ -4766,6 +4796,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     const sessionId = record?.sessionId ?? id
     const st = turnStates.get(sessionId)
     if (st) st.turnOpen = false
+    nixfred.attention.cancelled(record?.agentId ?? sessionId)
     codexNormalizers.get(sessionId)?.closeTurn()
     cursorNormalizers.get(sessionId)?.closeTurn()
     opencodeReaders.get(sessionId)?.closeTurn()
@@ -5637,7 +5668,17 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       console.log(`[msg] ${sid(sessionId)} slash-command adapted for engine=${engine}`)
     }
     console.log(`[msg] ${sid(sessionId)} recv · engine=${engine} · bytes=${Buffer.byteLength(adapted, 'utf8')}`)
-    input.submit(record?.agentId ?? sessionId, adapted, deliveryId)
+    // The brakes, in order: spend cap (pauses the pane and tells the web why), then the loop policy
+    // (battery, lid, busy GPU, quiet hours, fleet lease). An unknown agent has nothing to brake on.
+    void (async () => {
+      if (record) {
+        const like = nixfredSession(record)
+        if (nixfred.spendCheck(like).action === 'pause') return
+        const loop = await nixfred.loopCheck(like, adapted)
+        if (!loop.run) { console.log(`[msg] ${sid(sessionId)} held: ${loop.reason}`); return }
+      }
+      input.submit(record?.agentId ?? sessionId, adapted, deliveryId)
+    })().catch((err) => console.error('[msg] submit failed:', err instanceof Error ? err.message : err))
   }
   backend.onMessage = (id, content, deliveryId) => submitAgent(id, content, deliveryId)
   backend.onCancelOrchestratorMessage = id => input.cancelDelivery(id)
@@ -6363,6 +6404,58 @@ async function daemonCall(method: 'GET' | 'POST', path: string, body?: unknown):
   }
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
   return { res, json }
+}
+
+/**
+ * `harness <nixfred command>`: attention, adopt, gate, spend, stop-all, capabilities, checkpoint, bundle,
+ * record, pin, audit. Every one is a POST to the daemon's local /api/nixfred with an action name; the
+ * daemon does the work so the CLI never needs the registry or the E2EE state. `--json` prints raw.
+ */
+async function nixfredCommand(cmd: string, args: string[], flags: string[]): Promise<void> {
+  const json = flags.includes('--json')
+  const flag = (name: string): string | undefined => flags.find((f) => f.startsWith(`--${name}=`))?.slice(name.length + 3)
+  const num = (name: string): number | null | undefined => { const v = flag(name); if (v === undefined) return undefined; if (v === 'off' || v === 'null') return null; const n = Number(v); return Number.isFinite(n) ? n : undefined }
+  let action = cmd
+  let body: Record<string, unknown> = {}
+  switch (cmd) {
+    case 'attention': break
+    case 'capabilities': break
+    case 'stop-all': body = { except: flag('except') ?? args[0] ?? null }; break
+    case 'adopt': if (!args[0]) { console.error('Usage: harness adopt <tmux-pane like %12> [engine]'); process.exit(1) } body = { pane: args[0], engine: args[1] ?? null }; break
+    case 'unadopt': body = { pane: args[0] }; break
+    case 'adopted': break
+    case 'gate': action = `gate-${args[0] ?? 'status'}`; break
+    case 'spend': {
+      action = `spend-${args[0] ?? 'status'}`
+      if (action === 'spend-set') body = { perAgentUsd: num('agent-usd'), perAgentTokens: num('agent-tokens'), perDayUsd: num('day-usd'), perDayTokens: num('day-tokens'), warnAt: num('warn-at') ?? undefined, ...(flags.includes('--off') ? { enabled: false } : flags.includes('--on') ? { enabled: true } : {}) }
+      if (action === 'spend-off') { action = 'spend-set'; body = { enabled: false } }
+      if (action === 'spend-on') { action = 'spend-set'; body = { enabled: true } }
+      break
+    }
+    case 'checkpoint': body = { agentId: args[0], brief: flag('brief') ?? '', notes: flag('notes') ?? '' }; break
+    case 'checkpoints': body = { agentId: args[0] }; break
+    case 'restore': body = { dir: args[0], cwd: args[1] ?? process.cwd() }; break
+    case 'bundle': body = { agentId: args[0], brief: flag('brief') ?? '', outDir: flag('out') ?? '' }; break
+    case 'record': action = `record-${args[0] ?? 'start'}`; body = { agentId: args[1] }; break
+    case 'pin': body = { agentId: args[0], label: args.slice(1).join(' ') || 'pin' }; break
+    case 'pins': body = { agentId: args[0] }; break
+    case 'asciicast': body = { agentId: args[0] }; break
+    case 'audit': action = 'audit-tail'; body = { n: Number(args[0] ?? 50) }; break
+    case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
+    default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
+      for (const f of flags) { const m = /^--([a-zA-Z-]+)=(.*)$/.exec(f); if (m) body[m[1]!] = m[2] }
+  }
+  const { res, json: reply } = await daemonCall('POST', '/api/nixfred', { action, ...body })
+  if (json) { console.log(JSON.stringify(reply, null, 2)); process.exit(res.ok ? 0 : 1) }
+  if (!res.ok || reply.ok === false) { console.error(`✗ ${String(reply.error ?? res.statusText)}`); process.exit(1) }
+  const result = reply.result as unknown
+  if (action === 'attention' && result && typeof result === 'object') {
+    const r = result as { hostname: string; summary: { state: string; count: number }; agents: Array<{ glyph: string; name: string; engine: string; label: string; detail: string }> }
+    console.log(`${r.hostname}: ${r.summary.count} ${r.summary.state}`)
+    for (const a of r.agents) console.log(`  ${a.glyph} ${a.name.padEnd(28)} ${a.engine.padEnd(10)} ${a.label}${a.detail ? `  ${a.detail}` : ''}`)
+    return
+  }
+  console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2))
 }
 
 /** `harness pair <code>` — send a browser/device pairing code to the running daemon (localhost). */
@@ -7230,6 +7323,11 @@ switch (cmd) {
     break
   case 'status':
     status().catch(onError)
+    break
+  case 'attention': case 'capabilities': case 'stop-all': case 'adopt': case 'unadopt': case 'adopted':
+  case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
+  case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
+    nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':
     if (args[0] === 'export') logsExportCommand(flags.includes('--json')).catch(onError)

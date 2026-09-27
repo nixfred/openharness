@@ -784,7 +784,7 @@ export interface QuestionWatcherDeps {
   /** Skip the capture entirely when no device is listening — nothing would consume the question. */
   hasDevice: () => boolean
   /** A dialog is open on screen. Fires ONCE per distinct question (until it changes or closes). */
-  onQuestion: (sessionId: string, requestId: string, questions: ShapedQuestion[]) => void
+  onQuestion: (sessionId: string, requestId: string, questions: ShapedQuestion[], permission?: boolean) => void
   /**
    * An announced dialog LEFT the screen — answered somewhere else, or abandoned.
    *
@@ -992,7 +992,7 @@ export class QuestionWatcher {
       q: view.question,
       options: view.rows.map((r) => r.label),
       multi: view.multi,
-    }])
+    }], view.permission === true)
 
   }
 }

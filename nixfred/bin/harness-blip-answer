@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# harness-blip-answer <tmux-pane> <text...>
+# Type an answer into an agent's tmux pane and press Enter. Pairs with harness-blip-question.hook.ts.
+set -eu
+
+if [ $# -lt 2 ]; then
+  echo "usage: harness-blip-answer <tmux-pane e.g. %12> <text...>" >&2
+  exit 2
+fi
+pane="$1"; shift
+text="$*"
+
+case "$pane" in
+  %[0-9]*) ;;
+  *) echo "pane must be a tmux pane id like %12" >&2; exit 2 ;;
+esac
+
+tmux send-keys -t "$pane" -l -- "$text"
+tmux send-keys -t "$pane" Enter
+echo "sent to $pane: ${text:0:80}"

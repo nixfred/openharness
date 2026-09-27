@@ -1,0 +1,15 @@
+{
+  "spec": 1,
+  "id": "nixfred/larry-memory",
+  "name": "Larry Memory (read-only)",
+  "category": "Research",
+  "author": "Fred Nix",
+  "description": "An agent that can consult Larry's memory and history (mem search, ~/.claude/MEMORY) but never writes to it.",
+  "engine": "claude",
+  "agent": {
+    "instructions": "AGENTS.md",
+    "skills": [
+      "skills"
+    ]
+  }
+}
