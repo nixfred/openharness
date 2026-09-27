@@ -1,0 +1,17 @@
+name: harness-attention
+version: 0.1.0
+description: Who needs me? Reads the OpenHarness daemon's attention state (waiting, permission, failed, done, working) and collision alerts for every agent on this machine.
+author: Fred Nix
+license: MIT
+homepage: https://github.com/nixfred/openharness
+tags:
+  - harness
+  - fleet
+  - attention
+provides_tools:
+  - harness_attention
+config_schema:
+  attention_url:
+    type: str
+    default: "http://127.0.0.1:18473/api/attention"
+    description: "The Harness daemon's local attention endpoint"

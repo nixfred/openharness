@@ -5,6 +5,23 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## nixfred 0.1.1 (CLI 0.2.88-nixfred.2) on upstream 46897998, 2026-09-27
+
+Everything read off Mike Gannotti's fleet (@MichaelGannotti, 23 Hermes/Grok Bot/OpenClaw agents on
+Omarchy, the person who put the device in front of Fred). Details are in the 0.1.0 section under
+"For Mike Gannotti's flow".
+
+- Every Hermes profile session on the roster, pane or not (Hermes Desktop bots, Bot Mode, gateway).
+- Gate lanes: per-agent rules by name. Collision alarm with branch locks and a bar badge.
+- Hermes profile race fixed (OH-F1). Hermes health check with doctor stamp (`harness hermes`).
+- CI-failure wake into the agent's pane. Battery mode. `harness attention --kanban`, `harness loops`.
+- Hermes attention plugin skeleton (agent tool + slash command + Desktop status bar) under
+  nixfred/hermes-plugin/, built from Nous's plugin docs; untested inside Hermes (no install here).
+- Not carried: his PR #233 (conflicts on current main, Flutter).
+
+Verified: tsc clean; full suite baseline plus one timing flake; real sqlite3 specs for the Hermes
+backend and reader; badge validated in a Test Drive VM. Not run on a device or inside Hermes.
+
 ## nixfred 0.1.0 (CLI 0.2.88-nixfred.1) on upstream 46897998, 2026-09-26
 
 The first cut. Phases 1 through 5 of PLAN.md in code; Phase 0 (stock baseline) and Phase 6 (device
@@ -68,7 +85,7 @@ All of it lives in new files plus small taps in `cli.ts`, `hookServer.ts`, `hook
 - `lib/theme/omarchy_theme.dart`: Omarchy `colors.toml` to a Flutter ColorScheme. Written without a
   Flutter SDK on the build host; UNTESTED and not wired into the app yet.
 
-### For Mike Gannotti's flow (added 2026-09-27)
+### For Mike Gannotti's flow (shipped in 0.1.1, detailed below)
 
 Read from his last week on X (@MichaelGannotti, 23 Hermes/Grok Bot/OpenClaw agents on Omarchy, the
 person who put this device in front of Fred). Three things he said, three things built:
