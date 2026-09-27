@@ -29,6 +29,7 @@ Panel {
   }
 
   property var agents: []
+  property var alerts: []
   property string hostname: ""
   property string lastError: ""
   property bool daemonUp: false
@@ -42,7 +43,7 @@ Panel {
 
   // The bar row never grows: a fixed slot per ring up to maxAgents, plus a status glyph.
   readonly property int slotWidth: ringSize + 6
-  implicitWidth: statusGlyph.width + 4 + Math.max(1, Math.min(maxAgents, agents.length)) * slotWidth
+  implicitWidth: statusGlyph.width + 4 + (collisionBadge.visible ? collisionBadge.width + 4 : 0) + Math.max(1, Math.min(maxAgents, agents.length)) * slotWidth
   implicitHeight: ringSize + 4
 
   // Theme palette (yellow/red/green) for the state colours; shell Color.* for the rest.
@@ -71,6 +72,7 @@ Panel {
         root.daemonUp = true
         root.hostname = r.hostname
         root.agents = Model.sortAgents(r.agents)
+        root.alerts = r.alerts || []
       }
     }
     onExited: function (code) {
@@ -103,6 +105,39 @@ Panel {
       Behavior on color { ColorAnimation { duration: root.reducedMotion ? 0 : 220 } }
     }
     Item { width: 4; height: 1 }
+
+    // Collision badge: two agents on one file, folder or branch in the last hour. Only present when
+    // there is something to say, so the bar stays quiet otherwise (Law 17: it takes a fixed slot only
+    // while visible, and the ring row shifts by one glyph, never by a layout reflow).
+    Text {
+      id: collisionBadge
+      anchors.verticalCenter: parent.verticalCenter
+      visible: root.alerts.length > 0
+      width: visible ? implicitWidth : 0
+      text: "△" + (root.alerts.length > 1 ? String(root.alerts.length) : "")
+      color: (root.theme && root.theme.red) ? root.theme.red : Color.urgent
+      font.pixelSize: root.ringSize * 0.7
+      font.bold: true
+      opacity: 1.0
+      SequentialAnimation on opacity {
+        running: collisionBadge.visible && !root.reducedMotion
+        loops: Animation.Infinite
+        NumberAnimation { from: 1.0; to: 0.45; duration: 900; easing.type: Easing.InOutSine }
+        NumberAnimation { from: 0.45; to: 1.0; duration: 900; easing.type: Easing.InOutSine }
+      }
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        ToolTip.visible: containsMouse
+        ToolTip.delay: 300
+        ToolTip.text: {
+          var lines = []
+          for (var i = 0; i < root.alerts.length && i < 6; i++) lines.push(root.alerts[i].kind + ": " + root.alerts[i].detail)
+          return lines.join("\n")
+        }
+      }
+    }
+    Item { width: collisionBadge.visible ? 4 : 0; height: 1 }
 
     Repeater {
       model: Math.min(root.maxAgents, root.agents.length)

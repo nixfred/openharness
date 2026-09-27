@@ -65,7 +65,8 @@ def main():
         if data is not None:
             down_since = None
             out = {"hostname": data.get("hostname", ""), "machineId": data.get("machineId", ""),
-                   "at": data.get("at", int(time.time() * 1000)), "agents": data.get("agents", [])}
+                   "at": data.get("at", int(time.time() * 1000)), "agents": data.get("agents", []),
+                   "alerts": data.get("alerts", [])}
         else:
             down_since = down_since or time.time()
             out = {"error": err, "agents": []}

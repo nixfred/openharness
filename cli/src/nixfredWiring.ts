@@ -30,6 +30,7 @@ import { buildReviewBundle } from './nixfred/reviewBundle.js'
 import { listPins, pin, startRecording, stopRecording, toAsciicast } from './nixfred/sessionRecorder.js'
 import { installGateHook, uninstallGateHook, gateHookInstalled } from './lib/hooks.js'
 import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
+import { CiWatcher, parsePrChecks } from './nixfred/ciWatch.js'
 import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
 import { listHermesHomes } from './engines/hermes/home.js'
 
@@ -58,6 +59,8 @@ export interface NixfredDeps {
   tokenUsage: (s: NixfredSessionLike) => { totalTokens: number | null } | null
   /** Ask discovery to look at a pane now (adoption). */
   rediscover?: () => void
+  /** Deliver a message into an agent's pane as a new turn (the CI-failure wake). */
+  sendToAgent?: (agentId: string, text: string) => void
   hookPort: () => number
   now?: () => number
 }
@@ -92,6 +95,8 @@ export class Nixfred {
   private readonly now: () => number
   readonly collisions: CollisionWatcher
   private branchTimer: NodeJS.Timeout | null = null
+  readonly ci: CiWatcher
+  private ciTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly deps: NixfredDeps) {
     this.now = deps.now ?? Date.now
@@ -122,6 +127,44 @@ export class Nixfred {
       this.branchTimer = setInterval(() => { void this.pollBranches() }, 60_000)
       this.branchTimer.unref()
     }
+    // CI-failure wake: `gh pr checks` per agent branch every five minutes; a newly failing check is
+    // delivered into the agent's pane once, with the log tail. Needs gh on PATH and a PR for the branch.
+    this.ci = new CiWatcher({
+      prChecks: async (cwd, branch) => parsePrChecks(await exec('gh', ['pr', 'checks', branch, '--json', 'name,state,link,bucket'], { cwd }, 20_000)),
+      failedLog: async (cwd, check) => {
+        const run = /\/actions\/runs\/(\d+)/.exec(check.link ?? '')?.[1]
+        if (!run) return ''
+        try { return (await exec('gh', ['run', 'view', run, '--log-failed'], { cwd }, 30_000)).slice(-20_000) } catch { return '' }
+      },
+      now: this.now,
+    })
+    if (process.env.HARNESS_CI_WATCH !== '0' && deps.sendToAgent) {
+      this.ciTimer = setInterval(() => { void this.pollCi() }, Number(process.env.HARNESS_CI_WATCH_MS) || 5 * 60_000)
+      this.ciTimer.unref()
+    }
+  }
+
+  /** One pass of the CI watcher over every active agent that sits on a branch with a PR. */
+  async pollCi(): Promise<number> {
+    let wakes = 0
+    const seenBranch = new Map<string, string | null>()
+    for (const s of this.deps.sessions()) {
+      if (!s.active || !s.cwd) continue
+      let branch = seenBranch.get(s.cwd)
+      if (branch === undefined) {
+        try { branch = (await exec('git', ['-C', s.cwd, 'branch', '--show-current'], {}, 4000)).trim() || null } catch { branch = null }
+        seenBranch.set(s.cwd, branch)
+      }
+      if (!branch || branch === 'main' || branch === 'master') continue
+      const wake = await this.ci.poll({ agentId: s.agentId, agentName: s.name, cwd: s.cwd, branch })
+      if (!wake) continue
+      wakes += 1
+      console.log(`[ci] ${s.agentId} woken: ${wake.failed.map((c) => c.name).join(', ')} failed on ${branch}`)
+      this.log({ kind: 'turn', agentId: s.agentId, sessionId: s.sessionId, name: 'ci-failure', detail: wake.failed.map((c) => c.name).join(', ') })
+      this.deps.sendToAgent?.(s.agentId, wake.message)
+      void notifyAttention({ agentName: s.name, machine: this.deps.machineName(), state: 'failed', detail: `CI: ${wake.failed.map((c) => c.name).join(', ')}` }).catch(() => {})
+    }
+    return wakes
   }
 
   private onCollision(e: CollisionEvent): void {
@@ -380,6 +423,7 @@ export class Nixfred {
       case 'unlock': { const removed = this.collisions.unlock(str('repo'), str('branch')); this.saveLocks(); return { removed } }
       case 'locks': return { locks: this.collisions.listLocks() }
       case 'branches': await this.pollBranches(); return { alerts: this.collisions.recent() }
+      case 'ci': return { wakes: await this.pollCi() }
       case 'hermes-health': { const r = await hermesHealth(this.hermesDeps()); return { ...r, lines: describeHermesHealth(r) } }
       case 'hermes-doctor-done': return stampHermesDoctor(this.hermesDeps())
       case 'capabilities': return { ...(await this.capabilities(0)), line: describeCapabilities(await this.capabilities()) }

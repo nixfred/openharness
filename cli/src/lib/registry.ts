@@ -36,6 +36,9 @@ import {
   writeFileSync,
 } from 'fs'
 import { randomUUID } from 'crypto'
+
+/** Hermes session ids: `YYYYMMDD_HHMMSS_<6hex>`; the only shape a hosted row may carry. */
+const HOSTED_SESSION_ID_RE = /^\d{8}_\d{6}_[0-9a-f]{6}$/
 import { join, basename, dirname, relative } from 'path'
 import { hostname, uptime } from 'os'
 import { env } from '../config/env.js'
@@ -127,6 +130,12 @@ export interface RegisteredSession {
    * built, so there is nothing to say); absent on a row written before this field existed.
    */
   gridWebSearch?: GridWebSearchStatus | null
+  /**
+   * A row with no terminal runtime, fed straight from an engine's own store (Hermes Desktop bots,
+   * Bot Mode profiles, gateway sessions). In memory only: never written to registry.json, re-found
+   * by its backend after every boot. `terminalAvailable` is false; it is still advertised.
+   */
+  hosted?: 'hermes-store'
   /**
    * The engine's OWN model this agent was on immediately before it moved to a grid.
    *
@@ -726,6 +735,7 @@ class Registry {
    * are separate: a trust/setup/shell prompt can remain viewable after the engine process goes dormant.
    */
   private terminalAvailableAgents = new Set<string>()
+  private hostedAgents = new Set<string>()
   private transactionDepth = 0
   private savePending = false
   /** Root corruption/unknown schemas are read-only until the operator restores valid bytes. */
@@ -749,6 +759,7 @@ class Registry {
   private drop(entry: RegisteredSession | undefined): void {
     if (!entry) return
     this.agents.delete(entry.agentId)
+    this.hostedAgents.delete(entry.agentId)
     if (entry.sessionId && this.sessionIndex.get(entry.sessionId) === entry.agentId) {
       this.sessionIndex.delete(entry.sessionId)
     }
@@ -1895,7 +1906,67 @@ class Registry {
 
   /** The one public list: a verified terminal pane is sufficient even when its engine is dormant. */
   advertised(): RegisteredSession[] {
-    return this.list().filter((entry) => this.terminalAvailableAgents.has(entry.agentId))
+    return this.list().filter((entry) => this.terminalAvailableAgents.has(entry.agentId) || this.hostedAgents.has(entry.agentId))
+  }
+
+  /** Every hosted (runtime-less, store-fed) row, active or dormant. */
+  hostedList(): RegisteredSession[] {
+    return this.list().filter((entry) => this.hostedAgents.has(entry.agentId))
+  }
+
+  /**
+   * Register a session that has no terminal: a Hermes store session with no pane. Idempotent on the
+   * session id; a session a pane-backed row already owns is left to that row. Nothing here is saved
+   * to disk (see `hosted`), so the row's identity is per daemon run.
+   */
+  registerHosted(input: { engine: 'hermes'; sessionId: string; hermesHome: string; source: string; cwd?: string | null; title?: string | null }): { agentId: string; isNew: boolean } | null {
+    if (this.writeBlocked) return null
+    if (!input.sessionId || !HOSTED_SESSION_ID_RE.test(input.sessionId)) return null
+    const existing = this.bySession(input.sessionId)
+    if (existing) {
+      if (!existing.hosted) return null
+      if (input.title && !existing.title) existing.title = titleDisplayName(input.title)
+      if (input.cwd && !existing.cwd) existing.cwd = input.cwd
+      return { agentId: existing.agentId, isNew: false }
+    }
+    const now = Date.now()
+    const entry: RegisteredSession = {
+      schemaVersion: 2,
+      active: true,
+      agentId: randomUUID(),
+      sessionId: input.sessionId,
+      boundAt: now,
+      engine: input.engine,
+      gateway: null,
+      grid: null,
+      gridLaunch: null,
+      gridWebSearch: null,
+      hosted: 'hermes-store',
+      defaultName: undefined,
+      transcriptPath: null,
+      projectDir: basename(input.cwd ?? '') || input.sessionId,
+      cwd: input.cwd ?? null,
+      runtimes: [],
+      primaryRuntimeKey: '',
+      tmuxPane: '',
+      source: input.source,
+      title: titleDisplayName(input.title ?? null),
+      model: null,
+      cliVersion: null,
+      codexHome: null,
+      hermesHome: input.hermesHome === env.HERMES_HOME ? null : input.hermesHome,
+      dsh: null,
+      dshRuntime: null,
+      agent: null,
+      processIdentity: null,
+      registeredAt: now,
+      updatedAt: now,
+      lastHookAt: now,
+      lastTranscriptAt: now,
+    }
+    this.index(entry)
+    this.hostedAgents.add(entry.agentId)
+    return { agentId: entry.agentId, isNew: true }
   }
 
   async transaction<T>(apply: () => T | Promise<T>): Promise<T> {
@@ -1928,7 +1999,9 @@ class Registry {
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
       withRegistryFileLock(() => {
-        const currentRows = new Map(this.list().map((entry) => {
+        // Hosted rows are memory-only: they have no runtime, so the persisted-row invariants would
+        // refuse them, and their backend re-finds them within seconds of a boot anyway.
+        const currentRows = new Map(this.list().filter((entry) => !entry.hosted).map((entry) => {
           const row = persistedRow(entry) as unknown as Record<string, unknown>
           return [entry.agentId, row] as const
         }))

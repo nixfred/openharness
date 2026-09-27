@@ -227,6 +227,7 @@ import { probeGatewayRuntime } from './lib/gatewayRuntime.js'
 import { probeGridAssignment, sameGridAssignment } from './lib/gridAssignment.js'
 import { agentFrame, type AgentFrame } from './lib/agentFrame.js'
 import { Nixfred, type NixfredSessionLike } from './nixfredWiring.js'
+import { HermesSessionBackend, hermesSessionBackendConfig } from './lib/hermesSessionBackend.js'
 import { agentTokenUsage } from './lib/agentTokenUsage.js'
 import { SessionInputController } from './lib/sessionInput.js'
 import { DeviceResultJournal } from './lib/autonomous-device/resultJournal.js'
@@ -2250,7 +2251,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
      */
     replayFromStart = false,
   ): Promise<boolean> => {
-    if (!await validateTerminal(session)) return false
+    // A hosted row has no terminal to validate: its engine store is the only thing to attach to.
+    if (!session.hosted && !await validateTerminal(session)) return false
     if (!reset && (
       turnStates.has(session.sessionId)
       || codexNormalizers.has(session.sessionId)
@@ -3652,6 +3654,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     cancelAgent: (agentId, confirmed) => cancelAgent(agentId, confirmed),
     tokenUsage: (s) => { const r = registry.resolve(s.agentId); return r ? agentTokenUsage.get(r) : null },
     hookPort: () => hookPort,
+    sendToAgent: (agentId, text) => submitAgent(agentId, text),
   })
 
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(env.PORT, {
@@ -5683,6 +5686,46 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     })().catch((err) => console.error('[msg] submit failed:', err instanceof Error ? err.message : err))
   }
   backend.onMessage = (id, content, deliveryId) => submitAgent(id, content, deliveryId)
+
+  // Hermes sessions with no pane (Desktop bots, Bot Mode profiles, gateway): read off every Hermes
+  // store and registered as hosted rows, so the whole fleet is on the roster, not just tmux panes.
+  // Off with HARNESS_HERMES_SESSIONS=0. A hosted row cannot be typed into from here (no terminal);
+  // its turns still stream through the same HermesReader a pane-backed session uses.
+  const hermesHosted = hermesSessionBackendConfig()
+  if (hermesHosted.enabled) {
+    const hermesStore = new HermesSessionBackend({
+      registry,
+      idleMs: hermesHosted.idleMs,
+      log: (line) => console.log(line),
+      onNew: (agentId) => {
+        const row = registry.byAgent(agentId)
+        if (!row) return
+        void attachSession(row).then((attached) => {
+          if (!attached) { registry.setActive(agentId, false); return }
+          syncRecapPool()
+          announceSession(row)
+        }).catch((err) => console.error(`[hermes-store] ${sid(agentId)} attach failed:`, err instanceof Error ? err.message : err))
+      },
+      onRetired: (agentId, sessionId) => {
+        hermesReaders.get(sessionId)?.stop()
+        hermesReaders.delete(sessionId)
+        const row = registry.byAgent(agentId)
+        if (row) announceSession(row)
+        console.log(`[hermes-store] ${sid(agentId)} dormant · idle past the window`)
+      },
+      onVanished: (agentId, sessionId) => {
+        hermesReaders.get(sessionId)?.stop()
+        hermesReaders.delete(sessionId)
+        turnStates.delete(sessionId)
+        syncRecapPool()
+        console.log(`[hermes-store] ${sid(agentId)} forgotten · gone from every store`)
+      },
+    })
+    hermesStore.start()
+    console.log(`[hermes-store] watching every Hermes home for paneless sessions · idle window ${Math.round(hermesHosted.idleMs / 60000)} min`)
+  } else {
+    console.log('[hermes-store] disabled (HARNESS_HERMES_SESSIONS=0)')
+  }
   backend.onCancelOrchestratorMessage = id => input.cancelDelivery(id)
 
   // Keep the log file under its cap. This daemon writes it through an inherited stdout fd, so a size
@@ -6443,6 +6486,14 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
     case 'pins': body = { agentId: args[0] }; break
     case 'asciicast': body = { agentId: args[0] }; break
     case 'audit': action = 'audit-tail'; body = { n: Number(args[0] ?? 50) }; break
+    case 'collisions': break
+    case 'lock': if (!args[0]) { console.error('Usage: harness lock <repo-path> [branch] [--agent=<id>]'); process.exit(1) } body = { repo: args[0], branch: args[1] ?? '', agentId: flag('agent') ?? '' }; break
+    case 'unlock': body = { repo: args[0], branch: args[1] ?? '' }; break
+    case 'locks': break
+    case 'branches': break
+    case 'ci': break
+    case 'loops': break
+    case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
     default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
       for (const f of flags) { const m = /^--([a-zA-Z-]+)=(.*)$/.exec(f); if (m) body[m[1]!] = m[2] }
@@ -6466,6 +6517,17 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
     }
     console.log(`${r.hostname}: ${r.summary.count} ${r.summary.state}`)
     for (const a of r.agents) console.log(`  ${a.glyph} ${a.name.padEnd(28)} ${a.engine.padEnd(10)} ${a.label}${a.detail ? `  ${a.detail}` : ''}`)
+    return
+  }
+  if (action === 'hermes-health' && result && typeof result === 'object' && Array.isArray((result as { lines?: unknown }).lines)) {
+    for (const line of (result as { lines: string[] }).lines) console.log(line)
+    return
+  }
+  if (action === 'collisions' && result && typeof result === 'object') {
+    const r = result as { alerts: Array<{ at: number; kind: string; detail: string }>; locks: Array<{ branch: string; repo: string; holderName: string }> }
+    console.log(r.alerts.length ? `${r.alerts.length} collision(s) in the last hour:` : 'no collisions in the last hour')
+    for (const a of r.alerts) console.log(`  ${new Date(a.at).toISOString().slice(11, 16)} ${a.kind.padEnd(6)} ${a.detail}`)
+    for (const l of r.locks) console.log(`  lock ${l.branch} in ${l.repo} held by ${l.holderName}`)
     return
   }
   console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2))
@@ -7340,6 +7402,7 @@ switch (cmd) {
   case 'attention': case 'capabilities': case 'stop-all': case 'adopt': case 'unadopt': case 'adopted':
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
+  case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

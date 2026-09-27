@@ -29,9 +29,14 @@ function parseFeedLine(line) {
     if (!d || typeof d !== "object") return { ok: false, agents: [], error: "bad payload" };
     if (d.error) return { ok: false, agents: [], error: String(d.error) };
     var agents = Array.isArray(d.agents) ? d.agents : [];
+    var alerts = Array.isArray(d.alerts) ? d.alerts : [];
     return {
       ok: true,
       hostname: d.hostname || "",
+      // Collision alerts from the daemon: two agents on one file, folder or branch inside the hour.
+      alerts: alerts.map(function (x) {
+        return { kind: String(x.kind || ""), detail: String(x.detail || ""), at: Number(x.at) || 0 };
+      }),
       agents: agents.map(function (a) {
         return {
           agentId: String(a.agentId || ""),
