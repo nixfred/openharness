@@ -11,6 +11,7 @@ import '../logging/debug_surface.dart';
 /// be listed without a screen behind it or reachable without a row.
 enum SettingsSection {
   account(LucideIcons.user300, 'Account'),
+  profiles(LucideIcons.monitor300, 'Profiles'),
   usage(LucideIcons.chartNoAxesColumn300, 'Usage'),
   customize(LucideIcons.palette300, 'Customize'),
   notifications(LucideIcons.bell300, 'Notifications'),
@@ -93,6 +94,7 @@ const _kSettingsGroups = [
     SettingsSection.notifications,
     SettingsSection.devices,
     SettingsSection.account,
+    SettingsSection.profiles,
   ]),
   // Debug and Tracking sit between the two things they are most often reached
   // from: the keys that open them, and the version a report has to name. The
