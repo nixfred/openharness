@@ -23,6 +23,8 @@ Panel {
   readonly property bool reducedMotion: setting("reducedMotion", false) === true
   readonly property bool showMachine: setting("showMachine", true) !== false
   readonly property string focusWindowClass: String(setting("focusWindowClass", "harness"))
+  // Absolute path to a round-cropped picture of the person the agents wait on; empty means no avatar.
+  readonly property string avatarPath: String(setting("avatarPath", "") || "")
   readonly property int ringSize: {
     var v = Number(setting("ringSize", 18))
     return isFinite(v) ? Math.max(12, Math.min(28, Math.round(v))) : 18
@@ -179,6 +181,7 @@ Panel {
           agent: parent.agent
           reducedMotion: root.reducedMotion
           theme: root.theme
+          avatarPath: root.avatarPath
         }
 
         MouseArea {
@@ -189,7 +192,9 @@ Panel {
           ToolTip.delay: 300
           ToolTip.text: (agent.name || "agent") + "  " + (agent.engine || "") +
             (root.showMachine && agent.machine ? "  @" + agent.machine : "") +
+            (agent.lane ? "  [" + agent.lane + "]" : "") +
             "\n" + (agent.label || agent.state) + (agent.since ? "  " + Model.ago(agent.since, root.nowMs) : "") +
+            (agent.spend && agent.spend.usd ? "\nspend $" + agent.spend.usd.toFixed(2) + (agent.spend.fraction !== null ? "  " + Math.round(agent.spend.fraction * 100) + "% of cap" : "") : "") +
             (agent.detail ? "\n" + agent.detail : "")
         }
       }

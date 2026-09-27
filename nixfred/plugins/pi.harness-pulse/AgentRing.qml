@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import qs.Commons
 
 // One agent, one ring. Fixed footprint (Law 17: rings resize in place, never the row).
@@ -10,8 +11,15 @@ Item {
   property bool reducedMotion: false
   property var theme: ({})
   property bool showGlyph: reducedMotion
+  // A picture of the person the agent is waiting on (Fred's face), shown inside the ring only while
+  // the agent waits or needs permission. Empty means never.
+  property string avatarPath: ""
 
   readonly property string state: agent && agent.state ? agent.state : "idle"
+  // Spend as a fraction of the per-agent cap, or -1 when no cap is set: drawn as the outer arc.
+  readonly property real spendFraction: agent && agent.spend && agent.spend.fraction !== null && agent.spend.fraction !== undefined ? Number(agent.spend.fraction) : -1
+  readonly property bool waitingOnPerson: state === "waiting" || state === "permission"
+  readonly property bool showAvatar: avatarPath !== "" && waitingOnPerson
   readonly property color accent: Color.accent
   readonly property color urgent: theme.yellow ? theme.yellow : Color.urgent
   readonly property color danger: theme.red ? theme.red : Color.urgent
@@ -76,6 +84,7 @@ Item {
   onFillChanged: arc.requestPaint()
   onStateColorChanged: arc.requestPaint()
   onFlashChanged: arc.requestPaint()
+  onSpendFractionChanged: arc.requestPaint()
 
   Item {
     anchors.centerIn: parent
@@ -94,9 +103,28 @@ Item {
         var ctx = getContext("2d")
         var w = width, h = height, c = w / 2
         var lw = ring.state === "failed" ? 1.5 : 2.2
-        var r = c - lw
+        // The outer edge belongs to the spend arc when a cap is set; the state ring sits one line in.
+        var hasSpend = ring.spendFraction >= 0
+        var r = c - lw - (hasSpend ? 1.6 : 0)
         ctx.reset()
         ctx.clearRect(0, 0, w, h)
+        if (hasSpend) {
+          var f = Math.min(1, ring.spendFraction)
+          var spendColor = ring.spendFraction >= 1 ? ring.danger : ring.spendFraction >= 0.8 ? ring.urgent : Qt.rgba(ring.accent.r, ring.accent.g, ring.accent.b, 0.85)
+          ctx.beginPath()
+          ctx.lineWidth = 1.2
+          ctx.strokeStyle = Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+          ctx.arc(c, c, c - 0.7, 0, Math.PI * 2)
+          ctx.stroke()
+          if (f > 0) {
+            ctx.beginPath()
+            ctx.lineWidth = 1.2
+            ctx.lineCap = "round"
+            ctx.strokeStyle = spendColor
+            ctx.arc(c, c, c - 0.7, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2)
+            ctx.stroke()
+          }
+        }
         // Base ring, always present so the footprint reads even when idle.
         ctx.beginPath()
         ctx.lineWidth = lw
@@ -125,9 +153,44 @@ Item {
       }
     }
 
+    // The face of the person being waited on, round-masked inside the ring. Fades in and out; the
+    // ring itself is unchanged so the footprint never moves.
+    Item {
+      id: avatarHolder
+      anchors.centerIn: parent
+      width: ring.size - 6
+      height: ring.size - 6
+      visible: opacity > 0
+      opacity: ring.showAvatar ? 1.0 : 0.0
+      Behavior on opacity { NumberAnimation { duration: ring.reducedMotion ? 0 : 220 } }
+      Image {
+        id: avatar
+        anchors.fill: parent
+        source: ring.avatarPath !== "" ? "file://" + ring.avatarPath : ""
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+        cache: true
+        visible: false
+      }
+      Rectangle {
+        id: avatarMask
+        anchors.fill: parent
+        radius: width / 2
+        color: "white"
+        visible: false
+        layer.enabled: true
+      }
+      MultiEffect {
+        anchors.fill: parent
+        source: avatar
+        maskEnabled: true
+        maskSource: avatarMask
+      }
+    }
+
     Text {
       anchors.centerIn: parent
-      visible: ring.showGlyph
+      visible: ring.showGlyph && !ring.showAvatar
       text: agent && agent.glyph ? agent.glyph : ""
       color: ring.state === "done" ? Color.background : ring.stateColor
       font.pixelSize: Math.max(8, ring.size * 0.55)

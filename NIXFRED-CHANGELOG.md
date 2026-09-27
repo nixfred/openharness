@@ -5,6 +5,17 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## nixfred 0.1.2 (CLI 0.2.88-nixfred.3) on upstream 46897998, 2026-09-27
+
+- Fleet dispatcher end to end (`harness dispatch`, `dispatches`): a bounded job to a linked machine
+  over the daemon's own E2EE relay session; result read off the worker's `DISPATCH_RESULT:` line.
+- Clipboard and file drop between paired machines (`harness clip push`), sealed as a machine request.
+- Harness Pulse: spend arc on each ring's outer edge (accent, amber at 80 percent, red at the cap)
+  and the person's face inside the ring of an agent waiting on them, from an `avatarPath` setting
+  (empty by default). Validated in a Test Drive VM (quickshell 0.3.1): MultiEffect round mask works,
+  arcs at 0.31, 0.86 and 1.04 render as accent, warning and red; screenshots under ~/VMs/test-drive/evidence/.
+- Attention payload carries `spend` and `lane` per agent. README lists every fork command.
+
 ## nixfred 0.1.1 (CLI 0.2.88-nixfred.2) on upstream 46897998, 2026-09-27
 
 Everything read off Mike Gannotti's fleet (@MichaelGannotti, 23 Hermes/Grok Bot/OpenClaw agents on

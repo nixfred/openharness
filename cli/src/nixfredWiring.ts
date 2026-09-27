@@ -382,7 +382,14 @@ export class Nixfred {
     // Each agent carries the name of the first policy lane its name matches (planner, publisher ...),
     // so the bar and the device can show the role beside the state.
     const lanes = this.policy.lanes ?? []
-    const agents = this.snapshot().map((row) => ({ ...row, lane: lanes.find((l) => { try { return new RegExp(l.agent, 'i').test(row.name) } catch { return false } })?.name ?? null }))
+    const agents = this.snapshot().map((row) => {
+      const spent = this.ledger.agents[row.agentId]
+      const cap = this.caps.enabled ? this.caps.perAgentUsd : null
+      // Spend rides on the row so the bar can draw it as the ring's outer arc: fraction of the
+      // per-agent cap when one is set, else null (no arc).
+      const spend = spent ? { usd: Number(spent.usd.toFixed(2)), tokens: spent.input + spent.output, fraction: cap ? Math.min(1.5, spent.usd / cap) : null } : null
+      return { ...row, lane: lanes.find((l) => { try { return new RegExp(l.agent, 'i').test(row.name) } catch { return false } })?.name ?? null, spend }
+    })
     return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents, alerts: this.collisions.recent() }
   }
 

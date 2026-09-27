@@ -47,7 +47,12 @@ function parseFeedLine(line) {
           since: Number(a.since) || 0,
           detail: String(a.detail || ""),
           label: String(a.label || a.state || ""),
-          glyph: a.glyph ? String(a.glyph) : glyphFor(a.state)
+          glyph: a.glyph ? String(a.glyph) : glyphFor(a.state),
+          lane: a.lane ? String(a.lane) : "",
+          spend: a.spend && typeof a.spend === "object"
+            ? { usd: Number(a.spend.usd) || 0, tokens: Number(a.spend.tokens) || 0,
+                fraction: (a.spend.fraction === null || a.spend.fraction === undefined) ? null : Number(a.spend.fraction) }
+            : null
         };
       })
     };

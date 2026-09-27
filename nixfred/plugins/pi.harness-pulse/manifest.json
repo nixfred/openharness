@@ -23,7 +23,8 @@
       "reducedMotion": false,
       "showMachine": true,
       "focusWindowClass": "harness",
-      "ringSize": 18
+      "ringSize": 18,
+      "avatarPath": ""
     }
   }
 }
