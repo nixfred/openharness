@@ -96,6 +96,15 @@ person who put this device in front of Fred). Three things he said, three things
   size against a budget, profile isolation, and whether `hermes doctor` has run since the current
   version (`harness hermes doctor-done` stamps it). Green, amber or red per home and overall, ready
   to draw as one arc per profile.
+- CI-failure wake (library, wired when the Hermes session backend lands): `nixfred/ciWatch.ts` polls
+  `gh pr checks` for an agent's branch and produces one message per newly failing check with the
+  log tail and "fix, test locally, push, do not merge". His Peyton PR sweep only interrupts on red.
+- Battery mode: when the machine is on battery, a waiting agent shows on the bar and device but only
+  permission and failure pop a desktop notification. `harness loops` lists the loop policy, live
+  leases and the capability line.
+- His open upstream PR #233 (per-computer tab profile) no longer merges cleanly on current main
+  (conflicts in desktop/lib/state/app_state.dart and screens/swarm_screen.dart); not carried here
+  because the Flutter side cannot be built on this host. Worth telling him.
 
 ### Verified
 

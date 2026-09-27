@@ -187,7 +187,10 @@ export class Nixfred {
     const row = (payload.agents as AttentionRow[]).find((r) => r.agentId === agentId)
     const name = row?.name ?? agentId
     this.log({ kind: 'turn', agentId, name: `attention ${previous ?? 'none'} -> ${state}`, detail })
-    if (state === 'waiting' || state === 'permission' || state === 'failed') {
+    // Battery mode (the ten-year-old travel laptop): only permission and failure interrupt; a
+    // waiting agent shows on the bar and the device but does not pop a notification.
+    const onBattery = this.capsCache ? !this.capsCache.value.power.onAc : false
+    if (state === 'permission' || state === 'failed' || (state === 'waiting' && !onBattery)) {
       void notifyAttention({ agentName: name, machine: this.deps.machineName(), state, detail }).catch(() => {})
     }
     if (state === 'done' && row) this.exportRecap(row)
@@ -360,6 +363,10 @@ export class Nixfred {
     switch (action) {
       case 'attention': return this.attentionPayload()
       case 'collisions': return { alerts: this.collisions.recent(), locks: this.collisions.listLocks() }
+      case 'loops': {
+        const leases = (await this.leases.list()).filter((l) => l.expiresAt > this.now())
+        return { policy: this.loopPolicy, leases, capabilities: describeCapabilities(await this.capabilities()) }
+      }
       case 'lock': {
         const s = session(str('agentId'))
         const holder = s ?? { agentId: 'person', name: this.deps.machineName() }
