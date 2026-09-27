@@ -29,6 +29,9 @@ import { buildCheckpoint, listCheckpoints, restoreCheckpoint, describeCheckpoint
 import { buildReviewBundle } from './nixfred/reviewBundle.js'
 import { listPins, pin, startRecording, stopRecording, toAsciicast } from './nixfred/sessionRecorder.js'
 import { installGateHook, uninstallGateHook, gateHookInstalled } from './lib/hooks.js'
+import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
+import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
+import { listHermesHomes } from './engines/hermes/home.js'
 
 export interface NixfredSessionLike {
   agentId: string
@@ -87,6 +90,8 @@ export class Nixfred {
   private readonly turnSpans = new Map<string, Span>()
   private readonly leases: LoopLeaseStore
   private readonly now: () => number
+  readonly collisions: CollisionWatcher
+  private branchTimer: NodeJS.Timeout | null = null
 
   constructor(private readonly deps: NixfredDeps) {
     this.now = deps.now ?? Date.now
@@ -109,6 +114,55 @@ export class Nixfred {
     this.loopPolicy = readJson<LoopPolicy>(this.file('loop-policy.json')) ?? DEFAULT_LOOP_POLICY
     this.leases = new LoopLeaseStore({ readFile: (p) => fsp.readFile(p, 'utf8'), writeFile: (p, d) => fsp.writeFile(p, d), now: this.now, dataDir: this.dataDir })
     this.attention.onChange((entry, previous) => this.onAttentionChange(entry.agentId, entry.state, previous, entry.detail))
+    // The drift alarm: two agents on one file, folder or branch inside an hour. Locks persist per machine.
+    this.collisions = new CollisionWatcher({ now: this.now })
+    this.collisions.setLocks(readJson<BranchLock[]>(this.file('branch-locks.json')) ?? [])
+    this.collisions.onCollision((e) => this.onCollision(e))
+    if (process.env.HARNESS_BRANCH_WATCH !== '0') {
+      this.branchTimer = setInterval(() => { void this.pollBranches() }, 60_000)
+      this.branchTimer.unref()
+    }
+  }
+
+  private onCollision(e: CollisionEvent): void {
+    console.log(`[collision] ${e.detail}`)
+    this.log({ kind: 'turn', agentId: e.agents[0]?.agentId ?? 'daemon', name: `collision ${e.kind}`, detail: e.detail })
+    this.deps.sendLocal({ type: 'attention', payload: this.attentionPayload() })
+    void notifyAttention({ agentName: e.agents.map((a) => a.agentName).join(' and '), machine: this.deps.machineName(), state: 'waiting', detail: e.detail }).catch(() => {})
+  }
+
+  /** Which repo and branch each active agent's folder is on, fed to the collision watcher. */
+  async pollBranches(): Promise<void> {
+    const seen = new Map<string, { repo: string; branch: string } | null>()
+    for (const s of this.deps.sessions()) {
+      if (!s.active || !s.cwd) continue
+      let info = seen.get(s.cwd)
+      if (info === undefined) {
+        try {
+          const repo = (await exec('git', ['-C', s.cwd, 'rev-parse', '--show-toplevel'], {}, 4000)).trim()
+          const branch = (await exec('git', ['-C', s.cwd, 'branch', '--show-current'], {}, 4000)).trim()
+          info = repo ? { repo, branch } : null
+        } catch { info = null }
+        seen.set(s.cwd, info)
+      }
+      if (info?.branch) this.collisions.noteBranch({ agentId: s.agentId, agentName: s.name }, info.repo, info.branch)
+    }
+  }
+
+  private saveLocks(): void { writeJson(this.file('branch-locks.json'), this.collisions.listLocks()) }
+
+  private hermesDeps() {
+    return {
+      listHomes: () => listHermesHomes(),
+      stat: async (p: string) => { try { const st = await fsp.stat(p); return { size: st.size, mtimeMs: st.mtimeMs } } catch { return null } },
+      dirBytes: async (p: string) => { try { return Number((await exec('du', ['-sb', p], {}, 10_000)).split(/\s/)[0]) || 0 } catch { return 0 } },
+      writers: async (p: string) => { try { return (await exec('lsof', ['-t', p], {}, 5000)).split(/\s+/).filter(Boolean).map(Number) } catch { return [] } },
+      hermesVersion: async () => { try { return (await exec('hermes', ['--version'], {}, 5000)).split('\n')[0]?.trim() || null } catch { return null } },
+      readJson: async (p: string) => JSON.parse(await fsp.readFile(p, 'utf8')) as unknown,
+      writeJson: async (p: string, v: unknown) => { writeJson(p, v) },
+      now: this.now,
+      dataDir: this.dataDir,
+    }
   }
 
   private file(name: string): string { return join(this.dataDir, name) }
@@ -124,7 +178,7 @@ export class Nixfred {
 
   attentionPayload(): Record<string, unknown> {
     const agents = this.snapshot()
-    return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents }
+    return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents, alerts: this.collisions.recent() }
   }
 
   private onAttentionChange(agentId: string, state: AttentionState, previous: AttentionState | null, detail: string): void {
@@ -168,7 +222,11 @@ export class Nixfred {
   }
 
   gate(sessionId: string, agentId: string, toolName: string, input: unknown): GateVerdict {
-    const agentName = this.deps.sessions().find((s) => s.agentId === agentId)?.name ?? ''
+    const session = this.deps.sessions().find((s) => s.agentId === agentId)
+    const agentName = session?.name ?? ''
+    // Every tool call is journaled and fed to the drift alarm, whatever the gate decides.
+    this.log({ kind: 'tool', agentId, sessionId, name: toolName, detail: typeof input === 'object' && input ? JSON.stringify(input).slice(0, 300) : '' })
+    this.collisions.noteTool({ agentId, agentName: agentName || agentId }, toolName, input, session?.cwd)
     const verdict = evaluateToolCall(this.policy, toolName, input, agentName)
     if (verdict.decision !== 'allow') {
       console.log(`[gate] ${agentId} ${toolName} → ${verdict.decision} (${verdict.rule})`)
@@ -301,6 +359,19 @@ export class Nixfred {
     const recDeps = { exec: (c: string, a: string[]) => exec(c, a), writeFile: cpDeps.writeFile, readFile: cpDeps.readFile, stat: async (p: string) => ({ size: (await fsp.stat(p)).size }), mkdir: cpDeps.mkdir, now: this.now }
     switch (action) {
       case 'attention': return this.attentionPayload()
+      case 'collisions': return { alerts: this.collisions.recent(), locks: this.collisions.listLocks() }
+      case 'lock': {
+        const s = session(str('agentId'))
+        const holder = s ?? { agentId: 'person', name: this.deps.machineName() }
+        const out = this.collisions.lock({ repo: str('repo'), branch: str('branch'), holderAgentId: holder.agentId, holderName: holder.name, machineId: this.deps.machineId() })
+        if ('error' in out) throw new Error(out.error)
+        this.saveLocks(); return out
+      }
+      case 'unlock': { const removed = this.collisions.unlock(str('repo'), str('branch')); this.saveLocks(); return { removed } }
+      case 'locks': return { locks: this.collisions.listLocks() }
+      case 'branches': await this.pollBranches(); return { alerts: this.collisions.recent() }
+      case 'hermes-health': { const r = await hermesHealth(this.hermesDeps()); return { ...r, lines: describeHermesHealth(r) } }
+      case 'hermes-doctor-done': return stampHermesDoctor(this.hermesDeps())
       case 'capabilities': return { ...(await this.capabilities(0)), line: describeCapabilities(await this.capabilities()) }
       case 'placement': return this.placement(args as PlacementRequest)
       case 'gate-status': return this.gateStatus()

@@ -91,6 +91,29 @@ describe('Nixfred wiring', () => {
     expect(nix.attention.get('a')?.state).toBe('idle')
   })
 
+  it('raises a collision alert when two agents edit the same file, and it rides on the attention payload', async () => {
+    nix.gate('s-a', 'a', 'Edit', { file_path: '/tmp/proj/src/bridge.ts', old_string: 'x', new_string: 'y' })
+    nix.gate('s-b', 'b', 'Edit', { file_path: '/tmp/proj/src/bridge.ts', old_string: 'y', new_string: 'z' })
+    const alerts = (await nix.command('collisions', {}) as { alerts: Array<{ kind: string; detail: string }> }).alerts
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toMatchObject({ kind: 'file', detail: 'b and a on file /tmp/proj/src/bridge.ts' })
+    const payload = sent.at(-1)!.payload as { alerts: unknown[] }
+    expect(payload.alerts).toHaveLength(1)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(readFileSync(join(dir, 'audit.jsonl'), 'utf8')).toMatch(/"kind":"tool"/)
+  })
+
+  it('locks a branch for one agent and reports another agent on it', async () => {
+    const lock = await nix.command('lock', { repo: '/tmp/proj', branch: 'feature', agentId: 'a' }) as { holderName: string }
+    expect(lock.holderName).toBe('a')
+    await expect(nix.command('lock', { repo: '/tmp/proj', branch: 'feature', agentId: 'b' })).rejects.toThrow(/held by a/)
+    expect(JSON.parse(readFileSync(join(dir, 'branch-locks.json'), 'utf8'))).toHaveLength(1)
+    nix.collisions.noteBranch({ agentId: 'b', agentName: 'b' }, '/tmp/proj', 'feature')
+    const alerts = (await nix.command('collisions', {}) as { alerts: Array<{ kind: string }> }).alerts
+    expect(alerts.map((a) => a.kind)).toEqual(['lock'])
+    expect(await nix.command('unlock', { repo: '/tmp/proj', branch: 'feature' })).toEqual({ removed: true })
+  })
+
   it('exposes the local command surface', async () => {
     const status = await nix.command('gate-status', {}) as { enabled: boolean; rules: number; installed: boolean }
     expect(status).toMatchObject({ enabled: true, installed: false })

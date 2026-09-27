@@ -85,6 +85,17 @@ person who put this device in front of Fred). Three things he said, three things
 - "I really love LOVE the Hermes Kanban and it's essential when orchestrating an AI fleet":
   `harness attention --kanban` prints the fleet as columns (needs you, failed, done unreviewed,
   working, idle), the same states the bar and the device show.
+- "agents drift quietly towards grabbing things solo": the **collision alarm**. Every tool call is
+  journaled and fed to a watcher; two agents on the same file, the same folder or the same branch
+  inside an hour raise one alert (deduped per hour) that rides on the attention payload, reaches the
+  bar and the desktop notification, and shows in `harness collisions`. Branches are observed every
+  minute from each agent's folder. `harness lock <repo> <branch>` claims a branch for one agent so
+  anyone else touching it alarms at once; locks persist in `data/branch-locks.json`.
+- His five Hermes rules as a check: `harness hermes` reports every Hermes home (default plus each
+  `profiles/<name>`) with state.db size and age, processes holding it open (lsof), memory folder
+  size against a budget, profile isolation, and whether `hermes doctor` has run since the current
+  version (`harness hermes doctor-done` stamps it). Green, amber or red per home and overall, ready
+  to draw as one arc per profile.
 
 ### Verified
 
