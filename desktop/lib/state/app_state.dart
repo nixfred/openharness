@@ -51,6 +51,7 @@ import '../widgets/engine_identity.dart'
     show allEngines, engineIdentity, isTerminalEngine;
 import '../store/store_screen.dart' show openStoreAgent;
 import 'dial_status.dart';
+import 'attention_state.dart';
 import 'grid_pictures.dart';
 import 'model_start_watch.dart';
 import 'harness_placement.dart';
@@ -1824,6 +1825,8 @@ class AppNotifier extends ChangeNotifier {
   /// frames from the local daemon; its own notifier, so the row rebuilds
   /// without dragging the whole rail through a machine-list rebuild.
   final DialState dial;
+  /// nixfred: per-agent attention from the local daemon's `attention` frame.
+  final AttentionState attention = AttentionState();
   final AgentPreference agentPreference;
   final ProjectHistory projectHistory;
 
@@ -11023,6 +11026,10 @@ class AppNotifier extends ChangeNotifier {
       // ── the dial, over the cable, forwarded by the local daemon ──────────────────────────────────
       // Local-only frames (backend.sendLocal in the harness CLI): they describe a hand at THIS desk, so
       // they never reach the cloud web audience, who may be sitting at another computer entirely.
+      case 'attention':
+        // nixfred: what each agent needs from a person; drives the pane glow.
+        attention.apply(payload);
+        return;
       case 'dial_status':
         // The dial came, went, or started taking an update. Its own notifier —
         // see [dial] — so nothing else in the window rebuilds for it.

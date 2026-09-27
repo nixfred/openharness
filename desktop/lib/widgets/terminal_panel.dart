@@ -33,6 +33,7 @@ import '../terminal/terminal_links.dart';
 import '../terminal/terminal_session.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
+import 'attention_glow.dart';
 import '../terminal/terminal_viewport.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
@@ -1569,7 +1570,11 @@ class _TerminalPanelState extends State<TerminalPanel>
     final machineState = widget.notifier.stateOf(session.machineId);
     final remote = machineState != null && !machineState.isLocalMachine;
     final showComposer = _showsComposer;
-    return KeymapRegion(
+    // nixfred: the pane glows while its agent waits on a person (attention frame from the daemon).
+    return AttentionGlow(
+      attention: widget.notifier.attention,
+      agentId: session.agentId,
+      child: KeymapRegion(
       contextKind: KeymapContext.terminal,
       composing: () =>
           _focusNode.hasFocus &&
@@ -1806,6 +1811,7 @@ class _TerminalPanelState extends State<TerminalPanel>
           ],
         ),
       ),
+    ),
     );
   }
 
