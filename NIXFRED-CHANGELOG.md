@@ -1,0 +1,93 @@
+# nixfred changelog
+
+The nixfred fork of OpenHarness (github.com/nixfred/openharness) adds the features listed in PLAN.md
+on top of upstream. Every entry names the upstream commit it sits on, what was verified and what was
+not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
+"Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
+
+## nixfred 0.1.0 (CLI 0.2.88-nixfred.1) on upstream 46897998, 2026-09-26
+
+The first cut. Phases 1 through 5 of PLAN.md in code; Phase 0 (stock baseline) and Phase 6 (device
+firmware) wait for the device and for firmware signing.
+
+### Daemon (cli/)
+
+- Attention states. One typed state per agent: working, waiting, permission, failed, done (unreviewed),
+  idle, offline, each with a non-colour glyph and a label. Fed from turn events, the question watcher,
+  permission dialogs, cancels and engine errors. Pushed to local windows as an `attention` frame,
+  served at `GET /api/attention` on the loopback API, summarised by the most urgent state present.
+- Desktop notice. `notify-send` (Linux) or `osascript` (macOS) when an agent waits, needs permission
+  or fails, with a "Show me" action that focuses the Harness window. Never steals focus on its own.
+- Recap export. On every finished turn a JSON line under `data/recaps/<day>.jsonl` (machine, agent,
+  engine, cwd, detail) so breadcrumbs and `mem search` never parse engine transcripts.
+- Destructive-action gate. `harness gate init|install|uninstall|status|reload`. Opt-in Claude Code
+  PreToolUse hook; the daemon classifies each tool call against `data/action-policy.json` (default:
+  git push, force push, hard reset, branch -D, rm -rf, sudo, curl|sh, chmod 777, writes under
+  ~/.claude, systemctl changes ask; disk writes, ~/.ssh, ~/.env, `omarchy refresh` deny) and answers
+  with `permissionDecision`, so the engine shows its own prompt and the device mirrors it.
+- Spend brake. `harness spend status|set|off|on`. Per-agent and per-day token and dollar caps with a
+  price table by model family; 80 percent warns, 100 percent holds the pane and tells the web why.
+- Machine capabilities and loop policy. `harness capabilities`, `harness placement`. GPU (nvidia-smi),
+  CPU load, AC/battery, thermal, lid, toolchains on PATH. A `/loop` submit is deferred on battery,
+  closed lid, busy GPU or quiet hours (23:00 to 07:00 America/New_York), and one machine per job via
+  a lease file.
+- Adopt existing panes. `harness adopt %N [engine]`, `unadopt`, `adopted`. A pane the daemon did not
+  create is whitelisted for discovery, so a long-running agent shows up without a restart.
+- Panic stop. `harness stop-all [--except=<agentId>]` cancels every agent turn on this machine.
+- Audit journal. Append-only, secret-redacted `data/audit.jsonl` (rotates at 20 MB, keeps 5) for
+  tool starts, turn transitions, gate and spend decisions and commands. `harness audit [n]`.
+- Spans. OpenTelemetry-shaped spans per agent turn to `data/spans.jsonl`, and to
+  `OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces` when that variable is set.
+- Checkpoints and bundles. `harness checkpoint <agent> --brief=...`, `checkpoints`, `restore`,
+  `harness bundle <agent>` (redacted transcript excerpt, patch, diff stat, audit tail, sha256 manifest,
+  tarball).
+- Session recording. `harness record start|stop <agent>`, `harness pin <agent> <label>`, `pins`,
+  `asciicast` (tmux pipe-pane to a raw log with pinned moments, exported as asciicast v2).
+- Remote orchestrator backend (library only, not wired): `cli/src/nixfred/remoteOrchestratorBackend.ts`
+  gives the existing orchestrator a way to create, message and await an agent on another machine.
+  The worker-side `dispatch_result` frame is not emitted yet.
+
+All of it lives in new files plus small taps in `cli.ts`, `hookServer.ts`, `hook/notify.mjs`,
+`lib/hooks.ts`, `lib/askQuestion.ts` (permission flag on onQuestion) and `lib/tmuxAgentDiscovery.ts`.
+
+### Omarchy side (nixfred/)
+
+- `plugins/pi.harness-pulse`: Quickshell bar widget, one animated ring per agent off `/api/attention`
+  (working sweep, waiting breath, permission breath in red, done fill, failed double flash, offline
+  dim), reduced-motion switch, Law 17 density, python3 feed helper.
+- `hooks/harness-breadcrumb.hook.ts` (Claude Stop hook writes a breadcrumb note under
+  ~/.claude/MEMORY/BREADCRUMBS), `hooks/harness-blip-question.hook.ts` (question to iMessage via
+  Blip, self thread), `bin/harness-blip-answer`, `bin/harness-second-opinion` (diff to codex, grok or
+  kimi), `bin/harness-changelog-x` (CHANGE.log line plus an X post draft, never posts).
+- Domain harnesses: `harness/omarchy-quickshell` (pinned Qt6, qmllint, Test Drive push/check/shot,
+  AGENTS.md with the Alt/Super swap and the no-scroll rule), `harness/larry-memory` (read-only
+  `mem search`), `harness/pai-skills` (any engine gets the PAI skills library, read-only).
+
+### Desktop (desktop/)
+
+- `lib/theme/omarchy_theme.dart`: Omarchy `colors.toml` to a Flutter ColorScheme. Written without a
+  Flutter SDK on the build host; UNTESTED and not wired into the app yet.
+
+### Verified
+
+- `cd cli && npm run typecheck`: clean.
+- `npm test`: 4,851 passed, the same 11 environment-bound failures as upstream 46897998 on this host
+  (dsh shell suites, hookNotify launcher journal, gridHandoff child). 82 new tests.
+- `RUN_REAL_TMUX_DISCOVERY=1 npm run test:tmux-real` (tmux 3.7c): 11 passed, 6 skipped for engines
+  not installed here.
+- Bar widget: see the Test Drive result recorded in PLAN.md status.
+
+### Not verified
+
+- No Harness device was available. Nothing device-side was run.
+- No Flutter SDK: the Dart theme file is unbuilt.
+- The gate's PreToolUse path was unit-tested at the daemon and the hook script was syntax-checked,
+  but not run against a live Claude Code session yet.
+- Loop leases are per machine file; the cross-machine story needs the dispatcher.
+
+### Known gaps carried to the next cut
+
+- Fleet dispatcher end to end (worker emits `dispatch_result`; orchestrator gets a machine backend).
+- Encrypted clipboard and file drop between paired machines.
+- Device firmware work (Phase 6) waits on signed firmware.
+- Hyprland urgency hint is via notify-send only; no window-manager urgency flag yet.

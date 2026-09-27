@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "0.0.1",
+  "version": "0.2.88-nixfred.1",
   "type": "module",
   "bin": {
     "harness": "dist/cli.js"

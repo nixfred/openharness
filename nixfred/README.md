@@ -40,3 +40,7 @@ a filled hexagon and "Harness daemon not running" until the fork is installed.
 
 python3 for plugin helpers, never bun. No `omarchy refresh`. Test in Test Drive, not the live desktop.
 Blip only in Fred's own thread. Law 17: nothing scrolls, rings resize in place. No em dashes.
+
+## harness/pai-skills
+
+A third domain harness: any engine gets the PAI skills library under ~/.claude/skills, read-only, with the 9 Laws as working rules. Install like the others: `harness dsh install ./nixfred/harness/pai-skills --link`.

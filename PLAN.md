@@ -131,3 +131,20 @@ Almost everything else stands on those two.
 
 Do carefully: Phase 3 brakes touch permission flow; Phase 4 fleet touches transport; Phase 6 touches
 firmware. Each waits for its foundation and for upstream's signing work.
+
+## Submitting (per upstream CONTRIBUTING.md, applied 2026-09-26)
+
+Nothing goes upstream until Fred says so and the device has run the code. When it does:
+
+- One topic per PR, cherry-picked from `nixfred/main` onto a fresh branch off `upstream/main` (PRs are squash-merged, so the integration branch itself is never the PR).
+- Every PR that touches `cli/` runs `cd cli && npm install && npm run typecheck && npm test`, and, because adoption touches discovery, `RUN_REAL_TMUX_DISCOVERY=1 npm run test:tmux-real`; the PR says exactly which suites ran and which rows were unavailable.
+- The PR template is filled in full: what it helps someone do, how to try it (install command, one prompt, expected output, screenshot for anything visual), what was verified (engine, OS, versions, known limits).
+- New frame types (`attention`) and the local `/api/attention`, `/api/nixfred` routes count as a shared-protocol change: open an issue first to agree the interface.
+- Harness folders (`nixfred/harness/*`) go to `store/agents/<name>/` with `harness dsh check` output and a real run; credit upstream tools and licenses.
+- Credentials and private project content are scrubbed from every log and recording before it is attached.
+
+Suggested PR order: adopt panes (1), attention state + /api/attention (2), gate (3), spend brake (4), machine capabilities + loop policy (5), audit + spans (6), checkpoints/bundles/recording (7), harness folders (8), Dart theme (9, after a Flutter build).
+
+## Status 2026-09-26 (nixfred 0.1.0)
+
+Phase 1: all eight shipped in nixfred/ (bar widget QML pending Test Drive result below). Phase 2: adopt panes and attention events shipped; recap export shipped; notify-send with Show action shipped (no WM urgency flag). Phase 3: gate, spend brake, panic stop, glyph/label accessibility shipped. Phase 4: capabilities + placement, loop defer + lease, checkpoints shipped; dispatcher is a library only; clipboard/file drop not started; worktree lock/CI wake not started. Phase 5: audit journal, spans, bundles, recording shipped; memory and PAI skills harnesses shipped. Phase 6: not started by design.

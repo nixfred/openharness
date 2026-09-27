@@ -1,0 +1,14 @@
+{
+  "spec": 1,
+  "id": "nixfred/pai-skills",
+  "name": "PAI Skills",
+  "category": "Coding",
+  "author": "Fred Nix",
+  "description": "Gives any engine the skills library a PAI (Personal AI Infrastructure) install already carries under ~/.claude/skills, read-only, with the response format and the 9 Laws as working rules.",
+  "engine": "claude",
+  "agent": {
+    "instructions": "AGENTS.md",
+    "skills": ["skills"],
+    "env": { "PAI_SKILLS_DIR": "${HOME}/.claude/skills" }
+  }
+}
