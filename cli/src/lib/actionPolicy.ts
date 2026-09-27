@@ -17,12 +17,25 @@ export interface GateRule {
   decision: Exclude<GateDecision, 'allow'>
 }
 
+/**
+ * A lane: rules that apply only to agents whose name matches. This is how a fleet says "the planner
+ * never pushes, the publisher never posts without me": one policy file, one lane per role, the
+ * machine-wide rules still apply underneath.
+ */
+export interface GateLane {
+  name: string
+  /** Regex (source) matched case-insensitively against the agent's display name. */
+  agent: string
+  rules: GateRule[]
+}
+
 export interface ActionPolicy {
   version: 1
   enabled: boolean
   rules: GateRule[]
   /** Substrings that, when present in the flattened input, always allow (for known-safe wrappers). */
   allowIf?: string[]
+  lanes?: GateLane[]
 }
 
 const HOME = '(?:~|\\$HOME|/home/[^/\\s]+|/Users/[^/\\s]+)'
@@ -70,14 +83,22 @@ function regex(rule: GateRule): RegExp {
   return re
 }
 
-/** Deny beats ask beats allow. An `allowIf` substring short-circuits to allow. */
-export function evaluateToolCall(policy: ActionPolicy, toolName: string, input: unknown): GateVerdict {
+const laneRegex = new WeakMap<GateLane, RegExp>()
+function laneMatches(lane: GateLane, agentName: string): boolean {
+  let re = laneRegex.get(lane)
+  if (!re) { re = new RegExp(lane.agent, 'i'); laneRegex.set(lane, re) }
+  return re.test(agentName)
+}
+
+/** Deny beats ask beats allow. An `allowIf` substring short-circuits to allow. Lane rules run first. */
+export function evaluateToolCall(policy: ActionPolicy, toolName: string, input: unknown, agentName = ''): GateVerdict {
   if (!policy.enabled) return { decision: 'allow', rule: null, reason: 'gate disabled' }
   const text = flattenToolInput(input)
   if (!text) return { decision: 'allow', rule: null, reason: 'no input' }
   for (const safe of policy.allowIf ?? []) if (text.includes(safe)) return { decision: 'allow', rule: null, reason: `allowIf ${safe}` }
   let verdict: GateVerdict = { decision: 'allow', rule: null, reason: 'no rule matched' }
-  for (const rule of policy.rules) {
+  const laneRules = (policy.lanes ?? []).filter((l) => agentName && laneMatches(l, agentName)).flatMap((l) => l.rules.map((r) => ({ ...r, name: `${l.name}: ${r.name}` })))
+  for (const rule of [...laneRules, ...policy.rules]) {
     if (rule.tools && rule.tools.length && !rule.tools.includes(toolName)) continue
     if (!regex(rule).test(text)) continue
     if (rule.decision === 'deny') return { decision: 'deny', rule: rule.name, reason: `${rule.name} is refused by the machine policy` }
@@ -103,6 +124,16 @@ export function parsePolicy(raw: unknown): { ok: true; policy: ActionPolicy } | 
     if (rule.tools !== undefined && (!Array.isArray(rule.tools) || rule.tools.some((t) => typeof t !== 'string'))) problems.push(`rules[${i}].tools must be strings`)
   })
   if (p.allowIf !== undefined && (!Array.isArray(p.allowIf) || p.allowIf.some((t) => typeof t !== 'string'))) problems.push('allowIf must be strings')
+  if (p.lanes !== undefined) {
+    if (!Array.isArray(p.lanes)) problems.push('lanes must be an array')
+    else p.lanes.forEach((l, i) => {
+      const lane = l as Record<string, unknown>
+      if (typeof lane.name !== 'string' || !lane.name) problems.push(`lanes[${i}].name missing`)
+      if (typeof lane.agent !== 'string') problems.push(`lanes[${i}].agent missing`)
+      else { try { new RegExp(lane.agent) } catch { problems.push(`lanes[${i}].agent is not a valid regex`) } }
+      if (!Array.isArray(lane.rules)) problems.push(`lanes[${i}].rules must be an array`)
+    })
+  }
   return problems.length ? { ok: false, problems } : { ok: true, policy: raw as ActionPolicy }
 }
 

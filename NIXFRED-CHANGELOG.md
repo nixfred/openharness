@@ -68,6 +68,24 @@ All of it lives in new files plus small taps in `cli.ts`, `hookServer.ts`, `hook
 - `lib/theme/omarchy_theme.dart`: Omarchy `colors.toml` to a Flutter ColorScheme. Written without a
   Flutter SDK on the build host; UNTESTED and not wired into the app yet.
 
+### For Mike Gannotti's flow (added 2026-09-27)
+
+Read from his last week on X (@MichaelGannotti, 23 Hermes/Grok Bot/OpenClaw agents on Omarchy, the
+person who put this device in front of Fred). Three things he said, three things built:
+
+- "agents drift quietly towards grabbing things solo and I have to occasionally reign them in", and
+  lanes are "who plans, who checks, who drafts, and who is never allowed to merge or post without me":
+  the gate now has **lanes**. `action-policy.json` takes `lanes: [{name, agent: <regex on the agent's
+  name>, rules: [...]}]`; lane rules run before the machine rules, so a planner named Aiona can be
+  denied every git write while Peyton PR is asked before `gh pr merge`.
+- His bug #191 (activity cards empty for Hermes profile agents) was fixed upstream, but the race we
+  reported as OH-F1 remained: the first session in a new `hermes -p <profile>` could poll the default
+  store forever. **HermesReader now re-resolves the store** while nothing has been read and switches
+  the moment the profile's state.db appears (`resolveDbPath`, test included).
+- "I really love LOVE the Hermes Kanban and it's essential when orchestrating an AI fleet":
+  `harness attention --kanban` prints the fleet as columns (needs you, failed, done unreviewed,
+  working, idle), the same states the bar and the device show.
+
 ### Verified
 
 - `cd cli && npm run typecheck`: clean.

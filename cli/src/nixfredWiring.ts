@@ -168,7 +168,8 @@ export class Nixfred {
   }
 
   gate(sessionId: string, agentId: string, toolName: string, input: unknown): GateVerdict {
-    const verdict = evaluateToolCall(this.policy, toolName, input)
+    const agentName = this.deps.sessions().find((s) => s.agentId === agentId)?.name ?? ''
+    const verdict = evaluateToolCall(this.policy, toolName, input, agentName)
     if (verdict.decision !== 'allow') {
       console.log(`[gate] ${agentId} ${toolName} → ${verdict.decision} (${verdict.rule})`)
       this.log({ kind: 'gate', agentId, sessionId, name: toolName, detail: verdict.reason, decision: verdict.decision })

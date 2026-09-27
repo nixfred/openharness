@@ -89,4 +89,32 @@ d('HermesReader (sqlite3 CLI)', () => {
     expect(reader.turnOpen).toBe(true)
     reader.stop()
   })
+
+  it('moves to a profile store that appears after attach, then streams from it', async () => {
+    // The default store has nothing for this session (the row is a different session's), which is
+    // exactly what a `hermes -p <profile>` session looks like before its own state.db is found.
+    run(db, `INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (1, 'other_session', 'user', 'x', 1);`)
+    const profileDir = mkdtempSync(join(tmpdir(), 'hermes-profile-'))
+    const profileDb = join(profileDir, 'state.db')
+    run(profileDb,
+      'CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT,' +
+      ' tool_calls TEXT, tool_name TEXT, finish_reason TEXT, reasoning TEXT, timestamp REAL);')
+    let resolutions = 0
+    const events: LiveEvent[] = []
+    const reader = new HermesReader({
+      dbPath: db, sessionId: SID, pollMs: 20, reresolveEvery: 2,
+      resolveDbPath: async () => { resolutions += 1; return resolutions >= 2 ? profileDb : db },
+      onEvents: (e) => events.push(...e),
+    })
+    await reader.start()
+    expect(reader.currentDbPath).toBe(db)
+    await wait(150)
+    expect(reader.currentDbPath).toBe(profileDb)
+    execFileSync('sqlite3', [profileDb, `INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (1, '${SID}', 'user', 'now on the profile', 1);`])
+    await wait(120)
+    reader.stop()
+    rmSync(profileDir, { recursive: true, force: true })
+    expect(events.map((e) => e.type)).toEqual(['turn_started'])
+    expect(events[0]).toMatchObject({ payload: { userMessage: 'now on the profile' } })
+  })
 })

@@ -107,6 +107,15 @@ export interface HermesReaderDeps {
   /** Reports the one-time fatal "no SQLite reader" so the caller can warn + stop the reader. */
   onFatal?: (err: Error) => void
   pollMs?: number
+  /**
+   * Re-resolve the store path while nothing has been read yet. The first session in a new
+   * `hermes -p <profile>` can be hooked before its state.db exists, so the resolver at construction
+   * falls back to the default home and, without this, the reader polls the wrong store for the life of
+   * the agent (upstream #191 fixed the lookup; this closes the race after it).
+   */
+  resolveDbPath?: () => Promise<string>
+  /** How many empty ticks between re-resolutions. */
+  reresolveEvery?: number
 }
 
 export class HermesReader {
@@ -114,8 +123,28 @@ export class HermesReader {
   private polling = false
   private cursor = 0
   private state: HermesTurnState = newHermesTurnState()
+  private dbPath: string
+  private emptyTicks = 0
 
-  constructor(private readonly deps: HermesReaderDeps) {}
+  constructor(private readonly deps: HermesReaderDeps) { this.dbPath = deps.dbPath }
+
+  /** The store the reader is polling right now (changes once a late profile home is found). */
+  get currentDbPath(): string { return this.dbPath }
+
+  private async maybeReresolve(): Promise<void> {
+    if (!this.deps.resolveDbPath || this.cursor > 0) return
+    this.emptyTicks += 1
+    if (this.emptyTicks % (this.deps.reresolveEvery ?? 3) !== 0) return
+    try {
+      const next = await this.deps.resolveDbPath()
+      if (next && next !== this.dbPath) {
+        this.dbPath = next
+        this.state = newHermesTurnState()
+        const all = await readHermesMessages(this.dbPath, this.deps.sessionId)
+        this.hydrate(all)
+      }
+    } catch { /* keep polling the current store; the next re-resolution tries again */ }
+  }
 
   get turnOpen(): boolean { return this.state.open }
   closeTurn(): void { this.state.open = false; this.state.pendingTools.clear() }
@@ -123,7 +152,7 @@ export class HermesReader {
   /** Hydrate silently (no replay), then start polling. */
   async start(): Promise<void> {
     try {
-      const all = await readHermesMessages(this.deps.dbPath, this.deps.sessionId)
+      const all = await readHermesMessages(this.dbPath, this.deps.sessionId)
       this.hydrate(all)
     } catch (err) {
       if (err instanceof HermesSqliteMissing) { this.deps.onFatal?.(err); return }
@@ -153,8 +182,8 @@ export class HermesReader {
     if (this.polling) return
     this.polling = true
     try {
-      const batch = await readHermesMessages(this.deps.dbPath, this.deps.sessionId, this.cursor)
-      if (batch.length === 0) return
+      const batch = await readHermesMessages(this.dbPath, this.deps.sessionId, this.cursor)
+      if (batch.length === 0) { await this.maybeReresolve(); return }
       const events: LiveEvent[] = []
       for (const msg of batch) {
         this.cursor = Math.max(this.cursor, msg.id)

@@ -2401,6 +2401,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // Hermes has no transcript file — poll its SQLite store, like opencode.
       const reader = new HermesReader({
         dbPath: await hermesDbForSession(session),
+        // Keep looking for a late profile home until the first row is read (see HermesReaderDeps).
+        resolveDbPath: () => hermesDbForSession(registry.bySession(session.sessionId) ?? session),
         sessionId: session.sessionId,
         onEvents: (events) => emitSessionEvents(session.sessionId, events),
         onFatal: (err) => console.warn(`[hermes] ${sid(session.sessionId)} ${err.message}`),
@@ -6450,7 +6452,18 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
   if (!res.ok || reply.ok === false) { console.error(`✗ ${String(reply.error ?? res.statusText)}`); process.exit(1) }
   const result = reply.result as unknown
   if (action === 'attention' && result && typeof result === 'object') {
-    const r = result as { hostname: string; summary: { state: string; count: number }; agents: Array<{ glyph: string; name: string; engine: string; label: string; detail: string }> }
+    const r = result as { hostname: string; summary: { state: string; count: number }; agents: Array<{ glyph: string; name: string; engine: string; state: string; label: string; detail: string }> }
+    if (flags.includes('--kanban')) {
+      // Columns in the order a person works them: what needs me, what broke, what finished, what runs.
+      const columns: Array<[string, string[]]> = [['NEEDS YOU', ['permission', 'waiting']], ['FAILED', ['failed']], ['DONE, UNREVIEWED', ['done']], ['WORKING', ['working']], ['IDLE', ['idle', 'offline']]]
+      for (const [title, states] of columns) {
+        const rows = r.agents.filter((a) => states.includes(a.state))
+        if (!rows.length) continue
+        console.log(`${title} (${rows.length})`)
+        for (const a of rows) console.log(`  ${a.glyph} ${a.name.padEnd(28)} ${a.engine.padEnd(10)}${a.detail ? `  ${a.detail}` : ''}`)
+      }
+      return
+    }
     console.log(`${r.hostname}: ${r.summary.count} ${r.summary.state}`)
     for (const a of r.agents) console.log(`  ${a.glyph} ${a.name.padEnd(28)} ${a.engine.padEnd(10)} ${a.label}${a.detail ? `  ${a.detail}` : ''}`)
     return
