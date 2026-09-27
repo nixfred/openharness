@@ -74,14 +74,13 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
 
 **Omarchy side** ([nixfred/](nixfred/)): the bar widget, Claude Code hooks (turn breadcrumbs,
 questions to iMessage), a second-opinion review tool, three domain harnesses
-(Omarchy/Quickshell, Larry memory, PAI skills), a Hermes attention plugin, and Omarchy theme
-colours for the app.
+(Omarchy/Quickshell, Larry memory, PAI skills), a Hermes attention plugin, and an **Omarchy** palette in the app's
+Settings, Appearance that follows your Omarchy theme.
 
 **Fixes carried ahead of upstream**: the Hermes profile race after upstream #191 (a new
 profile's first session could read the wrong store forever).
 
-**Not yet**: device firmware changes (they wait on signed firmware), wiring the Omarchy palette
-into the app theme, approval batching on the device.
+**Not yet**: device firmware changes (they wait on signed firmware), approval batching on the device.
 
 ### Every agent, side by side
 

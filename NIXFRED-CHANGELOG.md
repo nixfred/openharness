@@ -5,6 +5,26 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## nixfred 0.1.3 (CLI 0.2.88-nixfred.3) on upstream aeb50151, 2026-09-27
+
+- Synced to upstream aeb50151 (session search across machines, #368).
+- Desktop pane glow: a pane's border breathes yellow while its agent waits on you and red on a
+  permission request or failure. Value-equal state rows, so the once-a-second frame repaints nothing.
+- Omarchy palette: Settings, Appearance gains "Omarchy", read live from your Omarchy theme file
+  (background, darker/lighter background, accent, foreground), re-read when picked, Graphite's
+  colours as fallback. The other presets are unchanged.
+- Mike Gannotti's per-computer tab profile (upstream PR #233) carried, rebased onto current main,
+  with two follow-ups upstream's new tab bar needed. Also on its own branch,
+  `nixfred/pr-233-rebased`, for him.
+- Harness Pulse: hold the hexagon 2 s to stop every agent on the machine.
+- README section on how this fork differs from upstream; `nixfred/main` is the fork's default branch.
+
+Verified: Flutter 3.47.5 installed user-local; `flutter build linux --release` succeeds; glow (2),
+palette and appearance (71), tab profile, settings and swarm (316) tests pass; the full Dart suite
+fails the same 25 tests upstream fails on the same commit. CLI suite: the 11 baseline failures plus
+the known orchestrator flake. Not seen live: the glow and the Omarchy palette in a running app,
+the physical hold on the bar.
+
 ## nixfred 0.1.2 (CLI 0.2.88-nixfred.3) on upstream 46897998, 2026-09-27
 
 - Fleet dispatcher end to end (`harness dispatch`, `dispatches`): a bounded job to a linked machine

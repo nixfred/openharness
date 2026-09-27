@@ -41,8 +41,11 @@ class PaletteSection extends StatelessWidget {
                       child: _PaletteChoice(
                         palette: palette,
                         selected: prefs.palette == palette,
-                        onChoose: () =>
-                            unawaited(preferences.setPalette(palette)),
+                        onChoose: () {
+                          // nixfred: re-read the Omarchy theme file so a theme switch shows on pick.
+                          if (palette == HarnessPalette.omarchy) OmarchyLivePalette.refresh();
+                          unawaited(preferences.setPalette(palette));
+                        },
                       ),
                     ),
                 ],
