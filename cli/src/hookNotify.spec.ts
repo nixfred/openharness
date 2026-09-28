@@ -49,7 +49,9 @@ interface RunHookOpts {
   cursorHome?: string
   hermesHome?: string
   /** Fake Hermes SQLite source; null means the session row has not appeared. */
-  hermesSource?: 'cli' | 'subagent' | null
+  hermesSource?: 'cli' | 'tui' | 'subagent' | null
+  /** How long Hermes' store takes to answer: a loaded machine. */
+  hermesDelaySeconds?: number
   grokHome?: string
   devinHome?: string
   input?: Record<string, unknown>
@@ -89,7 +91,8 @@ function runHook(opts: RunHookOpts): Promise<string> {
       }
       if (opts.hermesSource !== undefined) {
         const rows = opts.hermesSource === null ? '[]' : JSON.stringify([{ source: opts.hermesSource }])
-        writeFileSync(join(binDir, 'sqlite3'), `#!/bin/sh\nprintf '%s\\n' '${rows}'\n`, { mode: 0o755 })
+        const delay = opts.hermesDelaySeconds ? `sleep ${opts.hermesDelaySeconds}\n` : ''
+        writeFileSync(join(binDir, 'sqlite3'), `#!/bin/sh\n${delay}printf '%s\\n' '${rows}'\n`, { mode: 0o755 })
       }
       env.PATH = `${binDir}:${env.PATH ?? ''}`
     }
@@ -683,7 +686,7 @@ describe('hook notify terminal scope', () => {
     expect(() => readFileSync(join(dataDir, 'registry.json'), 'utf8')).toThrow()
   })
 
-  it('offline Hermes fallback binds only source=cli and rejects delegation children or unknown rows', async () => {
+  it.each(['cli', 'tui'] as const)('offline Hermes fallback binds source=%s and rejects delegation children or unknown rows', async (interactiveSource) => {
     const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-hermes-source-'))
     tmpDirs.push(dir)
     const hermesHome = join(dir, 'hermes')
@@ -701,7 +704,7 @@ describe('hook notify terminal scope', () => {
     await runHook({
       ...common,
       dataDir: cliData,
-      hermesSource: 'cli',
+      hermesSource: interactiveSource,
       input: { hook_event_name: 'on_session_start', session_id: '20260810_120000_a1b2c3' },
     })
     expect(JSON.parse(readFileSync(join(cliData, 'registry.json'), 'utf8'))).toMatchObject([{
@@ -718,6 +721,28 @@ describe('hook notify terminal scope', () => {
       })
       expect(() => readFileSync(join(dataDir, 'registry.json'), 'utf8')).toThrow()
     }
+  })
+
+  it('still binds a CLI Hermes session when its store is slow to answer, as on a loaded machine', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-hermes-slow-'))
+    tmpDirs.push(dir)
+    const dataDir = join(dir, 'data')
+    await runHook({
+      port: 9,
+      tmuxPane: '%83',
+      engine: 'hermes',
+      processEngine: 'hermes',
+      processExecutable: 'python3',
+      processArgs: 'python3 /opt/venvs/hermes/lib/python3.12/site-packages/hermes-agent/hermes',
+      hermesHome: join(dir, 'hermes'),
+      dataDir,
+      hermesSource: 'cli',
+      hermesDelaySeconds: 1.5,
+      input: { hook_event_name: 'on_session_start', session_id: '20260810_120003_a1b2c3' },
+    })
+    expect(JSON.parse(readFileSync(join(dataDir, 'registry.json'), 'utf8'))).toMatchObject([{
+      sessionId: '20260810_120003_a1b2c3', engine: 'hermes', tmuxPane: '%83',
+    }])
   })
 
   it('does not fallback when the adapter accepts the hook event', async () => {
@@ -872,6 +897,9 @@ describe('hook notify terminal scope', () => {
       updatedAt: 1,
       lastHookAt: 1,
       lastTranscriptAt: 1,
+      // When an app last opened it — every app's "last used" order reads this, so a hook that lands
+      // while the daemon is down must not be the write that forgets it.
+      lastOpenedAt: 1_790_000_000_000,
     }]))
 
     await runHook({
@@ -891,6 +919,7 @@ describe('hook notify terminal scope', () => {
       grid: { baseUrl: gridLaunch.baseUrl, model: null },
       gridLaunch,
       bypassPermission: true,
+      lastOpenedAt: 1_790_000_000_000,
     })
     expect(registry[0]).not.toHaveProperty('launch')
   })

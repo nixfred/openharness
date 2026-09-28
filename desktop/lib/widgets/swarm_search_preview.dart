@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/terminal/terminal_text.dart';
+import 'package:xterm/xterm.dart' show TerminalTheme;
 
 import '../core/models.dart';
 import '../shared/theme/app_theme.dart' as grid;
@@ -12,6 +13,7 @@ import '../shared/theme/status_line_style.dart';
 import '../state/app_state.dart';
 import '../state/harness_sessions.dart';
 import '../state/session_content_search.dart';
+import '../state/session_tail.dart';
 import '../state/swarm_navigation.dart';
 import '../state/swarm_search.dart';
 import '../terminal/terminal_theme.dart';
@@ -19,6 +21,7 @@ import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart';
 import 'engine_identity.dart';
 import 'search_result_text.dart' show SessionSnippetText;
+import 'session_tail_view.dart';
 import 'swarm_preview_scroll.dart';
 
 typedef _PreviewAgent = ({MachineState machine, Agent agent});
@@ -67,8 +70,29 @@ class SwarmSearchPreview extends StatefulWidget {
   State<SwarmSearchPreview> createState() => _SwarmSearchPreviewState();
 }
 
+/// The conversation an external row previews: its own, on its machine.
+SessionTailKey? _externalKey(SwarmDestination row) =>
+    switch ((row.external, row.machineId)) {
+      (final external?, final machineId?) => (
+        machineId: machineId,
+        sessionId: external.sessionId,
+      ),
+      _ => null,
+    };
+
+/// The session a single-agent row previews the end of: the agent's current
+/// one, which is what opening the row shows.
+SessionTailKey? _tailKey(_PreviewAgent item) => switch (item.agent.sessionId) {
+  final sessionId? => (
+    machineId: item.machine.machine.machineId,
+    sessionId: sessionId,
+  ),
+  null => null,
+};
+
 class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
   Timer? _warm;
+  Timer? _tail;
   String? _selectedId;
   SessionContentHit? _found;
   late SwarmPreviewScrollController _scroll;
@@ -78,6 +102,8 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
   void initState() {
     super.initState();
     _scroll = _scrollController();
+    // Each opening shows the sessions as they are now.
+    app.sessionTails.opened();
     widget.search.addListener(_changed);
     _changed();
   }
@@ -110,7 +136,13 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
     _selectedId = row?.id;
     setState(() {});
     _warm?.cancel();
+    _tail?.cancel();
     if (row?.isCommand == true || row?.pickerQuery != null) return;
+    // A row passed over while arrowing is not asked for; one that stays
+    // selected is, once per Cmd-P opening. Nothing refreshes it after that.
+    _tail = Timer(const Duration(milliseconds: 60), () {
+      if (mounted && row != null) _wantTail(row);
+    });
     _warm = Timer(const Duration(milliseconds: 140), () {
       if (!mounted || row == null) return;
       final selected = _agents(app, row);
@@ -124,12 +156,246 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
           for (final item in _agents(app, neighbor).take(2))
             app.previewKey(item.machine.machine.machineId, item.agent),
       ], prioritize: true);
+      // The next rows' latest turns, so arrowing down finds them ready.
+      for (final neighbor in neighbors) {
+        if (_externalKey(neighbor) case final key?) {
+          app.sessionTails.want(key);
+          continue;
+        }
+        final items = _agents(app, neighbor);
+        if (neighbor.isGroup || items.length != 1) continue;
+        if (_tailKey(items.single) case final key?) app.sessionTails.want(key);
+      }
     });
+  }
+
+  void _wantTail(SwarmDestination row) {
+    if (_externalKey(row) case final key?) {
+      app.sessionTails.want(key);
+      return;
+    }
+    final items = _agents(app, row);
+    if (row.isGroup || items.length != 1) return;
+    final item = items.single;
+    if (_tailKey(item) case final key?) app.sessionTails.want(key);
+  }
+
+  /// A conversation Harness did not start: what it is and where it ran, then
+  /// its latest turns from the bottom up, as any session's.
+  Widget _external(
+    SwarmDestination row,
+    ExternalSessionRef external,
+    EdgeInsets padding,
+    Size cell,
+    TerminalTheme theme,
+  ) {
+    final terminal = widget.terminal;
+    final muted = terminal
+        ? terminalContentStyle(color: theme.foreground.withValues(alpha: .54))
+        : _muted;
+    final body = terminal
+        ? terminalContentStyle(color: theme.foreground)
+        : _body;
+    final warning = terminal ? theme.yellow : const Color(0xffe9bf79);
+    final gap = terminal ? cell.height : 12.0;
+    final key = _externalKey(row)!;
+    final tail = app.sessionTails.read(key);
+    final open = tail?.openElsewhere ?? external.open;
+    final header = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          row.title,
+          style: terminal
+              ? body
+              : AppType.monoLabel(fontWeight: FontWeight.w600, height: 1.25),
+        ),
+        Text(row.detail, style: muted),
+        Text(
+          [
+            external.cwd,
+            if (row.machineLabel.isNotEmpty) row.machineLabel,
+          ].join(' · '),
+          style: muted,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        if (open)
+          Padding(
+            padding: EdgeInsets.only(top: gap * .5),
+            child: Text(switch (widget.search.sessionUnavailable(row)) {
+              null => 'Open in a terminal. Opening it here moves it.',
+              final where => '$where. Close it there to open it here.',
+            }, style: muted.copyWith(color: warning)),
+          ),
+      ],
+    );
+    if (tail == null || tail.rows.isEmpty) {
+      _scroll.reversed = false;
+      final found = widget.search.contentHitFor(row.id);
+      return SingleChildScrollView(
+        key: ValueKey('preview-content:${row.id}'),
+        controller: _scroll,
+        padding: padding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            header,
+            if (found != null) ...[
+              SizedBox(height: gap),
+              SessionSnippetText(found, style: body, maxLines: null),
+            ],
+          ],
+        ),
+      );
+    }
+    _scroll.reversed = true;
+    return Column(
+      key: ValueKey('preview-content:${row.id}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: padding.copyWith(bottom: gap),
+          child: header,
+        ),
+        Expanded(
+          child: SessionTailView(
+            tail: tail,
+            tails: app.sessionTails,
+            tailKey: key,
+            controller: _scroll,
+            words: [
+              for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
+                if (word.length > 1) word,
+            ],
+            body: body,
+            muted: muted,
+            gap: gap,
+            padding: padding.copyWith(top: 0),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// One agent's preview: its session's latest turns from the bottom up when
+  /// its machine can say them, else the excerpts the live agent keeps.
+  Widget _single(
+    SwarmDestination row,
+    _PreviewAgent item,
+    EdgeInsets padding,
+    Size cell,
+    TerminalTheme theme,
+  ) {
+    final found = widget.search.contentHitFor(row.id);
+    final key = _tailKey(item);
+    final tail = key == null ? null : app.sessionTails.read(key);
+    if (key == null || tail == null || tail.rows.isEmpty) {
+      _scroll.reversed = false;
+      return SingleChildScrollView(
+        key: ValueKey('preview-content:${row.id}'),
+        controller: _scroll,
+        padding: padding,
+        child: _AgentPreview(
+          app: app,
+          item: item,
+          dense: widget.compactHeader,
+          terminal: widget.terminal,
+          found: found,
+        ),
+      );
+    }
+    _scroll.reversed = true;
+    final terminal = widget.terminal;
+    final muted = terminal
+        ? terminalContentStyle(color: theme.foreground.withValues(alpha: .54))
+        : _muted;
+    final body = terminal
+        ? terminalContentStyle(color: theme.foreground)
+        : _body;
+    final gap = terminal ? cell.height : 12.0;
+    final (:machine, :agent) = item;
+    final live =
+        harnessSessionUnavailable(machine, agent) == null &&
+        (machine.blockedAgents.containsKey(agent.id) ||
+            machine.processingAgentIds.contains(agent.id));
+    // A match older than the turns shown says where it was, above them.
+    final earlier =
+        found != null &&
+            found.field != 'name' &&
+            (found.sessionId != key.sessionId ||
+                found.turn < tail.rows.first.turn)
+        ? found
+        : null;
+    return Column(
+      key: ValueKey('preview-content:${row.id}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: padding.copyWith(bottom: gap),
+          child: _AgentPreview(
+            app: app,
+            item: item,
+            dense: widget.compactHeader,
+            terminal: terminal,
+            part: _Part.header,
+          ),
+        ),
+        if (earlier != null)
+          Padding(
+            padding: EdgeInsets.fromLTRB(padding.left, 0, padding.right, gap),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  [
+                    'Matched earlier',
+                    if (earlier.at case final at?)
+                      '${harnessActivityAge(at, DateTime.now())} ago',
+                  ].join(' · '),
+                  style: muted,
+                ),
+                SessionSnippetText(
+                  earlier,
+                  key: ValueKey('preview-found:${earlier.destinationId}'),
+                  style: body,
+                  maxLines: 2,
+                ),
+              ],
+            ),
+          ),
+        Expanded(
+          child: SessionTailView(
+            tail: tail,
+            tails: app.sessionTails,
+            tailKey: key,
+            controller: _scroll,
+            words: [
+              for (final word in widget.search.wordsQuery.split(RegExp(r'\s+')))
+                if (word.length > 1) word,
+            ],
+            body: body,
+            muted: muted,
+            gap: gap,
+            padding: padding.copyWith(top: 0),
+            footer: live
+                ? _AgentPreview(
+                    app: app,
+                    item: item,
+                    terminal: terminal,
+                    part: _Part.footer,
+                  )
+                : null,
+          ),
+        ),
+      ],
+    );
   }
 
   @override
   void dispose() {
     _warm?.cancel();
+    _tail?.cancel();
     widget.search.removeListener(_changed);
     _scroll.dispose();
     super.dispose();
@@ -150,7 +416,7 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
       terminalThemeStore.value,
     );
     return AnimatedBuilder(
-      animation: Listenable.merge([app, app.sessionPreviews]),
+      animation: Listenable.merge([app, app.sessionPreviews, app.sessionTails]),
       builder: (context, _) {
         final row = widget.search.selected;
         if (row == null) return const SizedBox.shrink();
@@ -187,41 +453,64 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
             ),
           );
         }
+        if (row.external case final external?) {
+          final content = _external(row, external, padding, cell, theme);
+          return Semantics(
+            container: true,
+            label: 'Conversation preview',
+            child: _scroll.reversed
+                ? content
+                : Scrollbar(controller: _scroll, child: content),
+          );
+        }
         final agents = _agents(app, row);
-        return Semantics(
-          container: true,
-          label: 'Agent preview',
-          child: Scrollbar(
-            controller: _scroll,
-            child: row.isGroup || agents.length != 1
-                ? ListView.builder(
-                    key: ValueKey('preview-content:${row.id}'),
-                    controller: _scroll,
-                    padding: padding,
-                    scrollCacheExtent: const ScrollCacheExtent.pixels(120),
-                    itemCount: agents.length + 1,
-                    itemBuilder: (context, index) => index == 0
-                        ? Padding(
-                            padding: EdgeInsets.only(
-                              bottom: widget.terminal ? cell.height : 24,
+        if (row.isGroup || agents.length != 1) _scroll.reversed = false;
+        final content = row.isGroup || agents.length != 1
+            ? ListView.builder(
+                key: ValueKey('preview-content:${row.id}'),
+                controller: _scroll,
+                padding: padding,
+                scrollCacheExtent: const ScrollCacheExtent.pixels(120),
+                itemCount: agents.length + 1,
+                itemBuilder: (context, index) => index == 0
+                    ? Padding(
+                        padding: EdgeInsets.only(
+                          bottom: widget.terminal ? cell.height : 24,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              row.title,
+                              // The list leads the eye; this confirms it.
+                              style: widget.terminal
+                                  ? terminalContentStyle(
+                                      color: theme.foreground,
+                                    )
+                                  : AppType.monoLabel(
+                                      fontWeight: FontWeight.w600,
+                                    ),
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  row.title,
-                                  // The list leads the eye; this confirms it.
-                                  style: widget.terminal
-                                      ? terminalContentStyle(
-                                          color: theme.foreground,
-                                        )
-                                      : AppType.monoLabel(
-                                          fontWeight: FontWeight.w600,
-                                        ),
+                            if (!widget.terminal) const SizedBox(height: 6),
+                            Text(
+                              row.detail,
+                              style: widget.terminal
+                                  ? terminalContentStyle(
+                                      color: theme.foreground.withValues(
+                                        alpha: .54,
+                                      ),
+                                    )
+                                  : _muted,
+                            ),
+                            // Nothing exists yet behind the create row, so
+                            // there is no session to be missing text from.
+                            if (agents.isEmpty && !row.isCreate)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  top: widget.terminal ? cell.height : 24,
                                 ),
-                                if (!widget.terminal) const SizedBox(height: 6),
-                                Text(
-                                  row.detail,
+                                child: Text(
+                                  'No recent session text available.',
                                   style: widget.terminal
                                       ? terminalContentStyle(
                                           color: theme.foreground.withValues(
@@ -230,64 +519,45 @@ class _SwarmSearchPreviewState extends State<SwarmSearchPreview> {
                                         )
                                       : _muted,
                                 ),
-                                // Nothing exists yet behind the create row, so
-                                // there is no session to be missing text from.
-                                if (agents.isEmpty && !row.isCreate)
-                                  Padding(
-                                    padding: EdgeInsets.only(
-                                      top: widget.terminal ? cell.height : 24,
-                                    ),
-                                    child: Text(
-                                      'No recent session text available.',
-                                      style: widget.terminal
-                                          ? terminalContentStyle(
-                                              color: theme.foreground
-                                                  .withValues(alpha: .54),
-                                            )
-                                          : _muted,
-                                    ),
-                                  ),
-                              ],
+                              ),
+                          ],
+                        ),
+                      )
+                    : Padding(
+                        padding: EdgeInsets.only(
+                          top: index > 1
+                              ? widget.terminal
+                                    ? cell.height
+                                    : 20
+                              : 0,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _AgentPreview(
+                              app: app,
+                              item: agents[index - 1],
+                              compact: true,
+                              terminal: widget.terminal,
                             ),
-                          )
-                        : Padding(
-                            padding: EdgeInsets.only(
-                              top: index > 1
-                                  ? widget.terminal
-                                        ? cell.height
-                                        : 20
-                                  : 0,
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                _AgentPreview(
-                                  app: app,
-                                  item: agents[index - 1],
-                                  compact: true,
-                                  terminal: widget.terminal,
-                                ),
-                                if (index < agents.length)
-                                  SizedBox(
-                                    height: widget.terminal ? cell.height : 20,
-                                  ),
-                              ],
-                            ),
-                          ),
-                  )
-                : SingleChildScrollView(
-                    key: ValueKey('preview-content:${row.id}'),
-                    controller: _scroll,
-                    padding: padding,
-                    child: _AgentPreview(
-                      app: app,
-                      item: agents.single,
-                      dense: widget.compactHeader,
-                      terminal: widget.terminal,
-                      found: widget.search.contentHitFor(row.id),
-                    ),
-                  ),
-          ),
+                            if (index < agents.length)
+                              SizedBox(
+                                height: widget.terminal ? cell.height : 20,
+                              ),
+                          ],
+                        ),
+                      ),
+              )
+            : _single(row, agents.single, padding, cell, theme);
+        return Semantics(
+          container: true,
+          label: 'Agent preview',
+          // A session's latest turns carry their list's own scrollbar, on the
+          // turns alone: one around the whole preview, header included, drew
+          // a second thumb beside it.
+          child: _scroll.reversed
+              ? content
+              : Scrollbar(controller: _scroll, child: content),
         );
       },
     );
@@ -301,6 +571,10 @@ TextStyle get _body => AppType.monoLabel(
   color: Color(0xffe1e1e4),
 );
 
+/// Which part of an agent's preview to draw: all of it, or the header and the
+/// footer that frame a session's latest turns ([SessionTailView]).
+enum _Part { all, header, footer }
+
 class _AgentPreview extends StatelessWidget {
   const _AgentPreview({
     required this.app,
@@ -309,12 +583,14 @@ class _AgentPreview extends StatelessWidget {
     this.dense = false,
     this.terminal = false,
     this.found,
+    this.part = _Part.all,
   });
   final AppNotifier app;
   final _PreviewAgent item;
   final bool compact;
   final bool dense;
   final bool terminal;
+  final _Part part;
 
   /// Where the machine's session index found the searched words in this
   /// conversation, when that is how it matched.
@@ -381,6 +657,46 @@ class _AgentPreview extends StatelessWidget {
             ? request ?? activity ?? response
             : record?.contextResponse ?? response ?? request);
 
+    final waitingBox = waiting == null
+        ? null
+        : Container(
+            width: double.infinity,
+            padding: terminal ? EdgeInsets.zero : const EdgeInsets.all(16),
+            decoration: terminal
+                ? null
+                : BoxDecoration(
+                    color: color.withValues(alpha: .06),
+                    border: Border.all(color: color.withValues(alpha: .24)),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Needs your input',
+                  style: terminal
+                      ? terminalContentStyle(color: color)
+                      : AppType.monoLabel(
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                        ),
+                ),
+                if (!terminal) const SizedBox(height: 8),
+                Text(_displayText(waiting.prompt), style: body),
+                if (waiting.options.isNotEmpty) ...[
+                  SizedBox(height: terminal ? cell.height : 12),
+                  Text(waiting.options.take(6).join('  ·  '), style: muted),
+                ],
+              ],
+            ),
+          );
+    if (part == _Part.footer) {
+      // Below the latest turn: the question waiting on the person, or that
+      // the agent is still at work on this turn.
+      if (waitingBox != null) return waitingBox;
+      if (!working) return const SizedBox.shrink();
+      return Text('Working', style: muted.copyWith(color: color));
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -476,7 +792,23 @@ class _AgentPreview extends StatelessWidget {
             ],
           ),
         ],
-        if (compact) ...[
+        if (part == _Part.header) ...[
+          if (!terminal &&
+              (project?.label.isNotEmpty == true || project?.branch != null))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                [
+                  if (project?.label case final label? when label.isNotEmpty)
+                    label,
+                  ?project?.branch,
+                ].join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: muted,
+              ),
+            ),
+        ] else if (compact) ...[
           SizedBox(height: terminal ? cell.height : 10),
           Text(
             _displayText(excerpt ?? 'No recent session text available.'),
@@ -524,38 +856,8 @@ class _AgentPreview extends StatelessWidget {
             ),
             SizedBox(height: terminal ? cell.height : 24),
           ],
-          if (waiting != null) ...[
-            Container(
-              width: double.infinity,
-              padding: terminal ? EdgeInsets.zero : const EdgeInsets.all(16),
-              decoration: terminal
-                  ? null
-                  : BoxDecoration(
-                      color: color.withValues(alpha: .06),
-                      border: Border.all(color: color.withValues(alpha: .24)),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Needs your input',
-                    style: terminal
-                        ? terminalContentStyle(color: color)
-                        : AppType.monoLabel(
-                            fontWeight: FontWeight.w600,
-                            color: color,
-                          ),
-                  ),
-                  if (!terminal) const SizedBox(height: 8),
-                  Text(_displayText(waiting.prompt), style: body),
-                  if (waiting.options.isNotEmpty) ...[
-                    SizedBox(height: terminal ? cell.height : 12),
-                    Text(waiting.options.take(6).join('  ·  '), style: muted),
-                  ],
-                ],
-              ),
-            ),
+          if (waitingBox != null) ...[
+            waitingBox,
             SizedBox(height: terminal ? cell.height : 24),
           ],
           if (working) ...[

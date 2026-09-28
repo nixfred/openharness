@@ -355,6 +355,14 @@ describe('requests must name this server', () => {
     expect(onLogs).not.toHaveBeenCalled()
   })
 
+  it('serves a status that has to read before it answers', async () => {
+    // A harness's `updatedAt` is when its conversation last moved, which is read from its transcript.
+    const { base } = await start({ onStatus: async () => ({ sessions: [{ id: 'a', updatedAt: 42 }] }) })
+    const res = await fetch(`${base}/api/status`)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ sessions: [{ id: 'a', updatedAt: 42 }] })
+  })
+
   it('still serves loopback names, and the dashboard from its own origin', async () => {
     const { base } = await start({ onStatus: () => ({ ok: true }) })
     const port = new URL(base).port
@@ -402,6 +410,26 @@ describe('the daemon socket', () => {
         r.end()
       })
       expect(tcp).toBe(403)
+    } finally {
+      await started.localSocket?.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('hands out a phone sign-in code over the socket only — never on the loopback port', async () => {
+    const dir = mkdtempSync('/tmp/hsock-')
+    const socketPath = join(dir, 'daemon.sock')
+    const onAuthHandoff = vi.fn(async () => ({ status: 200, body: { success: true, data: { code: 'hnh_x', expiresIn: 90 } } }))
+    const started = await startHookServer(0, { onRegistered: vi.fn(), onSessionEnd: vi.fn(), onAuthHandoff }, { socketPath })
+    server = started.server
+    try {
+      const local = { 'x-adapter-local': '1' }
+      expect(await viaSocket(socketPath, 'POST', '/api/auth/handoff', local)).toBe(200)
+      expect(await viaSocket(socketPath, 'POST', '/api/auth/handoff')).toBe(403)
+      const port = (started.server.address() as { port: number }).port
+      const tcp = await fetch(`http://127.0.0.1:${port}/api/auth/handoff`, { method: 'POST', headers: local })
+      expect(tcp.status).toBe(403)
+      expect(onAuthHandoff).toHaveBeenCalledTimes(1)
     } finally {
       await started.localSocket?.close()
       rmSync(dir, { recursive: true, force: true })

@@ -25,8 +25,12 @@ export interface IndexedTurn {
 }
 
 export const ASK_MAX = 8_000
+/**
+ * What one row holds of a turn's answer and tool calls. A longer turn goes on in continuation rows of
+ * its own (below), so an agent that works for hours has every hour indexed, not the first and the last.
+ */
 export const ANSWER_MAX = 12_000
-/** The start of an answer usually says what it will do and the end what was done: keep both. */
+/** Within one row, a single message longer than the row keeps its start and its end. */
 const ANSWER_HEAD = 3_000
 export const TOOLS_MAX = 4_000
 const TOOL_VALUE_MAX = 300
@@ -58,11 +62,40 @@ export function askKind(text: string): AskKind {
 }
 
 // A paste's markers: what was pasted is the person's, and searchable; the tags around it are not.
-const PASTE_TAGS = /<\/?pasted_content\b[^>]*>/g
+// Nor are the tags around another agent's message.
+const PASTE_TAGS = /<\/?(?:pasted_content|agent-message)\b[^>]*>/g
+/**
+ * What Claude Code puts around another agent's message: a label before it, and after it an
+ * instruction to the model about trusting it. Neither was said in the conversation, and the
+ * instruction ran to 800 characters in every hand-back.
+ */
+const AGENT_NOTES = /^Another \w+ session sent a message:[^\S\n]*|That "other \w+ session" is an agent working inside this same session[\s\S]*?permission laundering\.?/gm
 
-/** Text as it is stored and searched: wrappers out, whitespace folded, secrets blanked, bounded. */
+/**
+ * What the person typed, when the Codex app or an editor sent it with context in front: the files
+ * they attached (`# Files mentioned by the user:`), the page open in the app's browser (`# In app
+ * browser:`), the editor's open tabs (`# Context from my IDE setup:`). Each block ends at a
+ * `## My request:` heading (`## My request for Codex:` in older versions), and what follows is the
+ * request. The blocks were not said, so they are not the ask; a message can carry more than one.
+ */
+const CODEX_CONTEXT = /^# (?:Files mentioned by the user|In app browser|Context from my IDE setup):[\s\S]*?^#{1,2} My request(?: for Codex)?:[^\S\n]*\n?/gm
+
+export function personAsk(text: string): string {
+  return text.replace(CODEX_CONTEXT, '')
+}
+
+/**
+ * Text as it is stored and searched: wrappers out, secrets blanked, bounded. Line breaks and each
+ * line's indentation stay, so a preview can show it as it was written; any other run of spaces is
+ * one space, and blank lines are at most one.
+ */
 export function searchableText(text: string, max: number): string {
-  const folded = redactSecretsInText(text.replace(WRAPPERS, ' ').replace(PASTE_TAGS, ' ')).replace(/\s+/g, ' ').trim()
+  const folded = redactSecretsInText(text.replace(WRAPPERS, ' ').replace(PASTE_TAGS, ' ').replace(AGENT_NOTES, ''))
+    .replace(/\r\n?/g, '\n')
+    .replace(/(\S)[^\S\n]+/g, '$1 ')
+    .replace(/[^\S\n]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
   return folded.length > max ? folded.slice(0, max) : folded
 }
 
@@ -121,6 +154,22 @@ export function toolText(tool: string, input: unknown): string {
   return [tool, ...parts.filter(Boolean)].join(' ')
 }
 
+const opensTurn = (event: LiveEvent): boolean => event.type === 'turn_started' || event.type === 'user_message'
+
+/** Whether one line's text or tool calls would take a row that already holds some past its bounds. */
+function overflows(draft: Draft, events: readonly LiveEvent[], calls: ReadonlyArray<string | null>): boolean {
+  let text = 0
+  let tools = 0
+  for (const [index, event] of events.entries()) {
+    if (event.type === 'text_delta') text += event.payload.content.length + 1
+    const call = calls[index]
+    if (call !== null) tools += call.length + 1
+  }
+  // `answerLength` leaves out the line breaks the parts are joined with.
+  return (text > 0 && draft.answerLength > 0 && draft.answerLength + draft.answer.length + text > ANSWER_MAX)
+    || (tools > 0 && draft.toolsLength > 0 && draft.toolsLength + tools > TOOLS_MAX)
+}
+
 interface Draft {
   /** The message that opened the turn, as it arrived: a second announcement of it is the same turn. */
   opener: string
@@ -150,7 +199,14 @@ export class TurnCollector {
 
   /** Events normalized from one transcript line, with that line's offset and time. */
   feed(events: readonly LiveEvent[], offset: number, at: number | null): void {
-    for (const event of events) {
+    const calls = events.map((event) => event.type === 'tool_start' ? toolText(event.payload.tool, event.payload.input) : null)
+    // A turn whose row this line would overflow goes on in a continuation: a row with no ask that opens
+    // at this line. Split only between lines, so a pass resumed at the continuation reads it the same way.
+    if (this.draft && !events.some(opensTurn) && overflows(this.draft, events, calls)) {
+      this.close()
+      this.current(offset, at)
+    }
+    for (const [index, event] of events.entries()) {
       switch (event.type) {
         case 'turn_started':
           this.open(event.payload.userMessage, offset, at)
@@ -171,7 +227,7 @@ export class TurnCollector {
         case 'tool_start': {
           const draft = this.current(offset, at)
           if (draft.toolsLength >= TOOLS_MAX) break
-          const text = toolText(event.payload.tool, event.payload.input)
+          const text = calls[index]!
           draft.tools.push(text)
           draft.toolsLength += text.length + 1
           break
@@ -195,7 +251,7 @@ export class TurnCollector {
     this.draft = {
       opener: ask,
       turn: this.nextTurn++, offset, at,
-      ask: kind === 'person' ? searchableText(ask, ASK_MAX) : '',
+      ask: kind === 'person' ? searchableText(personAsk(ask), ASK_MAX) : '',
       answer: kind === 'agent' ? [ask] : [],
       answerLength: kind === 'agent' ? ask.length : 0,
       tools: [], toolsLength: 0,

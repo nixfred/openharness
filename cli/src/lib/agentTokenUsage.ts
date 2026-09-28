@@ -8,16 +8,19 @@ import { env } from '../config/env.js'
 import type { RegisteredSession } from './registry.js'
 import { sqliteReadAll } from './sqliteRead.js'
 import { emptyOutputLedger, ingestOutput, outputSnapshot, validOutputLedger, type AgentOutputStats, type OutputLedger } from './agentOutputStats.js'
+import { emptySessionWork, ingestSessionWork, sessionWorkSnapshot, validSessionWork, type SessionWork, type SessionWorkLedger } from './sessionWork.js'
 
-export type AgentTokenUsage = { totalTokens: number | null; updatedAt: string; output?: AgentOutputStats }
+export type AgentTokenUsage = { totalTokens: number | null; updatedAt: string; output?: AgentOutputStats; work?: SessionWork }
 type Target = Pick<RegisteredSession, 'engine' | 'sessionId' | 'transcriptPath' | 'codexHome' | 'agentId' | 'forkedFrom' | 'registeredAt'>
+  & Partial<Pick<RegisteredSession, 'cwd'>>
 type Buckets = [number, number, number, number]
 type CodexTotals = [number, number, number, number]
 type Checkpoint = {
-  version: 2; key: string; offset: number; size: number; mtime: number; inode: string;
+  version: 3; key: string; offset: number; size: number; mtime: number; inode: string;
   boundary: string; total: number; observed: boolean; updatedAt: string | null;
   claude: Record<string, Buckets>; codex: CodexTotals | null; seen: Record<string, true>;
   output: OutputLedger;
+  work: SessionWorkLedger; sourceSession: string | null;
 }
 type Entry = {
   target: Target; value: AgentTokenUsage | null; checked: number; pending: Promise<void> | null;
@@ -44,11 +47,12 @@ function keyFor(s: Target): string | null {
 }
 function targetSnapshot(s: Target): Target {
   return { agentId: s.agentId, sessionId: s.sessionId, engine: s.engine, transcriptPath: s.transcriptPath,
-    codexHome: s.codexHome, registeredAt: s.registeredAt, forkedFrom: s.forkedFrom ? { ...s.forkedFrom } : null }
+    codexHome: s.codexHome, cwd: s.cwd, registeredAt: s.registeredAt, forkedFrom: s.forkedFrom ? { ...s.forkedFrom } : null }
 }
 function empty(key: string): Checkpoint {
-  return { version: 2, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0,
-    observed: false, updatedAt: null, claude: {}, codex: null, seen: {}, output: emptyOutputLedger() }
+  return { version: 3, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0,
+    observed: false, updatedAt: null, claude: {}, codex: null, seen: {}, output: emptyOutputLedger(),
+    work: emptySessionWork(), sourceSession: null }
 }
 function rawCodex(value: unknown): CodexTotals | null {
   const row = object(value)
@@ -61,13 +65,20 @@ function rawCodex(value: unknown): CodexTotals | null {
  * already inside output, Claude streaming repeats merge, and Codex cumulative snapshots are deltas. */
 function ingest(state: Checkpoint, line: string, target: Target): void {
   if (!line.includes(target.engine === 'claude' ? '"usage"' : '"token_count"')
-    && !line.includes('"tool_use"') && !line.includes('"tool_result"') && !line.includes('"response_item"')) return
+    && !line.includes('"tool_use"') && !line.includes('"tool_result"') && !line.includes('"response_item"')
+    && !line.includes('"session_meta"') && !line.includes('"turn_context"')) return
   const row = object(JSON.parse(line))
   if (!row) return
   // Forks carry old messages into a new conversation. Only work after the fork belongs to it.
   if (target.forkedFrom && (typeof row.timestamp !== 'string' || !Number.isFinite(Date.parse(row.timestamp))
     || Date.parse(row.timestamp) < target.registeredAt)) return
   if (target.engine === 'claude' && typeof row.sessionId === 'string' && row.sessionId !== target.sessionId) return
+  if (target.engine === 'codex') {
+    const id = row.type === 'session_meta' ? object(row.payload)?.id : null
+    if (typeof id === 'string') state.sourceSession = id
+    if (state.sourceSession !== null && state.sourceSession !== target.sessionId) return
+  }
+  if (row.isSidechain !== true) ingestSessionWork(state.work, row, target.engine, target.cwd)
   ingestOutput(state.output, row, target.engine)
   if (target.engine === 'claude') {
     if (row.type !== 'assistant') return
@@ -193,24 +204,26 @@ export class AgentTokenUsageCache {
   }
   private publish(entry: Entry, state: Checkpoint): void {
     const output = outputSnapshot(state.output)
+    const work = sessionWorkSnapshot(state.work)
     if (!state.updatedAt) return
     const previous = entry.value
-    if (!state.observed && !output) {
+    if (!state.observed && !output && !work) {
       entry.value = null
       if (previous) this.onChanged?.(entry.target)
       return
     }
     entry.value = { totalTokens: state.observed ? state.total : null, updatedAt: state.updatedAt,
-      ...(output ? { output } : {}) }
+      ...(output ? { output } : {}), ...(work ? { work } : {}) }
     if (previous?.totalTokens !== entry.value.totalTokens
-      || JSON.stringify(previous?.output) !== JSON.stringify(output ?? undefined)) this.onChanged?.(entry.target)
+      || JSON.stringify(previous?.output) !== JSON.stringify(output ?? undefined)
+      || JSON.stringify(previous?.work) !== JSON.stringify(work ?? undefined)) this.onChanged?.(entry.target)
   }
   private async load(key: string): Promise<Checkpoint> {
     try {
       const file = join(this.directory, `${key}.json`)
       if ((await stat(file)).size > MAX_CACHE_BYTES) return empty(key)
       const raw = JSON.parse(await readFile(file, 'utf8')) as Checkpoint
-      if (raw.version === 2 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
+      if (raw.version === 3 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
         && typeof raw.observed === 'boolean'
         && (raw.updatedAt === null || typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt)))
         && Number.isSafeInteger(raw.size) && raw.size >= 0 && Number.isFinite(raw.mtime)
@@ -218,7 +231,8 @@ export class AgentTokenUsageCache {
         && typeof raw.inode === 'string' && typeof raw.boundary === 'string'
         && object(raw.claude) && Object.values(raw.claude).every(validBuckets)
         && object(raw.seen) && Object.values(raw.seen).every(value => value === true)
-        && (raw.codex === null || validBuckets(raw.codex)) && validOutputLedger(raw.output)) return raw
+        && (raw.codex === null || validBuckets(raw.codex)) && validOutputLedger(raw.output)
+        && validSessionWork(raw.work) && (raw.sourceSession === null || typeof raw.sourceSession === 'string')) return raw
     } catch { /* First run, corrupt cache, or removed cache: rebuild from the trusted transcript. */ }
     return empty(key)
   }
@@ -278,7 +292,16 @@ export class AgentTokenUsageCache {
           return hash(buffer.subarray(0, bytesRead))
         }
         if (state.inode !== inode || info.size < state.size || (info.size === state.size && info.mtimeMs !== state.mtime)
-          || state.offset > 0 && await boundary(state.offset) !== state.boundary) state = empty(key)
+          || state.offset > 0 && await boundary(state.offset) !== state.boundary) {
+          // A rewritten/compacted transcript can lose old tool receipts. Their recorded locations
+          // and PR links still belong to this conversation; only current execution is invalidated.
+          const history = state.work
+          state = empty(key)
+          state.work.locations = history.locations
+          state.work.pullRequests = history.pullRequests
+          state.work.uncertain = history.locations.length > 0
+          state.work.truncated = history.truncated
+        }
         let offset = state.offset
         let partial = Buffer.alloc(0)
         while (offset < info.size) {

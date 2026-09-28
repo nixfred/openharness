@@ -117,6 +117,20 @@ describe('Codex hook installation', () => {
     installCursorHooks(19473)
     expect(readFileSync(file, 'utf8')).toBe(first)
   })
+
+  it('installs Cursor hooks in config with the separate transcript root baked in', async () => {
+    const config = join(cursorHome, 'config')
+    const data = join(cursorHome, 'data')
+    vi.stubEnv('CURSOR_CONFIG_DIR', config)
+    vi.stubEnv('CURSOR_DATA_DIR', data)
+    try {
+      const { installCursorHooks } = await loadHooks()
+      installCursorHooks(19473)
+      const hooks = JSON.parse(readFileSync(join(config, 'hooks.json'), 'utf8'))
+      expect(hooks.hooks.sessionStart[0].command).toContain(`--cursor-home '${data}'`)
+      expect(existsSync(join(data, 'hooks.json'))).toBe(false)
+    } finally { vi.unstubAllEnvs() }
+  })
 })
 
 describe('Grok hook installation', () => {
@@ -582,4 +596,3 @@ describe('Hermes hook allowlist', () => {
     expect(new Set(ours.map((a) => a.event)).size).toBe(ours.length)
   })
 })
-

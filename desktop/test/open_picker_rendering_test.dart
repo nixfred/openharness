@@ -296,7 +296,7 @@ void main() {
     },
   );
 
-  testWidgets('Open Harness builds a small window and Tab reaches later rows', (
+  testWidgets('Open Harness builds a small window and arrow keys reach later rows', (
     tester,
   ) async {
     final app = createApp();
@@ -359,7 +359,7 @@ void main() {
     expect(rows.evaluate().length, lessThan(search.rows.length));
     final visited = <String>{};
     for (var step = 0; step < 35; step++) {
-      await key(tester, LogicalKeyboardKey.tab);
+      await key(tester, LogicalKeyboardKey.arrowDown);
       await tester.pumpAndSettle();
       final selected = search.selected;
       if (selected != null) {

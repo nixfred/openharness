@@ -60,6 +60,10 @@ describe('makeSnippet', () => {
     expect(makeSnippet('nothing here', words(['scroll']))).toBeNull()
   })
 
+  it('is one line, though the text it quotes keeps its line breaks', () => {
+    expect(plain(makeSnippet('Plan:\n\n- halve the scroll\n  delta\n- flash', words(['scroll']))!)).toBe('Plan: - halve the [scroll] delta - flash')
+  })
+
   it('survives a match inside one long unbroken run', () => {
     const run = '東'.repeat(700)
     expect(() => makeSnippet(run, words(['東東']))).not.toThrow()
@@ -249,16 +253,62 @@ describe('SessionSearchStore', () => {
     expect(store.search('alpha', { now: NOW })).toHaveLength(1)
   })
 
-  it('rebuilds an index written by another schema version', () => {
+  it.each(['0', '8', '9', '10'])('rebuilds an index written by schema %s', (version) => {
     const dir = mkdtempSync(join(tmpdir(), 'session-search-'))
     dirs.push(dir)
     const path = join(dir, 'index.db')
     const first = open(path)
     first.writeSession(session('s', 'S', NOW), 0, [turn(0, 'alpha')])
-    ;(first as unknown as { db: { exec(sql: string): void } }).db.exec("UPDATE meta SET value = '0' WHERE key = 'schema'")
+    ;(first as unknown as { db: { exec(sql: string): void } }).db.exec(`UPDATE meta SET value = '${version}' WHERE key = 'schema'`)
     first.close()
     stores.splice(stores.indexOf(first), 1)
+    expect(SessionSearchStore.openReader(path)).toBe('outdated')
     const second = open(path)
     expect(second.counts()).toEqual({ sessions: 0, turns: 0 })
+    second.writeSession(session('s', 'S', NOW), 0, [turn(0, 'rebuilt conversation')])
+    expect(second.search('alpha', { now: NOW })).toEqual([])
+    expect(second.search('rebuilt', { now: NOW })).toHaveLength(1)
+  })
+})
+
+describe('SessionSearchStore.tail', () => {
+  const answer = (index: number) => `answer ${index}\n${'x'.repeat(900)}`
+
+  it('returns the last rows newest last, within the budget, and pages up from the first one', () => {
+    const store = open()
+    store.writeSession(session('s1', 'Dial firmware', NOW), 0, Array.from({ length: 40 }, (_, index) =>
+      turn(index, index % 5 === 0 ? `ask ${index}` : '', answer(index), index % 2 ? `Bash make ${index}` : '', NOW - (40 - index) * 60_000)))
+    const last = store.tail('s1', { maxChars: 5_000 })!
+    expect(last.rows.map((row) => row.turn)).toEqual([35, 36, 37, 38, 39])
+    // The latest ask comes with the last page, however far up it is.
+    expect(last.lastAsk).toMatchObject({ turn: 35, ask: 'ask 35' })
+    expect(store.tail('s1', { maxChars: 1_000 })!.lastAsk).toMatchObject({ turn: 35, ask: 'ask 35' })
+    expect(last).toMatchObject({ hasMore: true, total: 40, lastAt: NOW })
+    expect(last.rows[0]).toMatchObject({ turn: 35, ask: 'ask 35', answer: answer(35), tools: 'Bash make 35', at: NOW - 5 * 60_000 })
+
+    const older = store.tail('s1', { beforeTurn: 35, maxChars: 5_000 })!
+    expect(older.rows.map((row) => row.turn)).toEqual([30, 31, 32, 33, 34])
+    expect(older.lastAsk).toBeUndefined()
+    const first = store.tail('s1', { beforeTurn: 3, maxChars: 5_000 })!
+    expect(first.rows.map((row) => row.turn)).toEqual([0, 1, 2])
+    expect(first.hasMore).toBe(false)
+    // More than 16 rows at once: the reader pages its batches.
+    expect(store.tail('s1', { maxChars: 64_000 })!.rows).toHaveLength(40)
+  })
+
+  it('always returns the newest row, however long, and never the header row', () => {
+    const store = open()
+    store.writeSession(session('s1', 'Dial firmware', NOW), 0, [turn(0, 'first', 'short'), turn(1, 'second', 'y'.repeat(20_000))])
+    const tail = store.tail('s1', { maxChars: 1_000 })!
+    expect(tail.rows.map((row) => row.turn)).toEqual([1])
+    expect(tail.hasMore).toBe(true)
+    expect(JSON.stringify(tail)).not.toContain('Dial firmware')
+  })
+
+  it('knows a session with nothing to read, and not one it never indexed', () => {
+    const store = open()
+    store.writeSession(session('t1', 'Terminal', NOW), 0, [])
+    expect(store.tail('t1')).toEqual({ sessionId: 't1', rows: [], hasMore: false, total: 0, lastAt: NOW })
+    expect(store.tail('nope')).toBeNull()
   })
 })

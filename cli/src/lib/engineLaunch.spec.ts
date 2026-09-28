@@ -106,6 +106,26 @@ describe('buildEngineLaunchArgv', () => {
       // No shell was handed over and no "this pane is a shell now" line was printed: no tty.
       expect(result.out).not.toContain('This pane is a shell now')
     })
+    it('a take-over that waits says so, and starts the engine only once the other process is gone', () => {
+      // Not a child of this process, as the terminal's is not: an unreaped child never looks gone.
+      const pid = Number(execFileSync('/bin/sh', ['-c', 'sleep 1 >/dev/null 2>&1 & echo $!']).toString().trim())
+      try {
+        const argv = buildEngineLaunchArgv('codex', { waitForPid: { pid, name: 'Codex' } }, '/bin/sh', undefined, undefined, NO_TMUX)
+        const started = Date.now()
+        const result = run([argv[0], argv[1], argv[2], 'harness-engine', '/bin/sh', '-c', 'printf "%s\\n" "engine ran"'])
+        expect(Date.now() - started).toBeGreaterThanOrEqual(800)
+        expect(result.out).toContain('Waiting for the Codex in your terminal to finish its turn.')
+        expect(result.out.indexOf('Waiting for')).toBeLessThan(result.out.indexOf('engine ran'))
+        expect(result.status).toBe(0)
+      } finally {
+        try { process.kill(pid) } catch { /* gone */ }
+      }
+      // Nothing to wait for: it starts at once.
+      const argv = buildEngineLaunchArgv('codex', { waitForPid: { pid: 2 ** 22 + 7, name: 'Codex' } }, '/bin/sh', undefined, undefined, NO_TMUX)
+      const started = Date.now()
+      expect(run([argv[0], argv[1], argv[2], 'harness-engine', '/bin/sh', '-c', 'printf "%s\\n" "engine ran"']).out).toContain('engine ran')
+      expect(Date.now() - started).toBeLessThan(800)
+    })
     it('a command that does not exist still ends the pane with 127, so "not installed" stays a launch failure', () => {
       const argv = buildEngineLaunchArgv('claude', {}, '/bin/sh', undefined, undefined, NO_TMUX)
       expect(run([argv[0], argv[1], argv[2], 'harness-engine', '/nowhere/claude-that-is-not-here']).status).toBe(127)
@@ -421,16 +441,15 @@ describe('buildEngineLaunchArgv', () => {
       .toEqual([engineBin('claude'), '--permission-mode', 'auto'])
   })
 
-  it('is a no-op when resumeSessionId is set but the engine has no known launch resume flag', () => {
-    expect(buildEngineCommandArgv('devin', { resumeSessionId: 'abc-123' })).toEqual([engineBin('devin')])
+  it('resumes devin by its session slug (docs.devin.ai/cli, since 2026.4.17)', () => {
+    expect(buildEngineCommandArgv('devin', { resumeSessionId: 'brisk-otter' })).toEqual([engineBin('devin'), '--resume', 'brisk-otter'])
   })
 
   it('has a launch resume flag for every engine RESUME_ARGS also covers, plus claude/codex', () => {
     for (const engine of ['claude', 'codex', 'cursor', 'opencode', 'kilo', 'pi', 'hermes', 'commandcode',
-      'muse', 'amp', 'grok', 'agy', 'copilot'] as const) {
+      'muse', 'amp', 'grok', 'agy', 'copilot', 'devin'] as const) {
       expect(LAUNCH_RESUME_FLAG[engine]?.length).toBeGreaterThan(0)
     }
-    expect(LAUNCH_RESUME_FLAG.devin).toBeUndefined()
   })
 })
 

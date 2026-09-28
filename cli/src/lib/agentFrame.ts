@@ -19,6 +19,8 @@
  */
 
 import { agentProject, type AgentProject } from './agentProject.js'
+import { sessionGitContext, SessionGitContextReader, type SessionGitContext } from './sessionGitContext.js'
+import { sessionGitHistory } from './sessionGitHistory.js'
 import { transcriptActivityAt } from './transcriptActivity.js'
 import type { AgentTokenUsage } from './agentTokenUsage.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
@@ -60,6 +62,14 @@ export type AgentFrame = {
   launch: NonNullable<RegisteredSession['launch']>
   createdAt: string
   updatedAt: string
+  /**
+   * When any app last opened this agent (`agent_update {opened: true}`), stamped by this daemon's
+   * clock (registry.ts, `markOpened`). ALWAYS present: null means nobody has opened it yet, while an
+   * absent key means a daemon too old to keep the stamp — the distinction a client needs to tell "never
+   * opened" from "cannot say". A client's "last used" is the later of this and `updatedAt`, so every
+   * app orders the same agents the same way.
+   */
+  lastOpenedAt: string | null
   /** Cached usage from this conversation's owning machine; null means unreported, never zero. */
   tokenUsage: AgentTokenUsage | null
   outputStats: (AgentOutputStats & { updatedAt: string }) | null
@@ -70,6 +80,8 @@ export type AgentFrame = {
   grid: GridFrameBlock | null
   codexHome: string | null
   project: AgentProject | null
+  /** Additive display context; project/cwd remain the registered launch workspace. */
+  gitContext: SessionGitContext
   /** The domain-specific harness this agent was created as, or null for a plain engine. */
   dsh: string | null
   /** Its display name from the installed manifest; null when unknown here (not installed, plain engine). */
@@ -133,7 +145,7 @@ export interface AgentFrameContext {
  * When the conversation last moved, in epoch ms: dated work in the transcript, else the last time the engine
  * reported in (a hook, or a session bind — the agent's creation at the latest).
  *
- * ⚠️ Never the registry's `updatedAt`. That is bookkeeping: discovery rewrites it on every pass
+ * ⚠️ Never the registry row's `touchedAt`. That is bookkeeping: discovery rewrites it on every pass
  * (`updateRuntimes`), so falling back to it stamped every agent without a readable transcript "now"
  * — and a client sorting by recency put exactly those agents above the ones just used. File mtime is
  * bookkeeping too: an idle transcript can be rewritten without a new conversation event.
@@ -159,12 +171,23 @@ function frameTitle(s: RegisteredSession): string | null {
 
 /**
  * One agent as every client consumes it. `updatedAt` is {@link lastActivityAt}, so a client sorting by
- * recency follows the conversation rather than the daemon's housekeeping.
+ * recency follows the conversation rather than the daemon's housekeeping; `lastOpenedAt` is the other
+ * half of "last used" — when a person last opened it, from any app — and a client sorts by the later
+ * of the two.
  */
+const gitContexts = new SessionGitContextReader()
+
 export async function agentFrame(
   s: RegisteredSession,
   { selectedModel, terminalAvailable, dsh, tokenUsage }: AgentFrameContext,
 ): Promise<AgentFrame> {
+  const home = agentProject(s.cwd)
+  const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
+    const value = await sessionGitContext(await home, tokenUsage?.work)
+    value.history = await sessionGitHistory.observe(s, value)
+    return value
+  })
+  const [project, updatedAt, gitContext] = await Promise.all([home, lastActivityAt(s), context])
   return {
     id: s.agentId,
     sessionId: s.sessionId,
@@ -174,7 +197,10 @@ export async function agentFrame(
     status: s.active ? 'active' : 'offline',
     launch: s.launch ?? { state: 'ready' },
     createdAt: new Date(s.registeredAt).toISOString(),
-    updatedAt: new Date(await lastActivityAt(s)).toISOString(),
+    updatedAt: new Date(updatedAt).toISOString(),
+    // Null, never omitted, for the reason the module doc gives: a push without the key would erase
+    // the open an earlier frame had reported.
+    lastOpenedAt: s.lastOpenedAt ? new Date(s.lastOpenedAt).toISOString() : null,
     tokenUsage: tokenUsage?.totalTokens != null
       ? { totalTokens: tokenUsage.totalTokens, updatedAt: tokenUsage.updatedAt } : null,
     outputStats: tokenUsage?.output ? { ...tokenUsage.output, updatedAt: tokenUsage.updatedAt } : null,
@@ -194,7 +220,8 @@ export async function agentFrame(
     // engine's own login. Codex only; null is a real answer ("uses ~/.codex") for the same reason
     // `grid: null` is above.
     codexHome: s.codexHome ?? null,
-    project: await agentProject(s.cwd),
+    project,
+    gitContext,
     // All five are real answers when null, for the reason the module doc gives: a frame that omits
     // them would erase a viewer URL or a verdict an earlier frame had reported.
     dsh: dsh?.id ?? s.dsh ?? null,

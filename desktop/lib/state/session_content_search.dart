@@ -3,7 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'search_when.dart';
-import 'swarm_navigation.dart' show agentDestinationId;
+import 'swarm_navigation.dart'
+    show ExternalSessionRef, agentDestinationId, externalDestinationId;
 
 /// Where a machine's daemon marks each matched word in a snippet.
 const kSnippetMarkOpen = '\u0002';
@@ -25,9 +26,17 @@ class SessionContentHit {
     this.position = 0,
     this.turn = 0,
     this.at,
+    this.lastAt,
+    this.external,
   });
 
   final String machineId, agentId, sessionId;
+
+  /// A conversation Harness did not start, whose [agentId] is empty.
+  final ExternalSessionRef? external;
+
+  /// When the session was last worked on.
+  final DateTime? lastAt;
 
   /// `ask`, `answer`, `tools` or `name`: which part of the turn matched.
   final String field;
@@ -51,7 +60,9 @@ class SessionContentHit {
   /// When the matching turn happened, when the transcript says.
   final DateTime? at;
 
-  String get destinationId => agentDestinationId(machineId, agentId);
+  String get destinationId => external == null
+      ? agentDestinationId(machineId, agentId)
+      : externalDestinationId(machineId, sessionId);
 
   /// The snippet as plain text, marks removed.
   String get plainSnippet => snippet
@@ -67,11 +78,15 @@ class SessionContentHit {
     final agentId = raw['agentId'];
     final sessionId = raw['sessionId'];
     final snippet = raw['snippet'];
-    if (agentId is! String || agentId.isEmpty || sessionId is! String) {
+    final external = _external(raw, sessionId);
+    if (agentId is! String ||
+        (agentId.isEmpty && external == null) ||
+        sessionId is! String) {
       return null;
     }
     final score = raw['score'];
     final at = raw['at'];
+    final lastAt = raw['lastAt'];
     final turn = raw['turn'];
     return SessionContentHit(
       machineId: machineId,
@@ -88,6 +103,43 @@ class SessionContentHit {
       position: position,
       turn: turn is int ? turn : 0,
       at: at is int ? DateTime.fromMillisecondsSinceEpoch(at) : null,
+      lastAt: lastAt is int
+          ? DateTime.fromMillisecondsSinceEpoch(lastAt)
+          : null,
+      external: agentId.isEmpty ? external : null,
+    );
+  }
+
+  /// A hit on a conversation Harness did not start: the daemon says where it
+  /// resumes and where it ran. Null when the hit is a harness's.
+  static ExternalSessionRef? _external(Map raw, Object? sessionId) {
+    final external = raw['external'];
+    final engine = raw['engine'];
+    if (external is! Map || sessionId is! String || engine is! String) {
+      return null;
+    }
+    final cwd = external['cwd'];
+    if (cwd is! String || !cwd.startsWith('/')) return null;
+    final title = external['title'];
+    final origin = external['origin'];
+    return ExternalSessionRef(
+      sessionId: sessionId,
+      engine: engine,
+      cwd: cwd,
+      origin: origin is String ? origin : 'terminal',
+      title: title is String ? title : '',
+      open: external['open'] == true,
+      openIn: switch (external['openIn']) {
+        final String where
+            when const {
+              'terminal',
+              'app',
+              'harness',
+              'maybe',
+            }.contains(where) =>
+          where,
+        _ => null,
+      },
     );
   }
 

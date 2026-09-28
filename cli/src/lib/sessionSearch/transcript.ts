@@ -15,6 +15,7 @@ import { lineToEvents, newTurnState } from '../normalize.js'
 import { AgyNormalizer } from '../../engines/agy/normalizer.js'
 import { AmpNormalizer } from '../../engines/amp/normalizer.js'
 import { CodexNormalizer } from '../../engines/codex/normalizer.js'
+import { epochMs } from './externals/support.js'
 import { CommandCodeNormalizer } from '../../engines/commandcode/normalizer.js'
 import { CopilotNormalizer } from '../../engines/copilot/normalizer.js'
 import { CursorNormalizer } from '../../engines/cursor/normalizer.js'
@@ -33,7 +34,11 @@ export function lineNormalizer(engine: string, sessionId: string): LineNormalize
   switch (engine) {
     case 'claude': {
       const state = newTurnState()
-      return (line) => lineToEvents(line, state)
+      return (line) => {
+        const events = lineToEvents(line, state)
+        const asked = claudeSideAsk(line)
+        return asked ? [{ type: 'user_message', payload: { content: asked } }, ...events] : events
+      }
     }
     case 'codex': {
       // Sub-agent threads are resolved for the live view's cards; search only needs the text.
@@ -44,19 +49,91 @@ export function lineNormalizer(engine: string, sessionId: string): LineNormalize
       const normalizer = new CursorNormalizer('live', sessionId)
       return (line) => normalizer.ingest(line)
     }
-    case 'muse': return ingestWith(new MuseNormalizer())
+    // A Muse session log mirrors its sub-agents' and reminders' streams: only its own is the conversation.
+    case 'muse': return kept(ingestWith(new MuseNormalizer()), (line) => museOwnStream(line, sessionId))
     case 'amp': return ingestWith(new AmpNormalizer())
     case 'grok': return ingestWith(new GrokNormalizer())
     case 'agy': return ingestWith(new AgyNormalizer())
-    case 'copilot': return ingestWith(new CopilotNormalizer())
+    // A Copilot session file holds its sub-agents' events too, and prompts nobody typed.
+    case 'copilot': return kept(ingestWith(new CopilotNormalizer()), copilotOwnLine)
     case 'pi': return ingestWith(new PiNormalizer('live'))
     case 'commandcode': return ingestWith(new CommandCodeNormalizer('live'))
     default: return null
   }
 }
 
+/**
+ * The person's words that Claude Code writes outside its prompt records. The live view leaves them out
+ * on purpose, since neither opens a turn there, but both are things a person remembers asking:
+ *  - a message typed while the agent was working, delivered mid-turn as a `queued_command` attachment
+ *    (sub-agent hand-backs arrive the same way and are filed under the agent by `askKind`; task
+ *    notifications are not prompts and are left out);
+ *  - a `/goal`, whose text is recorded only in the bookkeeping line that turns its Stop hook on.
+ */
+export function claudeSideAsk(line: string): string | null {
+  const queued = line.includes('"queued_command"')
+  if (!queued && !(line.includes('"isMeta":true') && line.includes(GOAL_HEAD))) return null
+  let raw: {
+    type?: unknown; isMeta?: unknown; message?: { content?: unknown }
+    attachment?: { type?: unknown; commandMode?: unknown; prompt?: unknown; origin?: { kind?: unknown } }
+  }
+  try { raw = JSON.parse(line) } catch { return null }
+  if (queued) {
+    const attachment = raw.attachment
+    if (attachment?.type !== 'queued_command' || attachment.commandMode !== 'prompt') return null
+    // "Goal set: …", which Claude queues for itself: the goal's own line below already holds it.
+    if (attachment.origin?.kind === 'auto-continuation') return null
+    return promptText(attachment.prompt)
+  }
+  if (raw.type !== 'user' || raw.isMeta !== true) return null
+  const goal = GOAL_SET.exec(promptText(raw.message?.content) ?? '')
+  return goal ? goal[1].trim() || null : null
+}
+
+const GOAL_HEAD = 'A session-scoped Stop hook is now active with condition: '
+const GOAL_SET = /^A session-scoped Stop hook is now active with condition: "([\s\S]*)"\. Briefly acknowledge/
+
+/** A prompt's text: a string, or the text blocks of a content array. */
+function promptText(prompt: unknown): string | null {
+  if (typeof prompt === 'string') return prompt.trim() ? prompt : null
+  if (!Array.isArray(prompt)) return null
+  const text = prompt
+    .map((block) => block && typeof block === 'object' && (block as { type?: unknown }).type === 'text' ? (block as { text?: unknown }).text : null)
+    .filter((part): part is string => typeof part === 'string' && part.trim() !== '')
+    .join('\n')
+  return text || null
+}
+
 function ingestWith(normalizer: { ingest(line: string): LiveEvent[] }): LineNormalizer {
   return (line) => normalizer.ingest(line)
+}
+
+/** [normalize], for the lines [keep] accepts only. */
+function kept(normalize: LineNormalizer, keep: (line: string) => boolean): LineNormalizer {
+  return (line) => keep(line) ? normalize(line) : []
+}
+
+const MUSE_STREAM = /"stream"\s*:\s*\{[^{}]*"id"\s*:\s*"([^"]+)"/
+
+/** Whether a Muse record belongs to [sessionId]'s own stream (a record naming none is kept). */
+export function museOwnStream(line: string, sessionId: string): boolean {
+  const stream = MUSE_STREAM.exec(line)?.[1]
+  return !stream || stream === sessionId
+}
+
+/**
+ * Whether a Copilot event is the conversation's own: not a sub-agent's (those carry `agentId`), and not
+ * a prompt nobody typed (a skill's or another agent's, whose `source` is `skill-…` or `agent-…`, or
+ * an autopilot continuation).
+ */
+export function copilotOwnLine(line: string): boolean {
+  if (!line.includes('"agentId"') && !line.includes('"source"') && !line.includes('isAutopilotContinuation')) return true
+  let event: { agentId?: unknown; type?: unknown; data?: { source?: unknown; isAutopilotContinuation?: unknown } }
+  try { event = JSON.parse(line) } catch { return true }
+  if (typeof event.agentId === 'string' && event.agentId) return false
+  if (event.type !== 'user.message') return true
+  const source = typeof event.data?.source === 'string' ? event.data.source : ''
+  return !/^(?:skill|agent)-/.test(source) && event.data?.isAutopilotContinuation !== true
 }
 
 /**
@@ -82,13 +159,26 @@ export function skipPredicate(engine: string): ((head: string) => boolean) | nul
 }
 
 const TIMESTAMP = /"timestamp"\s*:\s*"([^"]{10,40})"/
+/** The fields other engines date their lines with: Grok's epoch seconds, Muse's microseconds,
+ *  Antigravity's ISO `created_at`. */
+const OTHER_TIMES = [
+  /"timestamp"\s*:\s*(\d{9,19}(?:\.\d+)?)[,}]/,
+  /"recorded_at"\s*:\s*(\d{9,19})[,}]/,
+  /"created_at"\s*:\s*"([^"]{10,40})"/,
+]
 
-/** When a transcript line was written, from its own `timestamp` field; null when it has none. */
+/** When a transcript line was written, from its own time field; null when it has none. */
 export function lineTime(line: string): number | null {
-  const match = TIMESTAMP.exec(line)
-  if (!match) return null
-  const at = Date.parse(match[1])
-  return Number.isFinite(at) ? at : null
+  const iso = TIMESTAMP.exec(line)
+  if (iso) {
+    const at = Date.parse(iso[1])
+    return Number.isFinite(at) ? at : null
+  }
+  for (const pattern of OTHER_TIMES) {
+    const match = pattern.exec(line)
+    if (match) return epochMs(match[1])
+  }
+  return null
 }
 
 export interface LineVisit {

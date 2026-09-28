@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { homedir, tmpdir, userInfo } from 'os'
 import { env } from '../config/env.js'
 import { findCursorTranscript } from '../engines/cursor/discovery.js'
+import { cursorConfigDir, cursorDataDir } from '../engines/cursor/home.js'
 import { cursorRuntimeBin, opencodeBin } from './engineBin.js'
 import {
   DisposableOneShotPool,
@@ -101,10 +102,10 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): voi
 }
 
 export async function cleanupCursorOneShotSession(sessionId: string): Promise<void> {
-  const transcript = await findCursorTranscript(env.CURSOR_HOME, sessionId)
+  const transcript = await findCursorTranscript(cursorDataDir(), sessionId)
   if (transcript) await rm(dirname(transcript), { recursive: true, force: true }).catch(() => {})
 
-  const chatsRoot = join(env.CURSOR_HOME, 'chats')
+  const chatsRoot = join(cursorConfigDir(), 'chats')
   const workspaces = await readdir(chatsRoot, { withFileTypes: true }).catch(() => [])
   await Promise.all(workspaces
     .filter((entry) => entry.isDirectory())
@@ -475,9 +476,19 @@ class CursorWorker extends ProcessWorker {
 }
 
 
-// Recap runs in an isolated OpenCode data dir so ephemeral summary sessions never land in the user's
-// real opencode.db, while still reading their ~/.config/opencode provider/model config.
+// Isolate session storage while retaining the user's provider config and auth.json location.
 const OPENCODE_RECAP_DATA_DIR = join(env.ADAPTER_DATA_DIR, 'opencode-recap')
+
+export function opencodeOneShotSpawn(model: string | undefined, parentEnv: NodeJS.ProcessEnv, dataDir: string) {
+  const childEnv = scrubTerminalContext({ ...parentEnv })
+  // OpenCode ignores OPENCODE_DATA_DIR. Its absolute OPENCODE_DB override selects the real store.
+  childEnv.OPENCODE_DB = join(dataDir, 'opencode.db')
+  childEnv.PWD = dataDir
+  return {
+    args: ['run', '--pure', '--format', 'json', ...(model ? ['--model', model] : [])],
+    env: childEnv,
+  }
+}
 
 class OpencodeWorker extends ProcessWorker {
   readonly engine = 'opencode' as const
@@ -497,9 +508,7 @@ class OpencodeWorker extends ProcessWorker {
     // the prompt later. `--pure` skips external plugins (so the machine discovery plugin never
     // self-registers this ephemeral recap session). `--format json` streams `{type:'text',part:{text}}`.
     mkdirSync(OPENCODE_RECAP_DATA_DIR, { recursive: true, mode: 0o700 })
-    const args = ['run', '--pure', '--format', 'json', ...(model ? ['--model', model] : [])]
-    const processEnv = scrubTerminalContext({ ...oneShotParentEnv() })
-    processEnv.OPENCODE_DATA_DIR = OPENCODE_RECAP_DATA_DIR
+    const { args, env: processEnv } = opencodeOneShotSpawn(model, oneShotParentEnv(), OPENCODE_RECAP_DATA_DIR)
     const child = spawn(opencodeBin(), args, {
       cwd: OPENCODE_RECAP_DATA_DIR, env: processEnv, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -582,8 +591,8 @@ function kiloBin(): string {
  * Recap runs in an isolated Kilo data dir so ephemeral summary sessions never land in the user's real
  * kilo.db, while still reading their ~/.config/kilo provider/model config.
  *
- * The isolation mechanism is where kilo parts company with the opencode it forked. Opencode honours
- * `OPENCODE_DATA_DIR`; kilo has no equivalent — measured with `kilo debug paths`, it ignores both
+ * The isolation mechanism is where kilo parts company with the opencode it forked. OpenCode honours
+ * `OPENCODE_DB`; this Kilo worker uses an isolated data root — measured with `kilo debug paths`, it ignores both
  * `KILO_DATA_DIR` and `OPENCODE_DATA_DIR` and moves its store only for `XDG_DATA_HOME`. So the child is
  * given that instead, and because kilo appends its own name, the store lands at `<dir>/kilo/kilo.db`.
  *

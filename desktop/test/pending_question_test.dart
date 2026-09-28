@@ -11,7 +11,6 @@ import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/ws/ws_conn.dart';
-import 'package:harness/state/terminal_pane.dart';
 import 'package:harness/terminal/terminal_session.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/notify/agent_alerts.dart';

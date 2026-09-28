@@ -24,6 +24,7 @@ import '../auth/cli_login.dart';
 import '../bootstrap/environment_provisioner.dart';
 import '../core/viewer_mode.dart';
 import '../core/config.dart';
+import '../core/agent_git_context.dart';
 import '../core/agent_names.dart';
 import '../core/agent_preference.dart';
 import '../core/dsh_catalog.dart';
@@ -47,6 +48,7 @@ import '../terminal/terminal_theme_store.dart';
 import '../logging/app_log.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../terminal/remote_media_download.dart';
+import 'take_over.dart';
 import '../widgets/engine_identity.dart'
     show allEngines, engineIdentity, isTerminalEngine;
 import '../store/store_screen.dart' show openStoreAgent;
@@ -74,6 +76,7 @@ import 'pending_question.dart';
 import 'search_when.dart';
 import 'session_content_search.dart';
 import 'session_preview.dart';
+import 'session_tail.dart';
 import '../usage/models_menu_controller.dart';
 import '../usage/remote_usage.dart';
 import '../usage/usage_accounts.dart';
@@ -214,6 +217,11 @@ class AgentCreationAttempt {
   bool _codexHomeTrusted = false;
 
   bool get awaitingConfirmation => _awaitingConfirmation;
+
+  /// The machine's code for a request it refused before launching anything,
+  /// such as `SESSION_BUSY_IN_TERMINAL`: what a caller can offer next.
+  String? _refusal;
+  String? get refusal => _refusal;
 
   /// A completed folder survives a refused agent launch, so correcting the
   /// agent choice does not clone or create the same project again.
@@ -366,7 +374,7 @@ class MachineState {
       (!isLocalMachine && machine.reportedOnline == false);
 
   AgentProject? projectOf(Agent agent) =>
-      agent.project ??
+      agent.displayProject ??
       localProjects[agent.id] ??
       localEndpoint?.agentProjects[agent.id];
 
@@ -505,7 +513,8 @@ class AppNotifier extends ChangeNotifier {
   /// [ViewerServices.login] in a viewer build — which has no CLI — under one name, so every call
   /// site reads the same in both.
   late final SignInClient cliLogin;
-  final CliLink cliLink;
+  CliLink? _cliLink;
+  CliLink get cliLink => _cliLink ??= CliLink();
 
   /// Links to other machines by remote password: [cliLink] in a desktop build, the app itself in a
   /// viewer. THIS machine's own remote password stays on [cliLink] — a viewer is not a machine, and
@@ -603,6 +612,11 @@ class AppNotifier extends ChangeNotifier {
       timeout: const Duration(seconds: 6),
     ),
   );
+
+  /// The end of the session a Cmd-P row previews, from its machine's index
+  /// (`session_tail`, cli/src/lib/sessionSearch/). Apart from
+  /// [sessionPreviews], whose excerpts come from the live agent.
+  late final sessionTails = SessionTails(readSessionTail);
 
   SessionPreviewKey previewKey(String machineId, Agent agent) =>
       (machineId: machineId, agentId: agent.id, sessionId: agent.sessionId);
@@ -1583,6 +1597,13 @@ class AppNotifier extends ChangeNotifier {
 
   void _noteNavigation() {
     _paneFocusByUser = !_navigatingFromDevice;
+    // A device's move is not a person opening anything — but it does leave a
+    // different harness in front, so the next gesture on it is an open again.
+    if (_navigatingFromDevice) {
+      _touchedFocus = null;
+    } else {
+      _touchFocusedAgent();
+    }
   }
 
   /// Native focus also changes during reparenting and dialog dismissal. The
@@ -1772,7 +1793,6 @@ class AppNotifier extends ChangeNotifier {
        projectHistory = ProjectHistory(paneLayoutStore?.storage),
        session = authSession,
        _store = configStore,
-       cliLink = cliLink ?? CliLink(),
        config = configStore?.config ?? config,
        viewer =
            viewer ??
@@ -1782,6 +1802,7 @@ class AppNotifier extends ChangeNotifier {
                    session: authSession,
                  )
                : null) {
+    _cliLink = cliLink;
     this.cliLogin = cliLogin ?? this.viewer?.login ?? CliLogin();
     this.peerLinks = peerLinks ?? this.viewer?.links ?? this.cliLink;
     _autonomousEnv = this.config.autonomousEnv;
@@ -1808,7 +1829,7 @@ class AppNotifier extends ChangeNotifier {
     config: config,
     session: session,
     auth: viewer?.auth,
-    localTransport: localDaemonTransport,
+    localTransport: viewer == null ? localDaemonTransport : null,
   );
 
   /// How this app reaches the local CLI — its Unix socket or the loopback
@@ -2620,6 +2641,9 @@ class AppNotifier extends ChangeNotifier {
       debugPrint('bootstrap: fallback to login after error: $error\n$stack');
       currentUser = null;
       status = AppStatus.unauthenticated;
+      if (viewer != null) {
+        _lastError = 'Could not complete sign-in. Please sign in again.';
+      }
       notifyListeners();
     } finally {
       // A `finally` rather than a call per exit path: bootstrap resolves four
@@ -2772,6 +2796,9 @@ class AppNotifier extends ChangeNotifier {
       );
       currentUser = null;
       status = AppStatus.unauthenticated;
+      if (viewer != null) {
+        _lastError = 'Could not complete sign-in. Please sign in again.';
+      }
       notifyListeners();
     }
   }
@@ -2986,7 +3013,9 @@ class AppNotifier extends ChangeNotifier {
     // race `harness start`'s own backend handshake and surface a bogus 30s "Could not load
     // machines" timeout. A daemon that never comes up still gets a home screen below, with
     // the failure shown there as before, since that's where the retry affordance lives.
-    _bootStatusMessage = 'Starting local service…';
+    _bootStatusMessage = viewer == null
+        ? 'Starting local service…'
+        : 'Opening workspace…';
     notifyListeners();
     // Before the machines, deliberately: the tiles are intent, they render as
     // "waiting for that machine" on their own, and each attaches as its machine
@@ -3169,6 +3198,7 @@ class AppNotifier extends ChangeNotifier {
     machinesAreStale = false;
     machineStates.clear();
     sessionPreviews.clear();
+    sessionTails.clear();
     gridPictures.clear();
     _stopWakeFollowers();
     expandedMachines.clear();
@@ -3443,12 +3473,12 @@ class AppNotifier extends ChangeNotifier {
       'You were signed out on this computer. This computer\'s agents keep '
       'running; sign in again to reach your other machines.';
 
-  /// The session went away while the app was already running — send the user to [LoginScreen] with a
-  /// reason, and stop the background work that can only fail from here.
-  ///
-  /// Cold start already handles this: [bootstrap] asks the CLI whether it is signed in. The hole this
-  /// fills is the app that was ALREADY authenticated when the session disappeared underneath it,
-  /// where nothing re-checked and the daemon supervisor simply respawned `harness start` forever.
+  /// Inject the same account-expiry event the connection pool reports, without a real daemon.
+  @visibleForTesting
+  void expireSessionForTest(String message) => _signedOutAtRuntime(message);
+
+  /// A running session lost its account. Viewers return to login; desktop windows
+  /// keep this computer available as guests and explain how to reconnect remotely.
   void _signedOutAtRuntime(String message) {
     if (status == AppStatus.unauthenticated || isGuest) {
       return; // idempotent: several sources can race here
@@ -3510,6 +3540,7 @@ class AppNotifier extends ChangeNotifier {
     machinesAreStale = false;
     machineStates.clear();
     sessionPreviews.clear();
+    sessionTails.clear();
     gridPictures.clear();
     _stopWakeFollowers();
     expandedMachines.clear();
@@ -4063,7 +4094,7 @@ class AppNotifier extends ChangeNotifier {
   void _ensurePool() {
     if (_pool != null) return;
     _pool = WsPool(
-      localTransport: localDaemonTransport,
+      localTransport: viewer == null ? localDaemonTransport : null,
       wsBaseUrl: config.wsBaseUrl,
       autonomousEnv: _autonomousEnv,
       // Every real desktop WsConn dials the local CLI's loopback WS (transportKind.localPlaintext, see
@@ -4735,7 +4766,9 @@ class AppNotifier extends ChangeNotifier {
           prev.modelName != agent.modelName ||
           prev.parentAgentId != agent.parentAgentId ||
           prev.project != agent.project ||
+          prev.gitContext != agent.gitContext ||
           prev.lastActivityAt != agent.lastActivityAt ||
+          prev.lastOpenedAt != agent.lastOpenedAt ||
           prev.tokensUsed != agent.tokensUsed ||
           prev.outputStats != agent.outputStats ||
           prev.tokensUpdatedAt != agent.tokensUpdatedAt ||
@@ -6262,6 +6295,11 @@ class AppNotifier extends ChangeNotifier {
   }
 
   void _replaceAgents(MachineState machine, List<Agent> agents) {
+    final previousWork = {for (final agent in machine.agents) agent.id: agent};
+    agents = [
+      for (final agent in agents)
+        retainNewerGitContext(agent, previousWork[agent.id]),
+    ];
     final previous = {for (final agent in machine.agents) agent.id: agent};
     final nextIds = agents.map((agent) => agent.id).toSet();
     machine._agentNames.removeWhere((id, _) => !nextIds.contains(id));
@@ -6319,6 +6357,7 @@ class AppNotifier extends ChangeNotifier {
   void _upsertAgent(MachineState machine, Agent agent) {
     final index = machine.agents.indexWhere((item) => item.id == agent.id);
     final previous = index == -1 ? null : machine.agents[index];
+    agent = retainNewerGitContext(agent, previous);
     if (index == -1) {
       machine.agents = [...machine.agents, agent];
     } else {
@@ -7078,6 +7117,29 @@ class AppNotifier extends ChangeNotifier {
     }
   }
 
+  /// The rows of [sessionId] on [machineId] before [beforeTurn], or its last
+  /// rows (`session_tail`, the same index as [searchSessions]). Null when the
+  /// machine cannot answer: offline, a CLI that predates the request, or a
+  /// session its index does not hold.
+  Future<Map<String, dynamic>?> readSessionTail(
+    String machineId,
+    String sessionId, {
+    int? beforeTurn,
+  }) async {
+    if (!searchableMachineIds.contains(machineId)) return null;
+    try {
+      final reply = await _conn(machineId).request(
+        'session_tail',
+        payload: {'sessionId': sessionId, 'beforeTurn': ?beforeTurn},
+        timeout: const Duration(seconds: 4),
+      );
+      if (reply['error'] != null) return null;
+      return reply;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<MachineUsage?> _readMachineUsage(MachineState machine) async {
     try {
       final reply = await _conn(machine.machine.machineId)
@@ -7216,12 +7278,63 @@ class AppNotifier extends ChangeNotifier {
     String machineId,
     String agentId,
   ) async {
+    final machine = stateOf(machineId), revision = _authRevision;
+    final agent = machine?.agents.where((a) => a.id == agentId).firstOrNull;
+    if (machine == null || agent == null) return {'status': 'unavailable'};
+    final identity = agent.gitContext?.requestIdentity;
+    if (agent.gitContext != null && identity == null) {
+      return {'status': 'unavailable'};
+    }
     try {
-      return await _conn(machineId).request(
+      final result = await _conn(machineId).request(
         'git_pull_request',
-        payload: {'agentId': agentId},
+        payload: {'agentId': agentId, 'context': ?identity},
         timeout: const Duration(seconds: 30),
       );
+      if (!_machineWorkCurrent(machine, revision) ||
+          !sameGitConversation(
+            agent,
+            machine.agents.where((a) => a.id == agentId).firstOrNull,
+          )) {
+        return {'status': 'unavailable'};
+      }
+      if (identity != null &&
+          !mapEquals(
+            identity,
+            result['context'] is Map
+                ? Map<String, Object?>.from(result['context'])
+                : null,
+          )) {
+        return {'status': 'unavailable'};
+      }
+      return result;
+    } catch (_) {
+      return {'status': 'unavailable'};
+    }
+  }
+
+  Future<Map<String, dynamic>> readAgentGitHistory(
+    String machineId,
+    String agentId, {
+    int offset = 0,
+  }) async {
+    final machine = stateOf(machineId), revision = _authRevision;
+    final agent = machine?.agents.where((a) => a.id == agentId).firstOrNull;
+    if (machine == null || agent == null) return {'status': 'unavailable'};
+    try {
+      final result = await _conn(machineId).request(
+        'git_pull_request',
+        payload: {'agentId': agentId, 'history': true, 'offset': offset},
+        timeout: const Duration(seconds: 45),
+      );
+      if (!_machineWorkCurrent(machine, revision) ||
+          !sameGitConversation(
+            agent,
+            machine.agents.where((a) => a.id == agentId).firstOrNull,
+          )) {
+        return {'status': 'unavailable'};
+      }
+      return result;
     } catch (_) {
       return {'status': 'unavailable'};
     }
@@ -7325,7 +7438,6 @@ class AppNotifier extends ChangeNotifier {
     AgentCreationAttempt? attempt,
     HarnessPlacement? placement,
   }) {
-    final creation = attempt ?? AgentCreationAttempt();
     final choices = <String, dynamic>{
       'engine': engine,
       if (projectFolder == null && folder != null) 'cwd': folder,
@@ -7355,6 +7467,65 @@ class AppNotifier extends ChangeNotifier {
       // same refusal for an engine that has no such thing (`AGENT_UNSUPPORTED`).
       'agent': ?agent,
     };
+    return _create(
+      machineId,
+      choices,
+      projectFolder: projectFolder,
+      dsh: dsh,
+      swarmId: swarmId,
+      split: split,
+      attempt: attempt,
+      placement: placement,
+    );
+  }
+
+  /// A Claude Code or Codex conversation Harness did not start, opened as a
+  /// harness that resumes it, in its own folder (Cmd-P, `ExternalSessionRef`).
+  /// The machine refuses one open elsewhere, already a harness, or whose folder
+  /// is gone, and says why. Null when it started; otherwise what to tell the
+  /// person.
+  /// Opens a conversation Harness did not start as a new harness. One open in
+  /// a terminal is refused unless [takeOver] says how to take it over from
+  /// there; the refusal's code says whether that terminal is mid-turn.
+  Future<({String? error, String? refusal})> resumeConversation(
+    String machineId, {
+    required String engine,
+    required String folder,
+    required String sessionId,
+    String? name,
+    String? swarmId,
+    HarnessPlacement? placement,
+    TakeOver? takeOver,
+  }) async {
+    final attempt = AgentCreationAttempt();
+    final error = await _create(
+      machineId,
+      {
+        'engine': engine,
+        'cwd': folder,
+        'bypassPermission': true,
+        'name': ?name,
+        'resumeSessionId': sessionId,
+        'takeOver': ?takeOver?.name,
+      },
+      swarmId: swarmId,
+      placement: placement,
+      attempt: attempt,
+    );
+    return (error: error, refusal: error == null ? null : attempt.refusal);
+  }
+
+  Future<String?> _create(
+    String machineId,
+    Map<String, dynamic> choices, {
+    ProjectFolderRequest? projectFolder,
+    String? dsh,
+    String? swarmId,
+    PaneSplitRequest? split,
+    AgentCreationAttempt? attempt,
+    HarnessPlacement? placement,
+  }) {
+    final creation = attempt ?? AgentCreationAttempt();
     if (creation._choices != null &&
         (creation._machineId != machineId ||
             creation._projectFolder?.isGenerated !=
@@ -7467,6 +7638,17 @@ class AppNotifier extends ChangeNotifier {
       'This engine cannot be opened as that named agent on $machine.',
     'INVALID_PERMISSION_MODE' =>
       'This engine has no such permission mode on $machine.',
+    // Opening a conversation Harness did not start (`resumeSessionId`). The
+    // machine says what stopped it: open elsewhere, already a harness, gone.
+    'SESSION_OPEN_ELSEWHERE' ||
+    'SESSION_IN_HARNESS' ||
+    'SESSION_NOT_FOUND' ||
+    'SESSION_FOLDER_GONE' ||
+    'SESSION_OPEN_IN_TERMINAL' ||
+    'SESSION_BUSY_IN_TERMINAL' ||
+    'SESSION_STOP_FAILED' ||
+    'INVALID_SESSION' =>
+      detail ?? 'Could not open that conversation on $machine.',
     // A daemon that predates the terminal engine refuses it by name; the
     // fix is the same one the other UNSUPPORTED codes ask for.
     'INVALID_ENGINE' =>
@@ -7670,8 +7852,18 @@ class AppNotifier extends ChangeNotifier {
         'GRID_CONFIG_FAILED',
         'UNSUPPORTED_ON_REMOTE',
         'UNSUPPORTED',
+        // A conversation Harness did not start, refused before its pane opens.
+        'SESSION_OPEN_ELSEWHERE',
+        'SESSION_IN_HARNESS',
+        'SESSION_NOT_FOUND',
+        'SESSION_FOLDER_GONE',
+        'SESSION_OPEN_IN_TERMINAL',
+        'SESSION_BUSY_IN_TERMINAL',
+        'SESSION_STOP_FAILED',
+        'INVALID_SESSION',
       };
       if (refusedBeforeLaunch.contains(failure.code)) {
+        creation._refusal = failure.code;
         if (failure.code == 'INVALID_CWD' && choices['projectSource'] != null) {
           return creation._complete(
             'Update Harness CLI on $machineName to create or clone project folders. Local can open an existing folder.',
@@ -7720,6 +7912,7 @@ class AppNotifier extends ChangeNotifier {
             when folder.isNotEmpty) {
           creation._preparedFolder = folder;
         }
+        creation._refusal = failure['code'] as String;
         return creation._complete(
           _creationFailureMessage(
             failure['code'] as String,
@@ -8008,6 +8201,93 @@ class AppNotifier extends ChangeNotifier {
       request.result.complete(error);
       if (_authWorkCurrent(request.authRevision)) notifyListeners();
     }
+  }
+
+  /// How long a second open of the SAME harness, with no other harness
+  /// opened in between, folds into the first. Only the same one: A, B, A in
+  /// quick succession is three opens, or the order would say B was last.
+  static const agentTouchDebounce = Duration(seconds: 3);
+
+  ({String machineId, String agentId, DateTime at})? _lastAgentTouch;
+
+  /// The harness the focus last stamped, so the grid's pointer-down — every
+  /// click inside the tile already in front re-focuses it — is not an open.
+  (String, String)? _touchedFocus;
+
+  /// Tell a harness's own daemon that a person just opened or focused it, so
+  /// its `lastOpenedAt` moves and with it "last used" order in EVERY client
+  /// (`agent_update {agentId, opened: true}`, sealed like any agent_update).
+  ///
+  /// Fire-and-forget. Nothing waits on it and nothing is said when it fails:
+  /// an older daemon answers MISSING_UPDATE and the list simply keeps sorting
+  /// by activity; a socket that is down loses one stamp. Never dials a socket
+  /// for it, and never for a view-only shared harness — its owner's order is
+  /// not this window's to move.
+  void touchAgent(String machineId, String agentId) {
+    if (_disposed) return;
+    final machine = machineStates[machineId];
+    if (machine == null ||
+        machine.machine.isShared ||
+        machine.needsLink ||
+        machine.nodeOnline == false ||
+        machine.connectionStatus != ConnectionStatus.connected ||
+        (_pool == null && connectionForTest == null)) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastAgentTouch;
+    if (last != null &&
+        last.machineId == machineId &&
+        last.agentId == agentId &&
+        now.difference(last.at) < agentTouchDebounce) {
+      return;
+    }
+    _lastAgentTouch = (machineId: machineId, agentId: agentId, at: now);
+    unawaited(_sendAgentTouch(machine, agentId));
+  }
+
+  Future<void> _sendAgentTouch(MachineState machine, String agentId) async {
+    final revision = _authRevision;
+    try {
+      final result = await _conn(machine.machine.machineId).request(
+        'agent_update',
+        payload: {'agentId': agentId, 'opened': true},
+        timeout: const Duration(seconds: 10),
+      );
+      if (!_machineWorkCurrent(machine, revision)) return;
+      // The daemon's own stamp, taken now rather than on the next push, so the
+      // list this window just opened from is already in its new order. Only
+      // this one field: the reply is not a frame to rebuild the agent from.
+      final returned = result['agent'];
+      final raw = returned is Map && (returned['id'] ?? agentId) == agentId
+          ? returned['lastOpenedAt']
+          : null;
+      final opened = raw is String ? DateTime.tryParse(raw) : null;
+      if (opened == null) return;
+      final index = machine.agents.indexWhere((a) => a.id == agentId);
+      if (index == -1) return;
+      final current = machine.agents[index];
+      final known = current.lastOpenedAt;
+      if (known != null && !opened.isAfter(known)) return;
+      machine.agents = [...machine.agents]
+        ..[index] = current.copyWith(lastOpenedAt: opened);
+      notifyListeners();
+    } catch (_) {
+      // MISSING_UPDATE from an older daemon, a timeout, a dropped socket: the
+      // stamp is a courtesy to the ordering, never worth an error band.
+    }
+  }
+
+  /// Stamp the harness now in front, when it is a different one from the
+  /// last stamped — see [touchAgent]. A viewer is its agent's, as in
+  /// [_announceAppFocus].
+  void _touchFocusedAgent() {
+    final pane = focusedPane;
+    final agentId = pane?.agentId ?? pane?.ownerAgentId;
+    final focus = agentId == null ? null : (pane!.machineId, agentId);
+    if (focus == _touchedFocus) return;
+    _touchedFocus = focus;
+    if (focus != null) touchAgent(focus.$1, focus.$2);
   }
 
   bool _agentStopCurrent(_AgentStop request) {
@@ -8607,7 +8887,7 @@ class AppNotifier extends ChangeNotifier {
       );
     }
     final terminal = isTerminalEngine(engine);
-    final cwd = machine.projectOf(source)?.cwd;
+    final cwd = source.project?.cwd ?? machine.projectOf(source)?.cwd;
     if (cwd == null && !terminal) {
       return Future.value(
         '${source.displayName} has no project folder to clone into.',
@@ -9347,7 +9627,7 @@ class AppNotifier extends ChangeNotifier {
   /// It has to be a tile like any other — the alternative of letting a machine
   /// take over the whole content area would blank three working terminals
   /// belonging to two other machines. The one exception is a machine that
-  /// already needs linking: selecting it brings up the Machines panel
+  /// already needs linking: selecting it brings up the Machines picker
   /// (`SwarmScreen._maybeLink`), so opening a tile here too would just be a
   /// redundant "not linked" pane sitting behind it. Selecting is still worth
   /// doing — it's what makes that gate notice this machine — the tile is not.
@@ -9527,6 +9807,14 @@ class AppNotifier extends ChangeNotifier {
     // duplicate with the inferred one is free: the daemon drops the second against where the dial
     // already is.
     if (focus && target == activeSwarm) _announceAppFocus();
+    // A new tile takes the focus without passing [focusPane], so the open is
+    // said here — for a person's add only, never a device's door.
+    if (focus &&
+        target == activeSwarm &&
+        intent == AttachIntent.person &&
+        !_navigatingFromDevice) {
+      _touchFocusedAgent();
+    }
     // The agent may already have a viewer the grid could not show until now,
     // because this tile is what it hangs beside.
     _syncViewerPane(machine, agent);
@@ -11617,6 +11905,7 @@ class AppNotifier extends ChangeNotifier {
 
   @override
   void dispose() {
+    viewer?.auth.dispose();
     _modelManager?.dispose();
     _modelsMenu?.dispose();
     for (final project in _orchestratorProjects.values) {
@@ -11626,6 +11915,7 @@ class AppNotifier extends ChangeNotifier {
     terminalThemeStore.removeListener(_announceTerminalThemeEverywhere);
     _localGitProjects.dispose();
     sessionPreviews.dispose();
+    sessionTails.dispose();
     gridPictures.dispose();
     _stopWakeFollowers();
     modelStarts.dispose();

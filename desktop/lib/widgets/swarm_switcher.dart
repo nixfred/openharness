@@ -740,9 +740,14 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
           final canSubmit = search.canSubmit(row);
           final unavailableReason = search.sessionUnavailable(row);
           final alreadyHere = search.alreadyHere(row);
-          final activityAge = widget.bios && row.lastActivityAt != null
-              ? harnessActivityAge(row.lastActivityAt, DateTime.now())
-              : null;
+          // As of this opening, like the order: the list does not move while
+          // it is open. Under a minute is "now", not "0m".
+          final activity = widget.bios ? search.activityOf(row) : null;
+          final activityAge = activity == null
+              ? null
+              : search.openedAt.difference(activity).inMinutes < 1
+              ? 'now'
+              : harnessActivityAge(activity, search.openedAt);
           final presentation = (
             row,
             selected,
@@ -981,8 +986,12 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                               ? 'No matching projects'
                               : search.isMachineMode
                               ? 'No matching machines'
-                              : search.adding && search.query.isEmpty
+                              : search.adding &&
+                                    search.query.isEmpty &&
+                                    search.capacity <= 0
                               ? 'This tab is full (${AppNotifier.maxPanes} panes). Open a new tab to add more.'
+                              : search.adding && search.query.isEmpty
+                              ? 'No harnesses yet. Start an agent or choose @ machines to connect a machine.'
                               : search.adding
                               ? 'No matching harnesses'
                               : 'No matching results',
@@ -1355,7 +1364,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   '${modelAction == null ? '' : ', $modelAction'}'
                   '${widget.unavailableReason == null ? '' : ', ${widget.unavailableReason}'}'
                   '${row.shortcut == null ? '' : ', Shortcut ${row.shortcut}'}'
-                  '${widget.activityAge == null ? '' : ', Last active ${widget.activityAge} ago'}',
+                  '${widget.activityAge == null ? '' : ', Last used ${widget.activityAge} ago'}',
         excludeSemantics: true,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1414,10 +1423,16 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                       ),
                     ] else if (widget.unavailableReason case final reason?) ...[
                       SizedBox(width: cell.width * 2),
-                      Text(
-                        reason,
-                        maxLines: 1,
-                        style: terminalContentStyle(color: muted),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: constraints.maxWidth * .4,
+                        ),
+                        child: Text(
+                          reason,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: terminalContentStyle(color: muted),
+                        ),
                       ),
                     ] else if (row.shortcut case final shortcut?) ...[
                       SizedBox(width: cell.width * 2),

@@ -280,7 +280,13 @@ describe('tmux process primitives', () => {
     expect(resumeSessionId('grok', 'grok -r 53d3843c-724e-47ff-ae3a-9fedfa328bba'))
       .toBe('53d3843c-724e-47ff-ae3a-9fedfa328bba')
     expect(resumeSessionId('commandcode', 'cmd -r Greeting')).toBeNull()
-    expect(resumeSessionId('devin', 'devin --resume 53d3843c-724e-47ff-ae3a-9fedfa328bba')).toBeNull()
+    // Devin's ids are word slugs; a bare word is not one.
+    expect(resumeSessionId('devin', 'devin --resume brisk-otter')).toBe('brisk-otter')
+    expect(resumeSessionId('devin', 'devin -r blue-agustinia --model x')).toBe('blue-agustinia')
+    expect(resumeSessionId('devin', 'devin -r latest')).toBeNull()
+    // Hermes takes -r too; opencode's --fork names the parent, never the session.
+    expect(resumeSessionId('hermes', 'hermes -r 20260927_101500_ab12cd')).toBe('20260927_101500_ab12cd')
+    expect(resumeSessionId('opencode', 'opencode -s ses_abc --fork')).toBeNull()
   })
 
   it('reads a claude/codex resume id from argv, but never the parent of a fork', () => {

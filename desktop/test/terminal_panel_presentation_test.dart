@@ -49,7 +49,7 @@ void main() {
       await tester.pump();
       revision.value = 1;
       await tester.pump();
-      for (final label in ['Close Pane', 'Zoom Pane', 'Stop Harness']) {
+      for (final label in ['Zoom Pane', 'Stop Harness']) {
         expect(find.byTooltip(label), findsNothing);
       }
       expect(closed, isEmpty);
@@ -198,7 +198,7 @@ void main() {
   );
   for (final local in [true, false]) {
     testWidgets(
-      '${local ? 'local' : 'remote'} compact model selectors stay visible without moving the title or terminal',
+      '${local ? 'local' : 'remote'} compact pane controls stay visible without moving the title or terminal',
       (tester) async {
         final app = createApp();
         app.stateOf('m')!.localOnly = local;
@@ -259,8 +259,9 @@ void main() {
               .length,
           0,
         );
-        expect(find.text('OpenAI').hitTestable(), findsOneWidget);
-        for (final label in ['Close Pane', 'Zoom Pane', 'Stop Harness']) {
+        expect(find.byType(GridModelPicker), findsNothing);
+        expect(find.byTooltip('Close Pane').hitTestable(), findsNothing);
+        for (final label in ['Zoom Pane', 'Stop Harness']) {
           expect(find.byTooltip(label).hitTestable(), findsNothing);
         }
         final controlsBounds = tester.getRect(controls);
@@ -268,14 +269,15 @@ void main() {
         await mouse.addPointer(location: const Offset(1, 100));
         await mouse.moveTo(tester.getCenter(title));
         await tester.pump();
-        for (final label in ['Close Pane', 'Zoom Pane', 'Stop Harness']) {
+        expect(find.byTooltip('Close Pane').hitTestable(), findsOneWidget);
+        for (final label in ['Zoom Pane', 'Stop Harness']) {
           expect(find.byTooltip(label), findsNothing);
         }
         expect(tester.getRect(title), titleBounds);
         expect(tester.getRect(controls), controlsBounds);
         await mouse.moveTo(tester.getCenter(find.byType(TerminalView)));
         await tester.pump();
-        for (final label in ['Close Pane', 'Zoom Pane', 'Stop Harness']) {
+        for (final label in ['Zoom Pane', 'Stop Harness']) {
           expect(find.byTooltip(label).hitTestable(), findsNothing);
         }
         expect(find.byTooltip('Share harness'), findsNothing);
@@ -297,7 +299,7 @@ void main() {
     );
   }
   testWidgets(
-    'narrow headers preserve identity and model selection at large text',
+    'narrow compact headers preserve identity and close controls at large text',
     (tester) async {
       final app = createApp();
       final session = terminal('a0', []);
@@ -345,7 +347,13 @@ void main() {
         expect(tester.takeException(), isNull);
         final titleBefore = tester.getRect(title);
         final picker = find.byType(GridModelPicker);
-        expect(picker.hitTestable(), findsOneWidget);
+        expect(picker, findsNothing);
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        await mouse.moveTo(tester.getCenter(title));
+        await tester.pump();
+        expect(find.byTooltip('Close Pane').hitTestable(), findsOneWidget);
+        await mouse.removePointer();
         expect(find.byTooltip('Stop Harness'), findsNothing);
         expect(find.byTooltip('Zoom Pane'), findsNothing);
         expect(tester.getRect(title), titleBefore);

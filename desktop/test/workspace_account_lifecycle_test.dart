@@ -11,7 +11,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_layout_store.dart';
 import 'package:harness/state/pane_preset.dart';
 import 'package:harness/terminal/terminal_session.dart';
-import 'package:harness/ws/local_cli_discovery.dart';
+import 'package:harness/viewer/viewer_services.dart';
 
 import 'swarm_screen_test.dart' show terminal;
 import 'swarm_state_test.dart' show MemoryStore;
@@ -28,20 +28,6 @@ class WorkspaceAccountLogin extends CliLogin {
   @override
   Future<CliAuthStatus> checkStatus() async =>
       const CliAuthStatus(loggedIn: false);
-}
-
-class _Discovery extends LocalCliDiscovery {
-  _Discovery() : super(config: AppConfig.dev);
-  @override
-  Future<LocalCliProbe> ensureRunning({
-    Duration timeout = const Duration(seconds: 15),
-    Duration readyTimeout = LocalCliDiscovery.defaultReadyTimeout,
-  }) async => const LocalCliProbe.down('fixture signed out');
-  @override
-  Future<String?> computerId() async => null;
-  @override
-  Future<LocalCliEndpoint?> discover({String? expectedComputerId}) async =>
-      null;
 }
 
 class _Api extends ApiClient {
@@ -68,7 +54,10 @@ class WorkspaceAccountFixture extends AppNotifier {
         config: AppConfig.dev,
         authSession: AuthSession(storage: MemoryStore()),
         cliLogin: cli,
-        localCliDiscovery: _Discovery(),
+        viewer: ViewerServices(
+          config: AppConfig.dev,
+          session: AuthSession(storage: MemoryStore()),
+        ),
         paneLayoutStore: PaneLayoutStore(storage: storage),
       ) {
     api = _Api();
@@ -76,16 +65,10 @@ class WorkspaceAccountFixture extends AppNotifier {
   }
   final WorkspaceAccountLogin cli;
   int get inventoryRequests => (api as _Api).inventoryRequests;
-  var expired = false;
-  @override
-  Future<void> ensureCliDaemonReady() async {
-    if (expired) await super.ensureCliDaemonReady();
-  }
-
+  // These account-wide teardown guarantees belong to a viewer. Desktop windows
+  // keep serving this computer as guests; guest_window_test covers that desk.
   Future<void> expire() async {
-    expired = true;
-    await ensureCliDaemonReady();
-    expired = false;
+    expireSessionForTest('You were signed out. Sign in again to reconnect.');
   }
 }
 

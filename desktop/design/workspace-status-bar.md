@@ -121,9 +121,13 @@ empty tab.
 Each field is independently clickable, with the same bold hover/keyboard-focus
 text and hand cursor as the status symbols. Machine opens the shared picker scoped by machine
 identity; project opens its harnesses across matching remote checkouts; branch
-opens that project filtered by its exact branch. Escape returns
-from branch to project, then to project search. Names never establish identity.
-Branch navigation does not check out or create a branch.
+opens the focused session's Work details when the daemon supplies `gitContext`.
+Details distinguish current observed work from the launch workspace and retain
+observed branches and PRs across tasks. Escape returns focus to the terminal.
+Older daemons keep exact-branch project search, with Escape returning through its
+scopes. Names never establish identity. Branch navigation does not check out or
+create a branch. Unknown/multiple/unavailable work uses plain muted context text,
+without a Git branch symbol; the same action remains inspectable.
 
 Customize Harness → Status offers twelve saved themes, grouped into Minimal
 and Powerline, with a preview of the same sample pane beneath each choice.

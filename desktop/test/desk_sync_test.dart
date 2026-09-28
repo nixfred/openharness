@@ -680,7 +680,7 @@ void main() {
 
       app.setPreset(2, PanePreset.rows);
       await Future<void>.delayed(Duration.zero);
-      final onDesk = () =>
+      DeskLayout? onDesk() =>
           api.doc!.tabs.singleWhere((t) => t.id == work.id).layout;
       expect(onDesk()?.presets, {'2': 'rows'});
       expect(

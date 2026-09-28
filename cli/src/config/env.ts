@@ -156,8 +156,8 @@ const envSchema = z.object({
   // <COPILOT_HOME>/session-state/<sessionId>/events.jsonl, and hooks are read from
   // <COPILOT_HOME>/hooks/*.json — a directory, so Harness drops in its own file.
   COPILOT_HOME: z.string().default(join(homedir(), '.copilot')),
-  // Cursor state root. Interactive transcripts live below <CURSOR_HOME>/projects and local
-  // subagent linkage metadata lives below <CURSOR_HOME>/chats.
+  // Legacy Cursor fallback. cursor/home.ts resolves its distinct config (chats/hooks) and data
+  // (projects/transcripts) roots using CURSOR_CONFIG_DIR, XDG_CONFIG_HOME and CURSOR_DATA_DIR.
   CURSOR_HOME: z.string().default(join(homedir(), '.cursor')),
   // OpenCode state root — the SQLite store lives at <OPENCODE_DATA_DIR>/opencode.db (honors
   // XDG_DATA_HOME). Sessions are polled from that DB (no per-session transcript file).

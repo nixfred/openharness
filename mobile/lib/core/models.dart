@@ -2,6 +2,7 @@
 library;
 
 import 'agent_output_stats.dart';
+import 'agent_git_context.dart';
 
 enum MachineAuthMode { managed, remote, self, provider }
 
@@ -143,10 +144,28 @@ class Agent {
   /// so it is what tells two such agents apart on a phone.
   final String? title;
 
-  /// When the conversation was last written — the transcript's mtime, which the
-  /// daemon prefers over its own bookkeeping precisely so a client sorting by
-  /// recency follows the work. Null from a daemon too old to send it.
+  /// When the conversation was last active — the latest dated record in its
+  /// transcript, which the daemon prefers over its own bookkeeping precisely so
+  /// a client sorting by recency follows the work. Null from a daemon too old
+  /// to send it.
   final DateTime? updatedAt;
+
+  /// When any app last opened this agent — the phone, a desktop window, on any
+  /// computer. Stamped by the daemon that owns the agent when an app says so
+  /// (`agent_update {opened: true}`), so every app reads the same moment. Null
+  /// when nobody has, or from a daemon too old to keep it.
+  final DateTime? lastOpenedAt;
+
+  /// What every list of agents sorts by: the later of the last activity and the
+  /// last time an app opened it — one order, the same on the phone and on every
+  /// desktop.
+  DateTime? get lastUsedAt {
+    final activity = updatedAt, opened = lastOpenedAt;
+    if (activity == null) return opened;
+    if (opened == null) return activity;
+    return opened.isAfter(activity) ? opened : activity;
+  }
+
   final String? engine;
   final String? engineDisplayName;
   final String? engineIconHint;
@@ -172,6 +191,9 @@ class Agent {
   final String? dshName;
   final String? parentAgentId;
   final AgentProject? project;
+  final AgentGitContext? gitContext;
+  AgentProject? get displayProject =>
+      gitContext?.displayProject(project) ?? project;
   final String status;
   final String launchState;
   final String? launchError;
@@ -198,6 +220,7 @@ class Agent {
     required this.name,
     this.title,
     this.updatedAt,
+    this.lastOpenedAt,
     this.engine,
     this.engineDisplayName,
     this.engineIconHint,
@@ -208,6 +231,7 @@ class Agent {
     this.dshName,
     this.parentAgentId,
     this.project,
+    this.gitContext,
     this.status = 'active',
     this.launchState = 'ready',
     this.launchError,
@@ -255,6 +279,7 @@ class Agent {
       name: j['name'] as String? ?? 'agent',
       title: _safeLabel(j['title']),
       updatedAt: _safeTime(j['updatedAt']),
+      lastOpenedAt: _safeTime(j['lastOpenedAt']),
       engine: _safeEngine(j['engine']),
       engineDisplayName: _safeLabel(j['engineDisplayName']),
       engineIconHint: _safeLabel(j['engineIconHint']),
@@ -267,6 +292,7 @@ class Agent {
       dshName: _safeLabel(j['dshName']),
       parentAgentId: _safeLabel(j['parentAgentId'] ?? j['parentId']),
       project: AgentProject.fromJson(j['project']),
+      gitContext: AgentGitContext.fromJson(j['gitContext']),
       status: (j['status'] as String?) ?? 'active',
       launchState: launchState,
       launchError: launchState == 'failed' ? _safeLabel(launch['error']) : null,
@@ -287,12 +313,13 @@ class Agent {
     );
   }
 
-  Agent copyWith({String? name}) => Agent(
+  Agent copyWith({String? name, AgentGitContext? gitContext}) => Agent(
     id: id,
     sessionId: sessionId,
     name: name ?? this.name,
     title: title,
     updatedAt: updatedAt,
+    lastOpenedAt: lastOpenedAt,
     engine: engine,
     engineDisplayName: engineDisplayName,
     engineIconHint: engineIconHint,
@@ -303,6 +330,7 @@ class Agent {
     dshName: dshName,
     parentAgentId: parentAgentId,
     project: project,
+    gitContext: gitContext ?? this.gitContext,
     status: status,
     launchState: launchState,
     launchError: launchError,
@@ -546,6 +574,7 @@ class AgentProject {
     this.root,
     this.remote,
     this.branch,
+    this.worktree = false,
     this.branchPending = false,
   });
   final String name;
@@ -553,6 +582,7 @@ class AgentProject {
   final String? root;
   final String? remote;
   final String? branch;
+  final bool worktree;
 
   /// [branch] is still the name Harness made up at Start; it is shown once the session's name
   /// replaces it.
@@ -618,10 +648,11 @@ class AgentProject {
       root == other.root &&
       remote == other.remote &&
       branch == other.branch &&
+      worktree == other.worktree &&
       branchPending == other.branchPending;
   @override
   int get hashCode =>
-      Object.hash(name, cwd, root, remote, branch, branchPending);
+      Object.hash(name, cwd, root, remote, branch, worktree, branchPending);
 
   static AgentProject? fromJson(Object? raw) {
     if (raw is! Map) return null;
@@ -644,6 +675,7 @@ class AgentProject {
       root: field('root'),
       remote: field('remote'),
       branch: field('branch', 256),
+      worktree: raw['worktree'] == true,
       branchPending: raw['branchPending'] == true,
     );
   }

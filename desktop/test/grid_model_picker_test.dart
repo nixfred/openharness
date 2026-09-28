@@ -296,14 +296,14 @@ void main() {
         of: control,
         matching: find.byType(ColoredBox),
       );
-      expect(fill, findsOneWidget);
-      expect(tester.getSize(fill).height, 28);
       expect(
-        tester.widget<ColoredBox>(fill).color,
-        tester
-            .widget<WorkspaceBarControl>(control)
-            .selection
-            .withValues(alpha: .5),
+        fill,
+        findsNothing,
+        reason: 'hover emphasizes text without filling the model control',
+      );
+      expect(
+        tester.widget<Text>(find.text('GPT-6 Astra')).style!.fontWeight,
+        FontWeight.bold,
       );
       await hover.moveTo(Offset.zero);
       await tester.pumpAndSettle();

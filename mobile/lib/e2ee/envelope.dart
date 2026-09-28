@@ -54,6 +54,8 @@ const Set<String> encryptedDownTypes = {
   'theme_set',
   // What somebody searches their conversations for (cli/src/lib/sessionSearch/).
   'session_search',
+  // Which conversation somebody is previewing, from the same index.
+  'session_tail',
   'device_e2ee_pair',
   'e2ee_pairings_list',
   'e2ee_pairing_unpair',

@@ -104,9 +104,11 @@ shared app bar. A dependent viewer uses its owner's context. Keep internal
 worktree paths and machinery out of everyday labels.
 
 Machine opens the shared picker scoped to that machine. Project opens its harnesses across
-known checkouts and machines. Branch narrows that project to the exact named
-branch. Hide detached commit hashes from the bar. These are navigation actions;
-they do not check out a branch.
+known checkouts and machines. With session Git context, Branch opens Work details:
+current observed checkout, launch workspace, observed branches and PR history.
+Older daemons keep exact-branch project search. Hide detached commit hashes from
+the bar. Ambiguous or unavailable work is plain context text, without a branch
+symbol. These are navigation actions; they do not check out a branch.
 The PR label opens that PR. Each field gets its own accessible link, tooltip, and
 the shared hover treatment, including in joined Agnoster segments.
 

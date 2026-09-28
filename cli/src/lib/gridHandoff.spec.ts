@@ -121,7 +121,8 @@ describe('handOffToGrid — a child that never answers', () => {
   function hangingGrid(dir: string): string {
     mkdirSync(dir, { recursive: true })
     const bin = join(dir, 'grid')
-    writeFileSync(bin, ['#!/bin/sh', "trap '' TERM", '/bin/cat > /dev/null', 'sleep 60', ''].join('\n'), { mode: 0o755 })
+    // Absolute paths, since PATH is empty here: Linux's sh exits 127 on a bare `sleep` before the watchdog fires.
+    writeFileSync(bin, ['#!/bin/sh', "trap '' TERM", '/bin/cat > /dev/null', '/bin/sleep 60', ''].join('\n'), { mode: 0o755 })
     return bin
   }
 

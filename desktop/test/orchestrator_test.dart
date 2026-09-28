@@ -119,11 +119,11 @@ void main() {
     );
   }
 
-  test('Cmd-P opens a pane and the orchestrator remains a palette command', () {
+  test('Cmd-O opens projects and the orchestrator remains a palette command', () {
     final shortcut = appShortcuts()
         .singleWhere((s) => s.action == ShortcutAction.addAgent)
         .activator;
-    expect(shortcut.trigger, LogicalKeyboardKey.keyP);
+    expect(shortcut.trigger, LogicalKeyboardKey.keyO);
     expect(shortcut.meta, isTrue);
     expect(shortcut.shift, isFalse);
     expect(

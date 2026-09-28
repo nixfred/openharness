@@ -34,10 +34,10 @@ describe('Enter resumes stopped work', () => {
   })
 
   it.each([
-    // No id recorded to reopen, and an engine with no resume argv at all: both still come back —
-    // same pane, same folder — as a new conversation, launched without a resume id.
+    // No id recorded to reopen: it still comes back — same pane, same folder — as a new
+    // conversation, launched without a resume id. (Every agent engine can resume one now.)
     { ...saved, sessionId: '' },
-    { ...saved, engine: 'devin' as const },
+    { ...saved, engine: 'devin' as const, sessionId: '' },
   ])('resumes without a conversation rather than refusing the harness', async entry => {
     const deps = fixture()
     deps.saved.mockReturnValue(entry)
@@ -198,11 +198,11 @@ describe('exact conversation readiness', () => {
   })
 
   it('says a resume with no conversation to reopen is a fresh one', async () => {
-    // devin hooks at launch like the rest, so it is confirmed the strict way — but it has no resume
-    // argv, so what came back is a new conversation and `resumed` says so rather than lying.
+    // devin hooks at launch like the rest, so it is confirmed the strict way — but with no id recorded
+    // there was nothing to reopen, so what came back is a new conversation and `resumed` says so.
     const deps = readiness('devin')
-    deps.set({ lastHookAt: 100, launch: { state: 'ready' } })
-    await expect(waitForResumedAgent({ ...saved, engine: 'devin' as const }, deps))
+    deps.set({ lastHookAt: 100, launch: { state: 'ready' }, sessionId: '' })
+    await expect(waitForResumedAgent({ ...saved, engine: 'devin' as const, sessionId: '' }, deps))
       .resolves.toMatchObject({ ok: true, resumed: false })
   })
 

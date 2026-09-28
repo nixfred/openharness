@@ -156,3 +156,9 @@ Shipped on nixfred/main: gate lanes; Hermes profile re-resolve (OH-F1); attentio
 ## Status 2026-09-27 late (nixfred 0.1.2)
 
 Dispatcher end to end, sealed clipboard/file drop, spend arc and avatar-in-ring on the bar (VM-validated), command reference. Open: hold-to-stop on the bar, Flutter pane glow (no SDK), Phase 6 firmware, approvals batching (device), PR #233 carry.
+
+## Status 2026-09-27 (nixfred 0.1.3 + sync to upstream 56651674)
+
+Shipped since 0.1.2: desktop pane glow, Omarchy palette, hold-to-stop on the bar, Mike Gannotti's #233 rebased and merged, README section, fork default branch nixfred/main. Synced to upstream 56651674 (hosted Hermes rows follow upstream's updatedAt to touchedAt rename).
+
+Open, waiting on the device (Tuesday 2026-09-29): Phase 0 stock baseline; then install the fork on top and see live what has only been tested offline: the pane glow, the Omarchy palette, the physical hold-to-stop, the gate on a live Claude session, a dispatch between two machines, the Hermes session backend on a real Hermes install. Waiting on signed firmware: Phase 6 device work and approvals batching. Waiting on Fred: whether his face assets (nixfred/device-art/) go in the public fork; sending the note to Mike.

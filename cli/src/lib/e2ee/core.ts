@@ -365,6 +365,8 @@ export const ENCRYPTED_RPC_RESULT_TYPES = new Set<string>([
   'theme_set_result',
   // Session search hits: what was said in this machine's conversations, around the searched words.
   'session_search_result',
+  // The end of one conversation, for a preview: what was asked and answered, verbatim.
+  'session_tail_result',
 ])
 /** Client→adapter frames that carry or can trigger adapter-local user data. */
 export const ENCRYPTED_DOWN_TYPES = new Set<string>([
@@ -390,6 +392,8 @@ export const ENCRYPTED_DOWN_TYPES = new Set<string>([
   // What somebody is searching their conversations for (lib/sessionSearch/). Same trap as above if
   // missing: the envelope would never be opened and the app would wait out its timeout.
   'session_search',
+  // Which conversation somebody is previewing. Same trap as above if missing.
+  'session_tail',
   'device_e2ee_pair', 'e2ee_pairings_list', 'e2ee_pairing_unpair',
   'e2ee_pairings_unpair_all', 'e2ee_browser_link_create',
   // Remote terminal control is always pairwise E2EE. The relay may route by outer type/connId but must

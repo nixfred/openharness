@@ -604,14 +604,18 @@ const RESUME_ARGS: Partial<Record<RegisteredSession['engine'], { flags: string[]
   claude: { flags: ['--resume', '-r'], id: /^[0-9a-f-]{16,}$/i, unless: ['--fork-session'] },
   codex: { flags: ['resume'], id: /^[0-9a-f-]{16,}$/i },
   cursor: { flags: ['--resume'], id: /^[0-9a-f-]{16,}$/i },
-  opencode: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/ },
+  // `--fork` continues from the id but writes a NEW session, so the id in argv is the parent's.
+  opencode: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/, unless: ['--fork'] },
   // Kilo inherits opencode's resume flags and its `ses_` id prefix — measured on this machine's kilo.db:
   // `ses_024a007fdffe11yG68JPxsHJly`. `--fork` is deliberately NOT here: it CONTINUES from an id but
   // writes a NEW session, so the id in argv is the parent's and would bind the agent to the wrong row.
-  kilo: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/ },
+  kilo: { flags: ['--session', '-s'], id: /^ses_[A-Za-z0-9]+$/, unless: ['--fork'] },
   pi: { flags: ['--session', '--session-id'], id: /^[0-9a-f][0-9a-f-]{7,}$/i },
   // Hermes ids are timestamps: 20260728_115628_f2c86a.
-  hermes: { flags: ['--resume'], id: /^\d{8}_\d{6}_[0-9a-z]+$/i },
+  // Hermes ids are timestamps (20260728_115628_f2c86a), or uuids for an editor's (ACP) sessions.
+  hermes: { flags: ['--resume', '-r'], id: /^(?:\d{8}_\d{6}_[0-9a-z]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i },
+  // `devin -r <id>` / `--resume <id>`: ids are word slugs (`brisk-otter`).
+  devin: { flags: ['--resume', '-r'], id: /^[a-z0-9]+(?:-[a-z0-9]+)+$/ },
   commandcode: { flags: ['--resume', '-r', '--session'], id: /^[0-9a-f-]{16,}$/i },
   // `muse resume <uuid>` names the session; `muse resume --last` does not, so that form falls through
   // to the scan in sessionRepair instead.

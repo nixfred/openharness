@@ -629,3 +629,27 @@ model Desk {
 
   @@map("desks")
 }
+
+/// A sign-in Harness issued ITSELF rather than through the Autonomous account service — today only
+/// to a phone that scanned a signed-in computer's Add Phone QR (lib/harnessSession.ts). The account
+/// service has no way for one signed-in device to sign in another, so the computer asks for a
+/// one-time handoff code, the QR carries it, and the phone trades it for this session.
+///
+/// Only a HASH of the refresh token is stored: a dump of this collection must not be a key store.
+/// The access token lives in Redis beside it, an hour at a time. Revoking is setting `revokedAt`;
+/// every request reads it, so it takes effect at once.
+model HarnessSession {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String
+  refreshHash String    @unique
+  /// What the device calls itself ("Dee's iPhone"), for a list of signed-in devices.
+  label       String
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime  @default(now())
+  /// Slides forward on every refresh: a phone in use stays signed in, one left in a drawer does not.
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  @@index([userId])
+  @@map("harness_sessions")
+}

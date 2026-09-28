@@ -35,9 +35,11 @@ export function canonicalRepository(raw: string | null): string | null {
 /** Bounded subprocesses, no shell, network, or repository mutation. */
 async function git(cwd: string, args: string[]): Promise<string | null> {
   try {
+    const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }
+    for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE', 'GIT_PREFIX']) delete (environment as NodeJS.ProcessEnv)[key]
     const { stdout } = await exec('git', ['-C', cwd, ...args], {
       timeout: 1500, maxBuffer: 16 * 1024, encoding: 'utf8',
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+      env: environment,
     })
     return stdout.trim() || null
   } catch { return null }

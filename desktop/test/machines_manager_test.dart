@@ -105,7 +105,7 @@ void main() {
         await openWorkspaceManagement(tester, 'machines');
         await tester.pumpAndSettle();
         expect(find.byType(HarnessSessionManager), findsNothing);
-        expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+        expect(resourceScope('@'), findsOneWidget);
         await openWorkspaceManagement(tester, 'models');
         await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
@@ -414,8 +414,8 @@ void main() {
           await tester.pumpAndSettle();
         }
 
-        expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
-        expect(find.text('Add a second machine'), findsOneWidget);
+        expect(resourceScope('@'), findsOneWidget);
+        expect(find.text('Add machine'), findsOneWidget);
         expect(app.activeSwarm, same(tab));
         expect(app.panes, isEmpty);
         expect(tester.takeException(), isNull);

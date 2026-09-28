@@ -16,7 +16,8 @@ import { chmodSync, existsSync, rmSync } from 'node:fs'
 import { builtinSqlite } from '../sqliteRead.js'
 import type { IndexedTurn } from './turns.js'
 
-const SCHEMA_VERSION = '5'
+// Rebuild schema 10's external-engine index with Codex app/editor context removed from asks.
+const SCHEMA_VERSION = '11'
 
 /** The row that holds a session's name, title and folder: searchable beside its turns. */
 export const HEADER_TURN = -1
@@ -48,6 +49,27 @@ export interface IndexedSession {
   resumeTurn: number
   lastAt: number | null
   turns: number
+  /**
+   * A conversation Harness did not start (lib/sessionSearch/external.ts), whose `agentId` is empty:
+   * its title (Codex's thread name, Claude's own title, else the first ask), the folder it resumes in,
+   * and where it ran. Empty for a Harness session.
+   */
+  title?: string
+  cwd?: string
+  origin?: string
+}
+
+/** What a hit on a conversation Harness did not start carries, so a client can show and resume it. */
+export interface ExternalHit {
+  title: string
+  cwd: string
+  origin: string
+  /** Open in a running process elsewhere (a terminal, the engine's app): not to be opened twice. */
+  open?: boolean
+  /** Where it is open: a terminal, which Harness can take it over from; an app, which it cannot; or
+   *  one of Harness's own panes, an agent the daemon is still binding; or `maybe` a terminal whose
+   *  process was started on it and may have moved on. */
+  openIn?: 'terminal' | 'app' | 'harness' | 'maybe'
 }
 
 export interface SearchHit {
@@ -68,6 +90,8 @@ export interface SearchHit {
   together: boolean
   /** 0–1, higher is better: relevance blended with recency; comparable across machines. */
   score: number
+  /** Set for a conversation Harness did not start; its `agentId` is then empty. */
+  external?: ExternalHit
 }
 
 // BM25 column weights: header (name/title/folder), what was asked, the answer, tool calls.
@@ -89,8 +113,42 @@ const OPENING_TURNS = 2
 const OPENING_BOOST = 1.2
 /** The start of what was asked, for a hit found by time alone. */
 function clipAsk(ask: string): string {
-  return ask.length > 160 ? ask.slice(0, 160).trimEnd() + '…' : ask
+  const line = ask.replace(/\s+/g, ' ').trim()
+  return line.length > 160 ? line.slice(0, 160).trimEnd() + '…' : line
 }
+
+/** One row of a session as a preview shows it: a turn, or a long turn's continuation (no ask). */
+export interface TailRow {
+  turn: number
+  at: number | null
+  ask: string
+  answer: string
+  /** Tool calls, one per line: the paths, commands and queries they named. */
+  tools: string
+}
+
+/** The end of a session, oldest row first. */
+export interface SessionTail {
+  sessionId: string
+  rows: TailRow[]
+  /** Whether rows older than the first one here exist. */
+  hasMore: boolean
+  /** Rows in the whole session. */
+  total: number
+  lastAt: number | null
+  /**
+   * With the last page: the latest row that has an ask. After a long autonomous turn it is many
+   * continuation rows up, and it is what the session is doing now.
+   */
+  lastAsk?: TailRow
+  /** For a conversation Harness did not start: what a hit on it carries, and whether it is open. */
+  external?: ExternalHit
+}
+
+/** What one preview page holds, and what a caller may ask for. */
+export const TAIL_CHARS = 16_000
+const TAIL_CHARS_MAX = 64_000
+const TAIL_BATCH = 16
 
 export interface SearchOptions {
   limit?: number
@@ -170,7 +228,8 @@ export function makeSnippet(text: string, patterns: RegExp[]): string | null {
   const to = Math.min(words.length - 1, from + SNIPPET_WORDS - 1)
   const start = from === 0 && regionStart === 0 ? 0 : words[from].index!
   const end = to === words.length - 1 && regionEnd === text.length ? text.length : words[to].index! + words[to][0].length
-  const window = text.slice(start, end)
+  // One line: stored text keeps its line breaks for the preview.
+  const window = text.slice(start, end).replace(/\s+/g, ' ')
   const marks: Array<[number, number]> = []
   for (const pattern of patterns) {
     pattern.lastIndex = 0
@@ -281,7 +340,10 @@ export class SessionSearchStore {
         resume_offset INTEGER NOT NULL,
         resume_turn INTEGER NOT NULL,
         last_at INTEGER,
-        turns INTEGER NOT NULL
+        turns INTEGER NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        cwd TEXT NOT NULL DEFAULT '',
+        origin TEXT NOT NULL DEFAULT ''
       );
       CREATE TABLE turns (
         id INTEGER PRIMARY KEY,
@@ -335,13 +397,16 @@ export class SessionSearchStore {
   }
 
   /** Who each session belongs to and when it was last worked on, read once per change. */
-  private meta: Map<string, { agentId: string; engine: string; lastAt: number | null }> | null = null
+  private meta: Map<string, SessionMeta> | null = null
 
-  private sessionMeta(): Map<string, { agentId: string; engine: string; lastAt: number | null }> {
+  private sessionMeta(): Map<string, SessionMeta> {
     if (!this.meta) {
-      this.meta = new Map(this.statement('SELECT session_id, agent_id, engine, last_at FROM sessions').all().map((row) => [
+      this.meta = new Map(this.statement('SELECT session_id, agent_id, engine, last_at, title, cwd, origin FROM sessions').all().map((row) => [
         row.session_id as string,
-        { agentId: row.agent_id as string, engine: row.engine as string, lastAt: (row.last_at as number | null) ?? null },
+        {
+          agentId: row.agent_id as string, engine: row.engine as string, lastAt: (row.last_at as number | null) ?? null,
+          ...(row.agent_id ? {} : { external: { title: String(row.title ?? ''), cwd: String(row.cwd ?? ''), origin: String(row.origin ?? '') } }),
+        },
       ]))
     }
     return this.meta
@@ -350,6 +415,59 @@ export class SessionSearchStore {
   session(sessionId: string): IndexedSession | undefined {
     const row = this.statement('SELECT * FROM sessions WHERE session_id = ?').get(sessionId)
     return row ? toSession(row) : undefined
+  }
+
+  /**
+   * The rows before `beforeTurn` (the last rows, without it), newest last, as many as fit in
+   * `maxChars` — never fewer than one. A preview shows them from the bottom and pages up with the
+   * first row's turn. Null for a session the index does not hold.
+   */
+  tail(sessionId: string, options: { beforeTurn?: number; maxChars?: number } = {}): SessionTail | null {
+    const session = this.session(sessionId)
+    if (!session) return null
+    const maxChars = Math.min(Math.max(options.maxChars ?? TAIL_CHARS, 1_000), TAIL_CHARS_MAX)
+    const before = this.statement(`SELECT turn, at, ask, answer, tools FROM turns
+      WHERE session_id = ? AND turn >= 0 AND turn < CAST(? AS INTEGER) ORDER BY turn DESC LIMIT ${TAIL_BATCH}`)
+    const rows: TailRow[] = []
+    let used = 0
+    let cursor = options.beforeTurn ?? Number.MAX_SAFE_INTEGER
+    let full = false
+    while (!full) {
+      const batch = before.all(sessionId, cursor)
+      for (const row of batch) {
+        const next: TailRow = {
+          turn: Number(row.turn), at: row.at === null ? null : Number(row.at),
+          ask: String(row.ask ?? ''), answer: String(row.answer ?? ''), tools: String(row.tools ?? ''),
+        }
+        const size = next.ask.length + next.answer.length + next.tools.length
+        if (rows.length && used + size > maxChars) { full = true; break }
+        rows.push(next)
+        used += size
+        cursor = next.turn
+      }
+      if (batch.length < TAIL_BATCH) break
+    }
+    rows.reverse()
+    const hasMore = rows.length > 0 && !!this.statement(
+      'SELECT 1 AS found FROM turns WHERE session_id = ? AND turn >= 0 AND turn < CAST(? AS INTEGER) LIMIT 1',
+    ).get(sessionId, rows[0].turn)
+    const tail: SessionTail = { sessionId, rows, hasMore, total: session.turns, lastAt: session.lastAt }
+    if (options.beforeTurn === undefined) {
+      const asked = this.statement(`SELECT turn, at, ask FROM turns
+        WHERE session_id = ? AND turn >= 0 AND ask != '' ORDER BY turn DESC LIMIT 1`).get(sessionId)
+      if (asked) {
+        tail.lastAsk = {
+          turn: Number(asked.turn), at: asked.at === null ? null : Number(asked.at),
+          ask: String(asked.ask), answer: '', tools: '',
+        }
+      }
+    }
+    return tail
+  }
+
+  /** Sessions the index files under a Harness agent, earlier ones (before a `/clear`) included. */
+  ownedSessionIds(): Set<string> {
+    return new Set(this.statement("SELECT session_id FROM sessions WHERE agent_id != ''").all().map((row) => row.session_id as string))
   }
 
   sessionIds(): string[] {
@@ -370,10 +488,11 @@ export class SessionSearchStore {
       for (const turn of turns) insert.run(session.sessionId, turn.turn, turn.at, '', turn.ask, turn.answer, turn.tools)
       const count = this.statement('SELECT count(*) AS n FROM turns WHERE session_id = ? AND turn >= 0').get(session.sessionId)?.n as number
       this.statement(`INSERT OR REPLACE INTO sessions
-        (session_id, agent_id, engine, path, header, size, mtime, resume_offset, resume_turn, last_at, turns)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        (session_id, agent_id, engine, path, header, size, mtime, resume_offset, resume_turn, last_at, turns, title, cwd, origin)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         session.sessionId, session.agentId, session.engine, session.path, session.header, session.size,
         session.mtime, session.resumeOffset, session.resumeTurn, session.lastAt, count,
+        session.title ?? '', session.cwd ?? '', session.origin ?? '',
       )
     })
   }
@@ -551,6 +670,7 @@ export class SessionSearchStore {
         snippet,
         together: match.together,
         score: Math.round(score * 1000) / 1000,
+        ...externalOf(session),
       }
     })
   }
@@ -611,6 +731,7 @@ export class SessionSearchStore {
         snippet: clipAsk(asked || String(row.answer ?? '')),
         together: true,
         score: Math.round(Math.pow(0.5, Math.max(0, now - at) / 86_400_000 / RECENCY_HALF_LIFE_DAYS) * 1000) / 1000,
+        ...externalOf(session),
       })
     }
     return hits
@@ -642,5 +763,16 @@ function toSession(row: Record<string, unknown>): IndexedSession {
     resumeTurn: row.resume_turn as number,
     lastAt: (row.last_at as number | null) ?? null,
     turns: row.turns as number,
+    title: String(row.title ?? ''),
+    cwd: String(row.cwd ?? ''),
+    origin: String(row.origin ?? ''),
   }
+}
+
+type SessionMeta = { agentId: string; engine: string; lastAt: number | null; external?: ExternalHit }
+
+/** The fields a hit on a session Harness did not start adds. */
+function externalOf(session: SessionMeta): { external: ExternalHit } | Record<string, never> {
+  // A copy: a search marks whether it is open, and the cache it came from outlives the search.
+  return session.external ? { external: { ...session.external } } : {}
 }

@@ -16,6 +16,7 @@ import 'package:harness/terminal/terminal_session.dart';
 
 import 'support/real_fonts.dart';
 import 'swarm_state_test.dart' show MemoryStore;
+import 'support/guest_app.dart';
 
 class SignOutFixture extends CliLogin {
   final attempts = <Completer<void>>[];
@@ -58,20 +59,21 @@ Widget signOutHost(
   );
 }
 
-AppNotifier signOutApp(SignOutFixture cli, {bool local = false}) => AppNotifier(
-  config: AppConfig.dev,
-  configStore: null,
-  authSession: AuthSession(storage: MemoryStore()),
-  cliLogin: cli,
-  localManualFixture: local
-      ? const LocalManualFixture(
-          apiBaseUrl: 'http://127.0.0.1:1',
-          apiKey: 'fixture',
-          machineId: 'fixture',
-          machineName: 'Fixture',
-        )
-      : null,
-)..status = AppStatus.authenticated;
+AppNotifier signOutApp(SignOutFixture cli, {bool local = false}) =>
+    GuestTestApp(
+      config: AppConfig.dev,
+      configStore: null,
+      authSession: AuthSession(storage: MemoryStore()),
+      cliLogin: cli,
+      localManualFixture: local
+          ? const LocalManualFixture(
+              apiBaseUrl: 'http://127.0.0.1:1',
+              apiKey: 'fixture',
+              machineId: 'fixture',
+              machineName: 'Fixture',
+            )
+          : null,
+    )..status = AppStatus.authenticated;
 
 void main() {
   setUpAll(() async {
@@ -97,7 +99,8 @@ void main() {
       cli.attempts.single.complete();
       await first;
       await second;
-      expect(app.status, AppStatus.unauthenticated);
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
       await app.login();
       expect(cli.logins, 1);
     },
@@ -111,7 +114,8 @@ void main() {
       addTearDown(app.dispose);
       await app.logout();
       expect(cli.attempts, isEmpty);
-      expect(app.status, AppStatus.unauthenticated);
+      expect(app.status, AppStatus.authenticated);
+      expect(app.isGuest, isTrue);
     },
   );
 

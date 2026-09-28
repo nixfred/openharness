@@ -1,3 +1,4 @@
+import 'support/resource_picker.dart';
 import 'support/workspace_tools.dart';
 import 'swarm_interactions_test.dart' show chord;
 
@@ -910,17 +911,16 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await chord(tester, LogicalKeyboardKey.keyN);
       await tester.pumpAndSettle();
-      // With no machine to open an agent on, the start page's New goes to
-      // the Machines panel, with desktop and server instructions one click away.
-      expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
-      await tester.tap(find.text('Add a second machine'));
+      // With no machine to open an agent on, New opens machine setup in the shared picker.
+      expect(resourceScope('@'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
-      expect(
-        find.text('1. Open Harness on your other computer.'),
-        findsOneWidget,
-      );
-      expect(find.text('Set up a server…'), findsOneWidget);
-      await tester.tap(find.byTooltip('Close Machines'));
+      expect(find.text('Add machine · App'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
       expect(app.panes, isEmpty);
       await tester.pumpWidget(const SizedBox());
@@ -1122,7 +1122,7 @@ void main() {
       // The panel and its password field receive focus after the first frame.
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+      expect(resourceScope('@'), findsOneWidget);
       expect(
         find.byWidgetPredicate(
           (widget) =>
@@ -1131,13 +1131,8 @@ void main() {
         ),
         findsNothing,
       );
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is Icon && widget.semanticLabel == 'remote-mac: Offline',
-        ),
-        findsOneWidget,
-      );
+      expect(resourceSearch(tester).selected!.machineId, machine.machineId);
+      expect(find.text('Offline'), findsWidgets);
       expect(find.text('Harness is offline'), findsNothing);
       expect(find.text('harness start'), findsNothing);
       await tester.pumpWidget(const SizedBox());
@@ -1188,20 +1183,21 @@ void main() {
 
     await openWorkspaceManagement(tester, 'machines');
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('link-mac'));
+    await selectResource(
+      tester,
+      resourceSearch(tester).rows
+          .firstWhere((row) => row.machineId == 'link-machine')
+          .id,
+    );
     await tester.tap(
-      find.byKey(const ValueKey('connect-machine-link-machine')),
+      find.byKey(const ValueKey('resource-action:picker.resource_connect')),
     );
     // Same popup-transition reasoning as above.
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+    expect(resourceScope('@'), findsOneWidget);
     expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is TextField &&
-            widget.decoration?.hintText == 'Harness password',
-      ),
+      find.byKey(const ValueKey('remote-password-connect-field')),
       findsOneWidget,
     );
     await tester.pumpWidget(const SizedBox());
@@ -1272,13 +1268,18 @@ void main() {
 
     await openWorkspaceManagement(tester, 'machines');
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('link-mac'));
+    await selectResource(
+      tester,
+      resourceSearch(tester).rows
+          .firstWhere((row) => row.machineId == 'link-machine')
+          .id,
+    );
     await tester.tap(
-      find.byKey(const ValueKey('connect-machine-link-machine')),
+      find.byKey(const ValueKey('resource-action:picker.resource_connect')),
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('machines-panel')), findsOneWidget);
+    expect(resourceScope('@'), findsOneWidget);
     // No second pane was opened for the popup — just the one terminal pane that was
     // already there.
     expect(app.allPanes, hasLength(1));

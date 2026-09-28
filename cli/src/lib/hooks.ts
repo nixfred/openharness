@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { basename, join, dirname } from 'path'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
+import { cursorConfigDir, cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
 import { VERSION } from '../version.js'
 import { hermesConfigHomes } from '../engines/hermes/home.js'
@@ -16,7 +17,7 @@ import { managedNodePath } from './nodeRuntime.js'
 
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
 const GROK_HOOKS_PATH = join(env.GROK_HOME, 'hooks', 'harness.json')
-const CURSOR_HOOKS_PATH = join(process.env.CURSOR_HOME || join(homedir(), '.cursor'), 'hooks.json')
+const CURSOR_HOOKS_PATH = join(cursorConfigDir(), 'hooks.json')
 // agy reads hooks from its SHARED customization root (~/.gemini/config), not from its own state dir —
 // the CLI's changelog records the move, "ensuring hooks remain synchronized between the TUI and the
 // backend". Verified live: a hooks.json placed there fires for `agy` in a pane.
@@ -80,7 +81,7 @@ function command(
     '--claude-projects-dir', shellQuote(env.CLAUDE_PROJECTS_DIR),
     '--codex-home', shellQuote(codexHome),
     '--grok-home', shellQuote(env.GROK_HOME),
-    '--cursor-home', shellQuote(env.CURSOR_HOME),
+    '--cursor-home', shellQuote(cursorDataDir()),
     '--hermes-home', shellQuote(hermesHome),
     '--commandcode-home', shellQuote(env.COMMANDCODE_HOME),
     '--devin-home', shellQuote(env.DEVIN_HOME),

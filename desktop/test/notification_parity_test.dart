@@ -56,7 +56,7 @@ void main() {
       app.handleEventForTest('m', {
         'type': 'turn_ended',
         'agentId': agentId,
-        if (subagent != null) 'subagent': subagent,
+        'subagent': ?subagent,
         'payload': <String, dynamic>{},
       });
 

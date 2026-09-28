@@ -11,6 +11,8 @@ import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/environment_setup_screen.dart';
 
+import 'support/guest_app.dart';
+
 const setupReview = EnvironmentReadiness(
   steps: {
     EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
@@ -84,8 +86,8 @@ Future<void> _mount(
       ),
       home: ListenableBuilder(
         listenable: app,
-        builder: (_, _) => app.status == AppStatus.unauthenticated
-            ? const Scaffold(body: Text('Sign-in reached'))
+        builder: (_, _) => app.status == AppStatus.authenticated
+            ? const Scaffold(body: Text('Guest workspace reached'))
             : EnvironmentSetupScreen(notifier: app),
       ),
     ),
@@ -94,7 +96,7 @@ Future<void> _mount(
 }
 
 AppNotifier _app(SetupProvisioner provisioner) =>
-    AppNotifier(
+    GuestTestApp(
         config: AppConfig.dev,
         authSession: AuthSession(),
         configStore: null,
@@ -353,52 +355,53 @@ void main() {
     });
   }
 
-  testWidgets('Enter installs and retries once before reaching sign-in', (
-    tester,
-  ) async {
-    final provisioner = SetupProvisioner();
-    final app = _app(provisioner);
-    await _mount(tester, app);
-    expect(provisioner.attempts, isEmpty);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(1));
-    expect(provisioner.attempts.single.install, isTrue);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(1));
-    provisioner.attempts.single.finish(
-      setupReview.copyWith(
-        phase: EnvironmentSetupPhase.failed,
-        failure: const EnvironmentFailure(
-          title: 'Could not install Harness',
-          detail: 'Check your connection, then retry setup.',
+  testWidgets(
+    'Enter installs and retries once before reaching the guest workspace',
+    (tester) async {
+      final provisioner = SetupProvisioner();
+      final app = _app(provisioner);
+      await _mount(tester, app);
+      expect(provisioner.attempts, isEmpty);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(1));
+      expect(provisioner.attempts.single.install, isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(1));
+      provisioner.attempts.single.finish(
+        setupReview.copyWith(
+          phase: EnvironmentSetupPhase.failed,
+          failure: const EnvironmentFailure(
+            title: 'Could not install Harness',
+            detail: 'Check your connection, then retry setup.',
+          ),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(provisioner.attempts, hasLength(2));
-    provisioner.attempts.last.finish(
-      const EnvironmentReadiness(
-        steps: {
-          EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
-          EnvironmentStep.tmux: EnvironmentStepStatus.ready,
-          EnvironmentStep.harness: EnvironmentStepStatus.ready,
-        },
-        phase: EnvironmentSetupPhase.ready,
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('Sign-in reached'), findsOneWidget);
-    expect(provisioner.attempts.map((attempt) => attempt.install), [
-      true,
-      true,
-    ]);
-    await tester.pumpWidget(const SizedBox());
-    app.dispose();
-  });
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(provisioner.attempts, hasLength(2));
+      provisioner.attempts.last.finish(
+        const EnvironmentReadiness(
+          steps: {
+            EnvironmentStep.clipboard: EnvironmentStepStatus.notApplicable,
+            EnvironmentStep.tmux: EnvironmentStepStatus.ready,
+            EnvironmentStep.harness: EnvironmentStepStatus.ready,
+          },
+          phase: EnvironmentSetupPhase.ready,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Guest workspace reached'), findsOneWidget);
+      expect(provisioner.attempts.map((attempt) => attempt.install), [
+        true,
+        true,
+      ]);
+      await tester.pumpWidget(const SizedBox());
+      app.dispose();
+    },
+  );
 }

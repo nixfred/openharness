@@ -41,6 +41,7 @@ import { randomUUID } from 'crypto'
 const HOSTED_SESSION_ID_RE = /^\d{8}_\d{6}_[0-9a-f]{6}$/
 import { join, basename, dirname, relative } from 'path'
 import { hostname, uptime } from 'os'
+import { cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
 import { readCodexRolloutMeta, resolveCodexRollout } from '../engines/codex/rollout.js'
 import { ENGINES, isTerminalEngine, type AgentEngine } from '../engines/types.js'
@@ -233,9 +234,28 @@ export interface RegisteredSession {
   cliVersion: string | null
   processIdentity: ProcessIdentity | null
   registeredAt: number
-  updatedAt: number
+  /**
+   * When the daemon last changed this row: housekeeping (a reconcile pass, an attach, a rename),
+   * never when the conversation moved. That is `lastActivityAt` (agentFrame.ts), which is what
+   * clients get as `updatedAt`. Rows saved before 2026-09-27 call this `updatedAt` ([savedTouchedAt]).
+   */
+  touchedAt: number
   lastHookAt: number
   lastTranscriptAt: number
+  /**
+   * When an app last OPENED this agent (ms epoch) — a desktop window focusing its tab, the phone
+   * landing on it — on any computer. Stamped by `markOpened` with THIS daemon's clock, never a
+   * client's: the agent's owner is the one place every app reads from, so it is the one clock they
+   * can all agree on, and "last used" comes out in the same order on every screen. Absent until the
+   * first open; persisted, carried through a hook bind, a stop and a resume like any other fact
+   * about the agent. A client sorts by the later of this and the frame's `updatedAt`.
+   */
+  lastOpenedAt?: number
+}
+
+/** A saved row's `touchedAt`, which rows saved before 2026-09-27 call `updatedAt`. */
+function savedTouchedAt(row: { touchedAt?: unknown; updatedAt?: unknown }): number | null {
+  return typeof row.touchedAt === 'number' ? row.touchedAt : typeof row.updatedAt === 'number' ? row.updatedAt : null
 }
 
 export interface RegisterInput {
@@ -323,6 +343,12 @@ function normalizedAgentName(value: unknown): string | null {
  *  engine (`permissionModeFlags`), and a name the engine lacks launches as `bypassPermission` says. */
 function permissionModeName(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z]{1,24}$/.test(value)
+}
+
+/** A persisted `lastOpenedAt`, or undefined for anything that is not a real moment (a row from before
+ *  the field, or a hand-edited one) — undefined rather than 0, so "never opened" stays absent. */
+function normalizedOpenedAt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
 function normalizedAgentEngine(value: unknown): AgentEngine {
@@ -499,8 +525,12 @@ export function strictPersistedRow(value: unknown): RegisteredSession | null {
     || (row.processIdentity !== null && !validProcessIdentity(row.processIdentity))) return null
   const placements = runtimes.map(terminalPlacementKey)
   if (new Set(placements).size !== placements.length) return null
+  // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
+  // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
+  const { lastOpenedAt: rawOpenedAt, ...rest } = row
+  const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   return {
-    ...row,
+    ...rest,
     schemaVersion: 2,
     active,
     ...(launch ? { launch } : {}),
@@ -524,9 +554,10 @@ export function strictPersistedRow(value: unknown): RegisteredSession | null {
     processIdentity: row.processIdentity ?? null,
     ...(row.terminalHost === true || row.engine === 'terminal' ? { terminalHost: true } : {}),
     registeredAt: typeof row.registeredAt === 'number' ? row.registeredAt : Date.now(),
-    updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : Date.now(),
+    touchedAt: savedTouchedAt(row) ?? Date.now(),
     lastHookAt: typeof row.lastHookAt === 'number' ? row.lastHookAt : Date.now(),
     lastTranscriptAt: typeof row.lastTranscriptAt === 'number' ? row.lastTranscriptAt : Date.now(),
+    ...(lastOpenedAt !== undefined ? { lastOpenedAt } : {}),
   }
 }
 
@@ -645,7 +676,7 @@ const TRANSCRIPT_ROOT: Readonly<Record<AgentEngine, ((codexHome?: string) => str
   grok: () => join(env.GROK_HOME, 'sessions'),
   agy: () => join(env.AGY_HOME, 'brain'),
   copilot: () => join(env.COPILOT_HOME, 'session-state'),
-  cursor: () => join(env.CURSOR_HOME, 'projects'),
+  cursor: () => join(cursorDataDir(), 'projects'),
   pi: () => join(env.PI_HOME, 'agent', 'sessions'),
   commandcode: () => join(env.COMMANDCODE_HOME, 'projects'),
   claude: () => env.CLAUDE_PROJECTS_DIR,
@@ -952,9 +983,12 @@ class Registry {
           model: modelString(raw.model),
           processIdentity: !rebooted && validProcessIdentity(raw.processIdentity) ? raw.processIdentity : null,
           registeredAt: typeof raw.registeredAt === 'number' ? raw.registeredAt : now,
-          updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
-          lastHookAt: typeof raw.lastHookAt === 'number' ? raw.lastHookAt : (raw.updatedAt ?? now),
-          lastTranscriptAt: typeof raw.lastTranscriptAt === 'number' ? raw.lastTranscriptAt : (raw.updatedAt ?? now),
+          touchedAt: savedTouchedAt(raw) ?? now,
+          lastHookAt: typeof raw.lastHookAt === 'number' ? raw.lastHookAt : (savedTouchedAt(raw) ?? now),
+          lastTranscriptAt: typeof raw.lastTranscriptAt === 'number' ? raw.lastTranscriptAt : (savedTouchedAt(raw) ?? now),
+          // Rehydrated explicitly for the reason the ⚠️ above gives. A reboot keeps it: it is when a
+          // person last looked, which no reboot changes.
+          ...(normalizedOpenedAt(raw.lastOpenedAt) !== undefined ? { lastOpenedAt: normalizedOpenedAt(raw.lastOpenedAt) } : {}),
         }
         if (
           raw.engine !== engine
@@ -1094,7 +1128,7 @@ class Registry {
       if (input.codexHome && !existing.codexHome) existing.codexHome = input.codexHome
       if (input.hermesHome && !existing.hermesHome) existing.hermesHome = input.hermesHome
       if (input.dsh && !existing.dsh) existing.dsh = input.dsh
-      existing.updatedAt = Date.now()
+      existing.touchedAt = Date.now()
       this.index(existing)
       this.terminalAvailableAgents.add(existing.agentId)
       this.save()
@@ -1153,7 +1187,7 @@ class Registry {
       cliVersion: null,
       processIdentity,
       registeredAt: now,
-      updatedAt: now,
+      touchedAt: now,
       lastHookAt: now,
       lastTranscriptAt: now,
     }
@@ -1228,7 +1262,7 @@ class Registry {
       cliVersion: null,
       processIdentity: null,
       registeredAt: now,
-      updatedAt: now,
+      touchedAt: now,
       lastHookAt: now,
       lastTranscriptAt: now,
     }
@@ -1256,7 +1290,7 @@ class Registry {
       runtimes: routes,
       primaryRuntimeKey: selectedRuntimeKey(routes, ''),
       tmuxPane: tmuxProjection(routes),
-      updatedAt: Date.now(),
+      touchedAt: Date.now(),
     }
     this.index(entry)
     this.terminalAvailableAgents.add(entry.agentId)
@@ -1288,7 +1322,7 @@ class Registry {
 
   /**
    * Upsert a session. Idempotent — a re-register (e.g. from the UserPromptSubmit catch hook) just
-   * refreshes `updatedAt`. Deduped by tmux pane: one session per pane, so a `/clear` rotation
+   * refreshes `touchedAt`. Deduped by tmux pane: one session per pane, so a `/clear` rotation
    * (SessionEnd of the old id → SessionStart of a new id, same pane) evicts the old one instead of
    * showing two tiles. Returns { entry, isNew, evicted } — isNew=false on a re-register (so callers
    * can skip re-announcing), evicted = the sessionId displaced from this pane (caller removes it).
@@ -1487,9 +1521,13 @@ class Registry {
       ...(existing?.terminalHost ? { terminalHost: true } : {}),
       processIdentity: validProcessIdentity(input.processIdentity) ? input.processIdentity : existing?.processIdentity ?? null,
       registeredAt: existing?.registeredAt ?? now,
-      updatedAt: now,
+      touchedAt: now,
       lastHookAt: now,
       lastTranscriptAt: existing?.lastTranscriptAt ?? now,
+      // ⚠️ Carried forward, for the reason the ⚠️ on `subscriptionModel` gives: without this line
+      // the first hook after an open — the next prompt, a `/clear` — erases it from memory, the next
+      // save writes that to disk, and every app's "last used" order forgets the open ever happened.
+      ...(existing?.lastOpenedAt ? { lastOpenedAt: existing.lastOpenedAt } : {}),
     }
     entry.tmuxPane = tmuxProjection(entry.runtimes)
     entry.primaryRuntimeKey = selectedRuntimeKey(entry.runtimes, input.primaryRuntimeKey || existing?.primaryRuntimeKey)
@@ -1517,7 +1555,7 @@ class Registry {
     const entry = this.bySession(sessionId)
     if (!entry) return false
     this.releaseBinding(entry)
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1584,7 +1622,7 @@ class Registry {
     entry.launch = { state: 'ready' }
     entry.active = true
     if (validProcessIdentity(processIdentity)) entry.processIdentity = processIdentity
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.index(entry)
     this.terminalAvailableAgents.add(entry.agentId)
     this.save()
@@ -1630,7 +1668,7 @@ class Registry {
     entry.subscriptionModel = null
     entry.model = null
     entry.title = null
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.index(entry)
     this.terminalAvailableAgents.add(entry.agentId)
     this.save()
@@ -1646,7 +1684,7 @@ class Registry {
     entry.tmuxPane = tmuxProjection(normalized)
     entry.primaryRuntimeKey = selectedRuntimeKey(normalized, primaryRuntimeKey)
     entry.active = true
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.index(entry)
     this.terminalAvailableAgents.add(entry.agentId)
     this.save()
@@ -1657,7 +1695,7 @@ class Registry {
     const entry = this.agents.get(agentId)
     if (!entry || entry.active === active) return !!entry
     entry.active = active
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1684,7 +1722,7 @@ class Registry {
     const before = entry.launch
     entry.launch = normalizedLaunch(launch)
     entry.active = launch.state !== 'failed'
-    entry.updatedAt = Date.now()
+    entry.touchedAt = Date.now()
     this.traceLaunch(agentId, before, entry.launch, `setLaunch${launch.state === 'failed' ? ` (${launch.error})` : ''}`)
     this.save()
     return entry
@@ -1728,7 +1766,7 @@ class Registry {
     // The grid is read from the same environment and follows the same rule. It matters most right
     // after a retarget: the respawned pane is a new pid, and this is where its new grid lands.
     if (grid !== undefined) session.grid = grid
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.index(session)
     this.save()
     return true
@@ -1741,7 +1779,7 @@ class Registry {
     if (!session.processIdentity) return true
     this.drop(session)
     session.processIdentity = null
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.index(session)
     this.save()
     return true
@@ -1753,7 +1791,7 @@ class Registry {
     if ((session.bypassPermission === true) === bypassPermission) return true
     if (bypassPermission) session.bypassPermission = true
     else delete session.bypassPermission
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1767,7 +1805,7 @@ class Registry {
     if (!session || !permissionModeName(permissionMode)) return false
     if (session.permissionMode) return session.permissionMode === permissionMode
     session.permissionMode = permissionMode
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1780,7 +1818,7 @@ class Registry {
     const session = this.agents.get(agentId)
     if (!session || session.cwd === cwd) return false
     session.cwd = cwd
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1789,7 +1827,7 @@ class Registry {
     const session = this.agents.get(agentId)
     if (!session || session.engine !== 'codex' || session.codexHome) return false
     session.codexHome = codexHome
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1801,7 +1839,7 @@ class Registry {
     const session = this.agents.get(agentId)
     if (!session || session.engine !== 'hermes' || session.hermesHome) return false
     session.hermesHome = hermesHome
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1812,7 +1850,7 @@ class Registry {
     const session = this.agents.get(agentId)
     if (!session || session.dsh || !DSH_ID_RE.test(dsh)) return false
     session.dsh = dsh
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1828,7 +1866,7 @@ class Registry {
     if (!session) return false
     session.gridLaunch = launch?.override ?? null
     session.gridWebSearch = launch?.webSearch ?? null
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
   }
@@ -1839,16 +1877,34 @@ class Registry {
     const session = this.agents.get(agentId)
     if (!session) return false
     session.subscriptionModel = model
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return true
+  }
+
+  /**
+   * An app opened this agent: stamp `lastOpenedAt` with THIS daemon's clock. Never takes a time from
+   * the caller — a phone and a laptop whose clocks disagree would otherwise order the same agents
+   * differently, which is the one thing this field exists to prevent.
+   *
+   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (the webui's "when" column,
+   * `session_get`'s timestamp), and looking at an agent changes nothing about the agent. The save
+   * still happens: a row is written whenever its bytes differ from the last write, whichever field
+   * moved.
+   */
+  markOpened(agentId: string): RegisteredSession | null {
+    const session = this.agents.get(agentId)
+    if (!session) return null
+    session.lastOpenedAt = Date.now()
+    this.save()
+    return session
   }
 
   touchTranscript(sessionId: string, at = Date.now()): boolean {
     const session = this.bySession(sessionId)
     if (!session) return false
     session.lastTranscriptAt = at
-    session.updatedAt = Math.max(session.updatedAt, at)
+    session.touchedAt = Math.max(session.touchedAt, at)
     this.save()
     return true
   }
@@ -1860,7 +1916,7 @@ class Registry {
     const current = titleDisplayName(session.title)
     if (next === current) return session
     session.title = next
-    session.updatedAt = Date.now()
+    session.touchedAt = Date.now()
     this.save()
     return session
   }
@@ -1960,7 +2016,7 @@ class Registry {
       agent: null,
       processIdentity: null,
       registeredAt: now,
-      updatedAt: now,
+      touchedAt: now,
       lastHookAt: now,
       lastTranscriptAt: now,
     }
