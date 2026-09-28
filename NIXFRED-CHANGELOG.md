@@ -5,6 +5,15 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## nixfred 0.1.3 synced to upstream 56651674, 2026-09-27
+
+- Merged upstream through #399 (engine store paths, Hermes hook timing, session branches). Upstream
+  renamed `updatedAt` to `touchedAt`; Hermes hosted rows follow it.
+- PLAN.md Phase 0: install with `--no-updates` (unsigned updates, OH-6) and a day-0 swap from stock
+  to fork that keeps a copy of `~/.harness`.
+- Verified: tsc clean, CLI 5368 pass / 7 fail (all upstream or known flakes), flutter analyze clean.
+  Not verified: anything on the device, which arrives Tuesday.
+
 ## nixfred 0.1.3 (CLI 0.2.88-nixfred.3) on upstream aeb50151, 2026-09-27
 
 - Synced to upstream aeb50151 (session search across machines, #368).

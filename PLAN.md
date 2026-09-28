@@ -12,7 +12,9 @@ Risk: how much Harness core has to change. Impact: how much of a normal day it c
 
 ## Phase 0: stock baseline (Tuesday 2026-09-29, day 0)
 
-Install stock from the checkout, not the installer: `cd cli && npm ci && bash scripts/install-cli.sh`,
+Install stock from the checkout, not the installer: `cd ~/Projects/autonomous.harness.device/cli && npm ci && bash scripts/install-cli.sh --no-updates`
+(`--no-updates` because the default keeps auto-update on, the update manifest is unsigned (OH-6, still open),
+and an update would replace Tuesday's build and void the baseline),
 then `harness login`, `harness remote-password set`, `harness start`, plug in the device.
 Record the baseline: screenshots of the app on gus, a short phone video of the device, `harness status`,
 the daemon log, and notes on what the device shows for each agent state. Do NOT touch the fork
@@ -20,6 +22,17 @@ until this is done. Everything after is judged against this baseline.
 
 Also on day 0, read-only observations we need for Phase 1: the exact Unix socket path the daemon
 opens (#364), the frame types it emits for agent state, and the recap payload the device receives.
+
+### Day 0 swap: stock to fork
+
+Both builds install the same `harness` launcher, the same port 18473 and the same `~/.harness` data,
+so they are swapped, never run side by side. Pairing and the machine identity live in `~/.harness` and
+survive the swap.
+
+1. `harness stop`, then `cp -a ~/.harness ~/.harness.stock-baseline-2026-09-29` (a copy, nothing deleted).
+2. `cd ~/Projects/openharness.nixfred/cli && npm ci && bash scripts/install-cli.sh --no-updates`
+3. `harness start`, `harness status`; the version must read `0.2.88-nixfred.3` or later.
+4. Back to stock at any time: step 2 from `~/Projects/autonomous.harness.device/cli` instead.
 
 ## Phase 1: low-hanging fruit (week 1). Zero change to Harness core, all (b), all reversible
 
