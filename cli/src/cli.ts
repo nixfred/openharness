@@ -169,6 +169,7 @@ import { apiCommand, apiUsage } from './lib/apiCommand.js'
 import { prepareApiInstructions } from './lib/apiInstructions.js'
 import type { AgentDshContext } from './lib/agentFrame.js'
 import { basename } from 'node:path'
+import { discoverOrcaClaudes, transcriptAgeSec } from './nixfred/orcaDiscovery.js'
 import {
   bypassPermissionActive,
   permissionModeFromArgv,
@@ -3977,6 +3978,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     if (e.event === 'UserPromptSubmit') questionWatcher.start(row.sessionId)
     const attention = attentionForExternalEvent(e)
     if (attention) nixfred.attention.set(row.agentId, attention.state, attention.detail)
+    if (e.event !== 'SessionStart') hooklessExternal?.delete(row.agentId)
     return { ok: true, agentId: row.agentId, isNew: out.isNew }
   }
   // A session that simply exits (terminal closed, no SessionEnd) goes offline when its engine process
@@ -3988,6 +3990,33 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     }
   }, 20_000)
   externalSweep.unref?.()
+  // nixfred: find Orca Claudes that never sent a hook (started before the hook was installed, or the
+  // daemon restarted since). Registered through the same path as a hook; see nixfred/orcaDiscovery.ts.
+  const hooklessExternal = new Set<string>()
+  const discoverExternal = async (): Promise<void> => {
+    if (!orcaWatch.enabled) return
+    const claudeHome = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+    for (const d of discoverOrcaClaudes(claudeHome)) {
+      const existing = registry.bySession(d.sessionId)
+      if (existing && existing.active) {
+        if (hooklessExternal.has(existing.agentId)) {
+          const age = transcriptAgeSec(existing.transcriptPath ?? d.transcriptPath)
+          const cur = nixfred.attention.get(existing.agentId)?.state
+          if (age !== null && age < 15 && cur !== 'working' && cur !== 'waiting' && cur !== 'permission') nixfred.attention.set(existing.agentId, 'working', '')
+          else if (age !== null && age >= 15 && cur === 'working') nixfred.attention.set(existing.agentId, 'done', '')
+        }
+        continue
+      }
+      const res = await handleExternalHook({ engine: 'claude', event: 'SessionStart', sessionId: d.sessionId, cwd: d.cwd, transcriptPath: d.transcriptPath, callerPid: d.pid, orca: d.orca })
+      if (res.ok && typeof res.agentId === 'string') {
+        hooklessExternal.add(res.agentId)
+        console.log(`[orca] ${sid(res.agentId)} discovered claude (no hook yet) · orca=${d.orca.terminal} · cwd=${d.cwd ?? '?'}`)
+      }
+    }
+  }
+  const externalDiscovery = setInterval(() => { void discoverExternal().catch(() => {}) }, 10_000)
+  externalDiscovery.unref?.()
+  setTimeout(() => { void discoverExternal().catch(() => {}) }, 3_000).unref?.()
   const orcaStatus = (): Record<string, unknown> => ({
     ...orcaWatch,
     orcaCli: orcaCli.available,
