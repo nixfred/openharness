@@ -54,6 +54,8 @@ Panel {
 
   property var agents: []
   property var alerts: []
+  property var subs: []
+  property string subsPick: ""
   property string lastStop: ""
   property string hostname: ""
   property string lastError: ""
@@ -101,6 +103,8 @@ Panel {
         root.hostname = r.hostname
         root.agents = Model.sortAgents(r.agents)
         root.alerts = r.alerts || []
+        root.subs = r.subs || []
+        root.subsPick = r.pick || ""
         var d = Model.diffStates(root.lastStates, root.agents, Date.now())
         root.lastStates = d.map
         if (d.events.length > 0) fleetView.pushEvents(d.events)
@@ -324,6 +328,8 @@ Panel {
         anchors.fill: parent
         agents: root.agents
         alerts: root.alerts
+        subs: root.subs
+        subsPick: root.subsPick
         hostname: root.hostname
         daemonUp: root.daemonUp
         active: root.opened

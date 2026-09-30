@@ -33,6 +33,12 @@ function parseFeedLine(line) {
     return {
       ok: true,
       hostname: d.hostname || "",
+      // Weekly subscription use from the daemon (harness subs): used and banked are fractions.
+      subs: d.subscriptions && Array.isArray(d.subscriptions.subs) ? d.subscriptions.subs.map(function (x) {
+        return { id: String(x.id || ""), name: String(x.name || x.id || ""), used: Number(x.used) || 0,
+                 banked: Number(x.bankedSigned) || 0, tone: String(x.tone || ""), resetsInMs: Number(x.resetsInMs) || 0 };
+      }) : [],
+      pick: d.subscriptions ? String(d.subscriptions.pick || "") : "",
       // Collision alerts from the daemon: two agents on one file, folder or branch inside the hour.
       alerts: alerts.map(function (x) {
         return { kind: String(x.kind || ""), detail: String(x.detail || ""), at: Number(x.at) || 0 };

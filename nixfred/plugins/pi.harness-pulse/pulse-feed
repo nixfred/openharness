@@ -91,7 +91,7 @@ def main():
             down_since = None
             out = {"hostname": data.get("hostname", ""), "machineId": data.get("machineId", ""),
                    "at": data.get("at", int(time.time() * 1000)), "agents": data.get("agents", []),
-                   "alerts": data.get("alerts", [])}
+                   "alerts": data.get("alerts", []), "subscriptions": data.get("subscriptions")}
         else:
             down_since = down_since or time.time()
             out = {"error": err, "agents": []}

@@ -19,6 +19,8 @@ Item {
 
   property var agents: []
   property var alerts: []
+  property var subs: []
+  property string subsPick: ""
   property string hostname: ""
   property bool daemonUp: false
   property bool active: false
@@ -396,8 +398,7 @@ Item {
               anchors.horizontalCenter: parent.horizontalCenter
               anchors.bottom: parent.bottom
               anchors.bottomMargin: 4
-              text: tile.group.agents.length + " agent" + (tile.group.agents.length === 1 ? "" : "s") +
-                (tile.group.spendUsd > 0 ? "  $" + tile.group.spendUsd.toFixed(2) : "")
+              text: tile.group.agents.length + " agent" + (tile.group.agents.length === 1 ? "" : "s")
               color: fleet.muted
               font.pixelSize: 10
             }
@@ -406,20 +407,20 @@ Item {
       }
     }
 
-    // ---------------- Spend: one 270 degree gauge per agent with a cap ----------------
+    // ---------------- Subscriptions: weekly use per plan, banked below (harness subs) ----------------
     Item {
       width: parent.width
-      height: 70
+      height: 82
       Text {
         id: spendLabel
-        text: "SPEND"
+        text: "THIS WEEK"
         color: fleet.muted
         font.pixelSize: 9; font.bold: true; font.letterSpacing: 2
       }
       Text {
         anchors.left: spendLabel.right; anchors.leftMargin: 8
         visible: gaugeRow.count === 0
-        text: "no spend caps set"
+        text: "no subscriptions detected"
         color: fleet.muted
         font.pixelSize: 10
       }
@@ -428,13 +429,15 @@ Item {
         spacing: 6
         Repeater {
           id: gaugeRow
-          model: fleet.agents.filter(function (a) { return a.spend && a.spend.fraction !== null && a.spend.fraction !== undefined }).slice(0, 8)
+          model: fleet.subs.slice(0, 8)
           delegate: Item {
             id: gauge
             required property var modelData
-            readonly property real f: Math.max(0, Number(modelData.spend.fraction) || 0)
-            readonly property color tone: f >= 1 ? fleet.danger : f >= 0.8 ? fleet.urgent : fleet.accent
-            width: 52; height: 56
+            readonly property real f: Math.max(0, Number(modelData.used) || 0)
+            readonly property real banked: Number(modelData.banked) || 0
+            // Over pace (negative banked) is the warning, not raw use: 60 percent used on day six is fine.
+            readonly property color tone: f >= 1 ? fleet.danger : banked < -0.1 ? fleet.danger : banked < 0 ? fleet.urgent : fleet.accent
+            width: 64; height: 68
             property real shown: fleet.revealed ? Math.min(1, f) : 0
             Behavior on shown { NumberAnimation { duration: fleet.motion ? 900 : 0; easing.type: Easing.OutCubic } }
             Shape {
@@ -478,9 +481,16 @@ Item {
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               elide: Text.ElideRight
-              text: gauge.modelData.name
-              color: fleet.muted
+              text: (fleet.subsPick === gauge.modelData.id ? "▸ " : "") + gauge.modelData.name
+              color: fleet.subsPick === gauge.modelData.id ? fleet.accent : fleet.muted
               font.pixelSize: 9
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              y: 40
+              text: (gauge.banked >= 0 ? "+" : "") + Math.round(gauge.banked * 100) + "% banked"
+              color: gauge.banked >= 0 ? fleet.okay : gauge.tone
+              font.pixelSize: 8
             }
           }
         }
