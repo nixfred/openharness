@@ -5,6 +5,30 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Watch mode: live Orca sessions on the app and the device, 2026-09-30 (branch nixfred/orca-sessions)
+
+Sits on nixfred/main 1a455d60 merged with upstream/main (385 commits). See docs/nixfred-orca.md.
+
+- Claude and Codex sessions this daemon did not start (Orca terminals, any terminal) become external
+  roster rows from their own hooks: engine, cwd, title, live transcript, attention state. They are
+  marked `external` on the agent frame and the attention feed, and are never moved, resumed or killed.
+- Answers from the device, the app or `harness orca answer` are typed into the session's Orca
+  terminal with `orca terminal send`; tmux rows keep the stock path. Ctrl-C/Ctrl-D refused. Every
+  send is journaled (`kind: answer`). Orca's hook token is never forwarded.
+- Off by default: `harness orca on|off|answers on|off`, `HARNESS_ORCA_WATCH=0`. With it off,
+  notify.mjs posts nothing for non-tmux sessions (stock behaviour).
+- Claude Notification hook added to the installer (inert in tmux panes and while watch mode is off).
+- Fix: registry.save() dropped every hosted row (Hermes store rows included) from memory; kept now.
+  The Hermes sweep no longer retires rows that are not its own.
+- Verified: tsc clean; CLI suite 7596 pass, 3 fail, 37 skipped (the same 3 environmental failures as
+  the post-sync baseline: two dsh node-path specs that also fail on nixfred/main, one real-tmux timing
+  spec). Live on a second daemon (port 18599, scratch data, cable disabled): a real Claude session in a
+  real Orca terminal registered from SessionStart, asked two AskUserQuestion dialogs, both answered
+  (window-protocol answer and `harness orca answer`) and delivered into Orca; answers-off refused a
+  third without typing; SessionEnd took the row offline; off switch ignored further hooks.
+  Codex only simulated through notify.mjs. Not verified: the physical USB device (the live daemon owns
+  it), a real permission prompt (Bash is pre-allowed on the test machine), the desktop app UI.
+
 ## nixfred desktop motion and branding on nixfred/main b82e4135, 2026-09-29 (branch nixfred/heavy-anim-app)
 
 - Pane attention frame, one motion per state: working sweeps an accent comet around the border,

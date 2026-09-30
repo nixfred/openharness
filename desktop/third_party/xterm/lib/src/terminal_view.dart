@@ -284,6 +284,7 @@ class TerminalViewState extends State<TerminalView> {
           textStyle: widget.textStyle,
           textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
           theme: widget.theme,
+          fillsBackground: widget.backgroundOpacity >= 1,
           focusNode: _focusNode,
           cursorType: widget.cursorType,
           alwaysShowCursor: widget.alwaysShowCursor,
@@ -298,7 +299,9 @@ class TerminalViewState extends State<TerminalView> {
       terminal: widget.terminal,
       simulateScroll: widget.simulateScroll,
       onAltBufferScroll: widget.onAltBufferScroll,
-      getCellOffset: (offset) => renderTerminal.getCellOffset(offset),
+      // Pointer events carry window coordinates; each pane owns a local grid.
+      getCellOffset: (offset) =>
+          renderTerminal.getCellOffset(renderTerminal.globalToLocal(offset)),
       getLineHeight: () => renderTerminal.lineHeight,
       child: child,
     );
@@ -554,9 +557,15 @@ class TerminalViewState extends State<TerminalView> {
     // internal deletes they make are plain Backspaces. It belongs to keyInput
     // below, where ⌥ becomes the Meta prefix a prompt reads as "kill the word
     // behind me" (see AltAsMetaInputHandler in lib/terminal/terminal_input.dart).
-    final nativeClientOwnsBackspace =
-        defaultTargetPlatform == TargetPlatform.macOS ||
-            defaultTargetPlatform == TargetPlatform.iOS;
+    //
+    // A BROWSER IS NOT APPLE'S EMBEDDER, whatever `defaultTargetPlatform` says
+    // (it reads macOS in Chrome on a Mac, iOS on an iPhone). Flutter web sends
+    // no performSelectors; the browser just deletes from the hidden input, so
+    // a Backspace with nothing typed there — a pasted `[Image #1]` at an agent
+    // prompt — changed nothing and never reached the pty.
+    final nativeClientOwnsBackspace = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.iOS);
     if (key == TerminalKey.backspace &&
         nativeClientOwnsBackspace &&
         !widget.hardwareKeyboardOnly &&
@@ -695,6 +704,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.textStyle,
     required this.textScaler,
     required this.theme,
+    this.fillsBackground = true,
     required this.focusNode,
     required this.cursorType,
     required this.alwaysShowCursor,
@@ -725,6 +735,9 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final TerminalTheme theme;
 
+  /// See [RenderTerminal.fillsBackground].
+  final bool fillsBackground;
+
   final FocusNode focusNode;
 
   final TerminalCursorType cursorType;
@@ -752,6 +765,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       textStyle: textStyle,
       textScaler: textScaler,
       theme: theme,
+      fillsBackground: fillsBackground,
       focusNode: focusNode,
       cursorType: cursorType,
       alwaysShowCursor: alwaysShowCursor,
@@ -776,6 +790,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..textStyle = textStyle
       ..textScaler = textScaler
       ..theme = theme
+      ..fillsBackground = fillsBackground
       ..focusNode = focusNode
       ..cursorType = cursorType
       ..alwaysShowCursor = alwaysShowCursor

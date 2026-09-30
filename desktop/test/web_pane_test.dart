@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/open_in_browser.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/pane_arrangement.dart';
 import 'package:harness/state/terminal_pane.dart';
@@ -161,8 +162,11 @@ void main() {
     );
 
     // The same URL again is nothing new; a different one navigates in place.
+    var updates = 0;
+    app.addListener(() => updates++);
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/');
     expect(_viewers(app).single.id, viewer.id);
+    expect(updates, 0, reason: 'an unchanged viewer must not repaint the workspace');
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/?file=a.step');
     expect(_viewers(app).single.id, viewer.id);
     expect(_viewers(app).single.url, 'http://127.0.0.1:4179/?file=a.step');
@@ -246,8 +250,11 @@ void main() {
     expect(app.panes, isEmpty);
     // Not a dismissal: the next open of the agent brings the viewer back.
     app.adoptSessionForTest(terminal('a0', input));
+    var updates = 0;
+    app.addListener(() => updates++);
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/');
     expect(_viewers(app), hasLength(1));
+    expect(updates, greaterThan(0), reason: 'restoring a viewer is a visible change');
   });
 
   test('the header control hides the viewer and brings it back', () async {
@@ -324,9 +331,22 @@ void main() {
     expect(WebPanePanel.webviewAvailable, isFalse);
     expect(find.byType(WebPanePanel), findsOneWidget);
     expect(find.byKey(const ValueKey('web-pane-placeholder')), findsOneWidget);
-    expect(find.text('http://127.0.0.1:4179/'), findsOneWidget);
+    expect(find.textContaining('http://127.0.0.1:4179/'), findsOneWidget);
+    // With no embedded webview the page opens in the browser instead
+    // (openharness#108 — a Linux desktop, or WSLg, has none today).
+    final opened = <Uri>[];
+    final previousOpener = browserOpener;
+    browserOpener = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => browserOpener = previousOpener);
+    await tester.tap(find.byKey(const ValueKey('web-pane-open-in-browser')));
+    await tester.pump();
+    expect(opened, [Uri.parse('http://127.0.0.1:4179/')]);
     // Its own close control, and no way to end an agent from it.
-    expect(find.byTooltip('Close viewer'), findsOneWidget);
+    final closeViewer = find.byTooltip(RegExp(r'^Close viewer(?: · .+)?$'));
+    expect(closeViewer, findsOneWidget);
     // Stop remains a command, not a pane-header control. Viewer visibility
     // is also available through View and command search.
     expect(find.byTooltip('Stop Harness'), findsNothing);
@@ -355,7 +375,7 @@ void main() {
     // One status in the viewer's title, and nothing on the terminal's: the
     // phase under way here, since the deck is neither ready nor failing.
     final viewerHeader = find.ancestor(
-      of: find.byTooltip('Close viewer'),
+      of: closeViewer,
       matching: find.byType(WebPanePanel),
     );
     expect(
@@ -370,7 +390,7 @@ void main() {
     expect(find.text('Build'), findsNothing);
     expect(find.text('1 warning'), findsNothing, reason: 'the phase wins');
     expect(find.textContaining('·  Viewer'), findsNothing);
-    await tester.tap(find.byTooltip('Close viewer'));
+    await tester.tap(closeViewer);
     await tester.pumpAndSettle();
     expect(_viewers(app), isEmpty);
     expect(tester.takeException(), isNull);

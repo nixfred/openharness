@@ -1,11 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:harness_mobile/core/last_opened_agent.dart' show AgentRef;
 import 'package:harness_mobile/shared/theme/app_theme.dart';
-import 'package:harness_mobile/shared/widgets/empty_state.dart';
 import 'package:harness_mobile/notify/agent_notice.dart' show NoticeKind;
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/external_session.dart';
@@ -19,22 +17,20 @@ import 'phone_search_catalog.dart' show phoneAgentId;
 import 'phone_search_commands.dart';
 import 'phone_search_controller.dart';
 import 'phone_search_rank.dart';
-import 'phone_search_row.dart';
 import 'resume_agent.dart';
 import 'search_result_text.dart'
     show phoneResultMatches, snippetLead, snippetRuns;
-import 'sheet_list.dart';
-import 'sheet_search_row.dart';
 import 'tty.dart';
 import 'tty_controls.dart';
 
 /// What the query reaches, drawn.
 ///
-/// ⚠️ Public because two screens draw it: [PhoneSearchPage], and the terminal's
-/// own in-place search (see `terminal_search.dart`), which fades up over the
-/// terminal rather than pushing a route. Both hand it one
-/// [PhoneSearchController], so the two cannot return different rows — or walk a
-/// different pager — for the same words.
+/// ⚠️ Public because two screens draw it: Find, the terminal's own in-place
+/// search (see `terminal_search.dart`), which slides over the terminal rather
+/// than pushing a route, and the first screen after pairing
+/// (`welcome/pick_up_page.dart`). Both hand it one [PhoneSearchController], so
+/// the two cannot return different rows — or walk a different pager — for the
+/// same words.
 ///
 /// ⚠️ **One flat ranked list, no folder headers.** The desktop has none either,
 /// and grouping fought the ranking it sat on: a folder whose best row was third
@@ -51,8 +47,6 @@ class PhoneSearchResults extends StatefulWidget {
     required this.notifier,
     required this.controller,
     this.onOpen,
-    this.grouped = false,
-    this.fzf = false,
     this.showing,
     this.onNewHarness,
   });
@@ -62,9 +56,6 @@ class PhoneSearchResults extends StatefulWidget {
   final void Function(({String machineId, String folder, String label})? place)?
   onNewHarness;
 
-  /// Find's list: two-line rows growing down from the field at the top — see [FindRow].
-  final bool fzf;
-
   final AppNotifier notifier;
   final PhoneSearchController controller;
 
@@ -73,17 +64,11 @@ class PhoneSearchResults extends StatefulWidget {
   /// ⚠️ For the in-place search, which is not a route and so is not popped by
   /// opening something. Its field still holds the keyboard, and the terminal it
   /// is covering is about to be replaced underneath it — this is what puts the
-  /// search away first. Null on [PhoneSearchPage], where the pop does it.
+  /// search away first. Null on the pick-up page, which is a route of its own.
   final VoidCallback? onOpen;
 
-  /// Draws the rows as one inset group of [SheetSearchRow]s — the terminal
-  /// sheet's list, whose tabs are drawn the same way — rather than the page's
-  /// flat list in the terminal's face. What is listed, and what a tap does, is
-  /// the same either way.
-  final bool grouped;
-
-  /// The agent the terminal sheet was opened over, whose row wears the check
-  /// in the grouped list. Unread by the flat one.
+  /// The agent Find was opened over: its row says `current`, sits after the recent ones, and a
+  /// tap on it is Cancel.
   final AgentRef? showing;
 
   @override
@@ -164,42 +149,7 @@ class PhoneSearchResultsState extends State<PhoneSearchResults> {
     builder: (context, _) {
       AppTheme.watch(context);
       final search = widget.controller;
-      final rows = search.rows;
-      if (widget.fzf) return _find(search, rows);
-      if (widget.grouped) return _grouped(search, rows);
-      if (rows.isEmpty) return _empty(search);
-      final terms = phoneSearchTerms(search.matchQuery);
-      final now = DateTime.now();
-      final previews = widget.notifier.sessionPreviews;
-      return ListView.builder(
-        // The keyboard is up and the finger is already on the glass; dragging
-        // the list is how somebody reaches a result without putting it away
-        // first.
-        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        padding: EdgeInsets.fromLTRB(
-          16,
-          4,
-          16,
-          MediaQuery.paddingOf(context).bottom + 16,
-        ),
-        itemCount: rows.length,
-        itemBuilder: (context, index) {
-          final row = rows[index];
-          return PhoneSearchRow(
-            row: row,
-            terms: terms,
-            now: now,
-            openable: search.canSubmit(row),
-            resuming: _resuming == row.id,
-            busy: _resuming != null,
-            // A row that is here for something said in its conversation quotes
-            // it in place of its detail: nothing else on the row would explain
-            // why it matched.
-            quote: phoneContentSnippet(row, terms, previews),
-            onTap: () => _tap(row),
-          );
-        },
-      );
+      return _find(search, search.rows);
     },
   );
 
@@ -489,67 +439,6 @@ class PhoneSearchResultsState extends State<PhoneSearchResults> {
   static bool _isShowing(PhoneDestination row, AgentRef showing) =>
       row.entry?.machineId == showing.machineId &&
       row.entry?.agent.id == showing.agentId;
-
-  Widget _grouped(PhoneSearchController search, List<PhoneDestination> rows) {
-    final bottom = MediaQuery.paddingOf(context).bottom + 16;
-    if (rows.isEmpty) {
-      // ⚠️ **In a list, though it is one thing.** The sheet can be left a
-      // couple of rows' height above the keyboard, and the empty state is
-      // taller than that — laid out bare, it would overflow the sheet.
-      return ListView(
-        padding: EdgeInsets.fromLTRB(kSheetInset, 8, kSheetInset, bottom),
-        children: [_empty(search, compact: true)],
-      );
-    }
-    final terms = phoneSearchTerms(search.matchQuery);
-    final previews = widget.notifier.sessionPreviews;
-    final showing = widget.showing;
-    return ListView.builder(
-      // ⚠️ **A drag keeps the keyboard, unlike the flat list's.** The sheet
-      // stands on the keyboard, so putting the keys away mid-scroll dropped
-      // the whole sheet under the finger and took the field's focus with it.
-      // The return key and Cancel are how this search puts them away.
-      // No top padding: the caption or the chips over the list end in the gap
-      // a group keeps from what labels it.
-      padding: EdgeInsets.fromLTRB(kSheetInset, 0, kSheetInset, bottom),
-      itemCount: rows.length,
-      itemBuilder: (context, index) {
-        final row = rows[index];
-        final entry = row.entry;
-        return SheetSearchRow(
-          row: row,
-          terms: terms,
-          openable: search.canSubmit(row),
-          resuming: _resuming == row.id,
-          busy: _resuming != null,
-          quote: phoneContentSnippet(row, terms, previews),
-          onScreen:
-              showing != null &&
-              entry != null &&
-              entry.machineId == showing.machineId &&
-              entry.agent.id == showing.agentId,
-          first: index == 0,
-          last: index == rows.length - 1,
-          onTap: () => _tap(row),
-        );
-      },
-    );
-  }
-
-  Widget _empty(PhoneSearchController search, {bool compact = false}) {
-    if (search.total == 0 && search.matchQuery.trim().isEmpty) {
-      return EmptyState(
-        icon: LucideIcons.laptopMinimal300,
-        title: 'Nothing to search yet',
-        message: 'Link a machine and its harnesses will be findable from here.',
-        compact: compact,
-      );
-    }
-    return EmptyState.noMatches(
-      compact: compact,
-      message: 'Nothing matches “${search.matchQuery.trim()}”.',
-    );
-  }
 
   /// A tap goes to the controller first, which absorbs the ones that only move
   /// the search: a `?` row taking its mode, a project or machine narrowing it.

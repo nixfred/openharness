@@ -11,8 +11,12 @@ class GuestTestApp extends AppNotifier {
     super.localManualFixture,
   });
 
+  var daemonGates = 0;
+
   @override
-  Future<void> ensureCliDaemonReady() async {}
+  Future<void> ensureCliDaemonReady() async {
+    daemonGates++;
+  }
 
   @override
   Future<bool> refreshMachines() async => true;

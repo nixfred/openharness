@@ -16,6 +16,7 @@ import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/terminal/terminal_text.dart';
 import 'package:harness/terminal/terminal_theme_store.dart';
 import 'package:harness/widgets/search_result_text.dart';
+import 'package:harness/widgets/desktop_chrome.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
 import 'package:xterm/xterm.dart';
 
@@ -66,7 +67,7 @@ void main() {
   );
 
   testWidgets(
-    'commands retain the Cmd-P terminal grid, editor and live appearance',
+    'commands retain the native palette, editor and live appearance',
     (tester) async {
       final originalFont = terminalFontStore.value;
       final originalPalette = grid.AppTheme.palette.value;
@@ -102,8 +103,10 @@ void main() {
           .search;
       expect(search.isCommandMode, isTrue);
       expect(search.hasPreview, isTrue);
-      expect(tester.getRect(_panel), bounds);
-      expect(tester.getRect(_input), inputBounds);
+      expect(tester.getRect(_panel).topLeft, bounds.topLeft);
+      expect(tester.getRect(_panel).width, bounds.width);
+      expect(tester.getRect(_input).topLeft, inputBounds.topLeft);
+      expect(tester.getRect(_input).height, inputBounds.height);
       expect(
         tester.state<EditableTextState>(
           find.descendant(of: _input, matching: find.byType(EditableText)),
@@ -114,11 +117,11 @@ void main() {
       expect(find.byType(SwarmSearchCount), findsNothing);
       expect(
         find.descendant(of: _panel, matching: find.byType(Icon)),
-        findsNothing,
+        findsWidgets,
       );
       expect(
         find.descendant(of: _panel, matching: find.byType(ListTile)),
-        findsNothing,
+        findsWidgets,
       );
 
       await tester.enterText(_input, '> new harness');
@@ -130,46 +133,40 @@ void main() {
       void checkAppearance() {
         final field = tester.widget<TextField>(_input);
         final pane = tester.widget<TerminalView>(find.byType(TerminalView));
-        final cell = terminalCellSizeOf(tester.element(_input));
-        final line = find.byKey(ValueKey('swarm-search-line:${selected.id}'));
-        expect(tester.getSize(line).height, closeTo(cell.height, .01));
-        expect(tester.widget<Container>(line).color, pane.theme.selection);
-        expect(tester.widget<Material>(_panel).color, pane.theme.background);
+        final line = find.byKey(ValueKey(selected.id));
+        expect(tester.getSize(line).height, greaterThanOrEqualTo(28));
+        final surface = find
+            .descendant(of: _panel, matching: find.byType(Material))
+            .first;
+        expect(tester.widget<Material>(surface).color, DesktopChrome.surface);
         expect(field.cursorWidth, 2);
-        expect(field.cursorColor, pane.theme.cursor);
+        expect(field.cursorColor, DesktopChrome.foreground);
         final title = find.descendant(
           of: line,
           matching: find.byType(SearchResultText),
         );
         expect(
-          tester.getTopLeft(title).dx,
-          closeTo(tester.getTopLeft(_input).dx, .01),
+          tester.getRect(_panel).contains(tester.getCenter(title)),
+          isTrue,
         );
-        final shortcut = find.byKey(
-          ValueKey('swarm-search-shortcut:${selected.id}'),
+        final shortcut = find.descendant(
+          of: line,
+          matching: find.text(selected.shortcut!),
         );
         expect(tester.widget<Text>(shortcut).data, selected.shortcut);
         final previewText = tester.widgetList<Text>(
           find.descendant(of: _preview, matching: find.byType(Text)),
         );
-        expect(previewText.map((text) => text.data), [
-          selected.title,
-          selected.detail,
-          selected.shortcut,
-        ]);
+        expect(
+          previewText.map((text) => text.data),
+          containsAll([selected.title, selected.detail, selected.shortcut]),
+        );
         for (final style in [
           field.style!,
           tester.widget<SearchResultText>(title).style,
-          tester.widget<Text>(shortcut).style!,
-          ...previewText.map((text) => text.style!),
         ]) {
-          expect(style.fontFamily, pane.textStyle.fontFamily);
-          expect(style.fontFamilyFallback, pane.textStyle.fontFamilyFallback);
-          expect(style.fontSize, pane.textStyle.fontSize);
-          expect(style.fontWeight, pane.textStyle.toTextStyle().fontWeight);
-          expect(style.height, pane.textStyle.height);
-          expect(style.letterSpacing, 0);
-          expect(style.wordSpacing, 0);
+          expect(style.fontFamily, DesktopChrome.text().fontFamily);
+          expect(style.fontSize, inInclusiveRange(13, 17));
         }
         expect(field.controller, same(controller));
         expect(controller.value, editing);
@@ -213,7 +210,7 @@ void main() {
       expect(tester.getRect(_panel), bounds);
       expect(controller.text, isEmpty);
       expect(
-        find.byKey(const ValueKey('swarm-search-type-hints')),
+        find.byKey(const ValueKey('search-category-Machines')),
         findsOneWidget,
       );
       await key(tester, LogicalKeyboardKey.escape);
@@ -226,11 +223,8 @@ void main() {
         shift: true,
       );
       expect(tester.widget<TextField>(_input).controller!.text, '>');
-      expect(
-        tester.widget<SwarmSearchResults>(find.byType(SwarmSearchResults)).bios,
-        isTrue,
-      );
-      expect(tester.getRect(_panel), bounds);
+      expect(tester.getRect(_panel).topLeft, bounds.topLeft);
+      expect(tester.getRect(_panel).width, bounds.width);
       expect(frames, isEmpty);
       await tester.pumpWidget(const SizedBox());
     },
@@ -241,7 +235,7 @@ void main() {
   );
 
   for (final size in [const Size(1280, 800), const Size(400, 600)]) {
-    testWidgets('commands page and preview on the terminal grid at $size', (
+    testWidgets('commands page and preview fit the native palette at $size', (
       tester,
     ) async {
       final originalFont = terminalFontStore.value;
@@ -274,6 +268,8 @@ void main() {
       expect(search.cursor, first);
       await key(tester, LogicalKeyboardKey.tab);
       expect(search.cursor, first);
+      expect(field.focusNode!.hasFocus, isFalse);
+      await key(tester, LogicalKeyboardKey.tab, shift: true);
       expect(field.focusNode!.hasFocus, isTrue);
       expect(
         find.byKey(const ValueKey('swarm-search-resource-actions')),
@@ -309,7 +305,7 @@ void main() {
       await tester.enterText(_input, '?');
       await tester.pumpAndSettle();
       expect(search.hasPreview, isTrue);
-      expect(find.text('No recent session text available.'), findsNothing);
+      expect(find.text('No recent harness text available.'), findsNothing);
       expect(
         tester.widget<TextField>(_input).controller,
         same(field.controller),

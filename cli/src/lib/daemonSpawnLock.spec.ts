@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { processStartMarker } from './processLiveness.js'
 
 let dataDir = ''
 
@@ -127,7 +128,7 @@ describe('daemon spawn lock', () => {
     const lock = await loadLock()
     mkdirSync(lockDir(), { mode: 0o700 })
     writeFileSync(ownerFile(), JSON.stringify({
-      pid: process.pid, startMarker: 'different-process-generation', token: 'stale', purpose: 'start', since: Date.now(),
+      pid: process.pid, startMarker: '', generationMarker: `${processStartMarker(process.pid)}-earlier`, token: 'stale', purpose: 'start', since: Date.now(),
     }), { mode: 0o600 })
     const release = await lock.acquireSpawnLock('start', { waitMs: 1000 })
     expect(lock.readSpawnLockOwner()?.token).not.toBe('stale')

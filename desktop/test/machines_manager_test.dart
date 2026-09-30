@@ -73,7 +73,9 @@ void main() {
         }
         expect(resourceField, findsOneWidget);
         expect(resourceSearch(tester).selected, isNull);
-        await tester.tap(find.byKey(const ValueKey('swarm-search-scope:@')));
+        await tester.tap(
+          find.byKey(const ValueKey('search-category-Machines')),
+        );
         await tester.pumpAndSettle();
         expect(resourceScope('@'), findsOneWidget);
         expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
@@ -93,7 +95,7 @@ void main() {
 
         await tester.enterText(resourceField, '');
         await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('swarm-search-scope::')));
+        await tester.tap(find.byKey(const ValueKey('search-category-Models')));
         await tester.pumpAndSettle();
         expect(resourceScope(':'), findsOneWidget);
         expect(find.byType(ModelsPanel), findsNothing);
@@ -337,7 +339,7 @@ void main() {
     expect(resourceScope('@'), findsOneWidget);
     await key(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('swarm-search-button')), findsNothing);
+    expect(resourceField, findsNothing);
     await openWorkspaceTool(tester, 'machines');
     await tester.pumpAndSettle();
     expect(resourceScope('@'), findsOneWidget);
@@ -388,6 +390,10 @@ void main() {
       await key(tester, LogicalKeyboardKey.tab);
       await tester.pumpAndSettle();
       expect(resourceSearch(tester).selected!.machineId, 'm');
+      // Tab advances through native controls; Escape returns to search.
+      expect(resourceSearch(tester).managing, isTrue);
+      await key(tester, LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
       expect(resourceSearch(tester).managing, isFalse);
       expect(search.focusNode!.hasFocus, isTrue);
       await tester.pumpWidget(const SizedBox());
@@ -415,7 +421,7 @@ void main() {
         }
 
         expect(resourceScope('@'), findsOneWidget);
-        expect(find.text('Add machine'), findsOneWidget);
+        expect(resourceSearch(tester).rows.last.title, 'Add machine');
         expect(app.activeSwarm, same(tab));
         expect(app.panes, isEmpty);
         expect(tester.takeException(), isNull);

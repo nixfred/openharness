@@ -4,7 +4,7 @@
 #   make install-cli ARGS="--no-restart"
 #   make release-cli ARGS="--dry-run"
 
-.PHONY: cli-test install-cli upload-cli-install-sh release-cli release-backend release-desktop remote-machine upload-circle device-test
+.PHONY: cli-test install-cli upload-cli-install-sh release-cli release-backend release-desktop release-web remote-machine upload-circle device-test
 
 ## cli-test: typecheck + run the CLI test suite.
 cli-test:
@@ -30,6 +30,13 @@ release-backend:
 ## escape hatches (upload-desktop, upload-desktop-linux, upload-node-runtime, upload-tmux-runtime) live in desktop/Makefile.
 release-desktop:
 	bash desktop/scripts/release-desktop.sh $(ARGS)
+
+## release-web: ship the browser app to harness.autonomous.ai — tag this commit vX.Y.Z_web; CI builds
+## the Flutter bundle into website/'s image and pushes it (ArgoCD deploys). Re-run with the same version
+## to resume waiting on a tag that already exists.
+## ARGS="--dry-run" to preview, ARGS="--minor" or ARGS="X.Y.Z" to bump differently.
+release-web:
+	bash desktop/scripts/release-web.sh $(ARGS)
 
 ## install-cli: bundle the CLI from THIS working tree and install it into ~/.harness/cli — the local dev
 ## loop, nothing published. Restarts the daemon on the new bytes. Self-update stays ON: the build is

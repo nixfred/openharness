@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/models/model_search_catalog.dart';
 import 'package:harness/models/api_connections_controller.dart';
+import 'package:harness/state/swarm_navigation.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/usage/models_menu_controller.dart';
 import 'package:harness/widgets/resting_model_words.dart';
@@ -73,100 +74,218 @@ void main() {
     app.dispose();
   });
 
-  test(
-    'four sections separate installed and shared models from downloads',
-    () async {
-      final usage = _WithSubscriptions();
-      final grouped = ModelSearchCatalog(
-        app.modelManager,
-        usage,
-        pollHosts: false,
+  test('sections separate your models from downloads, and fold the catalog past five', () async {
+    final usage = _WithSubscriptions();
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      usage,
+      pollHosts: false,
+    );
+    final search = SwarmSearchController(
+      app,
+      const [],
+      models: grouped,
+      offersCreate: true,
+      adding: true,
+    )..setQuery(':');
+    try {
+      app.localInventory = {
+        'memoryBytes': 64 * 1024 * 1024 * 1024,
+        'models': [
+          for (final letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+            {'id': 'catalog-$letter', 'name': '${letter * 3} catalog'},
+          {
+            'id': 'installed',
+            'name': 'ZZZ installed',
+            'state': 'downloaded',
+            'canStart': true,
+          },
+        ],
+      };
+      app.inventory = const GridModels(
+        gridName: 'home',
+        models: [],
+        grids: [
+          GridSection(
+            name: 'Team',
+            own: false,
+            models: [GridModel(id: 'Shared Qwen', node: 'team.lan')],
+          ),
+        ],
       );
-      final search = SwarmSearchController(
-        app,
-        const [],
-        models: grouped,
-        offersCreate: true,
-        adding: true,
-      )..setQuery(':');
-      try {
-        app.localInventory = {
-          'models': [
-            {'id': 'available', 'name': 'AAA catalog'},
-            {
-              'id': 'installed',
-              'name': 'ZZZ installed',
-              'state': 'downloaded',
-              'canStart': true,
-            },
-          ],
-        };
-        app.inventory = const GridModels(
-          gridName: 'home',
-          models: [],
-          grids: [
-            GridSection(
-              name: 'Team',
-              own: false,
-              models: [GridModel(id: 'Shared Qwen', node: 'team.lan')],
-            ),
-          ],
-        );
-        app.modelManager.apis.connections = [
-          const ApiConnection({'id': 'custom', 'name': 'Custom API'}),
-        ];
-        await app.modelManager.refresh();
-        expect(search.rows.map((row) => row.title), [
-          'OpenAI',
-          'Custom API',
-          '[ Add ]',
+      app.modelManager.apis.connections = [
+        const ApiConnection({'id': 'custom', 'name': 'Custom API'}),
+      ];
+      await app.modelManager.refresh();
+      expect(search.rows.map((row) => row.title), [
+        'OpenAI',
+        'Custom API',
+        '[ Add ]',
+        'ZZZ installed',
+        'AAA catalog',
+        'BBB catalog',
+        'CCC catalog',
+        'DDD catalog',
+        'EEE catalog',
+        '[ More models (2) ]',
+        'Shared Qwen · team.lan',
+      ]);
+      expect(search.rows.map(search.modelSection), [
+        ModelSearchSection.subscriptions,
+        ModelSearchSection.apis,
+        ModelSearchSection.apis,
+        ModelSearchSection.local,
+        for (var i = 0; i < 6; i++) ModelSearchSection.catalog,
+        ModelSearchSection.shared,
+      ]);
+      // The downloads are headed with the machine they are for, and its memory.
+      expect(grouped.catalogHeading, 'Get for ${thisComputerName()} · 64 GB');
+      expect(
+        search.modelSectionLabel(ModelSearchSection.catalog),
+        grouped.catalogHeading,
+      );
+      expect(search.modelSectionLabel(ModelSearchSection.local), 'Your models');
+      search.move(
+        search.rows.indexWhere(search.isModelDownloadsRow) - search.cursor,
+      );
+      expect(search.actionLabel(search.selected), 'More models');
+      expect(search.submit(), isNull);
+      expect(search.modelDownloadsVisible, isTrue);
+      expect(search.rows.map((row) => row.title), [
+        'OpenAI',
+        'Custom API',
+        '[ Add ]',
+        'ZZZ installed',
+        for (final letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+          '${letter * 3} catalog',
+        '[ Show fewer ]',
+        'Shared Qwen · team.lan',
+      ]);
+      expect(search.selected!.title, 'AAA catalog');
+      expect(search.modelRowAction(search.selected!), isNull);
+      search.move(
+        search.rows.indexWhere(search.isModelDownloadsRow) - search.cursor,
+      );
+      expect(search.actionLabel(search.selected), 'Show fewer');
+      search.submit();
+      expect(search.modelDownloadsVisible, isFalse);
+      // The top five stay listed with the rest folded away again.
+      expect(search.rows.any((row) => row.title == 'EEE catalog'), isTrue);
+      expect(search.rows.any((row) => row.title == 'FFF catalog'), isFalse);
+      // A search reaches every catalog model, folded or not.
+      search.setQuery(':local');
+      expect(
+        search.rows.where((row) => !row.isCreate).map((row) => row.title),
+        [
           'ZZZ installed',
-          '[ Get models ]',
-          'Shared Qwen · team.lan',
-        ]);
-        expect(search.rows.map(search.modelSection), [
-          ModelSearchSection.subscriptions,
-          ModelSearchSection.apis,
-          ModelSearchSection.apis,
-          ModelSearchSection.local,
-          ModelSearchSection.local,
-          ModelSearchSection.shared,
-        ]);
-        search.move(
-          search.rows.indexWhere(search.isModelDownloadsRow) - search.cursor,
-        );
-        expect(search.submit(), isNull);
-        expect(search.modelDownloadsVisible, isTrue);
-        expect(search.rows.map((row) => row.title), [
-          'OpenAI',
-          'Custom API',
-          '[ Add ]',
-          'ZZZ installed',
-          '[ Hide catalog ]',
-          'AAA catalog',
-          'Shared Qwen · team.lan',
-        ]);
-        expect(search.selected!.title, 'AAA catalog');
-        expect(search.modelRowAction(search.selected!), isNull);
-        search.move(
-          search.rows.indexWhere(search.isModelDownloadsRow) - search.cursor,
-        );
-        search.submit();
-        expect(search.modelDownloadsVisible, isFalse);
-        expect(search.rows.any((row) => row.title == 'AAA catalog'), isFalse);
-        search.setQuery(':Local AI');
-        expect(
-          search.rows.where((row) => !row.isCreate).map((row) => row.title),
-          ['ZZZ installed', 'AAA catalog'],
-        );
-        expect(app.actions, isEmpty);
-      } finally {
-        search.dispose();
-        grouped.dispose();
-        usage.dispose();
-      }
-    },
-  );
+          for (final letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+            '${letter * 3} catalog',
+        ],
+      );
+      expect(app.actions, isEmpty);
+    } finally {
+      search.dispose();
+      grouped.dispose();
+      usage.dispose();
+    }
+  });
+
+  test('the desktop list names its action rows for what they do, and keeps who shares a model on its line', () async {
+    final usage = _WithSubscriptions();
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      usage,
+      pollHosts: false,
+    );
+    final search = SwarmSearchController(
+      app,
+      const [],
+      models: grouped,
+      offersCreate: true,
+      adding: true,
+    )..setQuery(':');
+    try {
+      app.localInventory = {
+        'models': [
+          for (final letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G'])
+            {'id': 'catalog-$letter', 'name': '${letter * 3} catalog'},
+        ],
+      };
+      app.inventory = const GridModels(
+        gridName: 'home',
+        models: [],
+        grids: [
+          GridSection(
+            name: 'Team',
+            own: false,
+            models: [GridModel(id: 'Shared Qwen', node: 'team.lan')],
+          ),
+        ],
+      );
+      app.modelManager.apis.connections = [
+        const ApiConnection({
+          'id': 'custom',
+          'name': 'Custom API',
+          'baseUrl': 'https://relay.example.test/v1',
+        }),
+      ];
+      await app.modelManager.refresh();
+      SwarmDestination row(bool Function(SwarmDestination) test) =>
+          search.rows.singleWhere(test);
+      final subscription = row((r) => r.title == 'OpenAI');
+      final api = row((r) => r.title == 'Custom API');
+      final shared = row((r) => r.title == 'Shared Qwen · team.lan');
+      final more = row(search.isModelDownloadsRow);
+
+      // One line a row: every other row keeps its own title, who shares a model included.
+      expect(search.modelRowTitle(subscription), 'OpenAI');
+      expect(search.modelRowTitle(api), 'Custom API');
+      expect(search.modelRowTitle(shared), 'Shared Qwen · team.lan');
+      // The fold is named for what Enter does, with how many it holds.
+      expect(search.modelRowTitle(more), 'More models (2)');
+      search.move(search.rows.indexOf(more) - search.cursor);
+      search.submit();
+      expect(search.modelRowTitle(more), 'Show fewer');
+    } finally {
+      search.dispose();
+      grouped.dispose();
+      usage.dispose();
+    }
+  });
+
+  test('a subscription the harness can use still shows how much of it is left, not Use', () async {
+    final usage = _MachineSubscriptions();
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      usage,
+      pollHosts: false,
+    );
+    final search = SwarmSearchController(
+      app,
+      const [],
+      models: grouped,
+      offersCreate: true,
+      adding: true,
+    )..setQuery(':');
+    try {
+      await app.modelManager.refresh();
+      // A Codex harness on this computer: its own OpenAI account is one it can switch to.
+      search.setModelSelection(
+        'codex',
+        const GridModels(gridName: 'home', models: []),
+        machineId: 'm',
+      );
+      final own = search.rows.singleWhere(
+        (row) => row.title == 'OpenAI · local-account',
+      );
+      expect(search.canSelectModel(own), isTrue);
+      expect(search.modelRowStatus(own), '50% remaining');
+    } finally {
+      search.dispose();
+      grouped.dispose();
+      usage.dispose();
+    }
+  });
 
   test(
     'own models precede shared models even without local inventory',

@@ -23,7 +23,7 @@ import {
   sealTerminalBinary,
   type TerminalBinaryClear,
 } from '../terminalBinary.js'
-import { E2eeStore } from './store.js'
+import { E2eeStore, type PeerKind } from './store.js'
 import { pwCpaceGenerator, pwContext } from './passwordPake.js'
 import { ReplayWindow } from './replayWindow.js'
 
@@ -114,6 +114,30 @@ export interface E2eeManagerDeps {
   onIdentityRevoked?: (identityPub: string) => void
   /** Release connection-scoped resources on revoke, eviction, replacement and disconnect. */
   onSessionDropped?: (connId: string) => void
+  /** A peer just proved this machine's remote password (it is already trusted here as a client). A
+   *  machine joiner carries its machineId so the caller can pin it back and sync the trust group. */
+  onPeerLinked?: (peer: LinkedPeer) => void
+  /** A person unpaired `identityPub` (`harness unpair`, or a trusted client's unpair RPC) — not called
+   *  for the trust group's own removals, so the group can keep an unpairing from being undone. */
+  onUnpaired?: (identityPub: string) => void
+}
+
+export interface LinkedPeer {
+  pub: string          // base64 Ed25519 identity
+  machineId?: string   // set when kind is 'machine'
+  kind?: PeerKind      // absent for an older joiner that did not say
+  label: string
+}
+
+const MACHINE_ID_RE = /^[a-f0-9]{32}$/
+
+/** The optional fields a newer joiner seals into round 4. Anything malformed is dropped rather than
+ *  failing the link — an older joiner sends none of them and still links one-way, as it always did. */
+function parseJoiner(p: { machineId?: unknown; kind?: unknown; label?: unknown }): Omit<LinkedPeer, 'pub'> {
+  const kind = p.kind === 'machine' || p.kind === 'viewer' ? p.kind : undefined
+  const machineId = kind === 'machine' && typeof p.machineId === 'string' && MACHINE_ID_RE.test(p.machineId) ? p.machineId : undefined
+  const label = pairedLabel(p.label) ?? 'harness link'
+  return { kind: kind === 'machine' && !machineId ? undefined : kind, machineId, label }
 }
 
 export class E2eeManager {
@@ -153,6 +177,21 @@ export class E2eeManager {
       setAt: this.store.remotePasswordSetAt(),
     }
   }
+  /** Trust `pub` as a client of this machine (idempotent; keeps the original pairedAt). Used for the
+   *  mutual half of a password link — the machine whose password the joiner proved is trusted back — and
+   *  for members learned from a trust-group sync. */
+  trustPeer(peer: LinkedPeer, at = this.now()): void {
+    const existing = this.store.pairedPeer(peer.pub)
+    if (existing && existing.label === peer.label && existing.machineId === peer.machineId && existing.kind === peer.kind) return
+    this.store.addPaired(peer.pub, peer.label, existing?.pairedAt ?? at, existing?.role ?? 'web', { machineId: peer.machineId, kind: peer.kind })
+  }
+  /** Stop trusting `pub` (a no-op when it is not paired): the same path as `harness unpair`. */
+  untrustPeer(pub: string): boolean {
+    if (!this.store.isPaired(pub)) return false
+    this.revokeIdentity(pub)
+    return true
+  }
+  pairedPeers(): ReturnType<E2eeStore['list']> { return this.store.list() }
   hasSession(connId: string): boolean { return this.sessions.has(connId) }
   sessionIdentity(connId: string): string | null { return this.sessions.get(connId)?.webIdentityPub ?? null }
   sessionRole(connId: string): C.PairRole | null { return this.sessions.get(connId)?.role ?? null }
@@ -221,6 +260,7 @@ export class E2eeManager {
     const found = this.findPaired(selector)
     if (!found.ok) return found
     this.revokeIdentity(found.identityPub)
+    this.noteUnpaired(found.identityPub)
     return { ok: true, label: found.label, fingerprint: found.fingerprint }
   }
 
@@ -232,6 +272,7 @@ export class E2eeManager {
       const reply = this.wrapRpcReply(connId, 'e2ee_pairing_unpair_result', requestId, { ok: true, label: payload.label, fingerprint: payload.fingerprint })
       if (reply) this.deps.sendTo(connId, reply)
       this.revokeIdentity(payload.identityPub)
+      this.noteUnpaired(payload.identityPub)
       return
     }
     const reply = this.wrapRpcReply(connId, 'e2ee_pairing_unpair_result', requestId, { error: payload.error })
@@ -241,12 +282,18 @@ export class E2eeManager {
   /** Revoke every paired browser. Signals all online sessions to re-pair + rotates the group key. */
   revokeAll(): { count: number } {
     const count = this.store.count()
+    const unpaired = this.store.list().map((p) => p.identityPub)
     // Device cleanup first: it needs the live session to seal a pair.revoke frame before deny drops it.
     for (const paired of this.store.list()) { try { this.deps.onIdentityRevoked?.(paired.identityPub) } catch { /* Continue revoking every stored identity. */ } }
     for (const s of [...this.sessions.entries()]) { this.deny(s[0]); this.dropSession(s[0]) }
     this.store.clear()
     this.rotateGroupKey()
+    for (const pub of unpaired) this.noteUnpaired(pub)
     return { count }
+  }
+
+  private noteUnpaired(identityPub: string): void {
+    try { this.deps.onUnpaired?.(identityPub) } catch { /* the unpairing itself stands */ }
   }
 
   revokeAllFromTrustedWeb(connId: string, requestId: unknown): void {
@@ -495,6 +542,25 @@ export class E2eeManager {
     if (reply) this.deps.sendTo(connId, reply)
   }
 
+  /** A linked browser can arm phone pairing on its own machine, just as the local desktop can.
+   * The code travels only inside the existing encrypted session. Possessing an account token or
+   * an observer link is not enough; the caller must already hold a paired web identity. */
+  async pairPhoneFromTrustedWeb(connId: string, p: Record<string, unknown>): Promise<void> {
+    if (this.sessions.get(connId)?.role !== 'web') return
+    const reply = (payload: Record<string, unknown>): void => {
+      const frame = this.wrapRpcReply(connId, 'phone_pair_result', p.requestId, payload)
+      if (frame) this.deps.sendTo(connId, frame)
+    }
+    const code = C.normalizeCode(typeof p.code === 'string' ? p.code : '')
+    if (!/^[A-Z2-9]{16}$/.test(code)) { reply({ error: 'BAD_CODE' }); return }
+    // A phone uses the web role. Never consume a hardware pairing or the caller's own intent.
+    if (!this.slot || this.slot.role !== 'web' || this.slot.connId === connId) {
+      reply({ error: 'NO_INTENT' }); return
+    }
+    const result = await this.onPair(code)
+    reply(result.ok ? { ok: true, label: result.label, fingerprint: result.fingerprint } : { error: result.error })
+  }
+
   /** Called by the hook server when the user runs `harness pair <code>`. Resolves when done/failed. */
   onPair(code: string): Promise<PairResult> {
     return new Promise<PairResult>((resolve) => {
@@ -631,14 +697,22 @@ export class E2eeManager {
         if (!slot.isk || !slot.th) { this.failPwPair(connId, 'TIMEOUT'); return true }
         const opened = C.aeadOpen(C.pairKey(slot.isk, ci), 4, C.utf8('e2e-id'), C.b64d(String(p.enc)))
         if (!opened) { this.failPwPair(connId, 'WRONG_PASSWORD', true); return true }
-        const joinerId = JSON.parse(new TextDecoder().decode(opened)) as { id: string; sig: string }
+        const joinerId = JSON.parse(new TextDecoder().decode(opened)) as { id: string; sig: string; machineId?: unknown; kind?: unknown; label?: unknown }
         if (!C.pairBindVerify(C.b64d(joinerId.id), slot.th, C.b64d(joinerId.sig))) { this.failPwPair(connId, 'WRONG_PASSWORD', true); return true }
         // Full success: trust the joiner exactly as if it were a paired browser session (same call/role
         // onSetupClaim uses) — this is what lets it relay through this machine's data plane.
-        this.store.addPaired(joinerId.id, 'harness link', this.now(), 'web')
+        //
+        // Named by the joiner when it says who it is ("Dee's iPhone"), inside the sealed identity, so the
+        // name is as authenticated as the key — and so the Mac's list of paired devices reads as devices.
+        // A joiner that predates the field (`harness link connect`, an older phone) stays "harness link".
+        // A newer joiner also says what it is: a machine gets pinned back (mutual link — it can be dialed
+        // from here without its own password).
+        const joiner = parseJoiner(joinerId)
+        this.store.addPaired(joinerId.id, joiner.label, this.now(), 'web', { machineId: joiner.machineId, kind: joiner.kind })
         this.store.notePwSuccess()
+        try { this.deps.onPeerLinked?.({ pub: joinerId.id, ...joiner }) } catch { /* the link itself stands */ }
         const fp = this.fingerprint()
-        this.deps.sendTo(connId, { type: 'e2e_pw_pake', payload: { sid: slot.sidB64, round: 5, ok: true, fingerprint: fp } })
+        this.deps.sendTo(connId, { type: 'e2e_pw_pake', payload: { sid: slot.sidB64, round: 5, ok: true, fingerprint: fp, mutual: 1 } })
         this.clearPwSlot(connId)
         return true
       }
@@ -794,4 +868,11 @@ function hex8(): string {
   let s = ''
   for (let i = 0; i < 4; i++) s += b[i].toString(16).padStart(2, '0')
   return s
+}
+
+/** A joiner's name for itself, fit to show in a list: text only, one line, 60 characters at most. */
+function pairedLabel(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const label = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60)
+  return label || null
 }

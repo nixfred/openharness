@@ -50,7 +50,7 @@ import { parseGridLaunchOverride, type GridLaunchOverride, type GridLaunchRecord
 import { commandcodeTranscriptPath } from '../engines/commandcode/transcript.js'
 import { agyTranscriptPath } from '../engines/agy/session.js'
 import { copilotTranscriptPath } from '../engines/copilot/session.js'
-import { lockOwnerAlive, processStartMarker } from './processLiveness.js'
+import { lockOwnerAlive, lockStartMarker, processLockIdentity } from './processLiveness.js'
 import { hardenPrivateStateFileIfPresent, readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { mergeTerminalRuntimes, processIdentityKey, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
 import type { HookTerminalHint, ProcessIdentity, TerminalRuntimeRef } from './terminalTypes.js'
@@ -136,7 +136,14 @@ export interface RegisteredSession {
    * Bot Mode profiles, gateway sessions). In memory only: never written to registry.json, re-found
    * by its backend after every boot. `terminalAvailable` is false; it is still advertised.
    */
-  hosted?: 'hermes-store'
+  hosted?: 'hermes-store' | 'external'
+  /**
+   * nixfred watch mode (nixfred/orcaWatch.ts): a live Claude/Codex session this daemon did NOT start,
+   * registered from its hooks. Memory-only like every hosted row. `orca` is the Orca terminal the
+   * session runs in, when the hook saw one; it is the only place an answer may be typed. Never moved,
+   * never killed: the row has no runtime and no process identity to act on.
+   */
+  external?: { orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null; proc: { pid: number; start: string } | null } | null
   /**
    * The engine's OWN model this agent was on immediately before it moved to a grid.
    *
@@ -226,7 +233,7 @@ export interface RegisteredSession {
   /** Authoritative backend-neutral terminal placements for this one process-owned agent. */
   runtimes: TerminalRuntimeRef[]
   primaryRuntimeKey: string
-  /** Additive rollback/wire projection. Empty in memory and omitted on disk for Herdr-only agents. */
+  /** Additive rollback/wire projection of the tmux runtime. */
   tmuxPane: string
   source: string | null
   title: string | null
@@ -374,7 +381,7 @@ function removeRegistryLockOwnedBy(token: string): void {
 function withRegistryFileLock<T>(apply: () => T): T {
   secureStateDirectory(env.ADAPTER_DATA_DIR)
   const uid = typeof process.getuid === 'function' ? process.getuid() : null
-  const processMarker = processStartMarker(process.pid) ?? ''
+  const processIdentity = processLockIdentity(process.pid)
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     const token = randomUUID()
     let created = false
@@ -384,7 +391,7 @@ function withRegistryFileLock<T>(apply: () => T): T {
       const owner = join(LOCK_DIR, 'owner.json')
       const fd = openSync(owner, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
       try {
-        writeFileSync(fd, JSON.stringify({ pid: process.pid, startMarker: processMarker, token }))
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, ...processIdentity, token }))
         fsyncSync(fd)
       } finally { closeSync(fd) }
       try {
@@ -406,10 +413,10 @@ function withRegistryFileLock<T>(apply: () => T): T {
         if (!ownerStat.isFile() || ownerStat.isSymbolicLink() || (uid !== null && ownerStat.uid !== uid)
           || (ownerStat.mode & 0o777) !== 0o600) throw new Error('registry lock owner has unsafe owner, mode, or type')
         const owner = JSON.parse(readFileSync(join(LOCK_DIR, 'owner.json'), 'utf8')) as {
-          pid?: unknown; startMarker?: unknown; token?: unknown
+          pid?: unknown; startMarker?: unknown; generationMarker?: unknown; token?: unknown
         }
         ownerPid = Number(owner.pid)
-        ownerStartMarker = typeof owner.startMarker === 'string' ? owner.startMarker : ''
+        ownerStartMarker = lockStartMarker(owner)
         ownerToken = typeof owner.token === 'string' ? owner.token : ''
       } catch (inspectionError) {
         if (inspectionError instanceof Error && inspectionError.message.startsWith('registry lock')) throw inspectionError
@@ -417,10 +424,10 @@ function withRegistryFileLock<T>(apply: () => T): T {
       if (ownerPid > 0 && ownerToken && !lockOwnerAlive(ownerPid, ownerStartMarker)) {
         try {
           const current = JSON.parse(readFileSync(join(LOCK_DIR, 'owner.json'), 'utf8')) as {
-            pid?: unknown; startMarker?: unknown; token?: unknown
+            pid?: unknown; startMarker?: unknown; generationMarker?: unknown; token?: unknown
           }
           if (Number(current.pid) === ownerPid
-            && current.startMarker === ownerStartMarker
+            && lockStartMarker(current) === ownerStartMarker
             && current.token === ownerToken
             && !lockOwnerAlive(ownerPid, ownerStartMarker)) {
             rmSync(LOCK_DIR, { recursive: true, force: true })
@@ -474,12 +481,46 @@ function boundedIdentityPart(value: unknown, max = 200): value is string {
 export function validTerminalRuntime(value: unknown): value is TerminalRuntimeRef {
   if (!value || typeof value !== 'object') return false
   const runtime = value as Partial<TerminalRuntimeRef>
-  if (runtime.backend === 'tmux') return typeof runtime.paneId === 'string' && PANE_RE.test(runtime.paneId)
-  return runtime.backend === 'herdr'
-    && boundedIdentityPart(runtime.endpointId)
-    && boundedIdentityPart(runtime.sessionName, 100)
-    && boundedIdentityPart(runtime.terminalId)
-    && boundedIdentityPart(runtime.paneId)
+  return runtime.backend === 'tmux' && typeof runtime.paneId === 'string' && PANE_RE.test(runtime.paneId)
+}
+
+function retiredRuntime(value: unknown): boolean {
+  return !!value && typeof value === 'object' && (value as { backend?: unknown }).backend === 'herdr'
+}
+
+/**
+ * Earlier builds could also place an agent in a Herdr pane. That backend is gone, so its runtimes are
+ * dropped on read — the rest of the row is untouched, and a primary that named one falls to the first
+ * remaining tmux route. Returns `null` for a row left with no terminal at all: nothing can reach it.
+ * A row without a retired runtime is returned as is.
+ */
+function withoutRetiredRuntimes(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const row = value as Record<string, unknown>
+  if (!Array.isArray(row.runtimes) || !row.runtimes.some(retiredRuntime)) return value
+  const runtimes = row.runtimes.filter((runtime) => !retiredRuntime(runtime))
+  const hasLegacyPane = typeof row.tmuxPane === 'string' && PANE_RE.test(row.tmuxPane)
+  if (!runtimes.length && !hasLegacyPane) return null
+  const { runtimes: _retired, ...rest } = row
+  const cleaned: Record<string, unknown> = runtimes.length ? { ...rest, runtimes } : rest
+  if (typeof row.primaryRuntimeKey === 'string' && row.primaryRuntimeKey.startsWith('herdr\u0000')) {
+    const first = runtimes.find(validTerminalRuntime)
+    cleaned.primaryRuntimeKey = first ? terminalRouteKey(first) : ''
+  }
+  // A v2 row always carries `runtimes`, even when only the legacy pane is left to fill it.
+  if (!runtimes.length && Object.hasOwn(row, 'schemaVersion')) {
+    const pane = { backend: 'tmux' as const, paneId: row.tmuxPane as string }
+    cleaned.runtimes = [pane]
+    cleaned.primaryRuntimeKey = terminalRouteKey(pane)
+  }
+  return cleaned
+}
+
+/** `withoutRetiredRuntimes` over a whole stored file, dropping the rows it empties. */
+function withoutRetiredRows(stored: readonly unknown[]): { rows: unknown[]; dropped: number; changed: boolean } {
+  const cleaned = stored.map(withoutRetiredRuntimes)
+  const rows = cleaned.filter((row, i) => row !== null || stored[i] === null)
+  return { rows, dropped: stored.length - rows.length, changed: cleaned.some((row, i) => row !== stored[i]) }
 }
 
 function normalizedRuntimes(raw: unknown, legacyTmuxPane?: unknown): TerminalRuntimeRef[] {
@@ -500,7 +541,8 @@ function persistedRow(entry: RegisteredSession): RegisteredSession | Omit<Regist
   return { ...row, runtimes: row.runtimes.map((runtime) => ({ ...runtime })) }
 }
 
-export function strictPersistedRow(value: unknown): RegisteredSession | null {
+export function strictPersistedRow(raw: unknown): RegisteredSession | null {
+  const value = withoutRetiredRuntimes(raw)
   if (!value || typeof value !== 'object') return null
   const row = value as Partial<RegisteredSession>
   const runtimes = normalizedRuntimes(row.runtimes, row.tmuxPane)
@@ -756,7 +798,7 @@ class Registry {
    *  `sessionId` (`cancel`, `question_response`, `compact`, `session_get`) while everything else
    *  addresses the agent. `resolve()` is the one lookup that accepts either. */
   private sessionIndex = new Map<string, string>()
-  /** backend-scoped route → agentId. Public Herdr pane ids are never indexed without endpointId. */
+  /** backend-scoped route → agentId. */
   private runtimeIndex = new Map<string, string>()
   /** engine + PID start marker → agentId. This is authoritative across nested multiplexers. */
   private processIndex = new Map<string, string>()
@@ -841,12 +883,14 @@ class Registry {
     const rebooted = bootChanged(savedBoot, bootId)
     writeBoot(bootId) // refresh the reference so a reboot is detected exactly once, even across same-boot restarts
     try {
-      const parsed = JSON.parse(readPrivateStateFile(FILE)) as unknown
-      if (!Array.isArray(parsed)) {
+      const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
+      if (!Array.isArray(stored)) {
         this.writeBlocked = true
         console.error('[registry] registry root is not an array; refusing to overwrite it')
         return
       }
+      const { rows: parsed, dropped, changed: strippedRetired } = withoutRetiredRows(stored)
+      if (dropped) console.log(`[registry] dropped ${dropped} agent(s) that lived only in a retired Herdr terminal`)
       if (parsed.some(hasUnknownRowSchema)) {
         this.writeBlocked = true
         console.error('[registry] registry contains an unknown row schema; refusing to overwrite it')
@@ -870,10 +914,11 @@ class Registry {
         const id = rowId(row)
         if (id) this.persistedBaseline.set(id, rowFingerprint(row))
       }
+      // The rollback copy is the file as found, retired runtimes and all — not the cleaned rows.
       if (arr.some((row) => row.schemaVersion !== 2)) {
-        atomicWriteJson(PRE_V2_BACKUP_FILE, arr, true)
+        atomicWriteJson(PRE_V2_BACKUP_FILE, stored, true)
       }
-      let changed = false
+      let changed = strippedRetired
       if (rebooted) {
         this.rebooted = true
         console.log(`[registry] machine rebooted since last run — ${arr.length} agent(s) kept with their process identity cleared (stale panes, restored on start)`)
@@ -1965,9 +2010,83 @@ class Registry {
     return this.list().filter((entry) => this.terminalAvailableAgents.has(entry.agentId) || this.hostedAgents.has(entry.agentId))
   }
 
-  /** Every hosted (runtime-less, store-fed) row, active or dormant. */
-  hostedList(): RegisteredSession[] {
-    return this.list().filter((entry) => this.hostedAgents.has(entry.agentId))
+  /** Every hosted (runtime-less) row, active or dormant; `kind` narrows to one source. */
+  hostedList(kind?: 'hermes-store' | 'external'): RegisteredSession[] {
+    return this.list().filter((entry) => this.hostedAgents.has(entry.agentId) && (!kind || entry.hosted === kind))
+  }
+
+  /**
+   * Register (or refresh) a live session the daemon did not start, from its hooks: nixfred watch mode.
+   * Idempotent on the session id. A session a pane-backed or Hermes row already owns is left alone
+   * (null). The transcript is kept only when it lies under the engine's own home, the same rule every
+   * other row obeys, so a hook cannot point the watcher at an arbitrary file.
+   */
+  registerExternal(input: {
+    engine: 'claude' | 'codex'
+    sessionId: string
+    cwd: string | null
+    title: string | null
+    transcriptPath: string | null
+    codexHome?: string | null
+    model?: string | null
+    orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
+    proc: { pid: number; start: string } | null
+  }): { agentId: string; isNew: boolean; reactivated?: boolean } | null {
+    if (this.writeBlocked || !input.sessionId) return null
+    const transcript = input.transcriptPath && validTranscriptPath(input.engine, input.transcriptPath, input.codexHome ?? undefined)
+      ? input.transcriptPath : null
+    const existing = this.bySession(input.sessionId)
+    if (existing) {
+      if (existing.hosted !== 'external') return null
+      if (input.title) existing.title = titleDisplayName(input.title)
+      if (input.cwd) { existing.cwd = input.cwd; existing.projectDir = basename(input.cwd) || existing.projectDir }
+      if (transcript) existing.transcriptPath = transcript
+      if (input.model) existing.model = input.model
+      existing.external = { orca: input.orca ?? existing.external?.orca ?? null, proc: input.proc ?? existing.external?.proc ?? null }
+      existing.lastHookAt = Date.now()
+      const reactivated = !existing.active
+      if (reactivated) existing.active = true
+      return { agentId: existing.agentId, isNew: false, ...(reactivated ? { reactivated } : {}) }
+    }
+    const now = Date.now()
+    const entry: RegisteredSession = {
+      schemaVersion: 2,
+      active: true,
+      agentId: randomUUID(),
+      sessionId: input.sessionId,
+      boundAt: now,
+      engine: input.engine,
+      gateway: null,
+      grid: null,
+      gridLaunch: null,
+      gridWebSearch: null,
+      hosted: 'external',
+      external: { orca: input.orca, proc: input.proc },
+      defaultName: undefined,
+      transcriptPath: transcript,
+      projectDir: basename(input.cwd ?? '') || input.sessionId.slice(0, 8),
+      cwd: input.cwd,
+      runtimes: [],
+      primaryRuntimeKey: '',
+      tmuxPane: '',
+      source: 'external',
+      title: titleDisplayName(input.title ?? null),
+      model: input.model ?? null,
+      cliVersion: null,
+      codexHome: input.engine === 'codex' ? (input.codexHome ?? null) : null,
+      hermesHome: null,
+      dsh: null,
+      dshRuntime: null,
+      agent: null,
+      processIdentity: null,
+      registeredAt: now,
+      touchedAt: now,
+      lastHookAt: now,
+      lastTranscriptAt: now,
+    }
+    this.index(entry)
+    this.hostedAgents.add(entry.agentId)
+    return { agentId: entry.agentId, isNew: true }
   }
 
   /**
@@ -2063,8 +2182,9 @@ class Registry {
         }))
         const latestValues: unknown[] = (() => {
           if (!existsSync(FILE)) return []
-          const parsed = JSON.parse(readPrivateStateFile(FILE)) as unknown
-          if (!Array.isArray(parsed)) throw new Error('registry root changed to a non-array value')
+          const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
+          if (!Array.isArray(stored)) throw new Error('registry root changed to a non-array value')
+          const parsed = withoutRetiredRows(stored).rows
           if (parsed.some(hasUnknownRowSchema)) {
             throw new Error('registry contains an unknown row schema')
           }
@@ -2140,6 +2260,12 @@ class Registry {
           const entry = previous.get(row.agentId) ?? row
           if (entry !== row) Object.assign(entry, row)
           this.index(entry)
+        }
+        // Hosted rows are never persisted, so the rebuild above cannot see them. Without this every
+        // save quietly dropped them from memory (Hermes store rows and watch-mode external rows alike)
+        // while hostedAgents still listed them.
+        for (const entry of previous.values()) {
+          if (entry.hosted && this.hostedAgents.has(entry.agentId) && !this.agents.has(entry.agentId)) this.index(entry)
         }
         this.persistedBaseline = new Map(serialized.map((row) => [rowId(row), rowFingerprint(row)]))
       })

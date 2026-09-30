@@ -5,7 +5,7 @@
  */
 import { redactSecrets } from './redact.js'
 
-export type AuditKind = 'tool' | 'turn' | 'command' | 'rpc' | 'gate' | 'spend'
+export type AuditKind = 'tool' | 'turn' | 'command' | 'rpc' | 'gate' | 'spend' | 'answer'
 
 export interface AuditEntry {
   at: number

@@ -60,9 +60,13 @@ void main() {
         .controller;
     expect(box.engine, 'claude');
     expect(harnessChoicesActive(tester), isFalse);
-    await key(tester, LogicalKeyboardKey.arrowDown);
-    expect(box.field, NewHarnessField.harness);
-    await key(tester, LogicalKeyboardKey.arrowDown);
+    // A choice returns to its originating accessible control.
+    final agentButton = find.descendant(
+      of: find.byKey(const ValueKey('new-harness-field-agent')),
+      matching: find.byType(TextButton),
+    );
+    expect(tester.widget<TextButton>(agentButton).focusNode!.hasFocus, isTrue);
+    await tester.tap(find.byKey(const ValueKey('new-harness-field-project')));
     expect(box.field, NewHarnessField.projectMenu);
     expect(input, isEmpty);
     semantics.dispose();

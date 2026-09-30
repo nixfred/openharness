@@ -414,13 +414,11 @@ class _TerminalKeyBarState extends State<TerminalKeyBar> {
   /// Keeps the fixed keys and the hints on one row.
   final ScrollController _scroll = ScrollController();
 
-  @override
-  void initState() {
-    super.initState();
-    // The strip opens with the keyboard, and a pane already offering its keys
-    // shows them as it does.
-    if (widget.hints.isNotEmpty) _revealHints();
-  }
+  // ⚠️ **Not scrolled to the hints as the strip opens.** It was, and Claude Code
+  // offers `shift+tab to cycle` on every prompt, so every open slid esc and tab
+  // off the left edge — while the pane's own line said "esc to interrupt". The
+  // strip opens on its own keys; hints that ARRIVE while it is open (a question's
+  // keys, say) are scrolled to, and the rest are a sideways swipe away.
 
   @override
   void didUpdateWidget(TerminalKeyBar oldWidget) {

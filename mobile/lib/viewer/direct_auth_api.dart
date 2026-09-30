@@ -1,6 +1,5 @@
 import 'package:dio/dio.dart';
 
-import '../api/api_client.dart';
 import '../core/config.dart';
 import '../logging/http_log.dart';
 
@@ -17,7 +16,7 @@ class DirectAuthException implements Exception {
   String toString() => message;
 }
 
-/// What `/api/auth/exchange` and `/api/auth/refresh` hand back.
+/// What `/api/auth/refresh` and `/api/auth/handoff/redeem` hand back.
 class IssuedTokens {
   const IssuedTokens({
     required this.token,
@@ -71,43 +70,6 @@ class DirectAuthApi {
   static const _unavailable =
       'Could not renew your sign-in. That is usually the sign-in service having a moment — '
       'if it keeps happening, sign out and sign in again.';
-
-  Future<({String authorizeUrl, String tx})> authorizeNative(
-    String redirectUri,
-  ) async {
-    final data = unwrapApiResponse(
-      await _dio.post(
-        '/api/auth/authorize-native',
-        data: {
-          'redirectUri': redirectUri,
-          'autonomousEnv': config.autonomousEnv,
-        },
-      ),
-    );
-    final url = data is Map ? data['authorizeUrl'] : null;
-    final tx = data is Map ? data['tx'] : null;
-    if (url is! String || url.isEmpty || tx is! String || tx.isEmpty) {
-      throw const DirectAuthException(
-        'The server did not return a sign-in page.',
-      );
-    }
-    return (authorizeUrl: url, tx: tx);
-  }
-
-  Future<IssuedTokens> exchange({
-    required String code,
-    required String state,
-    required String tx,
-  }) async {
-    final data = unwrapApiResponse(
-      await _dio.post(
-        '/api/auth/exchange',
-        data: {'code': code, 'state': state, 'tx': tx},
-      ),
-    );
-    return IssuedTokens.fromData(data) ??
-        (throw const DirectAuthException('Sign-in returned no access token.'));
-  }
 
   /// Trade the one-time code in a signed-in computer's Add Phone QR for a
   /// session of this phone's own — scan to sign in, no emailed code. [label]

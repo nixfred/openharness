@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/phone/terminal_key_bar.dart';
+import 'package:harness_mobile/terminal/key_hints.dart';
 import 'package:xterm/xterm.dart';
 
 void main() {
@@ -160,4 +161,49 @@ void main() {
     await tapKey(tester, 'Hide keyboard');
     expect(dismissals, 1);
   });
+
+  testWidgets(
+    'esc stays in view when the pane already offers keys; new ones are scrolled to',
+    (tester) async {
+      // Claude Code's footer offers a key on every prompt.
+      final cycle = parseKeyHints(['  ⏵⏵ auto mode on (shift+tab to cycle)']);
+      expect(cycle, isNotEmpty);
+      Widget bar(List<KeyHint> hints) => MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: SizedBox(
+              width: 360,
+              child: TerminalKeyBar(
+                terminal: terminal,
+                enabled: true,
+                hints: hints,
+                onDismissKeyboard: () => dismissals++,
+                onPromptEdited: () => edits++,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(bar(cycle));
+      await tester.pumpAndSettle();
+      final scroll = tester.widget<SingleChildScrollView>(
+        find.byType(SingleChildScrollView).first,
+      );
+      // Opened on its own keys: esc is where the thumb expects it.
+      expect(scroll.controller!.offset, 0);
+      expect(
+        find.byKey(const ValueKey('terminal-key-esc')).hitTestable(),
+        findsOneWidget,
+      );
+
+      // A key the pane starts offering while the strip is up is brought into view.
+      final more = parseKeyHints([
+        '  ⏵⏵ auto mode on (shift+tab to cycle) · ctrl+] main prompt',
+      ]);
+      await tester.pumpWidget(bar(more));
+      await tester.pumpAndSettle();
+      expect(scroll.controller!.offset, greaterThan(0));
+    },
+  );
 }

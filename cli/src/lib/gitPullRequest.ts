@@ -43,6 +43,7 @@ export type FoundPullRequest = {
   status: 'found'; number: number; url: string; state: 'Draft' | 'Open' | 'Merged' | 'Closed'
   title?: string; headBranch?: string; baseBranch?: string; headRepository?: string;
   checkedAt?: string;
+  createdAt?: string; updatedAt?: string; mergedAt?: string; closedAt?: string;
   related?: FoundPullRequest[];
 }
 export type PullRequestResult = { status: 'none' | 'unavailable' } | FoundPullRequest
@@ -61,7 +62,14 @@ function prResult(pr: unknown, repo: string): PullRequestResult {
     ? v.replace(/[\x00-\x1f\x7f]+/g, ' ').trim() || undefined : undefined
   const head = row.head as { ref?: unknown; repo?: { full_name?: unknown } } | undefined
   const base = row.base as { ref?: unknown } | undefined
+  const dates: Partial<FoundPullRequest> = {}
+  for (const [wire, field] of [['created_at', 'createdAt'], ['updated_at', 'updatedAt'],
+    ['merged_at', 'mergedAt'], ['closed_at', 'closedAt']] as const) {
+    const value = row[wire]
+    if (typeof value === 'string' && Number.isFinite(Date.parse(value))) dates[field] = new Date(value).toISOString()
+  }
   return { status: 'found', number: Number(row.number), url: row.html_url,
+    ...dates,
     state: row.merged_at ? 'Merged' : row.state === 'closed' ? 'Closed' : row.draft ? 'Draft' : 'Open',
     ...(label(row.title) ? { title: label(row.title) } : {}),
     ...(label(head?.ref) ? { headBranch: label(head?.ref) } : {}),
@@ -69,8 +77,66 @@ function prResult(pr: unknown, repo: string): PullRequestResult {
     ...(label(head?.repo?.full_name) ? { headRepository: label(head?.repo?.full_name) } : {}),
   }
 }
+/** Look up PRs for a branch already associated with a session, even after checkout/deletion. */
+export function createBranchPullRequestReader(execute: Run = run, now = Date.now) {
+  const cache = new Map<string, { until: number; value: Promise<PullRequestResult> }>()
+  return async ({ branch, remote }: PullRequestIdentity, cwd = tmpdir()): Promise<PullRequestResult> => {
+    const repo = remote && githubRepository(`https://${remote}`)
+    if (!repo || !branch || branch.length > 256 || /[\x00-\x1f\x7f]/.test(branch)) return { status: 'unavailable' }
+    const key = JSON.stringify([repo, branch])
+    const previous = cache.get(key)
+    if (previous && previous.until > now()) return previous.value
+    const value = (async (): Promise<PullRequestResult> => {
+      try {
+        // GitHub redirects renamed repositories; compare against its canonical identity,
+        // not a stale origin spelling (for example autonomous-harness → openharness).
+        const metadata = JSON.parse(await execute('gh', ['api', '--hostname', 'github.com', '--jq', '{full_name,fork,parent:{full_name:.parent.full_name}}', `repos/${repo}`], cwd))
+        const canonical = typeof metadata?.full_name === 'string' ? metadata.full_name : ''
+        if (!canonical || githubRepository(`https://github.com/${canonical}`) !== canonical) return { status: 'unavailable' }
+        const parent = metadata.fork && typeof metadata.parent?.full_name === 'string'
+          && githubRepository(`https://github.com/${metadata.parent.full_name}`) === metadata.parent.full_name
+          ? metadata.parent.full_name as string : null
+        const repositories = [...new Set([...(parent ? [parent] : []), canonical])]
+        const found: FoundPullRequest[] = []
+        let unavailable = false
+        const deadline = Date.now() + 10_000
+        for (const baseRepo of repositories) {
+          try {
+            // Ask for open work first, so a long history of closed PRs cannot hide an old open PR.
+            for (const state of ['open', 'closed']) {
+              if (Date.now() >= deadline) { unavailable = true; break }
+              const query = new URLSearchParams({ state, head: `${canonical.split('/')[0]}:${branch}`, sort: 'updated', direction: 'desc', per_page: '100' })
+              const rows: unknown = JSON.parse(await execute('gh', ['api', '--hostname', 'github.com', '--jq', 'map({number,html_url,title,state,draft,created_at,updated_at,merged_at,closed_at,head:{ref:.head.ref,repo:{full_name:.head.repo.full_name}},base:{ref:.base.ref}})', `repos/${baseRepo}/pulls?${query}`], cwd))
+              if (!Array.isArray(rows)) { unavailable = true; break }
+              const matches = rows.filter(p => p?.head?.ref === branch && p?.head?.repo?.full_name?.toLowerCase() === canonical.toLowerCase())
+              for (const match of matches) {
+                const result = prResult(match, baseRepo)
+                if (result.status === 'found') {
+                  const duplicate = found.findIndex(p => p.url === result.url)
+                  if (duplicate < 0) found.push(result)
+                  else if (result.state === 'Open' || result.state === 'Draft') found[duplicate] = result
+                } else unavailable = true
+              }
+            }
+          } catch { unavailable = true }
+        }
+        const pr = found.find(p => p.state === 'Open' || p.state === 'Draft') ?? found[0]
+        if (!pr) return { status: unavailable ? 'unavailable' : 'none' }
+        const checkedAt = new Date(now()).toISOString()
+        const related = found.filter(p => p !== pr).slice(0, 127).map(p => ({ ...p, checkedAt }))
+        return { ...pr, checkedAt, ...(related.length ? { related } : {}) }
+      } catch { return { status: 'unavailable' } }
+    })()
+    cache.set(key, { until: now() + 60_000, value })
+    if (cache.size > 128) cache.delete(cache.keys().next().value!)
+    return value
+  }
+}
+export const readBranchPullRequest = createBranchPullRequestReader()
+
 /** Read-only, on the machine owning the checkout. No shell, browser login, fetch or checkout. */
 export function createPullRequestReader(execute: Run = run, now = Date.now) {
+  const readBranch = createBranchPullRequestReader(execute, now)
   const cache = new Map<string, { until: number; value: Promise<PullRequestResult> }>()
   return async (cwd: string, expected?: PullRequestIdentity): Promise<PullRequestResult> => {
     if (!validGitPath(cwd)) return { status: 'unavailable' }
@@ -92,48 +158,7 @@ export function createPullRequestReader(execute: Run = run, now = Date.now) {
       const key = JSON.stringify([cwd, repo, branch])
       const previous = cache.get(key)
       if (previous && previous.until > now()) return await stillCurrent(await previous.value)
-      const value = (async (): Promise<PullRequestResult> => {
-        try {
-          // GitHub redirects renamed repositories; compare against its canonical identity,
-          // not a stale origin spelling (for example autonomous-harness → openharness).
-          const metadata = JSON.parse(await execute('gh', ['api', '--hostname', 'github.com', '--jq', '{full_name,fork,parent:{full_name:.parent.full_name}}', `repos/${repo}`], cwd))
-          const canonical = typeof metadata?.full_name === 'string' ? metadata.full_name : ''
-          if (!canonical || githubRepository(`https://github.com/${canonical}`) !== canonical) return { status: 'unavailable' }
-          const parent = metadata.fork && typeof metadata.parent?.full_name === 'string'
-            && githubRepository(`https://github.com/${metadata.parent.full_name}`) === metadata.parent.full_name
-            ? metadata.parent.full_name as string : null
-          const repositories = [...new Set([...(parent ? [parent] : []), canonical])]
-          const found: FoundPullRequest[] = []
-          let unavailable = false
-          const deadline = Date.now() + 10_000
-          for (const baseRepo of repositories) {
-            try {
-              // Ask for open work first, so a long history of closed PRs cannot hide an old open PR.
-              for (const state of ['open', 'closed']) {
-                if (Date.now() >= deadline) { unavailable = true; break }
-                const query = new URLSearchParams({ state, head: `${canonical.split('/')[0]}:${branch}`, sort: 'updated', direction: 'desc', per_page: '100' })
-                const rows: unknown = JSON.parse(await execute('gh', ['api', '--hostname', 'github.com', '--jq', 'map({number,html_url,title,state,draft,merged_at,head:{ref:.head.ref,repo:{full_name:.head.repo.full_name}},base:{ref:.base.ref}})', `repos/${baseRepo}/pulls?${query}`], cwd))
-                if (!Array.isArray(rows)) { unavailable = true; break }
-                const matches = rows.filter(p => p?.head?.ref === branch && p?.head?.repo?.full_name?.toLowerCase() === canonical.toLowerCase())
-                for (const match of matches) {
-                  const result = prResult(match, baseRepo)
-                  if (result.status === 'found') {
-                    const duplicate = found.findIndex(p => p.url === result.url)
-                    if (duplicate < 0) found.push(result)
-                    else if (result.state === 'Open' || result.state === 'Draft') found[duplicate] = result
-                  } else unavailable = true
-                }
-                if (matches.length) break
-              }
-            } catch { unavailable = true }
-          }
-          const pr = found.find(p => p.state === 'Open' || p.state === 'Draft') ?? found[0]
-          if (!pr) return { status: unavailable ? 'unavailable' : 'none' }
-          const checkedAt = new Date(now()).toISOString()
-          const related = found.filter(p => p !== pr).slice(0, 127).map(p => ({ ...p, checkedAt }))
-          return { ...pr, checkedAt, ...(related.length ? { related } : {}) }
-        } catch { return { status: 'unavailable' } }
-      })()
+      const value = readBranch({ branch, remote: canonicalRepository(remote) }, cwd)
       cache.set(key, { until: now() + 60_000, value })
       if (cache.size > 128) cache.delete(cache.keys().next().value!)
       return await stillCurrent(await value)
@@ -154,7 +179,7 @@ export function createPullRequestUrlReader(execute: Run = run, now = Date.now) {
       try {
         const [, owner, name, , number] = new URL(url).pathname.split('/')
         const row = JSON.parse(await execute('gh', ['api', '--hostname', 'github.com',
-          '--jq', '{number,html_url,title,state,draft,merged_at,head:{ref:.head.ref,repo:{full_name:.head.repo.full_name}},base:{ref:.base.ref}}', `repos/${owner}/${name}/pulls/${number}`], tmpdir()))
+          '--jq', '{number,html_url,title,state,draft,created_at,updated_at,merged_at,closed_at,head:{ref:.head.ref,repo:{full_name:.head.repo.full_name}},base:{ref:.base.ref}}', `repos/${owner}/${name}/pulls/${number}`], tmpdir()))
         // GitHub redirects renamed repositories. Return its canonical URL so history can
         // merge an old saved alias with a match discovered through the renamed origin.
         if (!validPullRequestUrl(row?.html_url) || row.number !== Number(number)) return { status: 'unavailable' }

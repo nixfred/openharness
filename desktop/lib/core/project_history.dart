@@ -9,6 +9,7 @@ class ProjectHistory {
   static const _key = 'new_agent_projects_v1';
   final _recent = <String, List<String>>{};
   final _selected = <String, String?>{};
+  final _worktrees = <String, Map<String, bool>>{};
   Future<void>? _loading;
   Future<void> _saving = Future.value();
   int _revision = 0;
@@ -17,6 +18,7 @@ class ProjectHistory {
       List.unmodifiable(_recent[machine] ?? []);
   bool hasSelection(String machine) => _selected.containsKey(machine);
   String? selected(String machine) => _selected[machine];
+  bool? worktreeFor(String machine, String path) => _worktrees[machine]?[path];
 
   Future<void> load() => _loading ??= _load();
   Future<void> _load() async {
@@ -38,9 +40,19 @@ class ProjectHistory {
               .toSet()
               .toList();
         }
-        if (value['selected'] == null ||
-            value['selected'] is String && _valid(value['selected'])) {
+        if (value.containsKey('selected') &&
+            (value['selected'] == null ||
+                value['selected'] is String && _valid(value['selected']))) {
           _selected[entry.key] = value['selected'];
+        }
+        if (value['worktrees'] case final Map choices) {
+          _worktrees[entry.key] = {
+            for (final choice in choices.entries.take(40))
+              if (choice.key is String &&
+                  _valid(choice.key) &&
+                  choice.value is bool)
+                choice.key as String: choice.value as bool,
+          };
         }
       }
     } catch (_) {
@@ -64,9 +76,37 @@ class ProjectHistory {
         ...?_recent[machine]?.where((item) => item != path),
       ].take(40).toList();
     }
+    await _save();
+  }
+
+  /// A worktree preference belongs to this folder on this machine. It does
+  /// not change the selected project or add a worktree folder to recents.
+  Future<void> selectWorktree(String machine, String path, bool enabled) async {
+    if (!_valid(path)) return;
+    await load();
+    _revision++;
+    _worktrees[machine] = {
+      path: enabled,
+      for (final entry
+          in (_worktrees[machine] ?? {}).entries
+              .where((entry) => entry.key != path)
+              .take(39))
+        entry.key: entry.value,
+    };
+    await _save();
+  }
+
+  Future<void> _save() async {
     final snapshot = jsonEncode({
-      for (final id in _selected.keys.toList().reversed.take(64))
-        id: {'selected': _selected[id], 'recent': _recent[id] ?? []},
+      for (final id in {
+        ..._worktrees.keys,
+        ..._selected.keys,
+      }.toList().reversed.take(64))
+        id: {
+          if (_selected.containsKey(id)) 'selected': _selected[id],
+          'recent': _recent[id] ?? [],
+          if (_worktrees.containsKey(id)) 'worktrees': _worktrees[id],
+        },
     });
     _saving = _saving.then((_) async {
       try {

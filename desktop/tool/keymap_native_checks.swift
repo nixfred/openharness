@@ -54,7 +54,12 @@ for context in HarnessNativeKeymap.contexts {
   try checkKeymap(directModels == nil,
     "Command-semicolon is unbound from \(context)")
   try checkKeymap(defaults.match([stroke("cmd+u")], context: context).binding == nil,
-    "The former Machines shortcut is unbound")
+    "Command-U has no default workspace action")
+  try checkKeymap(defaults.match([stroke("cmd+y")], context: context).binding == nil,
+    "Command-Y has no default workspace action")
+  let store = defaults.match([stroke("cmd+s")], context: context).binding
+  try checkKeymap(store?.command == "app.store" && store?.menuAction == "store" && store?.hint == "⌘S",
+    "Command-S opens Store with the matching native action and hint")
   try checkKeymap(defaults.match([stroke("cmd+o")], context: context).binding?.command == "agent.open",
     "Command-O opens the project picker")
   try checkKeymap(defaults.match([stroke("cmd+shift+n")], context: context).binding?.command == "agent.clone",

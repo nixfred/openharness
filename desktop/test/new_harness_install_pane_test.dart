@@ -89,7 +89,11 @@ class _Notifier extends AppNotifier {
   /// The machine's side of an install: a fresh run, then whatever the test
   /// narrates through [narrate], then [pendingInstall]'s answer.
   @override
-  Future<String?> installDsh(String machineId, String id) async {
+  Future<String?> installDsh(
+    String machineId,
+    String id, {
+    bool trustUnverified = false,
+  }) async {
     installs.add(id);
     final machine = machineStates[machineId]!;
     machine.dsh.runs.remove(id);
@@ -196,6 +200,7 @@ void main() {
     WidgetTester tester,
     _Notifier notifier, {
     double width = 900,
+    VoidCallback? onClose,
   }) async {
     final box = controller(notifier);
     final keymap = MemoryKeymap();
@@ -215,7 +220,7 @@ void main() {
                   height: 520,
                   child: NewHarnessForm(
                     controller: box,
-                    onClose: () {},
+                    onClose: onClose ?? () {},
                     onCreated: () {},
                   ),
                 ),
@@ -404,6 +409,31 @@ void main() {
   });
 
   group('installing on the way to start', () {
+    testWidgets('outside dismissal cannot abandon a running installation', (
+      tester,
+    ) async {
+      final notifier = await app();
+      notifier.pendingInstall = Completer<String?>();
+      var closes = 0;
+      final box = await mount(tester, notifier, onClose: () => closes++);
+      box.focusField(NewHarnessField.harness);
+      box.applyOption(box.options.firstWhere((o) => o.id == _circuit.id));
+      await tester.pump();
+      await startHarness(tester);
+      await tester.pump();
+      tester
+          .state<NewHarnessFormState>(find.byType(NewHarnessForm))
+          .dismissFromOutside();
+      await tester.pump();
+      expect(closes, 0);
+      expect(box.busy, isTrue);
+      expect(box.error, contains('Still working on it'));
+      expect(notifier.launches, isEmpty);
+      notifier.pendingInstall!.complete('Synthetic installation failure');
+      await tester.pumpAndSettle();
+      expect(box.busy, isFalse);
+    });
+
     testWidgets('the right pane narrates the machine, step by step', (
       tester,
     ) async {
@@ -497,6 +527,11 @@ void main() {
       await tester.pump();
       await startHarness(tester);
       await tester.pump();
+      expect(
+        find.byKey(const ValueKey('new-harness-progress')),
+        findsOneWidget,
+        reason: 'compact install progress keeps the busy action visible',
+      );
       notifier.narrate(_circuit.id, 'setup', line: 'npm ci');
       notifier.narrate(_circuit.id, 'failed', code: 'DSH_BUSY');
       notifier.pendingInstall!.complete('another install holds the lock');

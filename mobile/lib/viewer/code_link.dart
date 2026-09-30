@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-
 import '../e2ee/bytes.dart';
 import '../e2ee/code_pake.dart';
 import '../e2ee/cpace.dart';
@@ -50,14 +49,16 @@ Future<PasswordLinkResult> linkWithCode({
         channel.sink.add(jsonEncode({'type': type, 'payload': payload})),
   );
   try {
-    await channel.ready;
-    return await run
-        .drive(
-          channel.stream.map(
-            (raw) => raw is String ? jsonObjectOf(utf8Bytes(raw)) : null,
-          ),
-        )
-        .timeout(timeout, onTimeout: () => const PasswordLinkFailed('TIMEOUT'));
+    // The dial is inside the timeout, as in `linkWithPassword`: a network that swallows packets
+    // otherwise holds "Pairing…" on screen for the OS's own TCP timeout.
+    return await () async {
+      await channel.ready;
+      return run.drive(
+        channel.stream.map(
+          (raw) => raw is String ? jsonObjectOf(utf8Bytes(raw)) : null,
+        ),
+      );
+    }().timeout(timeout, onTimeout: () => const PasswordLinkFailed('TIMEOUT'));
   } catch (_) {
     return const PasswordLinkFailed('CONNECTION_ERROR');
   } finally {

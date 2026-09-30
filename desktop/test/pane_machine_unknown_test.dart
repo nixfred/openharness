@@ -3,10 +3,12 @@
 // "Waiting for this machine to answer…" is only honest while there is something to wait FOR. When the
 // machine LIST itself could not be read, the machine is not slow — it is unknown, and a spinner that
 // never ends tells the user nothing and offers them nothing. This is the difference between those two.
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -195,7 +197,7 @@ void main() {
         find.text('Could not load machines. Retry to reconnect.'),
         findsOneWidget,
       );
-      expect(find.byIcon(Icons.cloud_off), findsOneWidget);
+      expect(find.byIcon(AppIcons.cloudOff), findsOneWidget);
 
       // And the button reaches the same reload the error strip's RETRY does.
       expect(api.lists, hasLength(1));
@@ -213,7 +215,7 @@ void main() {
     api.lists.single.completeError(ApiException('boom', status: 502));
     await failed;
     await _pump(tester, app);
-    expect(find.byIcon(Icons.cloud_off), findsOneWidget);
+    expect(find.byIcon(AppIcons.cloudOff), findsOneWidget);
 
     final ok = app.retryMachines();
     await _untilRequested(tester, api, 2);

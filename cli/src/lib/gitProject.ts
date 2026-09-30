@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
 import { cp, lstat, mkdir, realpath, stat, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 import { promisify } from 'node:util'
 import { placeholderBranch, plausibleBranchName, worktreeFolderName } from './agentNames.js'
+import { withinRoots } from './pathContainment.js'
 
 const exec = promisify(execFile)
 
@@ -89,8 +91,22 @@ async function refreshBranches(path: string): Promise<Map<string, string[] | nul
 
 /** Cached choices are immediate. A picker can separately request a bounded
  *  remote refresh, including branches excluded by a single-branch clone. */
-export async function readGitProject(path: string, options: { refresh?: boolean } = {}) {
-  if (!validGitPath(path)) return { error: 'INVALID_PATH' }
+/**
+ * Reads a repository's shape for the New Harness form. `knownRoots` widens the browsable home with
+ * the workspaces agents are already running in; leaving it out still fences to the home folder, so a
+ * caller can never accidentally ask this to run git anywhere on the machine.
+ *
+ * `path` is resolved before anything runs: git would follow a symlink out of the allowed folders
+ * whatever the name said, so the containment is measured on the real path and git is pointed at it.
+ */
+export async function readGitProject(requested: string, options: { refresh?: boolean; knownRoots?: string[] } = {}) {
+  if (!validGitPath(requested)) return { error: 'INVALID_PATH' }
+  let path: string
+  // A folder that is gone reads as "not a Git project", which is what running git in it used to
+  // report (exit 128) — a deleted folder is not a malformed request.
+  try { path = await realpath(requested) } catch { return { isGit: false, branches: [] } }
+  // Same word and same roots as projectPreview's fence, so the two read alike.
+  if (!(await withinRoots(path, [homedir(), ...(options.knownRoots ?? [])]))) return { error: 'FORBIDDEN' }
   let root: string
   try { root = await git(path, ['rev-parse', '--show-toplevel']) }
   catch (error) {

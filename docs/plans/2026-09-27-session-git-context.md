@@ -1,5 +1,8 @@
 # Session Git context
 
+The current product and data contract is [Session branches and pull requests](../worktree-pull-requests.md).
+The original location-driven design below records the first delivery; it is superseded by the branch-first correction at the end.
+
 ## Product contract
 
 A session is a durable conversation, a worktree is a checkout, a branch is a
@@ -9,6 +12,9 @@ branches and PRs without changing its name or launch directory.
 
 The focused context shows the branch read from Git in the most recently
 observed work location. Its tooltip explains the location and observation time.
+Pending, failed or unsupported newer activity retains that confirmed location
+with a “last observed” qualifier. Unknown is reserved for sessions without a
+confirmed location; an attempted command is never promoted to confirmed work.
 The session's original directory remains available as “Launch workspace”.
 If several locations occur in one operation, show “Multiple workspaces” and
 let the user inspect them. Never select one by an arbitrary completion order.
@@ -103,7 +109,7 @@ for files/index/HEAD rather than independent repositories.
   a static literal subset without evaluating code. Yielded processes and cells
   are correlated with passive waits, including waits after checkpoint reload.
 - `agentTokenUsage.ts` maintains observations in its existing append-only reader
-  and v3 private checkpoint. No new transcript scanner or idle watcher is added.
+  and v4 private checkpoint. No new transcript scanner or idle watcher is added.
 - `sessionGitContext.ts` resolves checkout roots and branches. `agentFrame.ts`
   includes the same additive context on list and push frames; stable daemon
   versions and client merge rules protect against response reordering.
@@ -184,3 +190,51 @@ step; this change does not alter running agents' checkouts.
 
 The user-facing behavior and recommended Git workflow are documented in
 [Session work, branches, and pull requests](../worktree-pull-requests.md).
+
+### Follow-up: recorded Codex batches
+
+The session that created PR #397 exposed a gap in the original tests: its code
+mode used multiple calls and emitted each result as a separate text block.
+Treating the batch as unknown, and concatenating result blocks before parsing,
+lost the yielded PR-creation receipt. A later unsupported call then erased the
+last successful location before the daemon projected it into branch history.
+
+The reader now accepts bounded unconditional sequential calls and literal
+`Promise.all` / `Promise.allSettled` batches with exact result forwarding. It
+keeps each result tied to its command, groups concurrent locations, and follows
+partial cell output and subsequent process polls. Dynamic scripts remain
+unconfirmed. Failed/unconfirmed work preserves the latest successful location;
+desktop and phone qualify that context, including the branch-history marker.
+Subfolders under a Git-verified root collapse into one recent workspace.
+
+Version 3 checkpoints replay their available transcript once with the new reader,
+retaining validated minimal history whose receipts were already compacted away.
+Version 4 restarts resume append-only reads. The recorded regression fixture is
+documented in `cli/src/lib/fixtures/session-work-codex.md`.
+
+A read-only replay of this session's 26 MB transcript into temporary caches
+resolved its actual `happy-owl` checkout, populated branch history, recovered
+PR #397's creation URL, and verified its **Merged** state against GitHub. No
+running daemon data was changed by that replay.
+
+## Branch-first correction — September 28
+
+Git, rather than transcript parsing, now supplies checked-out branch facts for
+every engine. The assigned checkout is always inspected; validated historical
+associations and successful activity add other checkouts. The projection emits
+bounded Git snapshots, and history records branches even without tool receipts.
+Unknown activity cannot clear a known branch. Multiple checked-out branches
+produce a branch count; worktree paths are internal bookkeeping.
+
+The desktop lists checked-out branches, recorded branches and PRs without
+launch paths or recent subdirectory lists. GitHub head repository + branch
+queries discover PRs from saved branch identities even after local deletion;
+PR URL refresh preserves durable merged/closed history. Discovery and URL checks
+share bounded pagination and retain actual cache check times.
+
+Regression coverage includes real temporary Git repositories with Claude, Codex
+and Grok registry rows and no transcripts, branch switches, another session's
+unassociated branch, deleted branches before the first PR lookup, multiple
+checkouts, offline preservation and the recorded Codex batch fixture. App tests
+cover branch grouping, merged history, paths absent from the view, native and
+Flutter navigation without terminal input, narrow layouts and large text.

@@ -11,9 +11,25 @@ void main() {
     };
     final agent = Agent.fromJson(raw);
     expect(agent.modelName, 'GPT-6 Astra');
+    expect(agent.modelEffort, 'high');
     expect(agent.gridModel, isNull);
     expect(agent.copyWith(name: 'Renamed').modelName, 'GPT-6 Astra');
+    expect(agent.copyWith(name: 'Renamed').modelEffort, 'high');
+    expect(Agent.fromJson({'id': 'legacy'}).modelEffort, isNull);
     expect(AppNotifier.agentsEqual([agent], [Agent.fromJson(raw)]), isTrue);
+    expect(
+      AppNotifier.agentsEqual(
+        [agent],
+        [
+          Agent.fromJson({
+            ...raw,
+            'selectedModel': 'runtime-v1:a:codex:gpt-6-astra@max',
+          }),
+        ],
+      ),
+      isFalse,
+      reason: 'effort-only updates must refresh the focused model label',
+    );
     expect(
       AppNotifier.agentsEqual(
         [agent],

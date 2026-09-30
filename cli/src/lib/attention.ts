@@ -22,6 +22,8 @@ export interface AttentionRow extends AttentionEntry {
   machine: string
   sessionId: string
   tmuxPane: string | null
+  /** A live session this daemon did not start (nixfred watch mode): shown, answered, never moved. */
+  external: boolean
   glyph: string
   label: string
 }
@@ -44,6 +46,7 @@ export interface AttentionSessionLike {
   active: boolean
   tmuxPane?: string
   name: string
+  external?: boolean
 }
 
 export class AttentionTracker {
@@ -97,6 +100,7 @@ export class AttentionTracker {
       return {
         agentId: s.agentId, sessionId: s.sessionId, engine: s.engine, machine, name: s.name,
         tmuxPane: s.tmuxPane ?? null,
+        external: s.external === true,
         state, since: e?.since ?? 0, detail: state === 'offline' ? '' : e?.detail ?? '',
         glyph: ATTENTION_GLYPH[state], label: ATTENTION_LABEL[state],
       }

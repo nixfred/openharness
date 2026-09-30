@@ -175,7 +175,7 @@ class _App extends AppNotifier {
   Future<void> retryMachines() async => notifyListeners();
 
   @override
-  Future<void> login() async {
+  Future<void> login({bool? qr}) async {
     await Future<void>.delayed(const Duration(seconds: 1));
     signedIn = true;
     notifyListeners();

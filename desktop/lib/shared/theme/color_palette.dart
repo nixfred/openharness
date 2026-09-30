@@ -1,8 +1,14 @@
+import 'dart:ui' show Brightness;
+
 import '../../theme/omarchy_theme.dart';
 import 'package:flutter/painting.dart';
 
 /// Coordinated workspace colors. These feed the existing design-system tokens,
 /// native tabs/search, and terminal defaults; they do not change agent state.
+///
+/// A palette carries its own [brightness]: choosing a light one is how the app
+/// goes light. There is no separate light/dark switch to disagree with it —
+/// `_GridTokenScope` (app_shell.dart) and the native window read it from here.
 enum HarnessPalette {
   graphite(
     'Graphite',
@@ -87,11 +93,45 @@ enum HarnessPalette {
     tabBar: Color(0xff1c1c1c),
     search: Color(0xff2c2c2c),
     accent: Color(0xffbdcbdc),
+  ),
+  // The light palettes mirror the dark ones' layering: the workspace gutter and
+  // tab bar sit a step darker than the terminal ground, cards a step lighter.
+  // Their accents are deep rather than pale, since an accent is drawn as text,
+  // a cursor and a focus ring on the ground.
+  paper(
+    'Paper',
+    'Neutral light',
+    brightness: Brightness.light,
+    foreground: Color(0xff1f1f1d),
+    background: Color(0xfffafaf9),
+    panel: Color(0xfff3f3f1),
+    card: Color(0xffffffff),
+    hover: Color(0xffebebe8),
+    workspace: Color(0xffe6e6e3),
+    tabBar: Color(0xffeeeeec),
+    search: Color(0xffe2e2df),
+    accent: Color(0xff3d5a8a),
+  ),
+  mist(
+    'Mist',
+    'Cool light',
+    brightness: Brightness.light,
+    foreground: Color(0xff1b2330),
+    background: Color(0xfff7f9fc),
+    panel: Color(0xffeef2f7),
+    card: Color(0xffffffff),
+    hover: Color(0xffe3e9f1),
+    workspace: Color(0xffe1e7f0),
+    tabBar: Color(0xffe9eef5),
+    search: Color(0xffdce4ee),
+    accent: Color(0xff2f5bb8),
   );
 
   const HarnessPalette(
     this.label,
     this.description, {
+    this.brightness = Brightness.dark,
+    this._foreground = const Color(0xfff5f5f5),
     required this._background,
     required this._panel,
     required this._card,
@@ -103,6 +143,8 @@ enum HarnessPalette {
   });
 
   final String label, description;
+  final Brightness brightness;
+  final Color _foreground;
   final Color _background, _panel, _card, _hover, _workspace, _tabBar, _search, _accent;
 
   // nixfred: every preset answers with its own constants; `omarchy` answers from the live Omarchy
@@ -117,7 +159,8 @@ enum HarnessPalette {
   Color get tabBar => _live('darker_background', _tabBar);
   Color get search => _live('lighter_background', _search);
   Color get accent => _live('accent', _accent);
-  Color get foreground => _live('foreground', const Color(0xfff5f5f5));
+  Color get foreground => _live('foreground', _foreground);
+  bool get isDark => brightness == Brightness.dark;
 
   static HarnessPalette fromId(String? id) =>
       values.where((palette) => palette.name == id).firstOrNull ?? graphite;
@@ -127,6 +170,10 @@ enum HarnessPalette {
     'workspace': workspace.toARGB32(),
     'search': search.toARGB32(),
     'accent': accent.toARGB32(),
+    'foreground': foreground.toARGB32(),
+    // AppKit's own surfaces (menus, the About panel, traffic lights) follow
+    // `NSApp.appearance`, which the window sets from this.
+    'dark': isDark ? 1 : 0,
   };
 }
 

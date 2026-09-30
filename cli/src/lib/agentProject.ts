@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
@@ -45,8 +47,7 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   } catch { return null }
 }
 
-// Agent list and push frames share this cache. Only four folders run Git at once.
-const cache = new Map<string, { at: number; value: Promise<AgentProject> }>()
+// Only four folders run Git at once, including cache refreshes.
 let running = 0
 const waiting: Array<() => void> = []
 async function inspect(cwd: string): Promise<AgentProject> {
@@ -76,17 +77,120 @@ async function inspect(cwd: string): Promise<AgentProject> {
   }
 }
 
-/** Forget what was read for `cwd`, as after renaming its branch. */
-export function forgetAgentProject(cwd: string): void {
-  cache.delete(cwd)
+/** Cheap freshness check for known Git metadata, including linked worktrees and
+ * nested repositories created under a previously inspected directory. Git still
+ * resolves all values; these stamps only avoid repeating it when nothing moved.
+ * Untracked config includes are covered by the bounded full-refresh interval. */
+async function metadataStamp(cwd: string, project: AgentProject): Promise<string | null> {
+  try {
+    if (project.root && !project.branch) return null
+    const physical = await realpath(cwd)
+    const directory = await stat(physical)
+    if (!directory.isDirectory()) return null
+    const paths = new Set<string>()
+    for (let path = physical, depth = 0; depth < 128; depth++) {
+      paths.add(join(path, '.git'))
+      if (path === project.root || dirname(path) === path) break
+      path = dirname(path)
+    }
+    const smallFile = async (path: string): Promise<string | null> => {
+      paths.add(path)
+      const info = await stat(path).catch(error => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+        throw error
+      })
+      if (!info) return null
+      if (!info.isFile() || info.size > 16 * 1024) throw new Error('Uncacheable Git metadata')
+      return (await readFile(path, 'utf8')).trim()
+    }
+    if (project.root) {
+      const marker = join(project.root, '.git')
+      const info = await stat(marker)
+      let gitDir = marker
+      if (!info.isDirectory()) {
+        const markerText = await smallFile(marker)
+        if (!markerText?.startsWith('gitdir: ')) return null
+        gitDir = resolve(project.root, markerText.slice(8))
+      }
+      paths.add(join(gitDir, 'HEAD'))
+      paths.add(join(gitDir, 'config'))
+      paths.add(join(gitDir, 'config.worktree'))
+      const common = await smallFile(join(gitDir, 'commondir'))
+      if (common) paths.add(join(resolve(gitDir, common), 'config'))
+    }
+    paths.add(process.env.GIT_CONFIG_GLOBAL || join(homedir(), '.gitconfig'))
+    paths.add(join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'git', 'config'))
+    paths.add(process.env.GIT_CONFIG_SYSTEM || '/etc/gitconfig')
+    const stamps = await Promise.all([...paths].map(async path => {
+      const info = await stat(path).catch(error => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+        throw error
+      })
+      // Index/lock activity changes the .git directory's mtime without changing
+      // this projection. Its identity, HEAD and config are the relevant inputs.
+      return [path, !info ? null : info.isDirectory()
+        ? [info.dev, info.ino, 'directory']
+        : [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]]
+    }))
+    // A visible .git marker with no resolved repository can mean an unavailable
+    // checkout or a failed Git process, not a stable non-repository folder.
+    if (!project.root && stamps.some(([path, stamp]) => typeof path === 'string' && path.endsWith('/.git') && stamp !== null)) return null
+    return JSON.stringify([physical, directory.dev, directory.ino, stamps])
+  } catch { return null }
 }
 
-export function agentProject(cwd: string | null, now = Date.now()): Promise<AgentProject | null> {
-  if (!cwd || !isAbsolute(cwd) || cwd.length > 4096 || /[\x00-\x1f\x7f]/.test(cwd)) return Promise.resolve(null)
-  const found = cache.get(cwd)
-  if (found && now - found.at < 15_000) return found.value
-  if (cache.size >= 256) cache.delete(cache.keys().next().value!)
-  const value = inspect(cwd)
-  cache.set(cwd, { at: now, value })
-  return value
+export function createAgentProjectReader(lookup: (cwd: string) => Promise<AgentProject> = inspect) {
+  type Entry = { at: number; gitAt: number; pending: boolean; stamp: string | null; value: Promise<AgentProject> }
+  const cache = new Map<string, Entry>()
+  const trim = () => {
+    // Pending work must survive both expiry and eviction, otherwise a slow
+    // queue creates duplicate Git subprocesses for the same directory.
+    for (const [key, entry] of cache) {
+      if (cache.size <= 1024) break
+      if (!entry.pending) cache.delete(key)
+    }
+  }
+  const read = (cwd: string | null, now = Date.now()): Promise<AgentProject | null> => {
+    if (!cwd || !isAbsolute(cwd) || cwd.length > 4096 || /[\x00-\x1f\x7f]/.test(cwd)) return Promise.resolve(null)
+    const found = cache.get(cwd)
+    if (found && (found.pending || now - found.at < 15_000)) {
+      cache.delete(cwd)
+      cache.set(cwd, found)
+      return found.value
+    }
+    const started = Date.now()
+    const entry: Entry = { at: now, gitAt: found?.gitAt ?? now, pending: true, stamp: null, value: null! }
+    entry.value = (async () => {
+      const previous = found ? await found.value : null
+      const before = previous ? await metadataStamp(cwd, previous) : null
+      if (found?.stamp && before === found.stamp && now - found.gitAt < 60_000) {
+        entry.stamp = before
+        return previous!
+      }
+      const value = await lookup(cwd)
+      const after = await metadataStamp(cwd, value)
+      // Only reuse a snapshot if its inputs stayed stable across the Git read.
+      // A first lookup has no resolved Git directory yet and warms this on the
+      // next refresh; a checkout racing a lookup never becomes a cached fact.
+      entry.stamp = before && before === after ? after : null
+      entry.gitAt = now + Math.max(0, Date.now() - started)
+      return value
+    })().finally(() => {
+      entry.pending = false
+      entry.at = now + Math.max(0, Date.now() - started)
+      trim()
+    })
+    cache.delete(cwd)
+    cache.set(cwd, entry)
+    trim()
+    return entry.value
+  }
+  return { read, forget: (cwd: string) => { cache.delete(cwd) } }
 }
+
+// Agent lists and push frames share this reader. Branch changes still become
+// visible within 15 seconds; unchanged historical paths do not fork Git again.
+const projects = createAgentProjectReader()
+export const agentProject = projects.read
+/** Forget what was read for `cwd`, as after renaming its branch. */
+export const forgetAgentProject = projects.forget

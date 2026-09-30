@@ -111,7 +111,20 @@ describe('production resume handler', () => {
     // muse never hooks, so nothing else would ever leave this row `starting` — it would read as
     // "Starting" for ever and keep discovery out of the pane.
     rewrite({ engine: 'muse' })
+    vi.mocked(resolvePaneEngineProcess).mockResolvedValue(identity)
     expect(await start()).toMatchObject({ ok: true, session: { launch: { state: 'ready' } } })
+  })
+
+  it('persists the verified process before announcing a resume that has no hook yet', async () => {
+    // A process probe only reads. The ordinary fixture also imitates discovery, which used to
+    // hide a ready row with no process identity until the next reconcile or SessionStart hook.
+    vi.mocked(resolvePaneEngineProcess).mockResolvedValue(identity)
+    const result = await start()
+    expect(result).toMatchObject({ ok: true, session: { processIdentity: identity, launch: { state: 'ready' } } })
+    expect(registry.byAgent(saved.agentId)?.processIdentity).toEqual(identity)
+    expect(deps.announceSession).toHaveBeenLastCalledWith(expect.objectContaining({ processIdentity: identity }))
+    registry.load()
+    expect(registry.byAgent(saved.agentId)?.processIdentity).toEqual(identity)
   })
 
   it('opens a retained terminal as a new shell without a vendor resume argument', async () => {

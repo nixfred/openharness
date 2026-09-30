@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
@@ -11,21 +11,25 @@ import '../state/swarm_catalog.dart';
 import '../state/swarm_navigation.dart';
 import '../state/welcome_sessions.dart';
 import 'engine_identity.dart';
+import 'desktop_chrome.dart';
 import '../shared/theme/appearance_prefs_store.dart';
+import '../shared/theme/status_line_style.dart';
 import '../shared/theme/harness_background.dart';
 import 'swarm_wallpaper.dart';
 import 'terminal_text_action.dart';
+import 'status_line.dart';
 import '../shortcuts/app_keymap.dart';
 import '../shortcuts/keymap.dart';
 import '../shortcuts/keymap_commands.dart';
 import '../terminal/terminal_text.dart';
+import '../terminal/terminal_theme.dart' show lightTerminalTheme;
 
 /// A quiet terminal welcome. Opening a command is always an explicit action.
 ///
 /// With [app], it also offers what to pick up: the harnesses you were just
 /// with and the Claude Code and Codex conversations on your machines that
-/// Harness did not start ([WelcomeSessions]), numbered 1–9 like the terminal
-/// client's home. [onOpen] opens one in this tab, as Cmd-P would.
+/// Harness did not start ([WelcomeSessions]), limited to six recent visits.
+/// [onOpen] opens one in this tab, as Cmd-P would.
 class WorkspaceWelcome extends StatefulWidget {
   const WorkspaceWelcome({
     super.key,
@@ -33,12 +37,17 @@ class WorkspaceWelcome extends StatefulWidget {
     this.app,
     this.projects = const [],
     this.onOpen,
+    this.composerBuilder,
   });
 
   final ValueChanged<String> onCommand;
   final AppNotifier? app;
   final List<SavedSwarmProject> projects;
   final ValueChanged<SwarmDestination>? onOpen;
+
+  /// Embedded creation and the popup supply the exact same form. Welcome
+  /// only contributes its existing recent-session data beneath that form.
+  final Widget Function(Widget? recentSessions)? composerBuilder;
 
   @override
   State<WorkspaceWelcome> createState() => _WorkspaceWelcomeState();
@@ -47,7 +56,7 @@ class WorkspaceWelcome extends StatefulWidget {
 class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
   // Resolve the icon at compile time. Lazy initialization of Lucide's large
   // generated library overflows the browser debug runtime's stack here.
-  static const _phoneIcon = LucideIcons.smartphone500;
+  static const _phoneIcon = AppIcons.smartphone;
   WelcomeSessions? _sessions;
   int _cursor = 0;
   final _focus = FocusNode(debugLabel: 'Welcome sessions');
@@ -74,6 +83,7 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
   /// Focus anywhere else (a field, a dialog, Cmd-P) is left alone, and the
   /// app's shortcuts are read before any of this.
   void _claimFocus() {
+    if (widget.composerBuilder != null) return;
     if (!mounted || _focus.hasPrimaryFocus || !_focus.canRequestFocus) return;
     final primary = FocusManager.instance.primaryFocus;
     if (primary != null && !_focus.ancestors.contains(primary)) return;
@@ -144,8 +154,8 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
   }
 
   static const _actions = [
-    ('agent.new', 'Start an agent'),
-    ('harnesses.list', 'Manage all your agents'),
+    ('agent.new', 'Start a harness'),
+    ('harnesses.list', 'Manage all your harnesses'),
     ('models.list', 'Deploy a local model'),
     ('machines.list', 'Manage all your machines'),
     ('app.store', 'Build beyond code'),
@@ -162,14 +172,25 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
 
   Widget _buildWelcome(BuildContext context) {
     grid.AppTheme.watch(context);
-    final palette = grid.AppTheme.palette.value;
+    if (widget.composerBuilder case final composer?) {
+      return Material(
+        key: const ValueKey('workspace-welcome'),
+        color: grid.AppPalette.windowBg,
+        child: composer(_desktopSessions()),
+      );
+    }
+    final palette = grid.AppTheme.surfacePalette;
     final background = appearancePrefsStore.value.background;
     final hasArtwork = background != HarnessBackground.plain;
     final ink = hasArtwork
         ? const Color(0xffdededb)
         : palette.foreground.withValues(alpha: .75);
-    // The welcome surface uses a dark workspace palette in both theme modes.
-    const accent = Color(0xffa5d786);
+    // Keys in the terminal's green. Artwork is dark, so over it — and on a dark
+    // palette — the pale one; on a light palette's plain field, the light
+    // terminal ramp's (5.9:1, where the pale one is 1.4:1).
+    final accent = hasArtwork || palette.isDark
+        ? const Color(0xffa5d786)
+        : lightTerminalTheme.green;
     // The page stands where a terminal will, so it is set like one: the
     // terminal's face at the terminal's size, following ⌘+ and ⌘−.
     final style = terminalTextStyle(
@@ -335,6 +356,131 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
     );
   }
 
+  Widget? _desktopSessions() {
+    final sessions = _sessions;
+    if (sessions == null || sessions.rows.isEmpty) return null;
+    return Column(
+      key: const ValueKey('welcome-sessions'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8, left: 10),
+          child: Semantics(
+            header: true,
+            child: Text('Recent harnesses', style: DesktopChrome.metadata()),
+          ),
+        ),
+        for (final (index, row) in sessions.rows.indexed)
+          TextButton(
+            key: ValueKey('welcome-session-${row.id}'),
+            onPressed: () => _open(index),
+            style:
+                TextButton.styleFrom(
+                  foregroundColor: DesktopChrome.muted,
+                  backgroundColor: Colors.transparent,
+                  enabledMouseCursor: SystemMouseCursors.click,
+                  alignment: Alignment.centerLeft,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(
+                      grid.AppDesktop.rowRadius,
+                    ),
+                  ),
+                ).copyWith(
+                  side: WidgetStateProperty.resolveWith(
+                    (states) => BorderSide(
+                      width: 1.5,
+                      color: states.contains(WidgetState.focused)
+                          ? (MediaQuery.highContrastOf(context)
+                                ? DesktopChrome.accent
+                                : DesktopChrome.focusRing)
+                          : Colors.transparent,
+                    ),
+                  ),
+                ),
+            child: Row(
+              children: [
+                ExcludeSemantics(
+                  child: EngineMark(engine: row.engine, size: 18),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        row.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: DesktopChrome.control(
+                          color: DesktopChrome.muted,
+                        ),
+                      ),
+                      if (_recentContext(row) case final context?) ...[
+                        const SizedBox(height: 2),
+                        context,
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                if (sessions.lastUsedAt(row) case final at?)
+                  Text(
+                    sessions.readAt.difference(at).inMinutes < 1
+                        ? 'now'
+                        : harnessActivityAge(at, sessions.readAt),
+                    style: DesktopChrome.text(
+                      size: 12,
+                      color: DesktopChrome.muted,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget? _recentContext(SwarmDestination row) {
+    final context = row.promptContext;
+    if (context == null) {
+      return row.detail.isEmpty
+          ? null
+          : Text(
+              row.detail,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: DesktopChrome.metadata(),
+            );
+    }
+    final prefs = appearancePrefsStore.value.prompt;
+    final parts = statusLineParts(
+      provider: '',
+      machine: prefs.machine ? context.machine ?? '' : '',
+      project: prefs.project ? context.project ?? '' : '',
+      branch: prefs.branch ? context.branch : null,
+      style: prefs.statusStyle,
+      separateMachine: true,
+    );
+    if (parts.text.isEmpty) return null;
+    return Tooltip(
+      message: parts.text,
+      child: StatusLine(
+        parts: parts,
+        color: prefs.color,
+        workspaceBar: true,
+        textAlign: TextAlign.left,
+        middleEllipsis: true,
+        surfaceBackground: grid.AppPalette.windowBg,
+        monochromeColor: DesktopChrome.muted,
+      ),
+    );
+  }
+
   /// The commands, each with its shortcut: the whole page before there is
   /// anything to pick up, and the column beside the list after.
   Widget _commands(
@@ -434,7 +580,7 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
     if (rows.isEmpty) {
       return sessions.loading && widget.app!.searchableMachineIds.isNotEmpty
           ? Text(
-              'Finding your sessions…',
+              'Finding your harnesses…',
               textAlign: TextAlign.left,
               style: TextStyle(color: muted),
             )
@@ -471,7 +617,7 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
     final agent = row.agentId == null
         ? null
         : machine?.agents.where((agent) => agent.id == row.agentId).firstOrNull;
-    final at = row.lastActivityAt;
+    final at = _sessions!.lastUsedAt(row);
     final readAt = _sessions!.readAt;
     final age = at == null
         ? ''
@@ -485,7 +631,7 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
       style: TextButton.styleFrom(
         foregroundColor: ink,
         backgroundColor: selected
-            ? Colors.white.withValues(alpha: .07)
+            ? ink.withValues(alpha: .07)
             : Colors.transparent,
         textStyle: style,
         padding: const EdgeInsets.symmetric(vertical: 2),

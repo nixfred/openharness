@@ -41,8 +41,9 @@ class _ApiApp extends ModelManagerTestApp {
   @override
   Future<Map<String, dynamic>> apiConnections(
     String machineId,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
     expect(machineId, 'm');
     requests.add(payload);
     if (failure != null) throw failure!;
@@ -205,7 +206,7 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.enter);
         await tester.pumpAndSettle();
         expect(
-          find.textContaining('without credentials or query parameters'),
+          find.text('Take the ? or # part off the end of the URL.'),
           findsOneWidget,
         );
         expect(app.requests.where((row) => row['action'] == 'save'), isEmpty);
@@ -1095,7 +1096,10 @@ void main() {
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
       expect(
-        find.text('Enter an API URL without credentials or query parameters.'),
+        find.text(
+          'Enter the full URL, starting with https://, '
+          'for example https://openrouter.ai/api/v1.',
+        ),
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);

@@ -55,4 +55,14 @@ void main() {
     expect(profileNeighborId(swarms, 'm1', 0), 'store');
     expect(profileNeighborId([remote], 'm1', 0), isNull);
   });
+
+  test('a profile that would hide every tab shows them all and adds none', () {
+    final remote = tab('remote', ['m2']);
+    final mixed = tab('mixed', ['m1', 'm2']);
+    final desk = [remote, mixed];
+    final shown = swarmsForMachineProfile(desk, 'm1');
+    expect(shown.map((s) => s.id), ['remote', 'mixed']);
+    // Only hides: the desk itself is never rewritten or padded.
+    expect(desk.map((s) => s.id), ['remote', 'mixed']);
+  });
 }

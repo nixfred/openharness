@@ -263,6 +263,18 @@ jobs:
             echo "Running daemons self-update within ~1 min."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Fresh installs need the launchers and runtime setup from this same release.
+      # Scratch manifests must not replace the production installer.
+      - name: Publish and verify the CLI installer
+        if: needs.version.outputs.metadata_path == 'harness/cli/metadata.json'
+        run: |
+          set -euo pipefail
+          bash cli/scripts/upload-install-sh.sh
+          curl -fsSL --retry 3 --retry-all-errors --max-time 30 \
+            https://cdn.autonomous.ai/harness/cli/install.sh \
+            -o "$RUNNER_TEMP/cli-install.sh"
+          cmp cli/scripts/install.sh "$RUNNER_TEMP/cli-install.sh"
+
   # The GitHub Release. Notes are the tag's OWN message, verbatim — the same rule the desktop repo
   # follows. CI generates nothing: what a human wrote and reviewed at tag time is exactly what
   # publishes, and `generate_release_notes` would append a second, differently-built list under it

@@ -164,7 +164,8 @@ export class RelaySessionCrypto {
 }
 
 export type PwConnectResult =
-  | { ok: true; peerPub: Uint8Array; fingerprint: string }
+  /** `mutual`: the target said it pinned this joiner back (a machine joiner can then be dialed from it). */
+  | { ok: true; peerPub: Uint8Array; fingerprint: string; mutual: boolean }
   | { ok: false; error: string; retryAt?: number }
 
 export type PwConnectProgress = 'connecting' | 'deriving_key' | 'exchanging' | 'verifying'
@@ -186,6 +187,9 @@ export async function connectWithPassword(opts: {
   autonomousEnv: string
   onProgress?: (stage: PwConnectProgress) => void
   timeoutMs?: number
+  /** Who this joiner is, sealed into round 4 next to its identity. A machine that names its own
+   *  machineId gets pinned back by a target that understands it, so the link works both ways. */
+  self?: { machineId?: string; kind: 'machine' | 'viewer'; label?: string }
 }): Promise<PwConnectResult> {
   const url = `${opts.backendWsBase}/api/web-ws?autonomousEnv=${encodeURIComponent(opts.autonomousEnv)}`
   const ws = new WebSocket(url, [opts.accessToken])
@@ -273,13 +277,14 @@ export async function connectWithPassword(opts: {
           const targetPub = C.b64d(targetId.id)
           if (!C.pairBindVerify(targetPub, th, C.b64d(targetId.sig))) { finish({ ok: false, error: 'WRONG_PASSWORD' }); return }
           peerPub = targetPub
-          const sealed = C.aeadSeal(C.pairKey(isk, ci), 4, C.utf8('e2e-id'), C.utf8(JSON.stringify({ id: C.b64e(opts.selfIdentity.pub), sig: C.b64e(C.pairBindSig(opts.selfIdentity.priv, th)) })))
+          const joiner = { id: C.b64e(opts.selfIdentity.pub), sig: C.b64e(C.pairBindSig(opts.selfIdentity.priv, th)), ...(opts.self ?? {}) }
+          const sealed = C.aeadSeal(C.pairKey(isk, ci), 4, C.utf8('e2e-id'), C.utf8(JSON.stringify(joiner)))
           ws.send(JSON.stringify({ type: 'e2e_pw_pake', payload: { sid: sidB64, round: 4, enc: C.b64e(sealed) } }))
           return
         }
         if (round === 5) {
           if (payload.ok === true && peerPub) {
-            finish({ ok: true, peerPub, fingerprint: typeof payload.fingerprint === 'string' ? payload.fingerprint : C.fingerprint(peerPub) })
+            finish({ ok: true, peerPub, fingerprint: typeof payload.fingerprint === 'string' ? payload.fingerprint : C.fingerprint(peerPub), mutual: payload.mutual === 1 })
           } else {
             const retryAt = typeof payload.retryAt === 'number' ? payload.retryAt : undefined
             finish({ ok: false, error: typeof payload.error === 'string' ? payload.error : 'PAIR_FAILED', ...(retryAt !== undefined ? { retryAt } : {}) })

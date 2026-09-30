@@ -209,8 +209,8 @@ class SampleRuntime implements SampleHarnessHost {
         machineId: harness.machineId,
         agentId: harness.agentId,
         requestId: 'sample-question-${++_questions}',
-        answerKey: ask.question,
-        prompt: ask.question,
+        answerKey: ask.announced,
+        prompt: ask.announced,
         options: ask.options,
         multi: false,
         since: DateTime.now(),
@@ -317,6 +317,7 @@ class SampleRuntime implements SampleHarnessHost {
                 'installed': engine == 'claude' || engine == 'codex',
                 'installable': true,
                 'command': engine,
+                if (engine == 'codex') 'supportsCodexHome': true,
               },
           ],
         };
@@ -373,6 +374,7 @@ class SampleRuntime implements SampleHarnessHost {
         // Find's `:` — the models a sample harness could run on: this computer's own, as a
         // real machine lists them.
         return {
+          'supportsModelLaunch': true,
           'gridName': 'home',
           'localModelEngines': ['claude', 'codex', 'opencode'],
           'grids': [
@@ -380,8 +382,16 @@ class SampleRuntime implements SampleHarnessHost {
               'name': 'home',
               'own': true,
               'models': [
-                {'id': 'qwen3-coder-30b', 'node': machineId},
-                {'id': 'gpt-oss-20b', 'node': machineId},
+                // A node by the name the computer goes by, as a real one reports it — the
+                // sample's machine ids (`sample-studio`) are fixture plumbing, not names.
+                {
+                  'id': 'qwen3-coder-30b',
+                  'node': machineId.replaceFirst('sample-', ''),
+                },
+                {
+                  'id': 'gpt-oss-20b',
+                  'node': machineId.replaceFirst('sample-', ''),
+                },
                 {'id': 'devstral-small', 'node': 'laptop'},
               ],
             },
@@ -428,6 +438,9 @@ class SampleRuntime implements SampleHarnessHost {
     );
     (agent['project'] as Map)['cwd'] = cwd;
     (agent['project'] as Map)['root'] = cwd;
+    if (payload['gridModel'] case final String model) {
+      agent['grid'] = {'model': model, 'gridName': payload['gridName']};
+    }
     final harness = SampleHarness(
       machineId: machineId,
       agent: agent,

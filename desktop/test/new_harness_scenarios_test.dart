@@ -301,7 +301,7 @@ void main() {
       await key(tester, LogicalKeyboardKey.enter);
       expect(scenario.box.launchAgentLabel, 'Blender · Codex');
       expect(harnessChoicesActive(tester), isFalse);
-      for (final label in ['Agent', 'Project', 'Options']) {
+      for (final label in ['Harness', 'Project', 'Options']) {
         expect(find.text(label), findsOneWidget);
       }
       expect(find.text('Agent default'), findsNothing);

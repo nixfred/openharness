@@ -117,6 +117,11 @@ export type AgentFrame = {
   /** The engine's named agent (`agent_create`'s `agent`); `namedAgent` on the wire so an agent
    *  object never carries a key called `agent`. */
   namedAgent: string | null
+  /**
+   * nixfred watch mode: set on a live session this daemon did not start (nixfred/orcaWatch.ts). A client
+   * shows it as external and offers no move, restart or kill for it. Null on every other agent.
+   */
+  external: { source: 'orca' | 'terminal'; orcaTerminal: string | null; orcaWorktree: string | null } | null
 }
 
 /** What the daemon knows about an agent's DSH — looked up by the caller, never here. */
@@ -183,7 +188,8 @@ export async function agentFrame(
 ): Promise<AgentFrame> {
   const home = agentProject(s.cwd)
   const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
-    const value = await sessionGitContext(await home, tokenUsage?.work)
+    const saved = await sessionGitHistory.get(s)
+    const value = await sessionGitContext(await home, tokenUsage?.work, undefined, saved)
     value.history = await sessionGitHistory.observe(s, value)
     return value
   })
@@ -235,5 +241,8 @@ export async function agentFrame(
     permissionMode: s.permissionMode ?? null,
     bypassPermission: s.bypassPermission ?? null,
     namedAgent: s.agent ?? null,
+    external: s.hosted === 'external'
+      ? { source: s.external?.orca ? 'orca' : 'terminal', orcaTerminal: s.external?.orca?.terminal ?? null, orcaWorktree: s.external?.orca?.worktree ?? null }
+      : null,
   }
 }

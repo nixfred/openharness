@@ -6,18 +6,18 @@ import 'package:flutter/services.dart';
 
 import '../shortcuts/app_keymap.dart';
 import '../shortcuts/keymap.dart';
-import 'box_chrome.dart';
 
+import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/app_type.dart';
 import '../theme/app_theme.dart';
+import 'desktop_chrome.dart';
 import 'engine_identity.dart';
 import 'transient_menus.dart';
 
 /// The pane header's menu, as one shape for every list that wants to look like it.
 ///
-/// Born in the model picker and shared from here so any second list that wants this shape is
-/// the same menu rather than a second drawing of it: the same overlay, the same rows, the same
-/// quiet fill on the current row instead of a tick.
+/// Model choices and Find options share desktop chrome without changing their
+/// pane's terminal styling or the overlay's interaction contract.
 ///
 /// Shown in an OVERLAY rather than as a modal route. `showMenu` puts a full-screen modal barrier
 /// under its menu, and that barrier EATS the click that dismisses it: closing the menu and then
@@ -88,9 +88,9 @@ Future<T?> showPaneMenu<T>({
             // column. A BODY does neither: it is handed the menu's box and lays itself out, which
             // is what a panel with something pinned above and below a scrolling middle needs.
             child: body != null
-                ? TerminalBox(child: body(close))
+                ? _PaneMenuSurface(child: body(close))
                 : IntrinsicWidth(
-                    child: TerminalBox(
+                    child: _PaneMenuSurface(
                       child: SingleChildScrollView(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -111,6 +111,37 @@ Future<T?> showPaneMenu<T>({
   onOpen?.call(entry, () => close(null));
   overlayState.insert(entry);
   return completer.future;
+}
+
+class _PaneMenuSurface extends StatelessWidget {
+  const _PaneMenuSurface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    final highContrast = MediaQuery.highContrastOf(context);
+    return Material(
+      key: const ValueKey('pane-menu-surface'),
+      color: grid.AppMenu.fill,
+      surfaceTintColor: Colors.transparent,
+      elevation: grid.AppMenu.elevation,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(grid.AppMenu.panelRadius),
+        side: BorderSide(
+          color: highContrast
+              ? DesktopChrome.foreground.withValues(alpha: .55)
+              : grid.AppMenu.rim,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: DefaultTextStyle.merge(
+        style: DesktopChrome.control(),
+        child: child,
+      ),
+    );
+  }
 }
 
 /// Position against the actual overlay, including panes beside the left edge
@@ -203,60 +234,100 @@ class _PaneMenuFocusState extends State<_PaneMenuFocus> {
         node: _scope,
         autofocus: true,
         onKeyEvent: _key,
-        child: FocusTraversalGroup(child: widget.child),
+        // Scrolling can move rows above a pinned search field. Keep keyboard
+        // order tied to the list, not those temporary screen coordinates.
+        child: FocusTraversalGroup(
+          policy: WidgetOrderTraversalPolicy(),
+          child: widget.child,
+        ),
       ),
     );
   }
 }
 
-/// One selectable row of a pane menu.
-///
-/// The hover is the SAME rectangle as the selected fill — inset by [kPaneMenuInset] and rounded
-/// the same — so a row looks like one thing whether the pointer is on it or the choice is. An
-/// InkWell around the whole item painted edge to edge and square, over a selected fill that was
-/// neither, and the two reading as different shapes made the current row look like the odd one
-/// out.
-///
-/// Same SHAPE, one fill. The fill belongs to the CHOSEN row and to nothing else: focus paints
-/// none at all (it is a keyboard position, not a decision) and hover paints the weaker
-/// [AppColors.rowHover], which moves with the pointer and so can never be mistaken for where the
-/// agent is. A tick was tried and taken out again — the fill is the whole signal, and a second one
-/// beside it was a column every row paid for.
-/// ⚠️ The cursor is STATED, in both places that can answer for it. A pane menu is drawn in an
-/// overlay above a terminal, and what a person sees while hovering a row was whatever the surface
-/// underneath asked for — an arrow over rows that are the whole point of the menu. `InkWell` carries
-/// a clickable cursor of its own in principle, and in this app it was not what reached the screen;
-/// the control that OPENS this menu needed both annotations before a hand appeared, and these rows
-/// need the same. The cursor a person sees is the innermost annotation under the pointer, so the
-/// MouseRegion covers the row and the InkWell answers for its own ink.
-Widget paneMenuItem({required VoidCallback onTap, required Widget child}) =>
-    Padding(
-      padding: const EdgeInsets.symmetric(horizontal: kPaneMenuInset),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: InkWell(
-          onTap: onTap,
-          mouseCursor: SystemMouseCursors.click,
-          borderRadius: BorderRadius.circular(kPaneMenuRowRadius),
-          // ⚠️ STATED, all three. Left to the Material default the hover landed close enough to
-          // the selected fill to be indistinguishable, so the row under the pointer and the row
-          // the agent is actually on looked equally chosen — two highlights, one menu. The
-          // palette has always had a weaker tone for exactly this ([AppColors.rowHover]); the
-          // menu simply never asked for it. Splash and highlight go transparent because an ink
-          // ripple is a THIRD fill on the same rectangle, and it lingers after the tap.
-          hoverColor: AppColors.rowHover,
-          splashColor: Colors.transparent,
-          highlightColor: Colors.transparent,
-          // ⚠️ The one that actually put two highlights on screen. The menu moves focus to its
-          // FIRST row as it opens (`_PaneMenuFocus`, so Enter activates something), and an InkWell
-          // paints focus with a fill of its own — so the top row was lit before the pointer moved
-          // and the agent's real row was lit too. Focus is a keyboard position, not a choice; only
-          // the chosen row is filled.
-          focusColor: Colors.transparent,
-          child: child,
-        ),
-      ),
+/// One inset action in the compact menu. Its child owns the row's content.
+Widget paneMenuItem({
+  required VoidCallback onTap,
+  Widget? child,
+  Widget Function(BuildContext context, bool active)? builder,
+}) => Padding(
+  padding: const EdgeInsets.symmetric(horizontal: kPaneMenuInset),
+  child: PaneMenuAction(onPressed: onTap, builder: builder, child: child),
+);
+
+/// A blue active row is separate from the stored choice. Content builders use
+/// the active ink; chosen models carry a checkmark without a competing rim.
+class PaneMenuAction extends StatefulWidget {
+  const PaneMenuAction({
+    super.key,
+    required this.onPressed,
+    this.child,
+    this.builder,
+    this.selected,
+  }) : assert((child == null) != (builder == null));
+
+  final VoidCallback onPressed;
+  final Widget? child;
+  final Widget Function(BuildContext context, bool active)? builder;
+  final bool? selected;
+
+  @override
+  State<PaneMenuAction> createState() => _PaneMenuActionState();
+}
+
+class _PaneMenuActionState extends State<PaneMenuAction> {
+  final _states = WidgetStatesController();
+
+  @override
+  void dispose() {
+    _states.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    return ValueListenableBuilder(
+      valueListenable: _states,
+      builder: (context, states, _) {
+        final active =
+            states.contains(WidgetState.focused) ||
+            states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.pressed);
+        return TextButton(
+          statesController: _states,
+          onPressed: widget.onPressed,
+          style: TextButton.styleFrom(
+            foregroundColor: active
+                ? grid.AppDesktop.onSelection
+                : DesktopChrome.foreground,
+            backgroundColor: active
+                ? grid.AppDesktop.selection
+                : widget.selected == true
+                ? grid.AppSurface.accentWash
+                : Colors.transparent,
+            minimumSize: const Size(0, DesktopChrome.controlHeight),
+            padding: EdgeInsets.zero,
+            alignment: Alignment.centerLeft,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(grid.AppDesktop.rowRadius),
+            ),
+            side: const BorderSide(color: Colors.transparent, width: 1.5),
+            textStyle: DesktopChrome.control(),
+            enabledMouseCursor: SystemMouseCursors.click,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            splashFactory: NoSplash.splashFactory,
+            overlayColor: Colors.transparent,
+          ),
+          child: Semantics(
+            selected: widget.selected,
+            child: widget.builder?.call(context, active) ?? widget.child!,
+          ),
+        );
+      },
     );
+  }
+}
 
 /// A line that states something rather than offering it — no hover, no tap.
 Widget paneMenuEmpty(String text) => Padding(

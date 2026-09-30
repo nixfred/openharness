@@ -143,7 +143,7 @@ void main() {
     expect(press('ctrl+space', phase: KeymapKeyPhase.up).handled, isTrue);
   });
 
-  test('repeat cannot create swarms or advance a sequence; directional commands can repeat', () {
+  test('repeat cannot create tabs or advance a sequence; directional commands can repeat', () {
     expect(press('cmd+t').command, 'swarm.new');
     expect(press('cmd+t', phase: KeymapKeyPhase.repeat).handled, isTrue);
     expect(press('cmd+t', phase: KeymapKeyPhase.repeat).command, isNull);

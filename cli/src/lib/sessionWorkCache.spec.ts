@@ -75,11 +75,39 @@ describe('work evidence in the incremental transcript cache', () => {
     expect(await read()).toBeNull()
   })
 
-  it('rebuilds an older cache to recover work associations', async () => {
+  it.each([2, 3])('rebuilds a version %s cache to recover work associations', async version => {
     await writeFile(target.transcriptPath!, lines(receipt('12'))); await read()
     const file = join(dir, 'cache', (await readdir(join(dir, 'cache')))[0])
-    const stored = JSON.parse(await readFile(file, 'utf8')); stored.version = 2; delete stored.work
+    const stored = JSON.parse(await readFile(file, 'utf8')); stored.version = version; delete stored.work
     await writeFile(file, JSON.stringify(stored)); cache.dispose(); cache = open()
     expect((await read())?.work?.current[0]?.cwd).toBe('/ship-hn/tui')
+  })
+
+  it('replays v3 code-mode history once to recover the already-created PR', async () => {
+    target.engine = 'codex'; target.cwd = '/workspace/happy-owl'
+    const recorded = await readFile(new URL('./fixtures/session-work-codex.jsonl', import.meta.url), 'utf8')
+    await writeFile(target.transcriptPath!, recorded)
+    expect((await read())?.work?.pullRequests[0]?.url).toBe('https://github.com/acme/app/pull/397')
+    const file = join(dir, 'cache', (await readdir(join(dir, 'cache')))[0])
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.version = 3; stored.work.current = []; stored.work.pullRequests = []; stored.work.uncertain = true
+    await writeFile(file, JSON.stringify(stored)); cache.dispose(); cache = open()
+    expect((await read())?.work?.pullRequests[0]?.url).toBe('https://github.com/acme/app/pull/397')
+    const afterReplay = bytes
+    cache.dispose(); cache = open()
+    expect((await read())?.work?.current[0]?.cwd).toBe('/workspace/happy-owl')
+    expect(bytes).toBe(afterReplay)
+  })
+
+  it('preserves validated v3 history whose receipts have already been compacted away', async () => {
+    await writeFile(target.transcriptPath!, lines(receipt('12'))); await read()
+    const file = join(dir, 'cache', (await readdir(join(dir, 'cache')))[0])
+    const stored = JSON.parse(await readFile(file, 'utf8')); stored.version = 3
+    delete stored.work.currentOrder; delete stored.work.failedOrder
+    await writeFile(file, JSON.stringify(stored))
+    await writeFile(target.transcriptPath!, lines([{ type: 'user', text: 'compacted' }]))
+    cache.dispose(); cache = open()
+    expect((await read())?.work).toMatchObject({ current: [], uncertain: true,
+      pullRequests: [{ url: 'https://github.com/acme/app/pull/12' }] })
   })
 })

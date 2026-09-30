@@ -127,6 +127,15 @@ export interface TailRow {
   tools: string
 }
 
+/** Dated conversation text for an explicit learning review; never tool output or reasoning. */
+export interface RecentConversationTurn extends TailRow {
+  sessionId: string
+  agentId: string
+  engine: string
+  title: string
+  cwd: string
+}
+
 /** The end of a session, oldest row first. */
 export interface SessionTail {
   sessionId: string
@@ -415,6 +424,20 @@ export class SessionSearchStore {
   session(sessionId: string): IndexedSession | undefined {
     const row = this.statement('SELECT * FROM sessions WHERE session_id = ?').get(sessionId)
     return row ? toSession(row) : undefined
+  }
+
+  recentConversations(from: number, to: number, limit = 300): { rows: RecentConversationTurn[]; more: boolean } {
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return { rows: [], more: false }
+    const count = Math.min(300, Math.max(1, Math.trunc(limit)))
+    const found = this.statement(`SELECT t.session_id, t.turn, t.at, t.ask, t.answer,
+      s.agent_id, s.engine, s.header, s.title, s.cwd FROM turns t JOIN sessions s ON s.session_id = t.session_id
+      WHERE t.turn >= 0 AND t.at BETWEEN ? AND ? AND t.ask != ''
+      ORDER BY t.at DESC, t.session_id, t.turn DESC LIMIT ?`).all(from, to, count + 1)
+    return { more: found.length > count, rows: found.slice(0, count).map(row => ({
+      sessionId: String(row.session_id), agentId: String(row.agent_id), engine: String(row.engine),
+      title: String(row.title || row.header || ''), cwd: String(row.cwd || ''),
+      turn: Number(row.turn), at: Number(row.at), ask: String(row.ask), answer: String(row.answer), tools: '',
+    })) }
   }
 
   /**

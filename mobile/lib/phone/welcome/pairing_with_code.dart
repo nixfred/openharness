@@ -74,28 +74,44 @@ class _PairingWithCodeState extends State<PairingWithCode> {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(Tty.origin, 48, Tty.origin, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                error == null ? 'Connecting to\n$name…' : 'Couldn’t connect',
-                style: tty
-                    .style(size: TtySize.display, weight: FontWeight.w600)
-                    .copyWith(height: 34 / 28, letterSpacing: -0.6),
-              ),
-              const SizedBox(height: 12),
-              TtyText(
-                error ?? 'Keep “Add phone” open on your Mac.',
-                color: error == null ? tty.faint : tty.red,
-                size: TtySize.row,
-              ),
-              const Spacer(),
-              if (error != null)
-                TtyPrimaryButton(
-                  label: 'Use its password instead',
-                  onPressed: _usePassword,
+          // Scrolls when it does not fit — a long computer name at a large text size is more lines
+          // than a small phone has, and the button was pushed off the foot of an overflowing column.
+          child: LayoutBuilder(
+            builder: (context, box) => SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: box.maxHeight),
+                child: IntrinsicHeight(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        error == null
+                            ? 'Connecting to\n$name…'
+                            : 'Couldn’t connect',
+                        style: tty
+                            .style(
+                              size: TtySize.display,
+                              weight: FontWeight.w600,
+                            )
+                            .copyWith(height: 34 / 28, letterSpacing: -0.6),
+                      ),
+                      const SizedBox(height: 12),
+                      TtyText(
+                        error ?? 'Keep “Add phone” open on your Mac.',
+                        color: error == null ? tty.faint : tty.red,
+                        size: TtySize.row,
+                      ),
+                      const Spacer(),
+                      if (error != null)
+                        TtyPrimaryButton(
+                          label: 'Use its password instead',
+                          onPressed: _usePassword,
+                        ),
+                    ],
+                  ),
                 ),
-            ],
+              ),
+            ),
           ),
         ),
       ),

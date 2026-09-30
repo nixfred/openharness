@@ -8,7 +8,8 @@ import 'swarm_search.dart' show externalSessionDestination;
 
 /// What the welcome page offers to pick up: the harnesses you were just with,
 /// and the Claude Code and Codex conversations on your machines that Harness
-/// did not start — the latest [limit] of them by activity, whatever machine.
+/// did not start — the latest [limit] of them, whatever machine. Harnesses use
+/// recorded visits; external conversations use their conversation activity.
 ///
 /// Read once when the page shows, like Cmd-P: the rows keep their order and
 /// numbers while the page is on screen, and the next showing reads again.
@@ -18,7 +19,7 @@ class WelcomeSessions extends ChangeNotifier {
   WelcomeSessions(
     this.app, {
     this.projects = const [],
-    this.limit = 9,
+    this.limit = 6,
     this.window = const Duration(days: 30),
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
@@ -41,6 +42,13 @@ class WelcomeSessions extends ChangeNotifier {
   final _asked = <String>{};
   bool _hadAgents = false;
   List<SwarmDestination> _external = const [];
+  Map<String, DateTime?> _harnessVisits = const {};
+
+  /// The same snapshot supplies both order and age. An older daemon can tell
+  /// us a harness was opened without a visit time; leave its age unknown,
+  /// rather than presenting a background hook or transcript write as a visit.
+  DateTime? lastUsedAt(SwarmDestination row) =>
+      row.external != null ? row.lastActivityAt : _harnessVisits[row.id];
 
   /// The app changed. At launch the page shows before machines connect and
   /// their harnesses arrive — before most of what it offers exists — so a
@@ -51,19 +59,17 @@ class WelcomeSessions extends ChangeNotifier {
     final unasked = app.searchableMachineIds.any(
       (machine) => !_asked.contains(machine),
     );
-    if (unasked || (!_hadAgents && _anyAgents)) load();
+    if (unasked || (!_hadAgents && _readHarnessVisits().isNotEmpty)) load();
   }
 
   Future<void> load() async {
     readAt = _now();
+    _harnessVisits = _readHarnessVisits();
     final harnesses = [
       for (final row in SwarmSearchCatalog().read(app, projects))
-        if (row.agentId != null &&
-            row.lastActivityAt != null &&
-            app.stateOf(row.machineId ?? '')?.nodeOnline != false)
-          row,
+        if (row.agentId != null && _harnessVisits.containsKey(row.id)) row,
     ];
-    _hadAgents = _anyAgents;
+    _hadAgents = _harnessVisits.isNotEmpty;
     // What the machines said last stays until they answer again.
     _rows = _latest([...harnesses, ..._external]);
     loading = true;
@@ -99,14 +105,27 @@ class WelcomeSessions extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool get _anyAgents =>
-      app.machineStates.values.any((machine) => machine.agents.isNotEmpty);
+  Map<String, DateTime?> _readHarnessVisits() {
+    final open = {
+      for (final pane in app.allPanes) (pane.machineId, pane.agentId),
+    };
+    return {
+      for (final machine in app.machineStates.values)
+        if (machine.nodeOnline != false)
+          for (final agent in machine.agents)
+            if (agent.lastOpenedAt != null ||
+                open.contains((machine.machine.machineId, agent.id)) ||
+                app.hasOpenedHarness(machine.machine.machineId, agent.id))
+              agentDestinationId(machine.machine.machineId, agent.id):
+                  agent.lastOpenedAt,
+    };
+  }
 
   List<SwarmDestination> _latest(List<SwarmDestination> all) {
     final sorted = [...all]
       ..sort(
-        (a, b) => (b.lastActivityAt ?? DateTime(0)).compareTo(
-          a.lastActivityAt ?? DateTime(0),
+        (a, b) => (lastUsedAt(b) ?? DateTime(0)).compareTo(
+          lastUsedAt(a) ?? DateTime(0),
         ),
       );
     return List.unmodifiable(sorted.take(limit));

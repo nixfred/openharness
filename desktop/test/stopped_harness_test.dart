@@ -432,7 +432,11 @@ void main() {
       'Saved work',
     );
     await tester.pump();
-    expect(find.widgetWithText(TextButton, 'Resume & open'), findsNothing);
+    // The preview offers the same action for pointer users; Return submits
+    // directly from search without first opening a confirmation dialog.
+    expect(find.widgetWithText(TextButton, 'Resume & open'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(connection.types, isEmpty);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
     expect(connection.types, ['agent_resume']);

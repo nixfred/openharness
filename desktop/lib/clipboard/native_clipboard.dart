@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../core/runtime_platform.dart';
@@ -23,11 +27,50 @@ class NativeClipboard {
   /// today's text-paste behavior either way.
   static Future<Uint8List?> readImagePng() async {
     if (!RuntimePlatform.isMacOS && !RuntimePlatform.isLinux) return null;
+    Uint8List? bytes;
     try {
-      final bytes = await _channel.invokeMethod<Uint8List>('readImagePng');
-      return bytes;
+      bytes = await _channel.invokeMethod<Uint8List>('readImagePng');
     } on MissingPluginException {
-      return null;
+      bytes = null;
+    } catch (_) {
+      bytes = null;
+    }
+    if ((bytes == null || bytes.isEmpty) && RuntimePlatform.isWsl) {
+      return readWindowsImagePng();
+    }
+    return bytes;
+  }
+
+  /// Under WSL, the WINDOWS clipboard's image as PNG, read through
+  /// `powershell.exe` (WSL interop). WSLg mirrors a Windows screenshot into
+  /// the Linux clipboard as BMP only, when it mirrors it at all
+  /// (microsoft/wslg#833, #236), so the GTK read above can come back empty
+  /// with a picture plainly on the Windows clipboard (openharness#107).
+  /// Null when there is no image, no interop, or it takes over five seconds.
+  @visibleForTesting
+  static Future<Uint8List?> Function() readWindowsImagePng =
+      _readWindowsImagePng;
+
+  static Future<Uint8List?> _readWindowsImagePng() async {
+    const script =
+        r'Add-Type -AssemblyName System.Windows.Forms,System.Drawing;'
+        r'$i=[System.Windows.Forms.Clipboard]::GetImage();'
+        r'if($i -eq $null){exit 1};'
+        r'$m=New-Object System.IO.MemoryStream;'
+        r'$i.Save($m,[System.Drawing.Imaging.ImageFormat]::Png);'
+        r'[Convert]::ToBase64String($m.ToArray())';
+    try {
+      final result = await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-STA',
+        '-Command',
+        script,
+      ]).timeout(const Duration(seconds: 5));
+      if (result.exitCode != 0) return null;
+      final encoded = (result.stdout as String).trim();
+      if (encoded.isEmpty) return null;
+      return base64Decode(encoded);
     } catch (_) {
       return null;
     }

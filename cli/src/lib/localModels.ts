@@ -64,6 +64,10 @@ export interface LocalModel {
   id: string; name: string; state: 'available' | 'downloaded' | 'running'
   sizeBytes?: number; quant?: string; recommended?: boolean; canStart: boolean; canStop: boolean
   tokensPerSecond?: number; requests?: number; windowSeconds?: number
+  /** What the catalog says of this model on THIS machine, for choosing between models before any
+   * download: the window it will be given, its estimated speed, and its size in billions of
+   * parameters. Absent for a model found on disk, which the catalog never sized. */
+  contextWindow?: number; estTokS?: number; paramsB?: number
   operation?: ModelOperation
   /** Running here, parked while its grid sleeps (additive: an older desktop reads plain `running`). */
   gridAsleep?: boolean
@@ -81,14 +85,18 @@ export interface LocalModelsSnapshot {
   notice?: string
   observedAt: string; busy: boolean
   supportsDownload?: boolean
+  /** Free space where downloads land, so a download's size can be read against it. */
+  freeDiskBytes?: number
 }
-interface Candidate {
+export interface Candidate {
   id: string; name: string; pull: string; file: string; files: string[]; size: number; quant: string
   /** The window to pin at start: the catalog's fit for this machine, which is the largest it can
    * hold. Absent for a model found on disk, which the catalog never sized — the engine then measures
    * free memory at load and takes the largest window that fits (`grid join` without `--ctx-size`). */
   context?: number
   aliases?: string[]
+  /** The catalog's estimate for this machine, and the model's size in billions of parameters. */
+  estTokS?: number; paramsB?: number
 }
 /** `live`: its heartbeat sidecar is fresh (the grid is hearing from it). `pidAlive`: the process its run
  *  record names exists — the only liveness that holds while the grid sleeps and the sidecar goes stale. */
@@ -137,9 +145,132 @@ export function compatibleModels(raw: unknown): Candidate[] {
       try { return [basename(decodeURIComponent(new URL(str(url)).pathname))] } catch { return [] }
     })
     seen.add(id)
+    const estTokS = num(fit.est_tok_s), paramsB = num(row.params_b)
     return [{ id, name: cleanName(id), pull, file, files: files.length ? files : [file], size,
-      quant: str(fit.version), context: fitted }]
+      quant: str(fit.version), context: fitted,
+      ...(estTokS ? { estTokS } : {}), ...(paramsB ? { paramsB } : {}) }]
   })
+}
+
+/** One model, whatever its quantization: `Qwen3.6-35B-A3B`, `Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf` and
+ * `unsloth/Qwen3.6-35B-A3B-GGUF` are the same model. */
+export function modelFamily(name: string): string {
+  return cleanName(name).toLowerCase()
+    .replace(/[-_.](?:ud[-_])?(?:iq\d\w*|q\d\w*|mxfp\d\w*|bf16|fp16|f16)$/, '')
+}
+
+/** A catalog download is not offered for a model this machine already has in another quantization:
+ * running Qwen3.6-35B-A3B at Q5_K_XL, the catalog's Q4_K_M of it is a second copy, 20 GB of it, of
+ * the same model. A download already under way stays listed, so its progress has a row. */
+export function withoutCopiesOfOwned(models: LocalModel[]): LocalModel[] {
+  const owned = new Set(models.filter(model => model.state !== 'available').map(model => modelFamily(model.name)))
+  return models.filter(model => model.state !== 'available' || model.canStop || model.operation?.phase === 'running' ||
+    !owned.has(modelFamily(model.name)))
+}
+
+/** The speed a coding agent can work at: an agent waits on every token it writes, and below this the
+ * catalog's estimate for this machine reads as a model that crawls. On a bandwidth-bound Mac this is
+ * what separates an MoE (35-80 tok/s on an M1 Max) from a dense model of its size (9-17). */
+export const USABLE_TOK_S = 20
+
+/** The share of a machine's memory one model may fill — weights, a coding agent's context and the
+ * engine's overhead together, as the catalog fits them. The rest stays for everything else the person
+ * runs: on a 64 GB Mac, a 45 GB model with its context left the editor, the browser and the agents
+ * themselves fighting over what remained. */
+export const MODEL_MEMORY_SHARE = 0.5
+
+/** The budget the catalog fits models to: what the machine can spare ([MODEL_MEMORY_SHARE] of its
+ * memory), never more than grid says it has free. Undefined when grid reports neither.
+ *
+ * Only where a model shares its memory with everything else — an Apple Silicon Mac's unified memory,
+ * or system RAM on a machine with no usable GPU. An NVIDIA card's VRAM is the model's own: grid
+ * reports what is free on it now (total less what is already in use, the desktop's share included),
+ * and all of that goes to the catalog, whose fit keeps its own 10% margin. Capping it at half the
+ * system RAM would have held a 24 GB card in a 32 GB PC to 16 GB. */
+export function modelBudget(device: Record<string, any>): number | undefined {
+  const usable = num(device.usable_bytes), total = num(obj(device.memory).total_gb)
+  if (usable === undefined) return undefined
+  if (device.backend === 'cuda' || total === undefined) return usable
+  return Math.min(usable, Math.floor(total * GiB * MODEL_MEMORY_SHARE))
+}
+
+/** Catalog models that are not for running an agent on: safety classifiers such as gpt-oss-safeguard
+ * or Llama Guard, which answer "safe"/"unsafe" rather than code. */
+const NOT_FOR_AGENTS = /(?:^|[-_/])(?:safeguard|guard|shieldgemma)(?:[-_.]|$)/i
+
+/** Roughly how many bits a weight takes at [quant]: Q4 about 4.8, IQ4 about 4.3, MXFP4 4.25. */
+function bitsPerWeight(quant: string): number {
+  const q = quant.toUpperCase()
+  if (/MXFP4/.test(q)) return 4.25
+  if (/BF16|FP16|F16/.test(q)) return 16
+  const digit = /(IQ|Q)(\d)/.exec(q)
+  return digit ? Number(digit[2]) + (digit[1] === 'IQ' ? 0.3 : 0.8) : 4.8
+}
+
+/** A model's size in billions of parameters: the catalog's count, else read off its weights and quant. */
+function paramsOf(candidate: Candidate): number {
+  return candidate.paramsB ?? candidate.size * 8 / bitsPerWeight(candidate.quant) / 1e9
+}
+
+/** A model and its variants — MTP, QAT, REAP-pruned, instruct/thinking/`-it` — as one base model:
+ * `Qwen3.6-35B-A3B-MTP` and `Qwen3.6-35B-A3B`, `gemma-4-E4B-it-qat` and `gemma-4-E4B-it`. A fine-tune
+ * under its own name (`Qwen-AgentWorld-35B-A3B`) is a model of its own. */
+export function baseModel(name: string): string {
+  let base = modelFamily(name)
+  for (;;) {
+    const next = base.replace(/[-_](?:mtp|qat|reap(?:-\d+b)?(?:-a\d+b)?|instruct|thinking|it)$/, '')
+    if (next === base) return base
+    base = next
+  }
+}
+
+/** A quant under this many bits per weight (Q2, IQ2, IQ1) trades too much of the model away: a
+ * 2-bit 122B is not the better model than a 4-bit 35B beside it. */
+const MIN_FAITHFUL_BITS = 3
+
+/** The shape a model's name gives an MoE, `35B-A3B` — shared by its fine-tunes under other names
+ * (`Qwen-AgentWorld-35B-A3B` is Qwen3.6-35B-A3B retrained). Null for a name that gives none. */
+function moeShape(name: string): string | null {
+  const shape = /(?:^|[-_])(\d+(?:\.\d+)?)B-A(\d+(?:\.\d+)?)B(?:[-_.]|$)/i.exec(name)
+  return shape ? `${shape[1]}b-a${shape[2]}b` : null
+}
+
+/** Two catalog rows with the same parameter count, the same file size and the same speed estimate are
+ * one architecture: the estimate is the machine's bandwidth over the bytes a token reads, which only
+ * the same geometry at the same quant repeats. That is how a fine-tune under a name of its own
+ * (Ornith-1.0-35B beside Qwen3.6-35B-A3B: 20.6 GB, 78.2 tok/s both) reads as the model it is. */
+function sameArchitecture(a: Candidate, b: Candidate): boolean {
+  return Math.round(paramsOf(a)) === Math.round(paramsOf(b)) && Math.abs(a.size - b.size) <= 0.03 * b.size &&
+    !!a.estTokS && !!b.estTokS && Math.abs(a.estTokS - b.estTokS) <= 0.02 * b.estTokS
+}
+
+/** The order the Get list offers a machine's downloads in. Every candidate already fits the machine
+ * with a coding agent's context, within its [MODEL_MEMORY_SHARE] ([compatibleModels]); among them:
+ *  1. a faithful quant first — under [MIN_FAITHFUL_BITS] a model goes after every model at one;
+ *  2. fast enough to work with first — the catalog's estimate for this machine at [USABLE_TOK_S] or
+ *     more. That is what preferring MoE models on a bandwidth-bound Mac comes to, read per machine, and
+ *     it lets dense models in on a machine fast enough for them;
+ *  3. then bigger first, the better model;
+ *  4. then the catalog's own order, which is popularity among what fits.
+ * And one version of each model before any second one, so its MTP, QAT and pruned variants
+ * ([baseModel]), its fine-tunes sharing its MoE shape ([moeShape]) or its architecture
+ * ([sameArchitecture]) never fill the top of the list: they follow every other model, in this order. */
+export function rankForCoding<T extends Candidate>(candidates: T[]): T[] {
+  const faithful = (candidate: Candidate): number => bitsPerWeight(candidate.quant) >= MIN_FAITHFUL_BITS ? 1 : 0
+  const fast = (candidate: Candidate): number => (candidate.estTokS ?? 0) >= USABLE_TOK_S ? 1 : 0
+  const sorted = candidates.map((candidate, index) => ({ candidate, index })).sort((a, b) =>
+    faithful(b.candidate) - faithful(a.candidate) ||
+    fast(b.candidate) - fast(a.candidate) ||
+    Math.round(paramsOf(b.candidate)) - Math.round(paramsOf(a.candidate)) ||
+    a.index - b.index).map(({ candidate }) => candidate)
+  const seen = new Set<string>(), first: T[] = [], again: T[] = []
+  for (const candidate of sorted) {
+    const names = [baseModel(candidate.name), moeShape(candidate.name)].filter((name): name is string => !!name)
+    const repeat = names.some(name => seen.has(name)) || first.some(leader => sameArchitecture(candidate, leader))
+    ;(repeat ? again : first).push(candidate)
+    for (const name of names) seen.add(name)
+  }
+  return [...first, ...again]
 }
 
 export class LocalModels {
@@ -194,23 +325,26 @@ export class LocalModels {
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
       throw new Error('The model catalog address is unavailable.')
     }
-    const all: any[] = []
-    for (let page = 1; page <= 100; page++) {
-      const response = await this.request(url, {
-        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ browse: true, page, page_size: 50, device: {
-          device_class: device.device_class, usable_bytes: device.usable_bytes, backend: device.backend,
-        } }), signal: AbortSignal.timeout(20_000), redirect: 'error',
-      })
-      if (!response.ok) throw new Error('Compatible models are unavailable. Try again.')
-      const body = obj(await response.json())
-      if (!Array.isArray(body.models)) throw new Error('Compatible models are unavailable. Try again.')
-      all.push(...body.models)
-      const totalPages = num(obj(body.pagination).total_pages) ?? 1
-      if (page >= totalPages || (num(body.runnable_total) !== undefined && all.filter(m => m.runnable === true).length >= body.runnable_total)) return { models: all }
-      if (!body.models.length || obj(body.pagination).page !== page) throw new Error('The model catalog is incomplete. Try again.')
-    }
-    throw new Error('The model catalog is incomplete. Try again.')
+    // Match `grid catalog`/`list` (cli/models.py `_fetch_pullable`): browse the
+    // catalog service's first page of ranked "popular" models for this device,
+    // not every compatible row across all pages — the picker shows one page.
+    // ⚠️ The machine's measured memory bandwidth and compute go too: the service estimates speed
+    // from them (grid_cli/catalog/ranking.py) and, without them, assumes 150 GB/s and 4 TFLOPS for
+    // any Mac — an M1 Max's 400 GB/s read as 2.7x slower than it is, and the models whose prompt it
+    // then judged too slow to process were not offered at all.
+    const bandwidth = num(device.mem_bandwidth_gbps), compute = num(device.compute_gflops)
+    const budget = modelBudget(device)
+    const response = await this.request(url, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ browse: true, page: 1, page_size: 50, device: {
+        device_class: device.device_class, usable_bytes: budget ?? device.usable_bytes, backend: device.backend,
+        ...(bandwidth ? { mem_bandwidth_gbps: bandwidth } : {}), ...(compute ? { compute_gflops: compute } : {}),
+      } }), signal: AbortSignal.timeout(20_000), redirect: 'error',
+    })
+    if (!response.ok) throw new Error('Compatible models are unavailable. Try again.')
+    const body = obj(await response.json())
+    if (!Array.isArray(body.models)) throw new Error('Compatible models are unavailable. Try again.')
+    return { models: body.models }
   }
 
   private async loadCatalog(force = false): Promise<void> {
@@ -219,7 +353,7 @@ export class LocalModels {
       try {
         this.device = obj(await this.json(['device-info', '--json']))
         const catalog = obj(await this.catalog(this.device))
-        this.candidates = compatibleModels(catalog)
+        this.candidates = rankForCoding(compatibleModels(catalog).filter(candidate => !NOT_FOR_AGENTS.test(candidate.id)))
         // Prefer an already downloaded fitting quant rather than downloading
         // the catalog's default version of the same model again.
         for (let i = 0; i < this.candidates.length; i++) {
@@ -232,10 +366,6 @@ export class LocalModels {
             if (alternate && await this.downloaded(alternate)) { this.candidates[i] = alternate; break }
           }
         }
-        // A useful small download makes the first reply arrive sooner. Keep
-        // the catalog's relevance order within that group, and show all others.
-        const suggested = this.candidates.findIndex(c => c.size <= 8 * GiB && c.size >= GiB)
-        if (suggested > 0) this.candidates.unshift(...this.candidates.splice(suggested, 1))
         this.catalogError = undefined
         this.catalogAt = Date.now()
       } catch (error) {
@@ -468,6 +598,9 @@ export class LocalModels {
       const single = Array.isArray(node?.models) && node.models.length === 1
       return { id: candidate.id, name: candidate.name, state: running ? 'running' : available ? 'downloaded' : 'available',
         sizeBytes: candidate.size, quant: candidate.quant, recommended: index === 0,
+        ...(candidate.context ? { contextWindow: candidate.context } : {}),
+        ...(candidate.estTokS ? { estTokS: candidate.estTokS } : {}),
+        ...(candidate.paramsB ? { paramsB: candidate.paramsB } : {}),
         canStart: !inventoryError && (!this.catalogError || !candidate.pull) && !instance, canStop: !inventoryError && !!instance,
         // Device memory is deliberately not presented as this model's memory.
         tokensPerSecond: single && running ? num(node?.throughput_tok_s) : undefined,
@@ -483,9 +616,12 @@ export class LocalModels {
         operation: operation?.modelId === `local:${instance.file}` ? operation : undefined,
         ...(!serving && parked(instance) ? { gridAsleep: true } : {}) })
     }
-    const value: LocalModelsSnapshot = { models, memoryBytes: num(obj(this.device.memory).total_gb) === undefined ? undefined : this.device.memory.total_gb * GiB,
+    const freeDiskBytes = await statfs(join(this.home, 'models')).catch(() => statfs(this.home))
+      .then(disk => disk.bavail * disk.bsize, () => undefined)
+    const value: LocalModelsSnapshot = { models: withoutCopiesOfOwned(models), memoryBytes: num(obj(this.device.memory).total_gb) === undefined ? undefined : this.device.memory.total_gb * GiB,
       hardware: str(obj(this.device.machine).model || obj(this.device.cpu).brand), notice: inventoryError || this.catalogError,
-      observedAt: new Date().toISOString(), busy: !!this.active, supportsDownload: true }
+      observedAt: new Date().toISOString(), busy: !!this.active, supportsDownload: true,
+      ...(freeDiskBytes === undefined ? {} : { freeDiskBytes }) }
     this.cached = { grid, at: Date.now(), value }
     this.runningAtLastRead.set(grid, new Set(models.filter(model => model.state === 'running').map(model => model.id)))
     return value

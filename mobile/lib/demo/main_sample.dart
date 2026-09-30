@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'package:harness_mobile/app_shell.dart' show systemBarsFor;
 import 'package:harness_mobile/core/startup.dart';
 import 'package:harness_mobile/shared/theme/app_theme.dart' as grid;
 import 'package:harness_mobile/shared/theme/appearance_prefs_store.dart';
@@ -34,12 +36,16 @@ class SampleApp extends StatelessWidget {
         uiScale: prefs.uiSize / grid.AppFont.uiSizeDefault,
         codeSize: grid.AppFont.codeSize,
       );
-      grid.AppTheme.brightness.value = Brightness.dark;
+      final brightness = prefs.palette.brightness;
+      grid.AppTheme.brightness.value = brightness;
       return MaterialApp(
         title: 'Harness sample',
-        theme: grid.buildAppTheme(brightness: Brightness.dark),
-        builder: (context, child) =>
-            grid.BrightnessScope(child: child ?? const SizedBox.shrink()),
+        debugShowCheckedModeBanner: false,
+        theme: grid.buildAppTheme(brightness: brightness),
+        builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
+          value: systemBarsFor(brightness),
+          child: grid.BrightnessScope(child: child ?? const SizedBox.shrink()),
+        ),
         home: const _Launcher(),
       );
     },

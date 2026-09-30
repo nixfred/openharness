@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 
+import '../phone_navigation.dart' show phoneRoute;
 import '../tty.dart';
 import '../tty_controls.dart';
 import 'connect_code.dart';
@@ -32,6 +34,7 @@ class ScanToConnectPage extends StatefulWidget {
     required this.onUseEmail,
     required this.onBack,
     this.signingIn = false,
+    this.fallbackLabel = 'Use email instead',
     this.camera,
   });
 
@@ -41,6 +44,10 @@ class ScanToConnectPage extends StatefulWidget {
 
   /// A code was read and the phone is signing in with it.
   final bool signingIn;
+
+  /// The way out without a camera or a code: email on the first screen, the computer's password
+  /// when unlocking one ([onUseEmail] is called either way).
+  final String fallbackLabel;
 
   /// Stands in for the camera in tests and renders. Null opens the real one.
   final Widget? camera;
@@ -127,10 +134,29 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
             size: TtySize.meta,
           ),
         ),
+        const SizedBox(height: 10),
+        // The one line of trust on the way in: the scan hands a phone the run of a computer, and
+        // the first-time reviewer's question was what stops anyone else reading it.
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Tty.origin),
+          child: Row(
+            children: [
+              Icon(LucideIcons.lock300, size: 13, color: tty.faint),
+              const SizedBox(width: 6),
+              Expanded(
+                child: TtyText(
+                  'End-to-end encrypted, phone to computer.',
+                  color: tty.faint,
+                  size: TtySize.meta,
+                ),
+              ),
+            ],
+          ),
+        ),
         const SizedBox(height: 16),
         Center(
           child: TtyTextButton(
-            label: 'Use email instead',
+            label: widget.fallbackLabel,
             color: tty.faint,
             onPressed: widget.onUseEmail,
           ),
@@ -139,4 +165,35 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
       ],
     );
   }
+}
+
+/// The camera over the current page, and the code it read — null when the person went back or
+/// took the other way ([fallbackLabel]). For a phone that is already signed in and wants a
+/// computer: unlocking one, or pairing with one just set up.
+Future<ConnectCode?> scanForCode(
+  BuildContext context, {
+  required String fallbackLabel,
+  Widget? camera,
+}) async {
+  ConnectCode? scanned;
+  await Navigator.of(context).push(
+    phoneRoute(
+      (page) => Scaffold(
+        backgroundColor: Tty.of(page).ground,
+        body: SafeArea(
+          child: ScanToConnectPage(
+            camera: camera,
+            fallbackLabel: fallbackLabel,
+            onCode: (code) {
+              scanned = code;
+              Navigator.of(page).pop();
+            },
+            onUseEmail: () => Navigator.of(page).pop(),
+            onBack: () => Navigator.of(page).pop(),
+          ),
+        ),
+      ),
+    ),
+  );
+  return scanned;
 }

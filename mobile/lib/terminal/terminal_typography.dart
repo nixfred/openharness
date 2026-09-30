@@ -1,7 +1,5 @@
 import 'package:flutter/foundation.dart';
 
-import '../core/apple_fonts.dart';
-
 /// The default terminal face, per platform.
 ///
 /// Every family named here has to actually resolve on the OS it is named for,
@@ -64,17 +62,6 @@ const linuxTerminalFontFallback = <String>[
   'Liberation Mono',
   'monospace',
 ];
-
-/// The default face for the platform this build is running on.
-///
-/// A getter, not a `const`: the answer depends on the host. The per-platform
-/// constants above stay `const` so `TerminalFontChoice` can still name them
-/// from its const constructor.
-String get terminalFontFamily =>
-    hasAppleFonts ? macTerminalFontFamily : linuxTerminalFontFamily;
-
-List<String> get terminalFontFallback =>
-    hasAppleFonts ? macTerminalFontFallback : linuxTerminalFontFallback;
 
 /// The default terminal font size: 13 on a desktop, 14 on a phone.
 ///

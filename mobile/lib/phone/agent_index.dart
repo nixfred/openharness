@@ -19,10 +19,8 @@ class AgentEntry {
   String get machineId => machine.machine.machineId;
   String get machineName => machine.machine.displayName;
 
-  /// The folder this agent works in, as [AgentContextLine] names it. Through [MachineState.projectOf]
-  /// rather than `agent.project` directly: a locally launched agent carries its project on the
-  /// machine's own side, and a row reading the field alone shows nothing for exactly those agents.
-  AgentProject? get project => machine.projectOf(agent);
+  /// The folder this agent works in, as [AgentContextLine] names it.
+  AgentProject? get project => agent.project;
 
   /// Whether this agent is blocked on an answer from the person holding the phone.
   bool get isWaiting => machine.blockedAgents.containsKey(agent.id);

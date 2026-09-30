@@ -86,7 +86,7 @@ void _expectShape(List<Rect> actual, List<Rect> want) {
 
 void main() {
   testWidgets(
-    'automatic Swarm layouts match the prior geometry at narrow and wide sizes',
+    'automatic Tab layouts match the prior geometry at narrow and wide sizes',
     (tester) async {
       for (final size in [const Size(880, 600), const Size(1800, 900)]) {
         for (final count in [6, 17]) {

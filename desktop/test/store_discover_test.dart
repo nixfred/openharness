@@ -753,7 +753,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.text(
-          'Recorded sessions will appear here when they are available in your catalog.',
+          'Recorded runs will appear here when they are available in your catalog.',
         ),
         findsOneWidget,
       );

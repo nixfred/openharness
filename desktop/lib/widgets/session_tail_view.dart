@@ -3,6 +3,12 @@ import 'package:flutter/material.dart';
 import '../state/harness_sessions.dart';
 import '../state/session_tail.dart';
 
+/// Use the same under-a-minute wording as the search result's activity label.
+String sessionPreviewAge(DateTime at, DateTime now) =>
+    now.difference(at).inMinutes < 1
+    ? 'now'
+    : '${harnessActivityAge(at, now)} ago';
+
 /// A session's latest turns as Cmd-P previews them: bottom-anchored like the
 /// agent's own terminal, newest at the bottom, scrolled up for older ones.
 /// Scrolling near the top pages in the rows above. The latest ask stays in
@@ -122,8 +128,7 @@ class _SessionTailViewState extends State<SessionTailView> {
                 Text(
                   [
                     'Asked',
-                    if (lastAsk.at case final at?)
-                      '${harnessActivityAge(at, when)} ago',
+                    if (lastAsk.at case final at?) sessionPreviewAge(at, when),
                   ].join(' · '),
                   style: muted,
                 ),
@@ -172,7 +177,7 @@ class _SessionTailViewState extends State<SessionTailView> {
                             ? 'Loading earlier turns…'
                             : tail.hasMore
                             ? 'Earlier turns above'
-                            : 'Start of session',
+                            : 'Start of conversation',
                         style: muted,
                       ),
                     );
@@ -231,7 +236,7 @@ class _TailRowView extends StatelessWidget {
         children: [
           if (opens) ...[
             if (row.at case final at?)
-              Text('${harnessActivityAge(at, now)} ago', style: muted),
+              Text(sessionPreviewAge(at, now), style: muted),
             Text.rich(
               key: askKey,
               TextSpan(

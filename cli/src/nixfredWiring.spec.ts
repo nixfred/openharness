@@ -53,6 +53,19 @@ describe('Nixfred wiring', () => {
     expect(p.agents.map((a) => `${a.agentId}:${a.state}:${a.glyph}`)).toEqual(['b:permission:!', 'a:working:~'])
   })
 
+  it('journals every watch-mode answer send, delivered or not, and flags external rows', async () => {
+    sessions = [session('a'), session('x', { external: true, tmuxPane: undefined })]
+    nix.auditAnswer({ agentId: 'x', sessionId: 's-x', route: 'orca', what: 'key', value: '1', ok: true, terminal: 'term_abc' })
+    nix.auditAnswer({ agentId: 'x', sessionId: 's-x', route: 'none', what: 'text', value: 'blue', ok: false })
+    await vi.waitFor(() => expect(readFileSync(join(dir, 'audit.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2))
+    const lines = readFileSync(join(dir, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
+    expect(lines[0]).toMatchObject({ kind: 'answer', agentId: 'x', sessionId: 's-x', name: 'answer via orca: key', detail: '"1" -> term_abc', decision: 'allow' })
+    expect(lines[1]).toMatchObject({ kind: 'answer', decision: 'deny', detail: '"blue" (not delivered)' })
+    const rows = (nix.attentionPayload().agents as Array<{ agentId: string; external: boolean }>)
+    expect(rows.find((r) => r.agentId === 'x')?.external).toBe(true)
+    expect(rows.find((r) => r.agentId === 'a')?.external).toBe(false)
+  })
+
   it('gate asks on a push, allows a plain command, and journals the verdict', async () => {
     expect(nix.gate('s-a', 'a', 'Bash', { command: 'git status' }).decision).toBe('allow')
     const v = nix.gate('s-a', 'a', 'Bash', { command: 'git push origin main' })

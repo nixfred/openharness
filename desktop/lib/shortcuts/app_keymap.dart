@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/widgets.dart';
 
 import 'app_shortcuts.dart';
@@ -207,6 +206,7 @@ List<ShortcutRow> effectiveShortcutRows(
   return [
     for (final command in harnessCommands)
       if (!command.hidden &&
+          harnessCommandActive(command.id) &&
           (command.context == KeymapContext.workspace ||
               (contextKind == KeymapContext.project &&
                   command.context == KeymapContext.picker) ||
@@ -237,10 +237,10 @@ List<ShortcutRow> effectiveShortcutRows(
             group: command.group,
           ),
     if (defaultDigits)
-      const ShortcutRow(
+      ShortcutRow(
         label: 'Select tabs 1–9',
         chords: [
-          [kIsWeb ? 'Alt' : '⌘', '1 – 9'],
+          [workspaceKeyLabel, '1 – 9'],
         ],
         group: ShortcutGroup.navigate,
       ),

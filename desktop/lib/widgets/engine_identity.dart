@@ -1,11 +1,12 @@
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness/terminal/terminal_text.dart';
 
 import '../core/harness_catalog.dart';
 import '../core/models.dart';
+import '../shared/theme/app_theme.dart' as grid;
 import '../theme/app_theme.dart';
 
 class EngineIdentity {
@@ -938,7 +939,7 @@ class EngineMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    TerminalFontScope.watch(context);
+    final dark = grid.AppTheme.watch(context) == Brightness.dark;
     final identity = engineIdentity(engine, displayName: displayName);
     final mark = identity.asset != null
         ? Image.asset(
@@ -958,14 +959,20 @@ class EngineMark extends StatelessWidget {
         ? CustomPaint(
             key: const ValueKey('engine-icon-claude'),
             size: Size.square(size),
-            painter: _ClaudeMarkPainter(identity.color),
+            // The brand clay is 2.5:1 on a light workspace; there the same
+            // hue a step deeper (3.1:1+), so the mark still reads as a shape.
+            painter: _ClaudeMarkPainter(
+              dark ? identity.color : const Color(0xffc2633f),
+            ),
           )
         : identity.id == kTerminalEngine
         ? Icon(
-            LucideIcons.terminal,
+            AppIcons.terminal,
             key: const ValueKey('engine-icon-terminal'),
             size: size,
-            color: identity.color,
+            // The shell's pale steel is 1.8:1 on a light workspace; there it
+            // takes the secondary ink (5.0:1).
+            color: dark ? identity.color : AppColors.mutedStrong,
           )
         : _InitialMark(
             key: ValueKey('engine-fallback-${identity.id}'),
@@ -974,11 +981,14 @@ class EngineMark extends StatelessWidget {
           );
     // These vendor assets use near-white ink. Give them a stable dark ground
     // so their original shapes stay visible on both light and dark surfaces.
-    final needsDarkTile = const {
-      'cursor',
-      'opencode',
-      'autonomous/kicad',
-    }.contains(identity.id);
+    // Grok's and Copilot's white glyphs have no ground of their own either,
+    // but sit bare on a dark palette as they always have; only a light one
+    // needs the tile.
+    final needsDarkTile =
+        const {'cursor', 'opencode', 'autonomous/kicad'}.contains(
+          identity.id,
+        ) ||
+        (!dark && const {'grok', 'copilot'}.contains(identity.id));
     return Opacity(
       opacity: enabled ? 1 : 0.45,
       child: needsDarkTile

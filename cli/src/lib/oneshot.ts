@@ -82,7 +82,9 @@ function buildEnv(): NodeJS.ProcessEnv {
 export interface OneShotOptions {
   prompt: string
   model?: string
-  effort?: 'low' | 'medium' | 'high'
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'ultracode'
+  /** The collection agent's own Codex login profile, when it has one. */
+  codexHome?: string
   cwd: string
   timeoutMs?: number
   signal?: AbortSignal
@@ -280,7 +282,7 @@ class CodexWorker extends ProcessWorker {
     onAbort: () => void
   } | null = null
 
-  constructor(cwd: string, model?: string, effort?: OneShotOptions['effort']) {
+  constructor(cwd: string, model?: string, effort?: OneShotOptions['effort'], codexHome?: string) {
     const output = join(cwd, `.codex-recap-${randomUUID()}.txt`)
     const args = [
       'exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check',
@@ -290,6 +292,7 @@ class CodexWorker extends ProcessWorker {
       '-',
     ]
     const processEnv = scrubTerminalContext({ ...oneShotParentEnv() })
+    if (codexHome) processEnv.CODEX_HOME = codexHome
     const child = spawn(process.env.CODEX_PATH || 'codex', args, {
       cwd, env: processEnv, detached: true, stdio: ['pipe', 'ignore', 'pipe'],
     })
@@ -951,11 +954,12 @@ function createOneShotWorker(
   cwd: string,
   model?: string,
   effort?: OneShotOptions['effort'],
+  codexHome?: string,
 ): Promise<DisposableWorker<OneShotOptions, OneShotResult>> {
   return engine === 'claude'
     ? new ClaudeWorker(cwd, model, effort).ready()
     : engine === 'codex'
-      ? new CodexWorker(cwd, model, effort).ready()
+      ? new CodexWorker(cwd, model, effort, codexHome).ready()
       : engine === 'cursor'
         ? new CursorWorker(cwd, model).ready()
         : engine === 'pi'
@@ -968,7 +972,7 @@ function createOneShotWorker(
 }
 
 async function runDirect(engine: OneShotEngine, opts: OneShotOptions): Promise<OneShotResult> {
-  const worker = await createOneShotWorker(engine, opts.cwd, opts.model, opts.effort)
+  const worker = await createOneShotWorker(engine, opts.cwd, opts.model, opts.effort, opts.codexHome)
   try { return await worker.run(opts) } finally { worker.dispose() }
 }
 
@@ -982,7 +986,7 @@ export function runClaudeOneShot(opts: OneShotOptions): Promise<OneShotResult> {
 
 export function runCodexOneShot(opts: OneShotOptions): Promise<{ text: string; sessionId: null }> {
   if (opts.signal?.aborted) return Promise.reject(abortError('codex'))
-  const run = !config || config.cwd !== opts.cwd || config.codexModel !== opts.model || config.effort !== opts.effort
+  const run = opts.codexHome || !config || config.cwd !== opts.cwd || config.codexModel !== opts.model || config.effort !== opts.effort
     ? runDirect('codex', opts)
     : pool.run('codex', opts)
   return run.then((result) => ({ text: result.text, sessionId: null }))

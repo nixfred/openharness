@@ -81,7 +81,7 @@ void main() {
     expect(find.text('Your agents, wherever they run'), findsOneWidget);
     expect(find.text('Sign in'), findsOneWidget);
     expect(find.byType(LoginFleetMap), findsOneWidget);
-    // The real mark, from the bundle — `Icons.memory` used to stand here and
+    // The real mark, from the bundle — `AppIcons.cpu` used to stand here and
     // appeared nowhere else in the app.
     final logo = tester.widget<Image>(
       find.byWidgetPredicate(

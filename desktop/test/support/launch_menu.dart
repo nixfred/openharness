@@ -52,6 +52,34 @@ Future<void> focusLaunchRow(WidgetTester tester, String name) async {
       }.contains(target)) {
     await openLaunchRow(tester, 'advanced');
   }
+  final form = tester.widget<NewHarnessForm>(find.byType(NewHarnessForm));
+  if (form.desktop) {
+    bool focused() {
+      var within = false;
+      FocusManager.instance.primaryFocus?.context?.visitAncestorElements((e) {
+        if (e == tester.element(row)) within = true;
+        return !within;
+      });
+      return within;
+    }
+
+    final visited = <String?>[];
+    for (var i = 0; i < 32 && !focused(); i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      // Native frames can complete before the deferred focus restoration from
+      // opening the composer. Wait for that transition before the next key.
+      await tester.pumpAndSettle();
+      visited.add(FocusManager.instance.primaryFocus?.debugLabel);
+    }
+    expect(
+      focused(),
+      isTrue,
+      reason: '$target is reachable with Tab; visited $visited',
+    );
+    await tester.ensureVisible(row);
+    await tester.pumpAndSettle();
+    return;
+  }
   for (var i = 0; i < 12; i++) {
     if (tester.widget<Semantics>(row).properties.selected == true) break;
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);

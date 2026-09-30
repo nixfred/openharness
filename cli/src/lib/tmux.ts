@@ -116,6 +116,31 @@ function hasCursorPackageEntrypoint(args: string): boolean {
     /cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token))
 }
 
+/** Hermes' managed launchers exec Python -I -c with a path bootstrap, then either import main
+ * or run it through runpy. Require that executable prefix and actual code, never a script argument
+ * or a quoted mention. argv[0] is authoritative here: macOS can truncate an absolute `comm` path.
+ * Keep the standalone hook's copy in sync. */
+function hermesInlineLauncher(row: Pick<ProcessRow, 'args'>): boolean {
+  const args = row.args.trim()
+  if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvTokens(args)[0] ?? '').toLowerCase())) return false
+  const prefix = /^(?:"[^"]+"|'[^']+'|\S+)(?:\s+-(?:I|E|s|S|u|B|O{1,2}|q))*\s+-c\s+/.exec(args)
+  if (!prefix) return false
+  const source = args.slice(prefix[0].length).replace(/^["']/, '')
+  // Mask string literals before looking for Python statements. A print/prompt containing a whole
+  // launcher is still data. Keep literal values only to identify runpy's exact entry module.
+  const literals: string[] = []
+  const code = source.replace(/(['"])(?:\\[\s\S]|(?!\1)[^\\])*?\1/g, (literal) => {
+    literals.push(literal.slice(1, -1))
+    return `__literal${literals.length - 1}__`
+  })
+  if (!/^import\s+(?:(?:os|re|sys|runpy)\s*,\s*)*(?:sys|runpy)[;\s]+(?:os\.environ\.pop\(__literal\d+__,\s*None\)[;\s]+)*sys\.path\.insert\(\s*0,\s*__literal\d+__\s*\)/.test(code)) return false
+  if (/\bimport\s+hermes_bootstrap\b/.test(code)
+    && /\bfrom\s+hermes_cli\.main\s+import\s+main\b/.test(code)
+    && /\bsys\.exit\(\s*main\(\)\s*\)/.test(code)) return true
+  const run = /\brunpy\.run_module\(\s*__literal(\d+)__\s*,\s*run_name\s*=\s*__literal(\d+)__(?:\s*,\s*alter_sys\s*=\s*True)?\s*\)/.exec(code)
+  return !!run && literals[Number(run[1])] === 'hermes_cli.main' && literals[Number(run[2])] === '__main__'
+}
+
 function agentAliasCandidate(row: Pick<ProcessRow, 'executable' | 'args'>): boolean {
   if (basename(row.executable).toLowerCase() === 'agent') return true
   return basename(processEntrypoint(row.args)).toLowerCase() === 'agent'
@@ -128,7 +153,7 @@ function agentAliasCandidate(row: Pick<ProcessRow, 'executable' | 'args'>): bool
  * `comm` can itself contain spaces: Command Code rewrites its argv to `⌘ <session title>` and macOS
  * prints that verbatim as the command name. Splitting comm off as a single `\S+` therefore shifted every
  * later field — `startMarker` came out as `"<rest of title> Thu Jul 30"` instead of a start time, so it
- * changed whenever Command Code renamed the session, `validateSessionRuntime` saw a different process,
+ * changed whenever Command Code renamed the session, runtime validation saw a different process,
  * and the reaper evicted a live pane ~10s after its first turn (observed four times on one session; the
  * pane went on serving turn-stop hooks after being declared "gone"). It also silently defeated the
  * PID-reuse guard that startMarker exists for.
@@ -467,6 +492,9 @@ function heuristicEngineProcessMatchScore(
   // Cursor's launcher can retain argv[0]=agent while the Node package path appears later in argv.
   if (engine === 'cursor' && hasCursorPackageEntrypoint(row.args)) return 3
 
+  // Hermes' own launcher, read out of the inline source it runs as. See `hermesInlineLauncher`.
+  if (engine === 'hermes' && hermesInlineLauncher(row)) return 2
+
   const signature = ENGINE_PROCESS_SIGNATURES[engine]
   if (signature.basenames.some((pattern) => pattern.test(executable) || pattern.test(entrybase))) return 3
   if (signature.entrypoints.some((pattern) => pattern.test(entrypoint))) return 2
@@ -712,7 +740,7 @@ type PaneProcessLookup =
   | { ok: true; identity: ProcessIdentity }
   | { ok: false; unknown: boolean; reason: string }
 
-async function lookupPaneEngineProcess(
+export async function lookupPaneEngineProcess(
   pane: string,
   engine: RegisteredSession['engine'],
 ): Promise<PaneProcessLookup> {
@@ -810,11 +838,6 @@ export async function resolvePaneEngineProcess(
 export const LSTART_MARKER_RE =
   /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$/
 
-/** Pane + engine process validation. A saved identity prevents PID reuse from reviving a stale entry. */
-export async function validateSessionRuntime(session: RegisteredSession): Promise<boolean> {
-  return (await checkSessionRuntime(session)).state === 'alive'
-}
-
 /**
  * The same check, but three-valued and with a reason — the reaper needs both.
  *
@@ -864,8 +887,8 @@ export async function checkSessionRuntime(session: RegisteredSession): Promise<R
   return { state: 'alive' }
 }
 
-// A short single-line message can be pasted without bracketed-paste settling. Anything longer or
-// multi-line uses bracketed paste and waits before Enter (see sendToTmux).
+// Short single-line messages need no settling delay, but still need bracketed-paste boundaries:
+// Codex treats Enter immediately after an unbracketed text burst as a pasted newline, not submit.
 const INJECT_FASTPATH_MAXLEN = 500
 // Base settle time before the submit Enter; grows with length (Claude needs time to ingest a big paste
 // and collapse it to `[Pasted text]` before a clean Enter counts as submit rather than paste content).
@@ -968,6 +991,31 @@ export function tmuxPaneState(pane: string): Promise<TmuxPaneState | null> {
   })
 }
 
+/** What a pane is running and where, as tmux knows it (terminal clients' #{pane_current_*}). */
+export interface TmuxPaneInfo { command: string; path: string; pid: number | null; tty: string }
+
+/**
+ * The foreground command, live working directory, pid and tty of a pane — tmux's
+ * `#{pane_current_command}` and `#{pane_current_path}`, which a terminal client (hn) shows and a
+ * vim-tmux-navigator style check asks. Null when tmux does not know the pane.
+ */
+export function tmuxPaneInfo(pane: string, socket?: string): Promise<TmuxPaneInfo | null> {
+  return new Promise((resolve) => {
+    // A path can hold any character but a newline; the command, pid and tty cannot hold one either.
+    const format = '#{pane_current_command}\n#{pane_pid}\n#{pane_tty}\n#{pane_current_path}'
+    // `socket` names a server outright (tests pass their own); without it, the daemon's server.
+    const args = [...(socket ? ['-S', socket] : []), 'display-message', '-p', '-t', pane, format]
+    execFile('tmux', args, { timeout: 2_000 }, (err, stdout) => {
+      if (err) { resolve(null); return }
+      const [command = '', pid = '', tty = '', ...path] = stdout.replace(/\n$/, '').split('\n')
+      const n = Number(pid)
+      // tmux 3.5 answers a pane it does not know with empty fields rather than an error.
+      if (pid === '' || !Number.isSafeInteger(n)) { resolve(null); return }
+      resolve({ command, path: path.join('\n'), pid: n, tty })
+    })
+  })
+}
+
 /**
  * Hand a pane back to tmux's default disposal after `create()` asked tmux to keep it when dead.
  *
@@ -1011,18 +1059,18 @@ async function tmuxPasteText(pane: string, content: string, bracketed: boolean):
  * Type a message into a tmux pane and submit it — the web-chat/device → terminal injection point.
  *
  * All text is loaded into a uniquely named tmux buffer over stdin so prompt bytes never enter argv,
- * environment, logs, or child-process error strings. Short single-line input is pasted literally and
- * submitted immediately.
+ * environment, logs, or child-process error strings. Every message is bracketed-pasted as one unit
+ * (`paste-buffer -p`) so the terminal can distinguish the paste from the separate submit Enter.
+ * Short single-line input is submitted immediately after that explicit paste boundary.
  *
- * Long/multiline input is bracketed-pasted as one unit (`paste-buffer -p`), allowed to settle, then
- * submitted with a separate Enter. (Verified: reliably submits up to ~28 KB.)
+ * Long/multiline input is allowed to settle before Enter. (Verified: reliably submits up to ~28 KB.)
  */
 export function sendToTmux(pane: string, text: string): Promise<boolean> {
   const content = text.replace(/[\r\n]+$/, '') // strip trailing newlines so the submit Enter isn't doubled
   return (async () => {
-    const bracketed = content.length > INJECT_FASTPATH_MAXLEN || content.includes('\n')
-    if (!(await tmuxPasteText(pane, content, bracketed))) return false
-    if (bracketed) await sleep(Math.min(1500, INJECT_PASTE_DELAY_BASE_MS + Math.floor(content.length / 60)))
+    const needsSettle = content.length > INJECT_FASTPATH_MAXLEN || content.includes('\n')
+    if (!(await tmuxPasteText(pane, content, true))) return false
+    if (needsSettle) await sleep(Math.min(1500, INJECT_PASTE_DELAY_BASE_MS + Math.floor(content.length / 60)))
     return tmuxEnter(pane)
   })()
 }

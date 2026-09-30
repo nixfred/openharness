@@ -16,7 +16,8 @@ import 'tty_controls.dart';
 /// ⚠️ **The whole title is one button: its menu** (rename, restart, paste…). Nothing else is drawn
 /// to tap — no `…`, no state words: the terminal says when it is loading. Holding it goes back to
 /// the last harness. Find is a swipe right, and `api-fix asking` — a harness elsewhere waiting on
-/// you — is the one word that opens it from here.
+/// you — is the one word that opens it from here. The paired daemon, when there is one, sits at the
+/// right end ([daemon]): a tap on it opens its own sheet, not the menu.
 ///
 /// It floats over the terminal's top rows only while the output is followed at its end, and slides
 /// away while the history is read back (see `TerminalChromeScroll`) — so it can afford three rows.
@@ -30,9 +31,12 @@ class TerminalTitle extends StatelessWidget {
     this.branch,
     this.asking,
     this.onHold,
+    this.daemon,
+    this.sample = false,
   });
 
   final String name;
+  final bool sample;
 
   /// `machine:folder` — where the harness works.
   final String? place;
@@ -51,14 +55,25 @@ class TerminalTitle extends StatelessWidget {
   /// Holding the title: back to the last harness (tmux's `prefix L`, vim's `:b#`).
   final VoidCallback? onHold;
 
+  /// The paired daemon's chip (`daemon_chip.dart`), at the title's right end, centred on its
+  /// block. It takes its own taps, keeps its own gap from the names, and draws nothing — taking no
+  /// room — outside the signed-in shell or with daemons off.
+  final Widget? daemon;
+
   /// Four terminal rows: three lines of text and half a row of air above and below.
   static double heightOf(Tty tty) => 4 * tty.row;
 
   /// A long branch shortened in the middle — `fix/login-refresh-token` → `fix/logi…sh-token` — where
   /// both ends say which one it is.
-  static String _short(String branch) => branch.length <= 30
-      ? branch
-      : '${branch.substring(0, 14)}…${branch.substring(branch.length - 14)}';
+  ///
+  /// Cut by characters, not UTF-16 units, for the reason `_windowName` in `terminal_page.dart`
+  /// gives: half an emoji is a string the text engine throws on.
+  static String _short(String branch) {
+    final characters = branch.characters;
+    return characters.length <= 30
+        ? branch
+        : '${characters.take(14)}…${characters.skip(characters.length - 14)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -84,8 +99,11 @@ class TerminalTitle extends StatelessWidget {
         child: DecoratedBox(
           // No rule under it: the output fades out beneath instead — see the gradient below.
           decoration: BoxDecoration(color: tty.ground),
-          child: SizedBox(
-            height: height,
+          // ⚠️ **At least four rows, not exactly four.** The rows are the terminal's, which the
+          // text scale does not touch, and the three lines are the app's type, which it does: at
+          // Settings ▸ Text size's largest the lines outgrew a fixed box and overflowed it.
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: height),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: Tty.origin),
               child: Row(
@@ -137,6 +155,15 @@ class TerminalTitle extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (sample)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 12),
+                      child: TtyText(
+                        'Sample',
+                        color: tty.faint,
+                        size: TtySize.meta,
+                      ),
+                    ),
                   if (asking case final asking?)
                     Semantics(
                       button: true,
@@ -176,6 +203,7 @@ class TerminalTitle extends StatelessWidget {
                         ),
                       ),
                     ),
+                  ?daemon,
                 ],
               ),
             ),

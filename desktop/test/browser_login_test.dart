@@ -8,6 +8,7 @@ import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/viewer/browser_login.dart';
 import 'package:harness/viewer/direct_auth.dart';
 import 'package:harness/viewer/direct_auth_api.dart';
+import 'package:harness/sharing/shared_agent_location.dart';
 
 class _Storage implements LocalKeyValueStore {
   final values = <String, String>{};
@@ -90,6 +91,83 @@ void main() {
       browser: browser,
       clock: () => now,
     );
+  });
+
+  test('sign-in returns to a pinned share link and never accepts an external return path', () async {
+    final share =
+        '/s/11111111-1111-4111-8111-111111111111#key=${Uri.encodeComponent(base64Encode(List.filled(32, 1)))}';
+    browser.uri = Uri.parse('https://harness.example$share');
+    final pending = login.login(onAuthorizeUrl: (_) {});
+    final cancelled = expectLater(pending, throwsA(isA<DirectAuthException>()));
+    api.authorization.complete((
+      authorizeUrl: Uri.https('sso.example', '/authorize', {
+        'state': 'expected',
+        'redirect_uri': 'https://harness.example/auth/callback',
+      }).toString(),
+      tx: 'transaction',
+    ));
+    await Future<void>.delayed(Duration.zero);
+    final saved = browser.transaction!;
+    expect(jsonDecode(saved)['returnTo'], share);
+    login.cancel();
+    await cancelled;
+    browser.transaction = saved;
+    browser.uri = Uri.parse(
+      'https://harness.example/auth/callback?state=expected&code=one-use',
+    );
+    final status = login.checkStatus();
+    await Future<void>.delayed(Duration.zero);
+    expect(browser.uri.toString(), 'https://harness.example$share');
+    api.exchanged.complete(
+      const IssuedTokens(
+        token: 'access',
+        refreshToken: 'refresh',
+        expiresIn: 3600,
+      ),
+    );
+    expect((await status).loggedIn, isTrue);
+    for (final invalid in [
+      'https://evil.example$share',
+      '//evil.example$share',
+      '/auth/callback?code=secret',
+      '/s/invalid',
+    ]) {
+      expect(SharedAgentLocation.returnPath(invalid), isNull);
+    }
+  });
+
+  test('sign-in preserves the exact private viewer destination', () async {
+    const destination = '/?viewer=1&machine=server-1&agent=blender%20model';
+    browser.uri = Uri.parse('https://harness.example$destination');
+    final pending = login.login(onAuthorizeUrl: (_) {});
+    final cancelled = expectLater(pending, throwsA(isA<DirectAuthException>()));
+    api.authorization.complete((
+      authorizeUrl: Uri.https('sso.example', '/authorize', {
+        'state': 'expected',
+        'redirect_uri': 'https://harness.example/auth/callback',
+      }).toString(),
+      tx: 'transaction',
+    ));
+    await Future<void>.delayed(Duration.zero);
+    final saved = browser.transaction!;
+    expect(jsonDecode(saved)['returnTo'], destination);
+    login.cancel();
+    await cancelled;
+    browser.transaction = saved;
+    browser.uri = Uri.parse(
+      'https://harness.example/auth/callback?state=expected&code=one-use',
+    );
+    final status = login.checkStatus();
+    await Future<void>.delayed(Duration.zero);
+    expect(browser.uri.toString(), 'https://harness.example$destination');
+    api.exchanged.complete(
+      const IssuedTokens(
+        token: 'access',
+        refreshToken: 'refresh',
+        expiresIn: 3600,
+      ),
+    );
+    expect((await status).loggedIn, isTrue);
   });
 
   test(

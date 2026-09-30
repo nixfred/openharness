@@ -10,26 +10,31 @@ import 'access_token_source.dart';
 import 'bearer_auth_interceptor.dart';
 import 'multipart_body.dart';
 
-/// Control-plane REST client.
-///
-/// In a desktop build every call goes to the LOCAL `harness` CLI (loopback, no credential — see
-/// CLAUDE.md's naming/architecture notes for why), which proxies to the real backend using its own
-/// saved SSO session, and this app never holds a bearer token itself. A viewer build has no CLI:
-/// given [auth], the same calls go straight to the backend, signed with the session the app holds.
-/// Terminal bytes ride the WS path either way.
+/// Authenticated control-plane REST client for the phone.
 class ApiClient {
   final AppConfig config;
   final AuthSession session;
   final AccessTokenSource? auth;
+
+  /// An in-process transport for tests; authentication and serialization still run.
+  final HttpClientAdapter? httpClientAdapter;
   late final Dio _dio = _buildDio();
 
-  ApiClient({required this.config, required this.session, this.auth});
+  ApiClient({
+    required this.config,
+    required this.session,
+    this.auth,
+    this.httpClientAdapter,
+  });
 
   Dio _buildDio() {
+    // In-memory subclasses override requests; every real API call requires auth.
+    final source =
+        auth ?? (throw StateError('API calls require an access token source'));
     final dio = attachHttpLog(
       Dio(
         BaseOptions(
-          baseUrl: auth == null ? config.localCliBaseUrl : config.apiBaseUrl,
+          baseUrl: config.apiBaseUrl,
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
           // Let the API wrapper turn HTTP failures into short, user-facing
@@ -39,22 +44,21 @@ class ApiClient {
         ),
       ),
     );
-    final source = auth;
-    if (source != null) {
-      dio.interceptors.add(
-        BearerAuthInterceptor(source, dio, autonomousEnv: config.autonomousEnv),
-      );
-    }
+    dio.interceptors.add(
+      BearerAuthInterceptor(source, dio, autonomousEnv: config.autonomousEnv),
+    );
+    final adapter = httpClientAdapter;
+    if (adapter != null) dio.httpClientAdapter = adapter;
     return dio;
   }
 
-  // -- auth (proxied by the local CLI — no credential on this leg) --
+  // -- auth --
   Future<Map<String, dynamic>?> me() async {
     final res = await _dio.get('/api/auth/me');
     return unwrapApiResponse(res) as Map<String, dynamic>?;
   }
 
-  // -- machines (control plane, proxied by the local CLI) --
+  // -- machines --
   Future<List<Machine>> machines() async {
     final res = await _dio.get('/api/machines');
     final data = unwrapApiResponse(res) as Map<String, dynamic>;
@@ -109,6 +113,29 @@ class ApiClient {
     return unwrapApiResponse(res) as Map<String, dynamic>?;
   }
 
+  // -- the zoo: the account's daemons and eggs (daemons/README.md), its own document --
+
+  /// `{revision, zoo}` (the backend's `routes/zoo.ts`); null on a backend that
+  /// predates the zoo (404) or a session it will not take (401) — the phone
+  /// then draws no daemon at all.
+  Future<Map<String, dynamic>?> zoo() async {
+    final res = await _dio.get('/api/zoo');
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  /// Apply [ops] in order; answers `{revision, zoo, hatched, grants,
+  /// levelUps}`. Null under the same two conditions as [zoo].
+  Future<Map<String, dynamic>?> zooOps(List<Map<String, dynamic>> ops) async {
+    final res = await _dio.post(
+      '/api/zoo/ops',
+      data: {'ops': ops},
+      options: Options(headers: {'x-adapter-local': '1'}),
+    );
+    if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
   // -- voice (backend only: the viewer's own SSO session signs it) --
 
   /// The words in one WAV recording, in [lang] — `POST /api/voice/stt`, the
@@ -150,10 +177,6 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-bool isUnauthorizedError(Object error) =>
-    error is DioException && error.response?.statusCode == 401 ||
-    error is ApiException && error.status == 401;
-
 /// Unwraps the backend's `{success, data, error}` envelope, which both legs
 /// speak: the CLI's loopback server mirrors it, and the viewer's own auth calls
 /// (`viewer/direct_auth_api.dart`) read it straight from the backend.
@@ -172,28 +195,21 @@ dynamic unwrapApiResponse(Response res) {
   );
 }
 
-/// The sentence a failed local-CLI call earns on an error strip. A raw
-/// `DioException` is a paragraph about `RequestOptions.receiveTimeout` — true,
-/// and useless to the person reading it: what they need is which leg failed.
-/// The daemon not listening, the daemon not answering (it proxies to the
-/// backend, so that is nearly always the backend being slow), or the backend
-/// answering with a sentence of its own, which the daemon forwards verbatim.
+/// A short explanation of a failed request to the Harness backend.
 String describeApiError(Object error) {
   if (error is ApiException) return error.message;
   if (error is DioException) {
     switch (error.type) {
       case DioExceptionType.connectionError:
-        return 'the local Harness service is not answering on its port. '
-            'It usually restarts on its own; retry in a moment.';
+        return 'could not reach Harness. Check your connection and try again.';
       case DioExceptionType.connectionTimeout:
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
         final limit = error.requestOptions.receiveTimeout?.inSeconds;
-        return 'the local Harness service did not answer'
-            '${limit == null ? '' : ' within ${limit}s'} — the Harness '
-            'backend is probably slow right now. Retry in a moment.';
+        return 'Harness did not answer'
+            '${limit == null ? '' : ' within ${limit}s'}. Try again in a moment.';
       case DioExceptionType.badResponse:
-        return 'the local Harness service answered '
+        return 'Harness answered '
             '${error.response?.statusCode ?? 'with an error'}.';
       case DioExceptionType.badCertificate:
       case DioExceptionType.cancel:

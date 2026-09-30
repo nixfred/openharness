@@ -97,9 +97,118 @@ jobs:
       - run: npx tsc --noEmit
 
       # 1,871 tests over 144 files, ~30s. The four `*.real.spec.ts` / `localE2e.spec.ts` suites that
-      # need a live tmux, Herdr or Cursor are gated behind RUN_* env vars and stay skipped here —
+      # need a live tmux or Cursor are gated behind RUN_* env vars and stay skipped here —
       # `npm run test:tmux-real` and friends are how those are run, on a machine that has them.
-      - run: npx vitest run
+      # The guard fuzz suite measures a wall-clock CPU budget. Sibling workers running
+      # subprocess fixtures can deschedule it past that bound on a shared runner.
+      # Run it separately with the same assertions and deadline; every test still runs.
+      - run: npx vitest run --exclude src/pair/learn/guard.fuzz.spec.ts
+      - name: Guard fuzz and bounded hostile-input time
+        run: npx vitest run src/pair/learn/guard.fuzz.spec.ts
+
+      - name: Verify hn launcher repair in an existing installation
+        run: |
+          npm run bundle
+          node scripts/test-hn-upgrade.mjs
 
       - name: Require complete harness updater coverage
         run: npm run test:dsh-updates
+
+  # Native shell lifecycle checks on the Linux platforms used over SSH. This workflow
+  # remains on demand; it builds and tests without publishing or installing a release.
+  tui-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - name: Install isolated test dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux musl-tools
+          npm ci --prefix cli --no-audit --no-fund
+      - name: Release unit tests
+        run: cargo test --locked --release
+      - name: Build static Linux binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: End-to-end against a private mock daemon
+        env:
+          HARNESS_TUI_BIN: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          E2E_PORT: 19297
+          HN_SOCKET_NAME: hn-ci-e2e
+        run: bash tests/e2e.sh
+      - name: Pane surfaces, mouse coordinates and layout compatibility
+        env:
+          HN_PANE_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_PANE_UI_PORT: 19783
+        run: python3 -u tests/pane-ui.py
+      - name: New Harness popup, draft and launch recovery
+        env:
+          HN_NEW_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+        run: python3 -u tests/new-harness.py
+
+      - name: Layout keys and shared desk synchronization
+        env:
+          HN_LAYOUT_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_LAYOUT_TEST_PORT: 19801
+        run: python3 -u tests/layout-sync.py
+      - name: Terminal lease expiry and stalled-open recovery
+        env:
+          HN_RECONNECT_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_RECONNECT_TEST_PORT: 19781
+        run: python3 -u tests/reconnect.py
+      - name: Browser viewer commands and SSH handoff
+        env:
+          HN_VIEWER_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_VIEWER_TEST_PORT: 19671
+        run: python3 -u tests/viewer.py
+      - name: Persistent local shell lifecycle
+        env:
+          HN_LOCAL_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_LOCAL_TEST_PORT: 19441
+          HN_LOCAL_TEST_PREFIX: hn-local-test-ci
+        run: python3 -u tests/local-shells.py
+
+      - name: Native terminal exits, startup input and small PTYs
+        env:
+          HN_NATIVE_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_NATIVE_TEST_PORT: 19433
+          HN_NATIVE_TEST_PREFIX: hnt19fixnativeci
+        run: python3 -u tests/native-terminal.py
+
+      - name: Terminal attributes and attribute-only repaints
+        run: python3 -u tests/terminal-attributes.py target/${{ matrix.target }}/release/harness-tui
+
+  backend-desk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Shared desk layout compatibility
+        run: npm test -- src/routes/desk.test.ts

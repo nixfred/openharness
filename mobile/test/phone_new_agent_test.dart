@@ -169,4 +169,37 @@ void main() {
 
     expect(find.byType(NewAgentPage), findsNothing);
   });
+
+  testWidgets(
+    'a first harness is taught, and offered first tasks; later ones are not',
+    (tester) async {
+      final app = _app();
+      addTearDown(app.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NewAgentPage(notifier: app, machineId: 'ready'),
+        ),
+      );
+      await tester.pump();
+      expect(
+        find.text('A harness is one session of an agent. Start your first.'),
+        findsOneWidget,
+      );
+      expect(find.text('Explain this project to me'), findsOneWidget);
+
+      // Something is running: the lesson is learned, and the chips were filler.
+      app.machineStates['ready']!.agents = [
+        Agent(id: 'a', name: 'hn', engine: 'claude', terminalAvailable: true),
+      ];
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NewAgentPage(notifier: app, machineId: 'ready'),
+        ),
+      );
+      await tester.pump();
+      expect(find.textContaining('A harness is one session'), findsNothing);
+      expect(find.text('Explain this project to me'), findsNothing);
+    },
+  );
 }

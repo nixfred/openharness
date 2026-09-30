@@ -16,12 +16,23 @@ class SettingRow extends StatelessWidget {
     required this.title,
     this.detail,
     required this.control,
+    this.controlSemanticLabel,
+    this.footer,
     this.alignTop = false,
   });
 
   final String title;
   final String? detail;
   final Widget control;
+
+  /// Purpose of a single otherwise unlabeled control, such as a switch.
+  ///
+  /// Opt in only when [control] has one action. Rows containing several fields
+  /// or buttons keep their separate labels and actions instead of merging them.
+  final String? controlSemanticLabel;
+
+  /// Guidance or feedback that belongs inside this setting's block.
+  final Widget? footer;
 
   /// Align taller controls with the title; compact controls stay centered.
   final bool alignTop;
@@ -47,6 +58,9 @@ class SettingRow extends StatelessWidget {
         ],
       ],
     );
+    final labeledControl = controlSemanticLabel == null
+        ? control
+        : Semantics(label: controlSemanticLabel, child: control);
 
     return Container(
       // A raised block: fill plus a soft lift, no rim. The same recipe the rest
@@ -62,24 +76,35 @@ class SettingRow extends StatelessWidget {
       padding: detail == null
           ? const EdgeInsets.symmetric(vertical: 8)
           : const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: LayoutBuilder(
-        builder: (context, constraints) =>
-            constraints.maxWidth <
-                MediaQuery.textScalerOf(context).scale(_stackBelow)
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [text, const SizedBox(height: 10), control],
-              )
-            : Row(
-                crossAxisAlignment: alignTop
-                    ? CrossAxisAlignment.start
-                    : CrossAxisAlignment.center,
-                children: [
-                  Expanded(child: text),
-                  const SizedBox(width: 20),
-                  control,
-                ],
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) =>
+                constraints.maxWidth <
+                    MediaQuery.textScalerOf(context).scale(_stackBelow)
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      text,
+                      const SizedBox(height: 10),
+                      labeledControl,
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: alignTop
+                        ? CrossAxisAlignment.start
+                        : CrossAxisAlignment.center,
+                    children: [
+                      Expanded(child: text),
+                      const SizedBox(width: 20),
+                      labeledControl,
+                    ],
+                  ),
+          ),
+          if (footer case final footer?) ...[const SizedBox(height: 8), footer],
+        ],
       ),
     );
   }

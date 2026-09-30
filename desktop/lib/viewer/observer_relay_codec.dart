@@ -66,6 +66,9 @@ class ObserverRelayCodec implements RelayCodec {
     'terminal_resync',
     'terminal_close',
     'observer_viewer',
+    'observer_comments',
+    'observer_comment_post',
+    'observer_comment_remove',
   };
 
   @override

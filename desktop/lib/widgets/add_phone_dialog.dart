@@ -6,16 +6,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:qr/qr.dart';
-import 'package:xterm/xterm.dart' show TerminalTheme;
 
 import '../api/api_client.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shortcuts/app_keymap.dart';
 import '../state/app_state.dart';
-import '../terminal/terminal_text.dart';
-import '../terminal/terminal_theme.dart';
-import '../terminal/terminal_theme_store.dart';
-import 'box_chrome.dart';
+import '../ws/ws_conn.dart' show WsRequestFailure, WsRequestTimeout;
+import 'desktop_chrome.dart';
+import 'desktop_prompt_surface.dart';
 import 'terminal_prompt.dart';
 
 /// Harness ▸ Add Phone… — a QR the phone scans to sign in to this account AND
@@ -45,13 +43,19 @@ Future<void> showAddPhoneDialog(
   AppKeymap? keymap,
   PhonePairCall? pair,
   PhoneSignInCodeCall? signInCode,
+  VoidCallback? onConnectMachine,
+  PairedDevicesCall? listDevices,
+  RemovePairedDeviceCall? removeDevice,
 }) => showTerminalPrompt<void>(
   context,
   keymap: keymap,
   builder: (_) => AddPhoneDialog(
     app: app,
-    pair: pair ?? phonePairOverDaemon(app.api),
+    pair: pair,
     signInCode: signInCode ?? app.api.phoneSignInCode,
+    onConnectMachine: onConnectMachine,
+    listDevices: listDevices ?? app.api.pairedDevices,
+    removeDevice: removeDevice ?? app.api.removePairedDevice,
   ),
 );
 
@@ -189,21 +193,72 @@ PhonePairCall phonePairOverDaemon(ApiClient api) => (code, cancel) async {
   }
 };
 
+/// The browser already holds the machine's trusted identity. Arm that machine over its encrypted
+/// connection; the account service never receives the QR's pairing secret.
+PhonePairCall phonePairOverRelay(AppNotifier app, String machineId) =>
+    (code, cancel) async {
+      if (cancel.isCancelled) return const PhonePairAnswer.failed('CANCELLED');
+      try {
+        final answer = await Future.any([
+          app.pairPhone(machineId, code),
+          cancel.whenCancel.then(
+            (_) => <String, dynamic>{'error': 'CANCELLED'},
+          ),
+        ]);
+        if (answer['ok'] == true) {
+          final label = answer['label'];
+          return PhonePairAnswer.paired(
+            label is String && label.trim().isNotEmpty ? label.trim() : 'phone',
+          );
+        }
+        final error = answer['error'];
+        return PhonePairAnswer.failed(
+          error == 'UNSUPPORTED' ? PhonePairAnswer.unavailable : '$error',
+        );
+      } on WsRequestTimeout {
+        return const PhonePairAnswer.failed(PhonePairAnswer.unavailable);
+      } on WsRequestFailure catch (failure) {
+        return PhonePairAnswer.failed(
+          failure.code == 'UNSUPPORTED'
+              ? PhonePairAnswer.unavailable
+              : failure.code,
+        );
+      } catch (_) {
+        return const PhonePairAnswer.failed('BACKEND_DOWN');
+      }
+    };
+
 /// A fresh one-time sign-in code for the QR and how long it stays good, or
 /// null when there is none to be had (see [ApiClient.phoneSignInCode]).
 typedef PhoneSignInCodeCall = Future<({String code, Duration ttl})?> Function();
+
+/// The devices paired with this computer, or null when the daemon cannot say
+/// (see [ApiClient.pairedDevices]).
+typedef PairedDevicesCall = Future<List<PairedDevice>?> Function();
+
+/// Unpair one device by its fingerprint; true when it is done.
+typedef RemovePairedDeviceCall = Future<bool> Function(String fingerprint);
 
 class AddPhoneDialog extends StatefulWidget {
   const AddPhoneDialog({
     super.key,
     required this.app,
-    required this.pair,
+    this.pair,
     required this.signInCode,
+    this.onConnectMachine,
+    this.listDevices,
+    this.removeDevice,
   });
 
   final AppNotifier app;
-  final PhonePairCall pair;
+  final PhonePairCall? pair;
   final PhoneSignInCodeCall signInCode;
+  final VoidCallback? onConnectMachine;
+
+  /// The list under the QR — who can already reach this computer — with a way
+  /// to take a device's access back. Null shows no list.
+  final PairedDevicesCall? listDevices;
+  final RemovePairedDeviceCall? removeDevice;
 
   @override
   State<AddPhoneDialog> createState() => _AddPhoneDialogState();
@@ -230,6 +285,17 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
 
   AppNotifier get app => widget.app;
 
+  // Freeze the destination while a QR is visible, even if focus or inventory changes.
+  late final String? _remoteMachineId = app.viewer == null
+      ? null
+      : app.ownedActionMachine?.machine.machineId;
+
+  late final PhonePairCall _pair =
+      widget.pair ??
+      (_remoteMachineId != null
+          ? phonePairOverRelay(app, _remoteMachineId)
+          : phonePairOverDaemon(app.api));
+
   /// A fresh code each time the dialog opens, and a fresh one again after a
   /// scan that did not match — see [_loop].
   late String _code = newPhonePairCode();
@@ -247,6 +313,16 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
   bool _signInAsked = false;
   Timer? _signInTimer;
 
+  /// The devices paired with this computer, newest first; null until the
+  /// daemon answers, or when it cannot.
+  List<PairedDevice>? _devices;
+  bool _allDevices = false;
+  final _removing = <String>{};
+
+  /// How many devices show before "+ N more": the dialog is the QR and a
+  /// line, and the list must not outweigh it.
+  static const _devicesShown = 3;
+
   /// No pairing to be had from this daemon — asking stopped for good.
   bool _stopped = false;
   String? _connected;
@@ -263,6 +339,7 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     app.addListener(_appChanged);
     _syncLoop();
     unawaited(_renewSignIn());
+    unawaited(_loadDevices());
   }
 
   @override
@@ -298,7 +375,9 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
   ({String email, String machineId})? get _target {
     if (app.isGuest) return null;
     final email = app.currentUser?.email.trim();
-    final machineId = app.localMachineState?.machine.machineId;
+    final machineId = app.viewer == null
+        ? app.localMachineState?.machine.machineId
+        : _remoteMachineId;
     // `CurrentUserProfile.local()` says "local terminal": not an address.
     if (email == null || !email.contains('@')) return null;
     if (machineId == null || machineId.isEmpty) return null;
@@ -321,7 +400,7 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
       final code = _code;
       PhonePairAnswer answer;
       try {
-        answer = await widget.pair(code, _cancel);
+        answer = await _pair(code, _cancel);
       } catch (error) {
         answer = PhonePairAnswer.failed('$error');
       }
@@ -333,6 +412,8 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
           _connected = label;
           _message = null;
         });
+        // The phone that just joined is on the list now.
+        unawaited(_loadDevices());
         if (await _sleep(_connectedHold) && mounted) {
           Navigator.of(context).pop();
         }
@@ -355,7 +436,11 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
           _say('Too many tries. Wait a minute.');
           wait = _rateLimited;
         case 'BACKEND_DOWN':
-          _say("This ${_thisComputer()} can't reach Harness right now.");
+          _say(
+            app.viewer == null
+                ? "This ${_thisComputer()} can't reach Harness right now."
+                : 'The computer is offline. Reconnect it to add your phone.',
+          );
           wait = _poll;
         // The phone started and went quiet, or said no. The QR is still
         // good: scanning it again starts over.
@@ -366,7 +451,11 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
           _say('Cancelled on your phone. Scan again.', sticky: true);
           wait = _poll;
         case PhonePairAnswer.unavailable:
-          _say('Update Harness on this ${_thisComputer()} to add a phone.');
+          _say(
+            app.viewer == null
+                ? 'Update Harness on this ${_thisComputer()} to add a phone.'
+                : 'Update Harness on the computer to add a phone.',
+          );
           setState(() => _stopped = true);
           return;
         case final other:
@@ -403,6 +492,45 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     );
   }
 
+  Future<void> _loadDevices() async {
+    final list = widget.listDevices;
+    if (list == null) return;
+    List<PairedDevice>? devices;
+    try {
+      devices = await list();
+    } catch (_) {
+      devices = null;
+    }
+    if (_closed || !mounted) return;
+    setState(() => _devices = devices);
+  }
+
+  /// Takes [device]'s access away. One click, no confirmation: undoing it is
+  /// scanning the QR above again, and a device that is not yours should be
+  /// gone in one move.
+  Future<void> _remove(PairedDevice device) async {
+    final remove = widget.removeDevice;
+    if (remove == null || _removing.contains(device.fingerprint)) return;
+    setState(() => _removing.add(device.fingerprint));
+    bool removed;
+    try {
+      removed = await remove(device.fingerprint);
+    } catch (_) {
+      removed = false;
+    }
+    if (_closed || !mounted) return;
+    setState(() {
+      _removing.remove(device.fingerprint);
+      if (removed) {
+        _devices = [
+          for (final kept in _devices ?? const <PairedDevice>[])
+            if (kept.fingerprint != device.fingerprint) kept,
+        ];
+      }
+    });
+    if (!removed) _say("Couldn't remove ${device.name}. Try again.");
+  }
+
   void _say(String message, {bool sticky = false}) => setState(() {
     _message = message;
     _sticky = sticky;
@@ -422,78 +550,37 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
 
   void _close() => Navigator.of(context).maybePop();
 
-  TerminalTheme get _theme =>
-      terminalThemeFor(grid.AppTheme.palette.value, terminalThemeStore.value);
-  Color get _faint => _theme.foreground.withValues(alpha: .54);
-  TextStyle _ink([Color? color]) =>
-      terminalContentStyle(color: color ?? _theme.foreground);
+  Color get _faint => DesktopChrome.muted;
+  TextStyle _ink([Color? color]) => DesktopChrome.text(color: color);
 
   @override
   Widget build(BuildContext context) {
-    TerminalFontScope.watch(context);
-    // Live font and colour changes reach an open dialog too — see the dialog
-    // guide, design/terminal-dialogs.md.
-    return ListenableBuilder(
-      listenable: Listenable.merge([
-        terminalFontStore,
-        terminalThemeStore,
-        grid.AppTheme.palette,
-      ]),
-      builder: (context, _) => _dialog(context),
-    );
+    grid.AppTheme.watch(context);
+    return _dialog(context);
   }
 
   Widget _dialog(BuildContext context) {
-    // The grid: margins in whole character columns, spacing in whole rows.
-    final cell = terminalCellSizeOf(context);
-    final margin = cell.width * 2;
-    final row = cell.height;
-    // The window is the QR and one line: 240 points — a phone camera reads that
-    // from across a desk — in a whole number of rows, so the line under it stays
-    // on the grid, and the window just wider than the code.
-    final qrSide = (240 / row).ceil() * row;
-    final width = math.min(
-      qrSide + margin * 4,
-      MediaQuery.sizeOf(context).width - 32,
-    );
     return TerminalPromptKeys(
       cancel: _close,
-      child: Dialog(
-        insetPadding: const EdgeInsets.all(16),
-        elevation: 0,
-        backgroundColor: Colors.transparent,
-        child: SizedBox(
-          width: width,
-          child: Material(
-            elevation: 0,
-            color: _theme.background,
-            surfaceTintColor: Colors.transparent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(kTerminalCornerRadius),
-              side: terminalPaneBorder(focused: true),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: DefaultTextStyle.merge(
-              style: _ink(),
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(margin, row, margin, row),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Add your phone',
-                      textAlign: TextAlign.center,
-                      style: _ink(),
-                    ),
-                    SizedBox(height: row),
-                    ..._body(qrSide, row),
-                  ],
+      child: DesktopPromptSurface(
+        width: 440,
+        body: LayoutBuilder(
+          builder: (context, constraints) => DesktopPromptScrollBody(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Semantics(
+                  header: true,
+                  child: Text('Add your phone', style: DesktopChrome.heading()),
                 ),
-              ),
+                const SizedBox(height: 24),
+                ..._body(math.min(240, constraints.maxWidth), 16),
+              ],
             ),
           ),
         ),
+        actions: [TextButton(onPressed: _close, child: const Text('Done'))],
       ),
     );
   }
@@ -504,6 +591,21 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     }
     final target = _target;
     if (target == null) {
+      if (app.viewer != null && app.currentUser?.email.contains('@') == true) {
+        return [
+          Text('Connect a computer to add your phone.', style: _ink()),
+          if (widget.onConnectMachine case final connect?) ...[
+            SizedBox(height: row),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                connect();
+              },
+              child: const Text('Connect a machine'),
+            ),
+          ],
+        ];
+      }
       return [
         Text(
           app.currentUser?.email.contains('@') == true
@@ -515,7 +617,16 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
     }
     // A moment's wait for the sign-in code, in the QR's own space: a QR that
     // changed right after it appeared would be one scanned without it.
-    if (!_signInAsked) return [SizedBox(height: qrSide + row * 2)];
+    if (!_signInAsked) {
+      return [
+        SizedBox(
+          height: qrSide + row * 2,
+          child: Center(
+            child: Text('Preparing your code…', style: _ink(_faint)),
+          ),
+        ),
+      ];
+    }
     final link = phonePairLink(
       email: target.email,
       machineId: target.machineId,
@@ -531,18 +642,94 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
         ),
       ),
       SizedBox(height: row),
+      if (_remoteMachineId case final machineId?) ...[
+        Text(
+          app.stateOf(machineId)?.machine.displayName ?? 'Computer',
+          textAlign: TextAlign.center,
+          style: _ink(_faint),
+        ),
+        SizedBox(height: row),
+      ],
       // One line, and it is the status too: what to do, then that it worked.
       // The phone's own screen says the rest (Yes — scan to connect).
       _status(),
+      ..._devicesList(row),
     ];
+  }
+
+  /// Who can already reach this computer, with a way to take it back: the
+  /// safety net for a QR somebody else scanned.
+  List<Widget> _devicesList(double row) {
+    final devices = _devices;
+    if (devices == null || devices.isEmpty) return const [];
+    final shown = _allDevices ? devices : devices.take(_devicesShown).toList();
+    final more = devices.length - shown.length;
+    return [
+      SizedBox(height: row),
+      Text(
+        'Paired with this ${_thisComputer()}',
+        key: const ValueKey('add-phone-devices'),
+        style: DesktopChrome.metadata(),
+      ),
+      const SizedBox(height: 8),
+      for (final device in shown) _deviceRow(device),
+      if (more > 0)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: const ValueKey('add-phone-more-devices'),
+            onPressed: () => setState(() => _allDevices = true),
+            child: Text('Show $more more'),
+          ),
+        ),
+    ];
+  }
+
+  Widget _deviceRow(PairedDevice device) {
+    final removing = _removing.contains(device.fingerprint);
+    return Padding(
+      key: ValueKey('add-phone-device-${device.fingerprint}'),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  device.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: DesktopChrome.control(),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  device.online ? 'Online' : _pairedAgo(device.pairedAt),
+                  style: DesktopChrome.metadata(
+                    color: device.online ? grid.AppPalette.online : _faint,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: removing || widget.removeDevice == null
+                ? null
+                : () => unawaited(_remove(device)),
+            child: Text(removing ? 'Removing…' : 'Remove'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _status() {
     final connected = _connected;
     final (text, color) = connected != null
-        ? ('✓ Connected $connected', _theme.green)
+        ? ('✓ Connected $connected', grid.AppPalette.online)
         : _message != null
-        ? (_message!, _theme.red)
+        ? (_message!, Theme.of(context).colorScheme.error)
         : ('Scan with Harness on your iPhone', _faint);
     return Semantics(
       liveRegion: true,
@@ -554,6 +741,16 @@ class _AddPhoneDialogState extends State<AddPhoneDialog> {
       ),
     );
   }
+}
+
+/// How long ago [at] was, in one short word: `now`, `5m`, `3h`, `2d`, `6w`.
+String _pairedAgo(DateTime at) {
+  final ago = DateTime.now().difference(at);
+  if (ago.inMinutes < 1) return 'now';
+  if (ago.inHours < 1) return '${ago.inMinutes}m';
+  if (ago.inDays < 1) return '${ago.inHours}h';
+  if (ago.inDays < 14) return '${ago.inDays}d';
+  return '${ago.inDays ~/ 7}w';
 }
 
 /// "Mac" where the menu says Harness ▸ Add Phone…; the command palette also

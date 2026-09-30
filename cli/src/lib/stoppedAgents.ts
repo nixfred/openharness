@@ -68,7 +68,7 @@ export class StoppedAgentStore {
       defaultName: projectDisplayName(session),
       touchedAt: Date.now(),
     }
-    // Herdr-only snapshots omit the legacy alias just like registry persistence.
+    // A snapshot without a tmux pane omits the legacy alias just like registry persistence.
     if (!snapshot.tmuxPane) delete (snapshot as Partial<RegisteredSession>).tmuxPane
     atomicWriteJson(join(this.directory, `${session.agentId}.json`), { version: 1, session: snapshot })
   }

@@ -84,9 +84,12 @@ void main() {
     test('asks every machine once per pause in typing and keeps the best hit per harness', () async {
       final asked = <(String, String)>[];
       final gate = Completer<void>();
+      // A zero debounce, not 5ms: a timer due now always fires before [settle]'s 30ms one, where
+      // a 5ms one fired after it on a loaded machine (one full run in several). Four searches in
+      // a row still coalesce into one question — the restart happens before either timer is due.
       final search = SessionContentSearch(
         machines: () => ['m', 'n'],
-        debounce: const Duration(milliseconds: 5),
+        debounce: Duration.zero,
         ask: (machine, query, _) async {
           asked.add((machine, query));
           if (machine == 'n') await gate.future;

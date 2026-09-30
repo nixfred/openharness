@@ -100,7 +100,13 @@ class SampleAsk {
   /// The rows, in order — `1.` is the first.
   final List<String> options;
 
+  /// The dialog's own line, drawn in the pane.
   String get question => 'Do you want to proceed?';
+
+  /// What the daemon announces for it (`permissionTitle` in the CLI's askQuestion.ts): the header
+  /// and the command, `Approve Bash command: psql -f …`. It is what Find quotes under a harness that
+  /// needs you — the pane's stock "Do you want to proceed?" said nothing about what.
+  String get announced => 'Approve $title: $command';
 }
 
 enum LiveMode { idle, working, asking }
@@ -354,7 +360,7 @@ class ClaudeLook extends SampleLook {
         width - 6,
         // Claude Code's own kind of nudge, and true of any project: not one project's file name
         // on every harness.
-        placeholder: 'Try "run the tests and fix what fails"',
+        placeholder: 'Try "test"',
       ).indexed)
         [Span(i == 0 ? '> ' : '  '), ...row],
     ], width);

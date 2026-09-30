@@ -150,53 +150,55 @@ void main() {
     );
   }
 
-  testWidgets('fresh creation after browsing uses successful launch defaults', (
-    tester,
-  ) async {
-    newHarnessOpensInBox = true;
-    addTearDown(() => newHarnessOpensInBox = false);
-    final app = createApp();
-    app.machineStates['m']!.localOnly = true;
-    app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
-    await app.agentPreference.remember('codex');
-    await app.projectHistory.select('m', '/work/saved');
-    final map = MemoryKeymap();
-    addTearDown(app.dispose);
-    addTearDown(map.dispose);
-    final pane = app.adoptSessionForTest(terminal('a0', []));
-    final work = app.activeSwarm;
-    await configured.mount(tester, app, map);
-    await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+  testWidgets(
+    'returning from Store restores the creation draft and selected project',
+    (tester) async {
+      newHarnessOpensInBox = true;
+      addTearDown(() => newHarnessOpensInBox = false);
+      final app = createApp();
+      app.machineStates['m']!.localOnly = true;
+      app.gitProjectReaderForTest = (_, _) async => {'isGit': false};
+      await app.agentPreference.remember('codex');
+      await app.projectHistory.select('m', '/work/saved');
+      final map = MemoryKeymap();
+      addTearDown(app.dispose);
+      addTearDown(map.dispose);
+      final pane = app.adoptSessionForTest(terminal('a0', []));
+      final work = app.activeSwarm;
+      await configured.mount(tester, app, map);
+      await key(tester, LogicalKeyboardKey.keyN, cmd: true);
 
-    final box = tester
-        .widget<NewHarnessForm>(find.byType(NewHarnessForm))
-        .controller;
-    box.setFolder('/work/project');
-    await tester.pump();
-    box.task = 'Finish the login feature';
-    await tester.pump();
-    final draft = box.draft;
-    await openLaunchRow(tester, 'harness');
-    await typeHarnessQuery(tester, 'a harness not in this catalog');
-    await tester.pump();
-    expect(box.selected?.id, NewHarnessController.storeId);
-    expect(find.text('Browse Harness Store'), findsOneWidget);
-    await acceptSetupOrSearch(tester);
-    expect(app.activeSwarm.isStore, isTrue);
-    expect(find.byType(NewHarnessForm), findsNothing);
-    expect(work.panes.single, same(pane));
-    app.selectSwarm(work.id);
-    await tester.pump();
-    await key(tester, LogicalKeyboardKey.keyN, cmd: true);
-    final resumed = tester
-        .widget<NewHarnessForm>(find.byType(NewHarnessForm))
-        .controller;
-    expect(resumed.task, '');
-    expect(resumed.engine, draft.engine);
-    expect(resumed.machineId, draft.machineId);
-    expect(resumed.project.folder, '/work/saved');
-    await key(tester, LogicalKeyboardKey.escape);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-  });
+      final box = tester
+          .widget<NewHarnessForm>(find.byType(NewHarnessForm))
+          .controller;
+      box.setFolder('/work/project');
+      await tester.pump();
+      box.task = 'Finish the login feature';
+      await tester.pump();
+      final draft = box.draft;
+      await openLaunchRow(tester, 'harness');
+      await typeHarnessQuery(tester, 'a harness not in this catalog');
+      await tester.pump();
+      expect(box.selected?.id, NewHarnessController.storeId);
+      expect(find.text('Browse Harness Store'), findsOneWidget);
+      await acceptSetupOrSearch(tester);
+      expect(app.activeSwarm.isStore, isTrue);
+      expect(find.byType(NewHarnessForm), findsNothing);
+      expect(work.panes.single, same(pane));
+      app.selectSwarm(work.id);
+      await tester.pump();
+      await key(tester, LogicalKeyboardKey.keyN, cmd: true);
+      final resumed = tester
+          .widget<NewHarnessForm>(find.byType(NewHarnessForm))
+          .controller;
+      expect(resumed.task, draft.task);
+      expect(resumed.engine, draft.engine);
+      expect(resumed.machineId, draft.machineId);
+      expect(resumed.project.folder, draft.project.folder);
+      expect(app.projectHistory.selected('m'), '/work/project');
+      await key(tester, LogicalKeyboardKey.escape);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

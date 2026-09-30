@@ -5,7 +5,7 @@ import 'package:harness_mobile/core/config.dart';
 import 'package:harness_mobile/phone/tty_controls.dart';
 import 'package:harness_mobile/phone/phone_search_results.dart';
 import 'package:harness_mobile/phone/terminal_action_column.dart';
-import 'package:harness_mobile/phone/terminal_header.dart';
+import 'package:harness_mobile/phone/terminal_title.dart';
 import 'package:harness_mobile/phone/terminal_key_bar.dart';
 import 'package:harness_mobile/phone/terminal_page.dart';
 import 'package:harness_mobile/phone/voice_input_controller.dart';
@@ -83,6 +83,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     final before = tester.getSize(find.byType(TerminalView));
     resizes.clear();
+    // The title over the terminal's top rows, where a tap lands on it.
+    expect(find.byType(TerminalTitle).hitTestable(), findsOneWidget);
 
     // Back into the scrollback, then forward again: the forward push is what
     // sends the header away.
@@ -94,7 +96,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     // Folded: the header is no longer where a tap would land on it.
-    expect(find.byType(TerminalHeader).hitTestable(), findsNothing);
+    expect(find.byType(TerminalTitle).hitTestable(), findsNothing);
     expect(tester.getSize(find.byType(TerminalView)), before);
     // The slide is over; a resize owed to it would be on its way by now.
     await tester.pump(const Duration(seconds: 1));

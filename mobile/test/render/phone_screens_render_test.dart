@@ -9,6 +9,7 @@ import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/config.dart';
 import 'package:harness_mobile/core/models.dart';
 import 'package:harness_mobile/phone/new_agent_page.dart';
+import 'package:harness_mobile/phone/new_agent_draft.dart';
 import 'package:harness_mobile/phone/welcome/how_it_works.dart';
 import 'package:harness_mobile/core/local_key_value_store.dart';
 import 'package:harness_mobile/phone/welcome/focus_hints.dart';
@@ -44,7 +45,7 @@ final _outDir = Platform.environment['PHONE_RENDER_DIR'];
 
 /// Claude Code, mid-turn, the way its TUI draws on a phone-width terminal.
 const _claudeOutput = [
-  '\x1b[1m⏺\x1b[0m I\'ll look at how Find ranks agents first.\r\n',
+  '\x1b[1m⏺\x1b[0m I\'ll look at how Find ranks them first.\r\n',
   '\r\n',
   '\x1b[32m⏺\x1b[0m \x1b[1mRead\x1b[0m(lib/phone/phone_search_rank.dart)\r\n',
   '  ⎿  Read \x1b[1m262\x1b[0m lines\r\n',
@@ -54,22 +55,23 @@ const _claudeOutput = [
   '  The desktop does the opposite.\r\n',
   '\r\n',
   '\x1b[32m⏺\x1b[0m \x1b[1mUpdate\x1b[0m(lib/phone/phone_search_rank.dart)\r\n',
-  '  ⎿  Updated with \x1b[32m18\x1b[0m additions and \x1b[31m7\x1b[0m removals\r\n',
+  '  ⎿  Updated with \x1b[32m18\x1b[0m additions and\r\n',
+  '     \x1b[31m7\x1b[0m removals\r\n',
   '     \x1b[2m183\x1b[0m \x1b[31m-    if (needle.isEmpty) {\x1b[0m\r\n',
   '     \x1b[2m183\x1b[0m \x1b[32m+    if (byActivity || empty) {\x1b[0m\r\n',
   '\r\n',
   '\x1b[32m⏺\x1b[0m \x1b[1mBash\x1b[0m(flutter test test/search_test.dart)\r\n',
   '  ⎿  00:01 +42: All tests passed!\r\n',
   '\r\n',
-  '\x1b[1m⏺\x1b[0m Find now orders by last use, the same\r\n',
-  '  order as the desktop\'s ⌘P. Typing filters\r\n',
-  '  without reordering.\r\n',
+  '\x1b[1m⏺\x1b[0m Find now orders by last use, the\r\n',
+  '  same order as the desktop\'s ⌘P. Typing\r\n',
+  '  filters without reordering.\r\n',
   '\r\n',
   '\x1b[38;5;208m✻\x1b[0m Committing… \x1b[2m(12s · ↓ 1.8k tokens)\x1b[0m\r\n',
   '\r\n',
-  '\x1b[2m╭──────────────────────────────────────────╮\x1b[0m\r\n',
-  '\x1b[2m│\x1b[0m > \x1b[2m                                       │\x1b[0m\r\n',
-  '\x1b[2m╰──────────────────────────────────────────╯\x1b[0m\r\n',
+  '\x1b[2m╭────────────────────────────────────────╮\x1b[0m\r\n',
+  '\x1b[2m│\x1b[0m > \x1b[2m                                     │\x1b[0m\r\n',
+  '\x1b[2m╰────────────────────────────────────────╯\x1b[0m\r\n',
   '  \x1b[35m⏵⏵ auto mode on\x1b[0m \x1b[2m(shift+tab to cycle)\x1b[0m\r\n',
 ];
 
@@ -90,7 +92,42 @@ class _Conn extends WsConn {
     String type, {
     Map<String, dynamic> payload = const {},
     Duration timeout = const Duration(seconds: 20),
-  }) async => {};
+  }) async => switch (type) {
+    'engines_probe' => {
+      'engines': [
+        {'engine': 'claude', 'installed': true},
+        {'engine': 'codex', 'installed': true, 'supportsCodexHome': true},
+      ],
+    },
+    'git_project_info' => {
+      'isGit': true,
+      'branch': 'main',
+      'defaultRef': 'refs/heads/main',
+      'branches': [
+        {'ref': 'refs/heads/main', 'name': 'main'},
+      ],
+    },
+    'grid_models_list' => {
+      'supportsModelLaunch': true,
+      'localModelEngines': ['claude', 'codex'],
+      'grids': [
+        {
+          'name': 'own',
+          'own': true,
+          'models': [
+            {'id': 'qwen-coder', 'node': 'studio'},
+          ],
+        },
+        {
+          'name': 'team-grid',
+          'models': [
+            {'id': 'shared-coder', 'node': 'server'},
+          ],
+        },
+      ],
+    },
+    _ => {},
+  };
 }
 
 Future<void> _loadFont(
@@ -173,6 +210,7 @@ void main() {
 
   setUp(() async {
     if (skip) return;
+    newAgentDraft = null;
     notifier = AppNotifier(
       config: AppConfig.dev,
       authSession: AuthSession(),
@@ -239,7 +277,11 @@ void main() {
     session.streamId = 's';
     // A screen to show — kept from "last time", which is what a render needs: the live path waits
     // for a keyframe this fixture has no machine to send.
-    final screen = Terminal(maxLines: 1000)..resize(46, 49);
+    // 42 columns: what a 390pt phone fits at 14pt SF Mono between the two 12pt
+    // gutters, measured. The live terminal resizes itself to the view; this
+    // fixture has no machine to answer a resize, so a wider seed would render
+    // clipped at the right edge — a fixture fault a reviewer reads as the app's.
+    final screen = Terminal(maxLines: 1000)..resize(42, 49);
     for (var line = 0; line < 60; line++) {
       screen.write('earlier output line $line\r\n');
     }
@@ -262,6 +304,7 @@ void main() {
 
   tearDown(() {
     if (skip) return;
+    newAgentDraft = null;
     voice.dispose();
     language.dispose();
     notifier.dispose();
@@ -273,7 +316,9 @@ void main() {
           key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 3);
       final png = await image.toByteData(format: ui.ImageByteFormat.png);
-      await File('$_outDir/$name.png').writeAsBytes(png!.buffer.asUint8List());
+      final file = File('$_outDir/$name.png');
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(png!.buffer.asUint8List());
     });
     // Done with the screen: take it down and run its clocks out, so no timer outlives the test.
     await tester.pumpWidget(const SizedBox());
@@ -321,20 +366,27 @@ void main() {
     await shoot(tester, key, '0-welcome');
   });
 
-  testWidgets('welcome, email then code', skip: skip, (tester) async {
-    final key = await pumpScreen(
-      tester,
-      PhoneWelcome(
-        notifier: notifier,
-        onTrySample: (_) async => null,
-        sendCode: (_) async {},
-        signIn: (_, _) async {},
-        scanCamera: const SizedBox(),
-      ),
-    );
+  PhoneWelcome welcome() => PhoneWelcome(
+    notifier: notifier,
+    onTrySample: (_) async => null,
+    sendCode: (_) async {},
+    signIn: (_, _) async {},
+    scanCamera: const SizedBox(),
+    loadDownloads: () async => const {},
+  );
+
+  testWidgets('welcome, scan', skip: skip, (tester) async {
+    final key = await pumpScreen(tester, welcome());
     await tester.tap(find.text('Yes — scan to connect'));
     await tester.pump(const Duration(milliseconds: 300));
+    // [shoot] takes the screen down after it: one capture per test.
     await shoot(tester, key, '0a-welcome-scan');
+  });
+
+  testWidgets('welcome, email', skip: skip, (tester) async {
+    final key = await pumpScreen(tester, welcome());
+    await tester.tap(find.text('Yes — scan to connect'));
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('Use email instead'));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.enterText(
@@ -343,7 +395,6 @@ void main() {
     );
     await tester.pump();
     await shoot(tester, key, '0b-welcome-email');
-    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('welcome, code', skip: skip, (tester) async {
@@ -359,7 +410,7 @@ void main() {
     );
     await tester.tap(find.text('Yes — scan to connect'));
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Use email instead'));
+    await tester.tap(find.text('Use email instead', findRichText: true));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.enterText(find.byType(TextField), 'ada@example.com');
     await tester.tap(find.text('Send code'));
@@ -372,7 +423,11 @@ void main() {
   testWidgets('set up your computer', skip: skip, (tester) async {
     final key = await pumpScreen(
       tester,
-      ConnectComputerPage(notifier: notifier, onTrySample: (_) async => null),
+      ConnectComputerPage(
+        notifier: notifier,
+        onTrySample: (_) async => null,
+        loadDownloads: () async => const {},
+      ),
     );
     await shoot(tester, key, '0d-connect-computer');
   });
@@ -387,6 +442,7 @@ void main() {
             child: SetUpComputerPage(
               onScan: () {},
               onBack: () {},
+              onTrySample: () {},
               loadDownloads: () async => const {},
             ),
           ),
@@ -497,13 +553,15 @@ void main() {
   testWidgets('focus, prompt', skip: skip, (tester) async {
     final key = await pumpScreen(tester, focus());
     notifier.panes.first.session!.terminal.write(
-      '\r\n\x1b[2m────────────────────────────────────────────\x1b[0m\r\n'
+      '\r\n\x1b[2m──────────────────────────────────────────\x1b[0m\r\n'
       ' \x1b[1mBash command\x1b[0m\r\n'
       '   rm -rf build/ && flutter build ios\r\n'
       ' Do you want to proceed?\r\n'
       ' \x1b[36m❯ 1. Yes\x1b[0m\r\n'
-      "   2. Yes, and don't ask again for rm commands\r\n"
-      '   3. No, and tell Claude what to do differently\r\n'
+      "   2. Yes, and don't ask again for rm\r\n"
+      '      commands\r\n'
+      '   3. No, and tell Claude what to do\r\n'
+      '      differently\r\n'
       '\r\n'
       ' \x1b[2mEsc to cancel · Enter to confirm\x1b[0m',
     );
@@ -533,7 +591,8 @@ void main() {
 
   testWidgets('focus, actions', skip: skip, (tester) async {
     final key = await pumpScreen(tester, focus());
-    await tester.tap(find.text('…'));
+    // The title opens the harness's actions — rename, restart, paste…
+    await tester.tap(find.text('hn', findRichText: true).first);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     await shoot(tester, key, '1d-focus-actions');
@@ -609,6 +668,46 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await shoot(tester, key, '4d-new-agent-chooser');
+  });
+
+  Future<GlobalKey> expandedNew(WidgetTester tester, String engine) async {
+    final key = await pumpScreen(
+      tester,
+      NewAgentPage(notifier: notifier, machineId: 'm', voice: voice),
+    );
+    await tester.tap(find.text('agent'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final choice = find
+        .text(engine == 'codex' ? 'Codex' : 'Claude Code', findRichText: true)
+        .last;
+    await tester.ensureVisible(choice);
+    await tester.tap(choice);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('options'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.text(engine == 'codex' ? 'OpenAI' : 'Anthropic'),
+      findsOneWidget,
+    );
+    if (engine == 'codex') expect(find.text('profile'), findsOneWidget);
+    return key;
+  }
+
+  for (final engine in ['claude', 'codex']) {
+    testWidgets('new, $engine options', skip: skip, (tester) async {
+      final key = await expandedNew(tester, engine);
+      await shoot(tester, key, '4f-new-$engine-options');
+    });
+  }
+
+  testWidgets('new, models', skip: skip, (tester) async {
+    final key = await expandedNew(tester, 'codex');
+    await tester.tap(find.text('model'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await shoot(tester, key, '4g-new-models');
   });
 
   testWidgets('settings', skip: skip, (tester) async {

@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -228,7 +229,10 @@ void main() {
     expect(banner, findsOneWidget);
     expect(hint, findsOneWidget);
     expect(
-      find.descendant(of: banner, matching: find.byIcon(Icons.keyboard_return)),
+      find.descendant(
+        of: banner,
+        matching: find.byIcon(AppIcons.cornerDownLeft),
+      ),
       findsOneWidget,
       reason: 'the key is drawn on the button itself',
     );
@@ -242,7 +246,7 @@ void main() {
       tester,
       notice: terminalNotice(
         label: 'Offline',
-        icon: Icons.cloud_off,
+        icon: AppIcons.cloudOff,
         detail: 'Test host is offline.',
       ),
     );
@@ -260,7 +264,7 @@ void main() {
       tester,
       notice: terminalNotice(
         label: 'Not confirmed',
-        icon: Icons.help_outline,
+        icon: AppIcons.circleHelp,
         detail:
             'The engine is still running here; the daemon has not confirmed '
             'which conversation it reopened.',
@@ -276,7 +280,10 @@ void main() {
     expect(button, findsOneWidget);
     // ⏎ belongs to taking the stream back; this action has no chord behind it.
     expect(
-      find.descendant(of: button, matching: find.byIcon(Icons.keyboard_return)),
+      find.descendant(
+        of: button,
+        matching: find.byIcon(AppIcons.cornerDownLeft),
+      ),
       findsNothing,
     );
     await tester.tap(button);
@@ -294,7 +301,7 @@ void main() {
         tester,
         notice: terminalNotice(
           label: 'Link required',
-          icon: Icons.link_off,
+          icon: AppIcons.unlink,
           detail: 'Test host needs linking.',
           actionLabel: 'Link',
           onAction: () {},
@@ -313,7 +320,7 @@ void main() {
       tester,
       notice: terminalNotice(
         label: 'Offline',
-        icon: Icons.cloud_off,
+        icon: AppIcons.cloudOff,
         detail: 'Test host is offline.',
       ),
     );
@@ -330,7 +337,7 @@ void main() {
       tester,
       notice: terminalNotice(
         label: 'Not confirmed',
-        icon: Icons.help_outline,
+        icon: AppIcons.circleHelp,
         detail: 'Still checking.',
         banner: true,
         actionLabel: 'Check again',
@@ -732,7 +739,7 @@ void main() {
       tester,
       notice: terminalNotice(
         label: 'Offline',
-        icon: Icons.cloud_off,
+        icon: AppIcons.cloudOff,
         detail: 'Test host is offline.',
       ),
     );

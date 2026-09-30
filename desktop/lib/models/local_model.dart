@@ -15,12 +15,20 @@ class LocalModel {
     this.windowSeconds,
     this.operation,
     this.gridAsleep = false,
+    this.contextWindow,
+    this.estTokS,
+    this.paramsB,
   });
   final String id, name, state;
   final String? quant;
   final double? sizeBytes, tokensPerSecond, requests, windowSeconds;
   final bool recommended, canStart, canStop;
   final LocalModelOperation? operation;
+
+  /// What the grid catalog expects of this model on its machine, for choosing before a download:
+  /// the window it is given, its estimated speed, and its size in billions of parameters. Absent
+  /// for weights found on disk, which the catalog never sized, and from an older daemon.
+  final double? contextWindow, estTokS, paramsB;
 
   /// Running here, parked while the account's own grid sleeps (`gridAsleep`). It answers again by
   /// itself on the next message, so the row says so rather than reading as a plain `running`. An
@@ -65,6 +73,9 @@ class LocalModel {
     windowSeconds: _number(data['windowSeconds']),
     operation: LocalModelOperation.parse(data['operation']),
     gridAsleep: data['gridAsleep'] == true,
+    contextWindow: _number(data['contextWindow']),
+    estTokS: _number(data['estTokS']),
+    paramsB: _number(data['paramsB']),
   );
 }
 

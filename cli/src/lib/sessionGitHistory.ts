@@ -25,7 +25,12 @@ const date = (v: unknown): v is string => typeof v === 'string' && Number.isFini
 export function comparePullRequests(a: RecordedPullRequest, b: RecordedPullRequest): number {
   const rank = (p: RecordedPullRequest) => p.result?.status !== 'found' ? 1
     : p.result.state === 'Open' || p.result.state === 'Draft' ? 0 : 2
-  return rank(a) - rank(b) || Date.parse(b.at) - Date.parse(a.at)
+  const time = (p: RecordedPullRequest) => {
+    const pr = p.result?.status === 'found' ? p.result : null
+    const value = pr?.state === 'Merged' ? pr.mergedAt : pr?.state === 'Closed' ? pr.closedAt : pr?.updatedAt ?? pr?.createdAt
+    return value && date(value) ? Date.parse(value) : Date.parse(p.at)
+  }
+  return rank(a) - rank(b) || time(b) - time(a)
     || (a.url === b.url ? 0 : a.url < b.url ? -1 : 1)
 }
 function valid(value: unknown): value is GitHistory {
@@ -85,14 +90,15 @@ export class SessionGitHistoryStore {
     try {
       await entry.loaded
       const before = JSON.stringify(entry.value)
-      const current = context.current
-      const branch = current?.branch
-      // The launch checkout is context, not evidence that this conversation worked on its branch.
-      if (context.state === 'observed' && current && branch && !branch.startsWith('Detached ')) {
+      // This records branches checked out for the session, not authorship or proof of edits.
+      // Engine logs are optional enrichment; direct Git observations work for every engine.
+      for (const current of context.checkouts ?? (context.current ? [context.current] : [])) {
+        const branch = current.branch
+        if (!current.root || !branch || current.branchPending || branch.startsWith('Detached ')) continue
         const same = (b: WorkBranch) => b.cwd === (current.root ?? current.cwd) && b.branch === branch && b.remote === current.remote
         const previous = entry.value.branches.find(same)
         // Retrospective tool receipts cannot establish when this branch was checked out.
-        const at = previous ? context.observedAt ?? previous.at : new Date().toISOString()
+        const at = previous?.at ?? new Date().toISOString()
         if (!previous || previous.at < at) entry.value.branches = [
           { cwd: current.root ?? current.cwd, branch, remote: current.remote, at }, ...entry.value.branches.filter(b => !same(b)),
         ]
@@ -119,7 +125,8 @@ export class SessionGitHistoryStore {
       const existing = candidates.sort((a, b) => (b.checkedAt ?? '').localeCompare(a.checkedAt ?? ''))[0]
       // Network failures preserve the last observed state, with its original observation time.
       if (result.status === 'unavailable' && existing) return
-      const source = existing?.checkedAt && existing.checkedAt > checkedAt ? existing : { ...pr, result, checkedAt }
+      const source = existing?.checkedAt && existing.checkedAt > checkedAt ? existing
+        : { ...pr, at: existing?.at ?? pr.at, cwd: existing?.cwd ?? pr.cwd, result, checkedAt }
       if (source === existing) url = existing.url
       const aliases = [...new Set([pr.url, ...candidates.flatMap(p => [p.url, ...(p.aliases ?? [])])])].filter(alias => alias !== url).slice(0, 16)
       const next = { ...source, url,

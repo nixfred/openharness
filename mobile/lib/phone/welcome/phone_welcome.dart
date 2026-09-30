@@ -102,9 +102,7 @@ class _PhoneWelcomeState extends State<PhoneWelcome> {
     super.dispose();
   }
 
-  /// The offline sample — no longer offered on this screen (a video shows the app instead), but
-  /// kept behind a long press on the wordmark for the simulator's screenshots. Left from its end
-  /// card to set up a computer, it lands on the set-up page.
+  /// The offline sample, offered on welcome and setup. Its end card can lead to setup.
   Future<void> _trySample() async {
     final result = await widget.onTrySample!(context);
     if (!mounted || result != 'set-up') return;
@@ -236,6 +234,9 @@ class _PhoneWelcomeState extends State<PhoneWelcome> {
             _Step.setUp => SetUpComputerPage(
               onScan: () => _go(_Step.scan),
               onBack: () => _go(_Step.hello),
+              onTrySample: widget.onTrySample == null
+                  ? null
+                  : () => unawaited(_trySample()),
               loadDownloads: widget.loadDownloads,
             ),
             _Step.scan => ScanToConnectPage(
@@ -282,11 +283,16 @@ class _PhoneWelcomeState extends State<PhoneWelcome> {
                 onFilled: _signIn,
               ),
               error: _error,
-              button: TtyPrimaryButton(
-                label: 'Sign in',
-                busy: _busy || signingIn,
-                busyLabel: 'Signing in…',
-                onPressed: _signIn,
+              button: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _code,
+                builder: (_, value, _) => TtyPrimaryButton(
+                  label: 'Sign in',
+                  busy: _busy || signingIn,
+                  busyLabel: 'Signing in…',
+                  onPressed: value.text.trim().length == _codeLength
+                      ? _signIn
+                      : null,
+                ),
               ),
               footer: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -333,45 +339,61 @@ class _Hello extends StatelessWidget {
         .copyWith(height: 34 / 28, letterSpacing: -0.6);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Tty.origin, 24, Tty.origin, 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          GestureDetector(
-            key: const ValueKey('welcome-wordmark'),
-            behavior: HitTestBehavior.opaque,
-            onLongPress: onSample,
-            child: Row(
-              children: [
-                TtyText(
-                  'harness',
-                  size: TtySize.title,
-                  weight: FontWeight.w600,
-                ),
-                Container(
-                  width: 9,
-                  height: 18,
-                  margin: const EdgeInsets.only(left: 2),
-                  color: tty.green,
-                ),
-              ],
+      // ⚠️ **Scrolls when it does not fit.** The spacer holds the question at the foot where there
+      // is room; on a small phone at a large text size the headline alone outgrew the screen, and
+      // the column overflowed with both answers — the only ways on — pushed off its foot.
+      child: LayoutBuilder(
+        builder: (context, box) => SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: box.maxHeight),
+            child: IntrinsicHeight(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  GestureDetector(
+                    key: const ValueKey('welcome-wordmark'),
+                    behavior: HitTestBehavior.opaque,
+                    onLongPress: onSample,
+                    child: Row(
+                      children: [
+                        TtyText(
+                          'harness',
+                          size: TtySize.title,
+                          weight: FontWeight.w600,
+                        ),
+                        Container(
+                          width: 9,
+                          height: 18,
+                          margin: const EdgeInsets.only(left: 2),
+                          color: tty.green,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+                  Text(
+                    'Claude Code and Codex\nrun on your computer.\nDrive them from here.',
+                    style: hero,
+                  ),
+                  const Spacer(),
+                  TtyText(
+                    'Is Harness on your computer?',
+                    color: tty.faint,
+                    size: TtySize.row,
+                  ),
+                  const SizedBox(height: 12),
+                  _Answer(label: 'Yes — scan to connect', onTap: onScan),
+                  const SizedBox(height: 10),
+                  _Answer(label: 'Not yet — set it up', onTap: onSetUp),
+                  if (onSample != null) ...[
+                    const SizedBox(height: 8),
+                    TtyTextButton(label: 'Try the sample', onPressed: onSample),
+                  ],
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 48),
-          Text(
-            'Claude Code and Codex\nrun on your computer.\nDrive them from here.',
-            style: hero,
-          ),
-          const Spacer(),
-          TtyText(
-            'Is Harness on your computer?',
-            color: tty.faint,
-            size: TtySize.row,
-          ),
-          const SizedBox(height: 12),
-          _Answer(label: 'Yes — scan to connect', onTap: onScan),
-          const SizedBox(height: 10),
-          _Answer(label: 'Not yet — set it up', onTap: onSetUp),
-        ],
+        ),
       ),
     );
   }

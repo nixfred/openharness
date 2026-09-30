@@ -1,5 +1,6 @@
 import 'package:harness_mobile/core/codex_profiles.dart';
 import 'package:harness_mobile/core/git_project.dart';
+import 'package:harness_mobile/core/models.dart';
 import 'package:harness_mobile/core/project_folder.dart';
 
 /// What the New Harness form was left holding, so opening it again comes back to it.
@@ -32,6 +33,7 @@ class NewAgentDraft {
     this.git,
     this.gitFolder,
     this.codexProfile,
+    this.model,
     this.task,
   });
 
@@ -57,6 +59,7 @@ class NewAgentDraft {
   final String? gitFolder;
 
   final LocalCodexProfile? codexProfile;
+  final GridModel? model;
 }
 
 /// The one draft, or null where there is nothing to come back to.

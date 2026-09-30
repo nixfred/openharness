@@ -1,8 +1,7 @@
 import 'cli_link.dart';
 
-/// Linking to another machine by its remote password: `harness link connect/list/unlink` through
-/// [CliLink], or the same exchange run by the app itself in a viewer build
-/// (`viewer/direct_link.dart`).
+/// Linking to another machine by its remote password: the exchange `harness link
+/// connect/list/unlink` runs on a desktop, run by the app itself (`viewer/direct_link.dart`).
 abstract interface class PeerLinkClient {
   /// [onProgress] gets the CLI's stage names (`connecting`, `deriving_key`, `exchanging`,
   /// `verifying`) — best-effort feedback, never needed for correctness. [displayName] is how an
@@ -12,6 +11,8 @@ abstract interface class PeerLinkClient {
     String password, {
     void Function(String stage)? onProgress,
     String? displayName,
+    // What this device calls itself, for the computer's list of paired devices ("Dee's iPhone").
+    String? label,
   });
 
   /// Pairing by the one-time code a desktop app's "Add phone" QR carries (`viewer/code_link.dart`)

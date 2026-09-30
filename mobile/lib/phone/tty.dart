@@ -43,10 +43,27 @@ class Tty {
   /// Rules, marks and the gutter — brightBlack, as a terminal draws its own furniture.
   Color get dim => theme.brightBlack;
 
+  /// Whether the ground is light — a light palette, or the Light scheme.
+  bool get isLight => theme.background.computeLuminance() > .5;
+
   /// Secondary TEXT in the chrome: labels, details, hints. brightBlack on the ground is 3.1:1, too
   /// faint to read at a glance on a phone; this is the agent's own faint text, about 4.9:1.
-  Color get faint =>
-      Color.alphaBlend(theme.foreground.withValues(alpha: 0.52), theme.background);
+  /// Dark ink needs more of itself on a light ground: 52% there is 3.3:1, 70% is 5.7:1 on Mist and
+  /// still 4.5:1 on a [selected] row.
+  Color get faint => Color.alphaBlend(
+    theme.foreground.withValues(alpha: isLight ? 0.70 : 0.52),
+    theme.background,
+  );
+
+  /// Hints stay readable on raised form fields, as well as on the terminal ground.
+  Color get placeholder => Color.alphaBlend(
+    theme.foreground.withValues(alpha: isLight ? 0.75 : 0.60),
+    theme.background,
+  );
+
+  /// Ink on a solid ANSI fill — a green button, a red mic. The dark ramp's fills are bright and
+  /// take [dark] (black, or the scheme's white on red); the light ramp's are deep, and take white.
+  Color onFill(Color dark) => isLight ? Colors.white : dark;
   Color get green => theme.green;
   Color get yellow => theme.yellow;
   Color get red => theme.red;
@@ -110,7 +127,10 @@ class Tty {
     backgroundColor: background,
     fontWeight: weight,
     // Tabular by construction, but ligatures would glue `->` and `!=` in paths and branch names.
-    fontFeatures: const [FontFeature.disable('liga'), FontFeature.disable('calt')],
+    fontFeatures: const [
+      FontFeature.disable('liga'),
+      FontFeature.disable('calt'),
+    ],
   );
 }
 

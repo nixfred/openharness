@@ -74,6 +74,20 @@ export function clearAuthSession(): void {
   try { rmSync(AUTH_SESSION_FILE, { force: true }) } catch { /* ignore */ }
 }
 
+// Whether THIS process holds the refresh lock right now. `process.exit` skips the `finally` below, and
+// a daemon that exits mid-refresh (safe mode's own deadline, a revoke) used to leave the lock behind:
+// the next `harness auth status` — the one the desktop app runs before respawning that daemon — then
+// sat out the whole LOCK_STALE_MS before it could answer, and the app gave up on it at exactly 30s.
+let holdingLock = false
+let releaseOnExitArmed = false
+
+/** Drop the refresh lock if this process holds it. Run on `exit`; exported for the spec. */
+export function releaseHeldAuthLock(): void {
+  if (!holdingLock) return
+  holdingLock = false
+  try { rmSync(LOCK_FILE, { force: true }) } catch { /* ignore */ }
+}
+
 async function withLock<T>(action: () => Promise<T>): Promise<T> {
   ensureDir()
   let deadline = Date.now() + LOCK_STALE_MS
@@ -102,9 +116,15 @@ async function withLock<T>(action: () => Promise<T>): Promise<T> {
       await new Promise<void>((resolve) => setTimeout(resolve, 40))
       continue
     }
+    holdingLock = true
+    if (!releaseOnExitArmed) {
+      releaseOnExitArmed = true
+      process.once('exit', releaseHeldAuthLock)
+    }
     try {
       return await action()
     } finally {
+      holdingLock = false
       closeSync(fd)
       try { rmSync(LOCK_FILE, { force: true }) } catch { /* ignore */ }
     }

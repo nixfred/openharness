@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/shared/theme/appearance_prefs_store.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shared/theme/prompt_style.dart';
 import 'package:harness/shared/theme/status_line_style.dart';
 import 'package:harness/state/workspace_status.dart';
@@ -15,7 +16,7 @@ import 'swarm_state_test.dart' show createApp;
 void main() {
   for (final native in [false, true]) {
     testWidgets(
-      'current branch opens work history without touching its terminal (native=$native)',
+      'recent branch opens work history without touching its terminal (native=$native)',
       (tester) async {
         final old = appearancePrefsStore.value;
         appearancePrefsStore.value = old.copyWith(prompt: const PromptPrefs());
@@ -37,14 +38,28 @@ void main() {
         );
         final app = createApp();
         addTearDown(app.dispose);
+        final git = gitFixture();
+        final recent = git['current'] as Map;
+        git['state'] = 'multiple';
+        git['current'] = null;
+        git['checkouts'] = [
+          recent,
+          {
+            ...recent,
+            'cwd': '/launch',
+            'root': '/launch',
+            'branch': 'original',
+          },
+        ];
+        git['recentWork'] = {'project': recent, 'at': '2026-09-27T13:00:00Z'};
         app.stateOf('m')!
-          ..agents = [workAgent(git: gitFixture())]
+          ..agents = [workAgent(git: git)]
           ..nodeOnline = false;
         final input = <TerminalBinaryFrame>[];
         final pane = app.adoptSessionForTest(terminal('hn', input));
         final session = pane.session;
         await mount(tester, app, nativeTabs: native);
-        expect(WorkspacePaneContext.focused(app)?.branch, 'hn/preview-fix');
+        expect(WorkspacePaneContext.focused(app)?.branch, 'hn/preview-fix +1');
         if (native) {
           final fields =
               ((updates.last['focusedContext'] as Map)['fields'] as List)
@@ -64,7 +79,16 @@ void main() {
         }
         await tester.pumpAndSettle();
         expect(find.byType(SessionWorkDialog), findsOneWidget);
-        expect(find.text('/silent-beacon'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is ColoredBox &&
+                widget.color == grid.AppDesktop.darkVeil,
+          ),
+          findsOneWidget,
+        );
+        if (native) expect(updates.last['footerCovered'], isTrue);
+        expect(find.textContaining('/silent-beacon'), findsNothing);
         expect(pane.session, same(session));
         expect(input, isEmpty);
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -85,7 +109,7 @@ void main() {
     final context = WorkspacePaneContext.focused(app)!;
     for (final style in StatusLineStyle.values) {
       final parts = context.format(PromptPrefs(statusStyle: style));
-      expect(parts.text, contains('Multiple workspaces'));
+      expect(parts.text, contains('Branches'));
       expect(parts.segments.any((s) => s.branchSymbol), isFalse);
       expect(parts.text, isNot(contains('original')));
     }

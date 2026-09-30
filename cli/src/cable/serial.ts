@@ -26,6 +26,7 @@ export interface DialPort {
   path: string
   vendorId: number
   productId: number
+  serialNumber?: string
 }
 
 /**
@@ -41,9 +42,14 @@ export interface DialPort {
  * pairs a vendor id with whatever path happens to come next in the dump, which is a different device.
  */
 export async function findDialPort(): Promise<DialPort | null> {
+  return (await findDialPorts())[0] ?? null
+}
+
+/** Every matching USB device; each gets its own protocol session. */
+export async function findDialPorts(): Promise<DialPort[]> {
   if (process.platform === 'darwin') return findDarwin()
   if (process.platform === 'linux') return findLinux()
-  return null
+  return []
 }
 
 /** Indentation column of an ioreg line — the tree's only structure. */
@@ -52,17 +58,26 @@ function depthOf(line: string): number {
   return m ? m[0].length : 0
 }
 
-async function findDarwin(): Promise<DialPort | null> {
+async function findDarwin(): Promise<DialPort[]> {
   let dump: string
   try {
-    const { stdout } = await runFile('ioreg', ['-p', 'IOService', '-w0', '-l'], { maxBuffer: 64 * 1024 * 1024 })
+    // Keep each USB device's children (the tty lives below its vendor/product IDs), but do not
+    // serialize the whole IOService plane every two seconds just to detect a hot-plugged dial.
+    const { stdout } = await runFile('ioreg', ['-r', '-c', 'IOUSBHostDevice', '-w0', '-l'], { maxBuffer: 64 * 1024 * 1024 })
     dump = stdout
   } catch {
-    return null
+    throw new Error('Could not enumerate USB dials')
   }
+  return parseDarwinDialPorts(dump)
+}
 
+export function parseDarwinDialPorts(dump: string): DialPort[] {
   const lines = dump.split('\n')
+  const ports: DialPort[] = []
+  const seen = new Set<string>()
   let armedAt: number | null = null
+  let armedSerial: string | undefined
+  let serialNumber: string | undefined
   let sawVendor = false
   let sawProduct = false
   let nodeDepth = 0
@@ -71,29 +86,38 @@ async function findDarwin(): Promise<DialPort | null> {
     // A new node resets what we have seen about the current one. `+-o` opens a node in this dump.
     if (line.includes('+-o')) {
       const d = depthOf(line)
-      if (armedAt !== null && d <= armedAt) armedAt = null // left the armed subtree without a path
+      if (armedAt !== null && d <= armedAt) { armedAt = null; armedSerial = undefined }
       nodeDepth = d
       sawVendor = false
       sawProduct = false
+      serialNumber = undefined
       continue
     }
 
     if (line.includes('"idVendor"')) sawVendor = Number(line.split('=')[1]?.trim()) === DIAL_VENDOR_ID
     if (line.includes('"idProduct"')) sawProduct = Number(line.split('=')[1]?.trim()) === DIAL_PRODUCT_ID
-    if (sawVendor && sawProduct && armedAt === null) armedAt = nodeDepth
+    if (line.includes('"USB Serial Number"')) {
+      serialNumber = line.split('=')[1]?.trim().replace(/^"|"$/g, '')
+      if (armedAt === nodeDepth) armedSerial = serialNumber
+    }
+    if (sawVendor && sawProduct && armedAt === null) { armedAt = nodeDepth; armedSerial = serialNumber }
 
     if (armedAt !== null && line.includes('"IOCalloutDevice"')) {
       const path = line.split('=')[1]?.trim().replace(/^"|"$/g, '')
-      if (path) return { path, vendorId: DIAL_VENDOR_ID, productId: DIAL_PRODUCT_ID }
+      if (path && !seen.has(path)) {
+        ports.push({ path, vendorId: DIAL_VENDOR_ID, productId: DIAL_PRODUCT_ID, ...(armedSerial ? { serialNumber: armedSerial } : {}) })
+        seen.add(path)
+      }
     }
   }
-  return null
+  return ports
 }
 
-function findLinux(): DialPort | null {
+function findLinux(): DialPort[] {
   // /sys is the id, /dev/ttyACM* is the path, and the symlink between them is the only honest pairing.
   const base = '/sys/class/tty'
-  if (!existsSync(base)) return null
+  if (!existsSync(base)) return []
+  const ports: DialPort[] = []
   for (const name of readdirSync(base)) {
     if (!name.startsWith('ttyACM') && !name.startsWith('ttyUSB')) continue
     // The ids live on the USB device, a few directories up from the tty's own node.
@@ -103,7 +127,9 @@ function findLinux(): DialPort | null {
         const vid = parseInt(readFileSync(`${dir}/idVendor`, 'utf8').trim(), 16)
         const pid = parseInt(readFileSync(`${dir}/idProduct`, 'utf8').trim(), 16)
         if (vid === DIAL_VENDOR_ID && pid === DIAL_PRODUCT_ID) {
-          return { path: `/dev/${name}`, vendorId: vid, productId: pid }
+          let serialNumber: string | undefined
+          try { serialNumber = readFileSync(`${dir}/serial`, 'utf8').trim() } catch { /* older USB descriptors */ }
+          ports.push({ path: `/dev/${name}`, vendorId: vid, productId: pid, ...(serialNumber ? { serialNumber } : {}) })
         }
         break
       } catch {
@@ -111,7 +137,7 @@ function findLinux(): DialPort | null {
       }
     }
   }
-  return null
+  return ports
 }
 
 /**

@@ -126,6 +126,17 @@ export interface GridLaunchOverride {
   contextWindow?: number
 }
 
+/**
+ * The `networkId` of a launch onto a saved API (`apiModels.ts`) rather than a grid: `api:<connection id>`.
+ * The same contracts below run it — an OpenAI-compatible API such as OpenRouter is reached exactly the
+ * way a grid's relay is — but nothing grid-specific (waking, the grid's picture) applies to it.
+ */
+export const API_NETWORK_PREFIX = 'api:'
+
+export function isApiLaunch(launch: Pick<GridLaunchOverride, 'networkId'> | null | undefined): boolean {
+  return !!launch?.networkId.startsWith(API_NETWORK_PREFIX)
+}
+
 /** The smallest window believed. Anything below it is not a model a coding agent can run on, and a
  *  value that small is likelier a misreport than a real engine — better to say nothing than to have
  *  an agent compact every turn. */
@@ -275,6 +286,19 @@ const OPENCODE_CONFIG_FILE = 'opencode.json'
 export function gridProviderId(networkName: string): string {
   const slug = networkName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   return slug || 'grid'
+}
+
+/**
+ * The provider id OpenCode's generated config declares for [override].
+ *
+ * A saved API is `api-<connection id>`, never its bare name: OpenCode ships built-in providers under
+ * names like `openrouter`, and a config block with the same id is merged into the built-in one rather
+ * than replacing it.
+ */
+function opencodeProviderId(override: GridLaunchOverride): string {
+  return isApiLaunch(override)
+    ? `api-${gridProviderId(override.networkId.slice(API_NETWORK_PREFIX.length))}`
+    : gridProviderId(override.networkName)
 }
 
 /**
@@ -716,7 +740,7 @@ const GRID_ENGINE_CONTRACTS: Partial<Record<AgentEngine, GridEngineContract>> = 
   // models are the grid's own ids. The user's `~/.config/opencode/opencode.json` is never opened.
   opencode: {
     build: (override) => {
-      const provider = gridProviderId(override.networkName)
+      const provider = opencodeProviderId(override)
       // No model chosen means the grid routes — `Auto` is the router's own id, and the relay serves
       // it (verified: 200). It is a real id to OpenCode either way, which is what matters: the
       // provider block has to name something, and leaving the model out entirely puts OpenCode back

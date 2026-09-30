@@ -1,16 +1,28 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/link.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
 import 'workspace_bar_control.dart';
 
-/// The browser's consistent handoff to the existing macOS/Linux download page.
-class WebDownloadButton extends StatelessWidget {
-  const WebDownloadButton({super.key});
+/// Opens [uri] in a new browser tab, inside the click that asked for it: a
+/// `window.open` made later is outside the user's gesture, which browsers
+/// block as a popup or open as a separate window.
+Future<bool> openInNewTab(Uri uri) =>
+    launchUrl(uri, webOnlyWindowName: '_blank');
 
-  static final uri = Uri.parse('https://harness.autonomous.ai/download');
-  static const _text = '[ Download app ]';
+/// The browser's consistent handoff to the existing macOS/Linux download page,
+/// in a new tab so the workspace stays open behind it.
+class WebDownloadButton extends StatelessWidget {
+  const WebDownloadButton({super.key, this.open = openInNewTab});
+
+  /// How the page is opened; tests pass a recorder.
+  final Future<bool> Function(Uri uri) open;
+
+  static final uri = Uri.parse(
+    'https://www.autonomous.ai/harness-app?page=download',
+  );
+  static const _text = 'Download app';
 
   static double widthOf(BuildContext context) =>
       workspaceBarTextSizeOf(context, _text).width +
@@ -19,12 +31,12 @@ class WebDownloadButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
-    return Link(
-      uri: uri,
-      target: LinkTarget.blank,
-      builder: (context, followLink) => WorkspaceBarControl(
+    return Semantics(
+      link: true,
+      linkUrl: uri,
+      child: WorkspaceBarControl(
         label: 'Download app',
-        onPressed: followLink,
+        onPressed: () => open(uri),
         builder: (context, emphasized) => SizedBox(
           width: widthOf(context),
           height: workspaceBarControlHeight(context),

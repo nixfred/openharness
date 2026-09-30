@@ -241,7 +241,7 @@ void main() {
       expect(chordsFor(ShortcutAction.movePaneRight), ['⇧⌘→']);
     });
 
-    test('brackets walk agents, and Shift walks swarms', () {
+    test('brackets walk agents, and Shift walks tabs', () {
       // They used to carry three verbs told apart only by modifiers: ⌘[ ] walked
       // panes, ⇧⌘[ ] walked agents, ⌥⌘[ ] moved panes. Panes use arrows, so
       // the brackets keep the one job a bracket is good at.

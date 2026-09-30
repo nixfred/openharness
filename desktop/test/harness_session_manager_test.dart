@@ -2,12 +2,13 @@ import 'support/workspace_tools.dart';
 
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' show SemanticsAction;
+import 'dart:ui' show PointerDeviceKind, SemanticsAction;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/harness_sessions.dart';
 import 'package:harness/state/pending_question.dart';
@@ -18,6 +19,7 @@ import 'package:harness/ws/ws_conn.dart';
 import 'box_render_preview_test.dart' show loadPreviewFonts;
 import 'keymap_host_test.dart' show key;
 import 'support/restart_connection.dart';
+import 'support/real_fonts.dart';
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 
@@ -48,6 +50,8 @@ const _paused = Agent(
 );
 
 void main() {
+  setUpAll(loadRealFonts);
+
   late AppNotifier app;
   late RestartConnection connection;
   setUp(() {
@@ -244,6 +248,46 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Recently used'), findsOneWidget);
     expect(find.text('Recently active'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('recent harness ages show and say now, including clock skew', (
+    tester,
+  ) async {
+    final now = DateTime.now();
+    app.machineStates['m']!.agents = [
+      for (final (id, age) in [
+        ('recent', const Duration(seconds: 30)),
+        ('future', const Duration(minutes: -4)),
+      ])
+        Agent(
+          id: id,
+          name: '$id harness',
+          engine: _running.engine,
+          sessionId: '$id-conversation',
+          terminalAvailable: true,
+          project: _project,
+          lastActivityAt: now.subtract(age),
+        ),
+    ];
+    for (final id in ['recent', 'future']) {
+      app.rememberOpenedHarness('m', id);
+    }
+    await open(tester);
+    for (final agentId in ['recent', 'future']) {
+      final id = agentDestinationId('m', agentId);
+      expect(
+        tester.widget<Text>(find.byKey(ValueKey('session-age:$id'))).data,
+        '· now',
+      );
+      final spoken = tester
+          .widget<Semantics>(find.byKey(ValueKey('session-open:$id')))
+          .properties
+          .value!;
+      expect(spoken, contains('Last used now'));
+      expect(spoken, isNot(contains('0m')));
+      expect(spoken, isNot(contains('now ago')));
+    }
     expect(tester.takeException(), isNull);
   });
 
@@ -959,6 +1003,20 @@ void main() {
     nativeClick();
     await tester.pumpAndSettle();
     expect(find.byType(HarnessSessionManager), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('session-search')))
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('session-search')))
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
     expect(updates.last['sessionsOpen'], isTrue);
     expect(updates.last['runningSessions'], 1);
     nativeClick();
@@ -1023,6 +1081,172 @@ void main() {
   });
 
   final renderDir = Platform.environment['SESSION_MANAGER_RENDER_DIR'];
+  for (final brightness in Brightness.values) {
+    testWidgets('desktop inventory focus and feedback in ${brightness.name}', (
+      tester,
+    ) async {
+      if (renderDir != null) await tester.runAsync(loadPreviewFonts);
+      final previousBrightness = grid.AppTheme.brightness.value;
+      grid.AppTheme.brightness.value = brightness;
+      addTearDown(() => grid.AppTheme.brightness.value = previousBrightness);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      app.machineStates['m']!.blockedAgents['a0'] = question('a0');
+      app.machineStates['m']!.agents[0] = Agent.fromJson({
+        'id': 'a0',
+        'name': _running.name,
+        'engine': _running.engine,
+        'sessionId': 'fixture-conversation',
+        'terminal': {'available': true},
+        'project': {
+          'name': _project.name,
+          'cwd': _project.cwd,
+          'branch': _project.branch,
+        },
+        'tokenUsage': {'totalTokens': 123456},
+        'outputStats': {
+          'linesAdded': 124,
+          'linesRemoved': 38,
+          'pullRequestsCreated': 2,
+        },
+      });
+      final opening = <String>[];
+      final field = find.byKey(const ValueKey('session-search'));
+      final opener = find.byKey(
+        ValueKey('session-open:${agentDestinationId('m', 'a0')}'),
+      );
+      for (final (size, scale) in [
+        (const Size(880, 560), 1.0),
+        (const Size(420, 480), 1.7),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pumpWidget(
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: grid.buildAppTheme(brightness: brightness),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: TextScaler.linear(scale)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: SizedBox(
+                    width: 640,
+                    child: HarnessSessionManager(
+                      key: ValueKey((brightness, scale)),
+                      app: app,
+                      recent: const [],
+                      onClose: () {},
+                      onOpen: (row) async {
+                        opening.add(row.id);
+                        throw StateError('Synthetic open failure');
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        Future<void> capture(String state) async {
+          expect(tester.takeException(), isNull);
+          if (renderDir == null) return;
+          final oldShadows = debugDisableShadows;
+          debugDisableShadows = false;
+          try {
+            await tester.runAsync(() async {
+              await Future.wait(
+                find
+                    .byType(Image)
+                    .evaluate()
+                    .map(
+                      (element) => precacheImage(
+                        (element.widget as Image).image,
+                        element,
+                      ),
+                    ),
+              );
+            });
+            for (final object in tester.allRenderObjects) {
+              object.markNeedsPaint();
+            }
+            await tester.pump();
+            await expectLater(
+              find.byType(MaterialApp),
+              matchesGoldenFile(
+                Uri.file(
+                  '$renderDir/inventory-$state-${brightness.name}-$scale.png',
+                ),
+              ),
+            );
+          } finally {
+            debugDisableShadows = oldShadows;
+          }
+        }
+
+        final editor = tester.widget<TextField>(field);
+        expect(editor.focusNode!.hasFocus, isTrue);
+        expect(find.byTooltip('Close').hitTestable(), findsOneWidget);
+        await capture('list');
+        await tester.enterText(field, 'Font');
+        editor.controller!.value = const TextEditingValue(
+          text: 'Font',
+          selection: TextSelection.collapsed(offset: 4),
+          composing: TextRange(start: 0, end: 4),
+        );
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        await mouse.moveTo(tester.getCenter(opener));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<TextField>(field).controller,
+          same(editor.controller),
+        );
+        expect(editor.focusNode!.hasFocus, isTrue);
+        expect(
+          editor.controller!.value.composing,
+          const TextRange(start: 0, end: 4),
+        );
+        expect(tester.widget<Semantics>(opener).properties.selected, isTrue);
+        await capture('active');
+        await mouse.removePointer();
+        editor.controller!.value = const TextEditingValue(
+          text: 'Font',
+          selection: TextSelection.collapsed(offset: 4),
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(opening.last, agentDestinationId('m', 'a0'));
+        await tester.tap(find.byTooltip('Clear search'));
+        await tester.pumpAndSettle();
+        const failure = 'Could not open this harness. Try again.';
+        final error = tester.widget<Text>(find.text(failure)).style!.color!;
+        final foreground = error.computeLuminance();
+        final background = grid.AppMenu.fill.computeLuminance();
+        final contrast = foreground > background
+            ? (foreground + .05) / (background + .05)
+            : (background + .05) / (foreground + .05);
+        expect(contrast, greaterThanOrEqualTo(4.5));
+        await capture('error');
+        final questions = find.byKey(
+          const ValueKey('session-filter:needsInput'),
+        );
+        await tester.ensureVisible(questions);
+        await tester.tap(questions);
+        await tester.pumpAndSettle();
+        expect(find.text('Use the shared cache?'), findsOneWidget);
+        await capture('needs-input');
+        expect(connection.requests, isEmpty);
+        expect(connection.stops, isEmpty);
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
   testWidgets(
     'render session manager for visual review',
     skip: renderDir == null,

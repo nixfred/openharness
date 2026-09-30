@@ -5,6 +5,7 @@ import '../core/config.dart';
 import '../e2ee/keys.dart';
 import 'direct_auth.dart';
 import 'direct_auth_api.dart';
+import 'group_sync.dart';
 import 'password_link.dart';
 import 'viewer_key_store.dart';
 
@@ -62,6 +63,30 @@ class DirectLink implements PeerLinkClient {
           error: humanizeLinkError(code, name, retryAt: retryAt),
         );
     }
+  }
+
+  /// Swaps trust-group rosters with [machineId] ([syncTrustGroup]): the machines this device learns
+  /// of are pinned — no password for them — and the machine learns this device and whatever it
+  /// linked. [label] is this device's name for itself. Never throws.
+  Future<GroupSyncOutcome> syncGroup(
+    String machineId, {
+    required String label,
+  }) async {
+    final String token;
+    try {
+      token = await auth.accessToken();
+    } catch (_) {
+      return GroupSyncOutcome.none;
+    }
+    return syncTrustGroup(
+      machineId: machineId,
+      keys: keys,
+      accessToken: token,
+      wsBaseUrl: config.wsBaseUrl,
+      autonomousEnv: config.autonomousEnv,
+      label: label,
+      socket: socket,
+    );
   }
 
   @override

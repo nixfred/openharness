@@ -162,7 +162,9 @@ class VoiceMicCore extends StatelessWidget {
               duration: const Duration(milliseconds: 200),
               opacity: _spins(face) ? 1 : 0,
               child: _BusyArc(
-                color: fill == _Fill.accent ? tty.theme.brightWhite : tty.text,
+                color: fill == _Fill.accent
+                    ? tty.onFill(tty.theme.brightWhite)
+                    : tty.text,
                 spin: motion && _spins(face),
               ),
             ),
@@ -195,8 +197,8 @@ class VoiceMicCore extends StatelessWidget {
   }
 
   Color _inkFor(_Fill fill, Tty tty) => switch (fill) {
-    _Fill.accent => tty.theme.black,
-    _Fill.warn => tty.theme.black,
+    _Fill.accent => tty.onFill(tty.theme.black),
+    _Fill.warn => tty.onFill(tty.theme.black),
     _Fill.glass => face == VoiceMicFace.off ? tty.dim : tty.text,
   };
 
@@ -615,8 +617,14 @@ class _HeldBadge extends StatelessWidget {
         shape: BoxShape.circle,
         color: AppPalette.warn,
         // A ring the terminal's own near-black, so the dot reads as sitting
-        // ON the rim rather than as a stain on the fill.
-        border: Border.all(color: const Color(0xFF141414), width: 2),
+        // ON the rim rather than as a stain on the fill — its ground, on a
+        // light one.
+        border: Border.all(
+          color: Tty.of(context).isLight
+              ? Tty.of(context).ground
+              : const Color(0xFF141414),
+          width: 2,
+        ),
       ),
     ),
   );

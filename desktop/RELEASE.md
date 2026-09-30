@@ -438,8 +438,9 @@ running app back.
 ## Linux
 
 `scripts/upload-desktop-linux.sh` publishes architecture-specific Linux ARM64 and x64 releases to the
-**same** `metadata.json` as macOS. `release-desktop.yml` runs it on both a `ubuntu-24.04` and a
-`ubuntu-24.04-arm` runner, so one `make release-desktop` covers every build — which is also why the six
+**same** `metadata.json` as macOS. `release-desktop.yml` runs it on both a `ubuntu-22.04` and a
+`ubuntu-22.04-arm` runner — the oldest Ubuntu supported, because the bundle links the build host's
+GLib and glibc and a 24.04 build will not start on 22.04 — so one `make release-desktop` covers every build — which is also why the six
 `desktop-*` keys only stay on one version when the release goes through CI. Run by hand
 (`make upload-desktop-linux ARCH=arm64`) it moves one key and leaves the others behind. `amd64` and
 `x86_64` are accepted aliases for `x64`; `aarch64` is accepted as an alias for `arm64`.

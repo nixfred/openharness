@@ -4,37 +4,20 @@ import 'package:harness_mobile/state/app_state.dart';
 
 import '../p2p/phone_terminal_p2p.dart';
 import 'agent_home.dart';
-import 'agent_index.dart';
-import 'machines_tab.dart';
 import 'phone_shell_scope.dart';
-import 'phone_tab_bar.dart';
-import 'settings_page.dart';
 
-/// Whether the shell draws its tab bar.
+/// The signed-in phone app: one page stack, rooted in [AgentHome] — the terminal the phone opens
+/// on and stays on. Machines and Settings are pages pushed onto it, from the terminal's menu and
+/// from Find.
 ///
-/// Off because the terminal is where the phone opens and stays: [AgentHome] is
-/// the Agents tab's root, it picks the agent itself, and a bar for steering
-/// between tabs by hand is a row of chrome under every screen paying for a case
-/// that no longer arises.
+/// ⚠️ **One stack, no tabs.** There were three — Agents, Machines, Settings — each with its own
+/// navigator under a bottom bar. The bar was hidden once the terminal became the home screen, and
+/// with no bar there was no way to reach the other two: they were built out of sight and never
+/// shown, so they went with it.
 ///
-/// ⚠️ It hides the BAR, not the tabs. All three still exist, still hold their
-/// own page stacks, and [_PhoneShellState._select] still pops one back to its
-/// root — nothing below this flag knows it is off. What goes with it is the only
-/// way to REACH a tab by hand, so with it off the app can only be where it was
-/// put: fine while that place is one agent's terminal, and the reason this is a
-/// flag rather than a deletion.
-const bool _showTabBar = false;
-
-/// The signed-in phone app: three tabs, each with its own page stack.
-///
-/// Its own [Navigator] per tab, nested under the app's, on purpose. Two reasons, and both are
-/// things a single shared navigator gets wrong:
-///
-///  - `RootShell` swaps this whole shell out on sign-out, and the pages have to go with it rather
-///    than stay stacked over the login screen, as they would on the root navigator.
-///  - A tab remembers where it was. Walking into a machine's agents, switching to Settings and
-///    coming back returns to that machine, not to the root of the tab — which is what every phone
-///    OS does and what a single stack cannot express.
+/// Its own [Navigator], nested under the app's, on purpose: `RootShell` swaps this whole shell out
+/// on sign-out, and the pages have to go with it rather than stay stacked over the sign-in screen,
+/// as they would on the root navigator.
 class PhoneShell extends StatefulWidget {
   const PhoneShell({super.key, required this.notifier});
 
@@ -45,16 +28,10 @@ class PhoneShell extends StatefulWidget {
 }
 
 class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
-  PhoneTab _tab = PhoneTab.agents;
+  final _navigator = GlobalKey<NavigatorState>();
 
-  final _navigators = {
-    for (final tab in PhoneTab.values) tab: GlobalKey<NavigatorState>(),
-  };
-
-  /// One per tab — see the note at the `HeroControllerScope` below for why they cannot be shared.
-  final _heroControllers = {
-    for (final tab in PhoneTab.values) tab: HeroController(),
-  };
+  /// The nested navigator's own — see the note at the `HeroControllerScope` below.
+  final _heroController = HeroController();
 
   @override
   void initState() {
@@ -75,9 +52,7 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     );
     _linkedMachineId.dispose();
     _openAgentRequest.dispose();
-    for (final controller in _heroControllers.values) {
-      controller.dispose();
-    }
+    _heroController.dispose();
     super.dispose();
   }
 
@@ -86,17 +61,17 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   // Almost nothing, now — and that is the change. The shell used to reopen the last agent itself,
   // fall back to Machines when nothing answered, and time the wait out after 45 seconds, because
   // the thing it was steering towards was a page it had to PUSH over an agents list. There is no
-  // list and no push: [AgentHome] is the Agents tab's root, and it reads the last-agent record,
-  // waits for the machines to answer and picks the agent, all as part of drawing itself.
+  // list and no push: [AgentHome] is the stack's root, and it reads the last-agent record, waits
+  // for the machines to answer and picks the agent, all as part of drawing itself.
   //
-  // One move is left, because it crosses tabs and no page can make it alone: a password accepted on
-  // the Machines tab takes the person back to Agents, where the machine they just opened is about
-  // to bring its agents with it.
+  // One move is left, because no page can make it alone: a password accepted on a page pushed over
+  // the home screen takes the person back to it, where the machine they just opened is about to
+  // bring its agents with it.
 
   /// The machine whose password was just accepted, for [AgentHome] to open once it answers.
   ///
   /// ⚠️ **A notifier and not a field on this State, because a field cannot reach [AgentHome] at
-  /// all.** Each tab's root is built inside `onGenerateRoute`, which a nested [Navigator] runs ONCE
+  /// all.** The stack's root is built inside `onGenerateRoute`, which a nested [Navigator] runs ONCE
   /// when it creates that route — so the root keeps forever whatever arguments it was first given,
   /// and `setState` here rebuilds this widget without ever rebuilding it. A value passed down as a
   /// constructor field would have been read on the first launch frame, when no machine had been
@@ -108,19 +83,13 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   final _linkedMachineId = ValueNotifier<String?>(null);
 
   /// A password was accepted: the agent is what the person came for, so the phone points itself at
-  /// that machine and shows the tab an agent lives on.
+  /// that machine.
   ///
   /// No waiting and no timeout here, which is what this used to be full of. The machine is still
   /// connecting at this point and [AgentHome] is already watching for exactly that — it holds
   /// whatever is on screen while the machine dials, then opens the first agent it reports.
-  void _followLinkedMachine(String machineId) {
-    _linkedMachineId.value = machineId;
-    setState(() {
-      _tab = PhoneTab.agents;
-      _tabCanPop =
-          _navigators[PhoneTab.agents]?.currentState?.canPop() ?? false;
-    });
-  }
+  void _followLinkedMachine(String machineId) =>
+      _linkedMachineId.value = machineId;
 
   /// An agent somebody picked — from search, the new-agent form, the attention list — for
   /// [AgentHome] to put on screen. A notifier for the reason [_linkedMachineId] is one.
@@ -131,19 +100,14 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   ///
   /// ⚠️ **This is what took the back button off the terminal.** A terminal pushed over search, or
   /// over the new-agent form, had a page under it, so its header drew a chevron back to a screen the
-  /// person had finished with. Every stack is emptied back to its root instead and the root terminal
+  /// person had finished with. The stack is emptied back to its root instead and the root terminal
   /// switches agent, so there is never anything to go back to.
   void _openAgentAtHome(String machineId, String agentId) {
-    for (final navigator in _navigators.values) {
-      navigator.currentState?.popUntil((route) => route.isFirst);
-    }
+    _navigator.currentState?.popUntil((route) => route.isFirst);
     // Reset first, so picking the agent already requested last time still notifies.
     _openAgentRequest.value = null;
     _openAgentRequest.value = (machineId: machineId, agentId: agentId);
-    setState(() {
-      _tab = PhoneTab.agents;
-      _tabCanPop = false;
-    });
+    setState(() => _canPop = false);
   }
 
   /// A tapped "agent finished" notice: that agent, as the home screen — the
@@ -178,50 +142,17 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     widget.notifier.handleAppResumed();
   }
 
-  NavigatorState? get _currentNavigator => _navigators[_tab]?.currentState;
-
-  void _select(PhoneTab tab) {
-    if (tab == _tab) {
-      // A second tap on the tab you are already on pops that tab back to its root — the phone
-      // convention, and the only way back out of a deep stack without walking every page.
-      _currentNavigator?.popUntil((route) => route.isFirst);
-      _syncCanPop();
-      return;
-    }
-    // The new tab has a depth of its own, so the back gesture's answer changes with it.
-    setState(() {
-      _tab = tab;
-      _tabCanPop = _navigators[tab]?.currentState?.canPop() ?? false;
-    });
-  }
-
-  Widget _rootFor(PhoneTab tab) => switch (tab) {
-    PhoneTab.agents => AgentHome(
-      notifier: widget.notifier,
-      openMachineId: _linkedMachineId,
-      openAgent: _openAgentRequest,
-    ),
-    PhoneTab.machines => MachinesTab(notifier: widget.notifier),
-    PhoneTab.settings => SettingsPage(notifier: widget.notifier),
-  };
-
-  /// Whether the tab on screen has a page to go back to — what [PopScope] is given.
+  /// Whether the stack has a page to go back to — what [PopScope] is given.
   ///
   /// Kept as state rather than read inline in `build`, because a push or pop inside a nested
   /// [Navigator] does not rebuild this widget: the flag has to be pushed here by the notification
   /// below, or `canPop` would answer with whatever was true when the shell last happened to build.
-  bool _tabCanPop = false;
+  bool _canPop = false;
 
-  /// Android's back button, handled per tab.
+  /// Android's back button: the stack's own pages first, then the system.
   ///
-  /// ⚠️ Deliberately NOT `NavigatorPopHandler`, which is what a single-stack phone shell would
-  /// use. It tracks one `canPop` flag fed by `NavigationNotification`s bubbling out of its
-  /// subtree — and an [IndexedStack] keeps all three navigators MOUNTED and notifying, so the flag
-  /// ends up reflecting whichever tab spoke last rather than the one on screen. A back press on a
-  /// root Agents tab would then be swallowed because Settings happened to be two pages deep.
-  ///
-  /// So the notification is used only as a SIGNAL that some stack moved, and the answer is then
-  /// read from the current tab's navigator — the one stack the person is actually looking at.
+  /// The notification is used only as a SIGNAL that the stack moved, and the answer is then read
+  /// from the navigator itself.
   bool _onNavigation(NavigationNotification notification) {
     _syncCanPop();
     // Let it keep bubbling: the root navigator above this shell tracks its own state from it.
@@ -229,21 +160,21 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
   }
 
   void _syncCanPop() {
-    final next = _currentNavigator?.canPop() ?? false;
-    if (next == _tabCanPop) return;
+    final next = _navigator.currentState?.canPop() ?? false;
+    if (next == _canPop) return;
     // The notification arrives mid-build of the subtree that sent it, so defer rather than calling
     // setState inside another widget's build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final current = _currentNavigator?.canPop() ?? false;
-      if (current == _tabCanPop) return;
-      setState(() => _tabCanPop = current);
+      final current = _navigator.currentState?.canPop() ?? false;
+      if (current == _canPop) return;
+      setState(() => _canPop = current);
     });
   }
 
   void _handleBack(bool didPop, Object? result) {
     if (didPop) return;
-    _currentNavigator?.maybePop().then((_) {
+    _navigator.currentState?.maybePop().then((_) {
       if (mounted) _syncCanPop();
     });
   }
@@ -255,59 +186,36 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     child: ListenableBuilder(
       listenable: widget.notifier,
       builder: (context, _) => PopScope<Object?>(
-        // False while this tab has somewhere to go back to, so the gesture reaches [_handleBack]
-        // instead of leaving the app. True at a tab's root: the press then belongs to the system.
-        canPop: !_tabCanPop,
+        // False while the stack has somewhere to go back to, so the gesture reaches [_handleBack]
+        // instead of leaving the app. True at its root: the press then belongs to the system.
+        canPop: !_canPop,
         onPopInvokedWithResult: _handleBack,
         child: NotificationListener<NavigationNotification>(
           onNotification: _onNavigation,
           child: Scaffold(
-            body: IndexedStack(
-              index: PhoneTab.values.indexOf(_tab),
-              sizing: StackFit.expand,
-              children: [
-                for (final tab in PhoneTab.values)
-                  // ⚠️ Each tab's navigator needs its OWN HeroController, and without this the
-                  // engine-mark flights simply never happen — silently, with no error.
-                  //
-                  // `MaterialApp` installs one controller for the ROOT navigator only; a nested
-                  // `Navigator` inherits nothing, so its routes have no observer to drive a flight.
-                  // One shared controller is not the fix either — `navigator.dart` on
-                  // `HeroControllerScope`: "The hero controller ... can only subscribe to one
-                  // navigator", and these three are all mounted at once inside the IndexedStack.
-                  HeroControllerScope(
-                    controller: _heroControllers[tab]!,
-                    child: Navigator(
-                      key: _navigators[tab],
-                      // ⚠️ The controller goes in the SCOPE ONLY, never also in `observers`.
-                      // `NavigatorState._updateEffectiveObservers` appends the scope's controller to
-                      // `widget.observers` itself, so listing it here registers it twice and trips
-                      // "A HeroController can not be shared by multiple Navigators" — which reads
-                      // like a sharing bug and is really a double-subscription by one navigator.
-                      onGenerateRoute: (_) => MaterialPageRoute<void>(
-                        builder: (_) => _rootFor(tab),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            // ⚠️ Hidden, not removed. The terminal is the screen the phone
-            // opens on, and the three-tab bar under it is on its way out — but
-            // the tabs themselves still carry the whole app: every page here is
-            // rooted in one of them, and [_select] is what pops a tab back and
-            // keeps its stack. Deleting the bar would take all of that with it.
+            // ⚠️ The nested navigator needs its OWN HeroController, and without this the
+            // engine-mark flights simply never happen — silently, with no error.
             //
-            // So the shell is unchanged and only the bar is not drawn. Flip
-            // [_showTabBar] to bring it straight back, and everything below is
-            // still wired to it.
-            bottomNavigationBar: !_showTabBar
-                ? null
-                : PhoneTabBar(
-                    current: _tab,
-                    onSelect: _select,
-                    waitingCount: waitingAgents(agentIndex(widget.notifier))
-                        .length,
+            // `MaterialApp` installs one controller for the ROOT navigator only; a nested
+            // `Navigator` inherits nothing, so its routes have no observer to drive a flight.
+            body: HeroControllerScope(
+              controller: _heroController,
+              child: Navigator(
+                key: _navigator,
+                // ⚠️ The controller goes in the SCOPE ONLY, never also in `observers`.
+                // `NavigatorState._updateEffectiveObservers` appends the scope's controller to
+                // `widget.observers` itself, so listing it here registers it twice and trips
+                // "A HeroController can not be shared by multiple Navigators" — which reads
+                // like a sharing bug and is really a double-subscription by one navigator.
+                onGenerateRoute: (_) => MaterialPageRoute<void>(
+                  builder: (_) => AgentHome(
+                    notifier: widget.notifier,
+                    openMachineId: _linkedMachineId,
+                    openAgent: _openAgentRequest,
                   ),
+                ),
+              ),
+            ),
           ),
         ),
       ),

@@ -162,7 +162,7 @@ class _SessionWorkPageState extends State<SessionWorkPage> {
                   children: [
                     text(
                       widget.online
-                          ? data?.explanation ?? 'Session workspace'
+                          ? data?.explanation ?? 'Harness workspace'
                           : 'Offline · last known work',
                       dim: true,
                     ),
@@ -183,7 +183,7 @@ class _SessionWorkPageState extends State<SessionWorkPage> {
                     text('Pull requests (${prs.length})'),
                     if (prs.isEmpty)
                       text(
-                        'No pull requests observed for this session.',
+                        'No pull requests observed for this harness.',
                         dim: true,
                       ),
                     for (final pr in prs.take(_visible)) ...[

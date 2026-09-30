@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:xterm/src/utils/unicode_v11.dart';
 
 class CustomTextEdit extends StatefulWidget {
-  CustomTextEdit({
+  const CustomTextEdit({
     super.key,
     required this.child,
     required this.onInsert,
@@ -22,6 +22,7 @@ class CustomTextEdit extends StatefulWidget {
     this.inputAction = TextInputAction.newline,
     this.keyboardAppearance = Brightness.light,
     this.deleteDetection = false,
+    this.semanticLabel,
   });
 
   final Widget child;
@@ -49,6 +50,7 @@ class CustomTextEdit extends StatefulWidget {
   final Brightness keyboardAppearance;
 
   final bool deleteDetection;
+  final String? semanticLabel;
 
   @override
   CustomTextEditState createState() => CustomTextEditState();
@@ -85,6 +87,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   void dispose() {
     widget.focusNode.removeListener(_onFocusChange);
     _closeInputConnectionIfNeeded();
+    _semanticEditingState.dispose();
     super.dispose();
   }
 
@@ -92,9 +95,45 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   Widget build(BuildContext context) {
     return Focus(
       focusNode: widget.focusNode,
+      // The text-field node owns focus semantics. A second focused ancestor can
+      // deactivate the web editor or hide the native accessibility input target.
+      includeSemantics: false,
       autofocus: widget.autofocus,
       onKeyEvent: _onKeyEvent,
-      child: widget.child,
+      // Browser input and native dictation/accessibility both need an editable semantic
+      // target: a bare TextInputClient exposes no text field to macOS accessibility.
+      child: ListenableBuilder(
+        listenable: Listenable.merge([widget.focusNode, _semanticEditingState]),
+        builder: (context, _) => Semantics(
+          container: true,
+          excludeSemantics: true,
+          // Read-only observers are output surfaces, not browser editors. The web engine
+          // creates a writable DOM textarea even for a semantic readOnly text field.
+          textField: !widget.readOnly,
+          enabled: true,
+          focusable: !widget.readOnly,
+          focused: !widget.readOnly && widget.focusNode.hasFocus,
+          multiline: true,
+          label: widget.semanticLabel ??
+              (widget.readOnly ? 'Terminal output' : 'Terminal input'),
+          value: _semanticEditingState.value.text,
+          onTap: widget.readOnly ? null : requestKeyboard,
+          onFocus: widget.readOnly ? null : requestKeyboard,
+          onSetText: widget.readOnly
+              ? null
+              : (text) {
+                  if (widget.readOnly) return;
+                  updateEditingValue(TextEditingValue(
+                    text: text,
+                    selection: TextSelection.collapsed(offset: text.length),
+                  ));
+                  // A semantic action did not originate in the platform editor. Keep
+                  // its buffer current so the next native key cannot replay old text.
+                  _connection?.setEditingState(_currentEditingState);
+                },
+          child: widget.child,
+        ),
+      ),
     );
   }
 
@@ -117,6 +156,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   void setEditingState(TextEditingValue value) {
     _cancelPendingDeletes();
     _currentEditingState = value;
+    _semanticEditingState.value = value;
     _terminalText = value.text;
     _connection?.setEditingState(value);
   }
@@ -127,6 +167,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   void resetEditingState() {
     _cancelPendingDeletes();
     _currentEditingState = _initEditingState.copyWith();
+    _semanticEditingState.value = _currentEditingState;
     _terminalText = _currentEditingState.text;
     widget.onComposing(null, 0);
     _connection?.setEditingState(_currentEditingState);
@@ -245,6 +286,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         );
 
   late var _currentEditingState = _initEditingState.copyWith();
+  late final _semanticEditingState = ValueNotifier(_currentEditingState);
 
   /// Text that has already been mirrored to the PTY. This deliberately stays
   /// separate from [_currentEditingState], whose composing range can contain
@@ -311,6 +353,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   }) {
     final wasComposing = !_currentEditingState.composing.isCollapsed;
     _currentEditingState = value;
+    _semanticEditingState.value = value;
     final isComposing = !_currentEditingState.composing.isCollapsed;
 
     if (hasTextMutation || wasComposing || isComposing) {
@@ -346,6 +389,18 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     if (hasTextMutation || wasComposing || value.text != _terminalText) {
       _syncTerminalText(value.text);
     }
+    _restoreDeletePadding();
+  }
+
+  /// Under [CustomTextEdit.deleteDetection] the buffer keeps a pad in front of
+  /// what was typed, so a Backspace always has something to delete and is
+  /// seen. Once deletes eat into the pad it goes back: a phone's keyboard sends
+  /// no Backspace key, so a Backspace on an empty buffer changes nothing and
+  /// never reaches the terminal (a pasted `[Image #1]` could not be removed).
+  void _restoreDeletePadding() {
+    if (!widget.deleteDetection) return;
+    if (_currentEditingState.text.startsWith(_initEditingState.text)) return;
+    setEditingState(_initEditingState.copyWith());
   }
 
   void _syncTerminalText(String value) {
@@ -423,6 +478,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         composing: TextRange.empty,
       );
       _currentEditingState = next;
+      _semanticEditingState.value = next;
       _connection?.setEditingState(next);
       _syncTerminalText(next.text);
       return;

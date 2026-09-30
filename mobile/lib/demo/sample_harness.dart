@@ -21,13 +21,6 @@ class VerbStep extends SampleStep {
   final String verb;
 }
 
-/// The agent stops to ask. [then] is what it does with the answer — the row's index, from 0.
-class AskStep extends SampleStep {
-  const AskStep(this.ask, this.then, super.delay);
-  final SampleAsk ask;
-  final List<SampleStep> Function(int answer) then;
-}
-
 /// The turn ends, having said [reply].
 class DoneStep extends SampleStep {
   const DoneStep(this.reply, super.delay);
@@ -334,17 +327,6 @@ class SampleHarness {
         _append(entry);
       case VerbStep(:final verb):
         live.verb = verb;
-        host.liveChanged(this);
-      case AskStep(:final ask, :final then):
-        _stopSpin();
-        final wasWorking = working;
-        live
-          ..mode = LiveMode.asking
-          ..ask = ask
-          ..selected = 0;
-        _onAnswer = then;
-        if (wasWorking) host.workingChanged(this, false);
-        host.askChanged(this, ask);
         host.liveChanged(this);
       case DoneStep(:final reply):
         replies.insert(0, reply);

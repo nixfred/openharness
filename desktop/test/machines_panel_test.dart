@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -22,7 +23,6 @@ import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/shortcuts/keymap_host.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/machines_panel.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'keymap_host_test.dart' show MemoryKeymap, key;
 import 'support/password_cli.dart';
@@ -310,8 +310,8 @@ void main() {
     expect(find.textContaining('Available'), findsNothing);
     expect(find.text('Offline'), findsNothing);
     expect(find.textContaining('—'), findsNothing);
-    expect(find.byIcon(LucideIcons.ellipsis), findsNothing);
-    expect(find.byIcon(LucideIcons.monitorOff), findsNWidgets(2));
+    expect(find.byIcon(AppIcons.ellipsis), findsNothing);
+    expect(find.byIcon(AppIcons.monitorOff), findsNWidgets(2));
     expect(find.text('Connect'), findsOneWidget);
     expect(find.byKey(const ValueKey('machine-stats-rig')), findsNothing);
     expect(find.text('0 harnesses'), findsOneWidget);
@@ -659,7 +659,7 @@ void main() {
       app.add('remote', 'Mac mini', online: false);
       await mount(tester);
       expect(find.textContaining('Offline'), findsNothing);
-      expect(find.byIcon(LucideIcons.monitorOff), findsOneWidget);
+      expect(find.byIcon(AppIcons.monitorOff), findsOneWidget);
       expect(
         find.byTooltip('Open Harness on Mac mini to bring it online.'),
         findsOneWidget,
@@ -762,7 +762,7 @@ void main() {
       await tester.pumpAndSettle();
       final stats = find.byKey(const ValueKey('machine-stats-remote'));
       expect(stats, findsNothing);
-      expect(find.byIcon(LucideIcons.monitorOff), findsOneWidget);
+      expect(find.byIcon(AppIcons.monitorOff), findsOneWidget);
       expect(find.text('Offline'), findsNothing);
       app.resourceValues['remote'] = const MachineResources(cpuPercent: 7);
       app.stateOf('remote')!.nodeOnline = true;
