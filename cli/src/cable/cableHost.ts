@@ -481,6 +481,11 @@ export class DaemonCableHost implements CableHost {
     const tab = app?.active ?? ''
     const ids = app?.swarms.find(s => s.id === tab)?.agentIds ?? []
     const out = ids.map(id => byId.get(id)).filter((a): a is CableAgent => !!a)
+    // nixfred: external rows (Orca and other terminals the daemon watches but does not own) sit in no tab,
+    // so a tab-only list hid every one of them from the dial. They ride after the tab's own tiles.
+    const inTab = new Set(out.map((a) => a.id))
+    const external = new Set(registry.advertised().filter((s) => s.hosted === 'external').map((s) => s.agentId))
+    for (const a of flat) if (external.has(a.id) && !inTab.has(a.id)) out.push(a)
     // One line per CHANGE. The failure this catches is silent by nature: tiles whose ids this daemon does
     // not know drop out of the list, which looks exactly like the window never having opened them.
     const shape = app === null
