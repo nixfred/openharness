@@ -72,7 +72,25 @@ Panel {
 
   // The bar row never grows: a fixed slot per ring up to maxAgents, plus a status glyph.
   readonly property int slotWidth: ringSize + 6
-  implicitWidth: statusGlyph.width + 4 + (collisionBadge.visible ? collisionBadge.width + 4 : 0) + Math.max(1, Math.min(maxAgents, agents.length)) * slotWidth
+  // "Summary" (default): one ring for the most urgent agent plus a count. "Rings": one ring per agent.
+  readonly property bool summaryBar: String(setting("barMode", "Summary")) !== "Rings"
+  readonly property int needsYou: agents.filter(function (a) { return a.state === "waiting" || a.state === "permission" }).length
+  readonly property int workingCount: agents.filter(function (a) { return a.state === "working" }).length
+  readonly property string countText: needsYou > 0 ? String(needsYou) : String(agents.length)
+  readonly property int countWidth: summaryBar && agents.length > 0 ? countText.length * Math.max(7, ringSize * 0.5) + 6 : 0
+  readonly property string fleetSummary: {
+    if (!daemonUp) return lastError || "Harness daemon not running"
+    if (agents.length === 0) return "Harness: no agents"
+    var parts = []
+    if (needsYou > 0) parts.push(needsYou + " waiting on you")
+    if (workingCount > 0) parts.push(workingCount + " working")
+    var rest = agents.length - needsYou - workingCount
+    if (rest > 0) parts.push(rest + " idle or done")
+    var top = agents[0]
+    return "Harness · " + agents.length + " agent" + (agents.length === 1 ? "" : "s") + "\n" + parts.join(" · ") +
+      (needsYou > 0 && top ? "\n\u25B8 " + top.name + (top.detail ? ": " + top.detail : "") : "") + "\nClick for the fleet view"
+  }
+  implicitWidth: statusGlyph.width + 4 + (collisionBadge.visible ? collisionBadge.width + 4 : 0) + (summaryBar ? slotWidth + countWidth : Math.max(1, Math.min(maxAgents, agents.length)) * slotWidth)
   implicitHeight: ringSize + 4
 
   // Theme palette (yellow/red/green) for the state colours; shell Color.* for the rest.
@@ -181,9 +199,11 @@ Panel {
           if (mouse.button === Qt.RightButton || Date.now() - pressedAt < 400) root.toggle()
         }
         onCanceled: { holdAnim.stop(); statusGlyph.hold = 0 }
-        ToolTip.visible: containsMouse && !pressed
-        ToolTip.delay: 500
-        ToolTip.text: root.lastStop !== "" ? root.lastStop : "Click: fleet view · Hold 2 s: stop every agent on " + (root.hostname || "this machine")
+        PanelToolTip {
+          visible: parent.containsMouse && !parent.pressed
+          delay: 500
+          text: root.lastStop !== "" ? root.lastStop : "Click: fleet view · Hold 2 s: stop every agent on " + (root.hostname || "this machine")
+        }
       }
     }
     Process {
@@ -220,24 +240,38 @@ Panel {
       MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        ToolTip.visible: containsMouse
-        ToolTip.delay: 300
-        ToolTip.text: {
-          var lines = []
-          for (var i = 0; i < root.alerts.length && i < 6; i++) lines.push(root.alerts[i].kind + ": " + root.alerts[i].detail)
-          return lines.join("\n")
+        PanelToolTip {
+          visible: parent.containsMouse
+          delay: 300
+          text: {
+            var lines = []
+            for (var i = 0; i < root.alerts.length && i < 6; i++) lines.push(root.alerts[i].kind + ": " + root.alerts[i].detail)
+            return lines.join("\n")
+          }
         }
       }
     }
     Item { width: collisionBadge.visible ? 4 : 0; height: 1 }
 
     Repeater {
-      model: Math.min(root.maxAgents, root.agents.length)
+      model: root.summaryBar ? (root.agents.length > 0 ? 1 : 0) : Math.min(root.maxAgents, root.agents.length)
       delegate: Item {
         required property int index
         readonly property var agent: root.agents[index] || ({})
-        width: root.slotWidth
+        width: root.slotWidth + (root.summaryBar ? root.countWidth : 0)
         height: root.ringSize + 4
+
+        Text {
+          id: countLabel
+          visible: root.summaryBar
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.countText
+          color: root.needsYou > 0 ? agentRing.stateColor : Color.foreground
+          opacity: root.needsYou > 0 ? 1 : 0.6
+          font.pixelSize: Math.max(10, root.ringSize - 6)
+          font.bold: root.needsYou > 0
+        }
 
         // A soft dot travels along the row toward a ring that waits on you (leads the eye on wide bars).
         Rectangle {
@@ -266,7 +300,8 @@ Panel {
 
         AgentRing {
           id: agentRing
-          anchors.centerIn: parent
+          anchors.verticalCenter: parent.verticalCenter
+          x: (root.slotWidth - width) / 2
           size: root.ringSize
           agent: parent.agent
           reducedMotion: root.reducedMotion
@@ -282,14 +317,16 @@ Panel {
           acceptedButtons: Qt.LeftButton | Qt.RightButton
           // Left and right: the fleet popup (the Harness app is optional; Orca users never open it).
           onClicked: root.toggle()
-          ToolTip.visible: containsMouse
-          ToolTip.delay: 300
-          ToolTip.text: (agent.name || "agent") + "  " + (agent.engine || "") +
+          PanelToolTip {
+            visible: parent.containsMouse
+            delay: 300
+            text: root.summaryBar ? root.fleetSummary : (agent.name || "agent") + "  " + (agent.engine || "") +
             (root.showMachine && agent.machine ? "  @" + agent.machine : "") +
             (agent.lane ? "  [" + agent.lane + "]" : "") +
             "\n" + (agent.label || agent.state) + (agent.since ? "  " + Model.ago(agent.since, root.nowMs) : "") +
             (agent.spend && agent.spend.usd ? "\nspend $" + agent.spend.usd.toFixed(2) + (agent.spend.fraction !== null ? "  " + Math.round(agent.spend.fraction * 100) + "% of cap" : "") : "") +
             (agent.detail ? "\n" + agent.detail : "")
+          }
         }
       }
     }
@@ -301,9 +338,11 @@ Panel {
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton
     onClicked: root.toggle()
-    ToolTip.visible: containsMouse
-    ToolTip.delay: 300
-    ToolTip.text: root.daemonUp ? "Harness: no agents" : (root.lastError || "Harness daemon not running")
+    PanelToolTip {
+      visible: parent.containsMouse
+      delay: 300
+      text: root.fleetSummary
+    }
   }
 
   // ---- Fleet popup: right-click the widget (or `toggle` over IPC). ----

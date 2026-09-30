@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "pi.harness-pulse",
   "name": "Harness Pulse",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "Fred Nix",
   "description": "One ring per coding agent on every linked Harness machine. Working throws a comet, waiting breathes a halo toward you, permission strobes red with a glitch, done fills with a burst, failed flashes then holds, offline sits dim. Right-click for a live fleet view: machines with agents in orbit, spend gauges, a collision badge, an activity ticker and a hold-to-stop hexagon. Reads the local Harness daemon's attention feed; nothing leaves the machine.",
   "kinds": [
@@ -29,9 +29,21 @@
       "avatarInitials": "",
       "logo": "Harness",
       "logoPath": "",
-      "workingColor": "Accent"
+      "workingColor": "Accent",
+      "barMode": "Summary"
     },
     "schema": [
+      {
+        "key": "barMode",
+        "type": "enum",
+        "label": "Bar layout",
+        "options": [
+          "Summary",
+          "Rings"
+        ],
+        "description": "Summary: one ring for the most urgent agent and a count. Rings: one ring per agent.",
+        "defaultValue": "Summary"
+      },
       {
         "key": "reducedMotion",
         "type": "boolean",
