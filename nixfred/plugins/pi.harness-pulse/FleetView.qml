@@ -23,6 +23,7 @@ Item {
   property bool daemonUp: false
   property bool active: false
   property bool reducedMotion: false
+  property string workingColor: "Accent"
   property var theme: ({})
   property string lastStop: ""
   property string logoMode: "Harness"   // Omarchy, Harness, Custom or None
@@ -387,6 +388,7 @@ Item {
                 reducedMotion: !fleet.motion
                 showGlyph: !fleet.motion
                 theme: fleet.theme
+                workingColor: fleet.workingColor
               }
             }
 

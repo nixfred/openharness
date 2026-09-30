@@ -23,6 +23,7 @@ Panel {
     return isFinite(v) ? Math.max(1, Math.min(24, Math.round(v))) : 8
   }
   readonly property bool reducedMotion: setting("reducedMotion", false) === true
+  readonly property string workingColor: String(setting("workingColor", "Accent"))
   readonly property bool showMachine: setting("showMachine", true) !== false
   readonly property string focusWindowClass: String(setting("focusWindowClass", "harness"))
   // The face shown inside a ring that waits on you. "Auto": avatarPath when set, else ~/.face, else
@@ -164,12 +165,21 @@ Panel {
         anchors.fill: parent
         enabled: root.daemonUp
         hoverEnabled: true
-        onPressed: { statusGlyph.hold = 0; holdAnim.restart() }
-        onReleased: { holdAnim.stop(); statusGlyph.hold = 0 }
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        property double pressedAt: 0
+        // A quick click opens the fleet popup; only a 2 s hold stops agents. Right-click also opens it.
+        onPressed: function (mouse) {
+          if (mouse.button === Qt.RightButton) return
+          pressedAt = Date.now(); statusGlyph.hold = 0; holdAnim.restart()
+        }
+        onReleased: function (mouse) {
+          holdAnim.stop(); statusGlyph.hold = 0
+          if (mouse.button === Qt.RightButton || Date.now() - pressedAt < 400) root.toggle()
+        }
         onCanceled: { holdAnim.stop(); statusGlyph.hold = 0 }
         ToolTip.visible: containsMouse && !pressed
         ToolTip.delay: 500
-        ToolTip.text: root.lastStop !== "" ? root.lastStop : "Hold 2 s to stop every agent on " + (root.hostname || "this machine")
+        ToolTip.text: root.lastStop !== "" ? root.lastStop : "Click: fleet view · Hold 2 s: stop every agent on " + (root.hostname || "this machine")
       }
     }
     Process {
@@ -259,14 +269,15 @@ Panel {
           theme: root.theme
           avatarPath: root.avatarPath
           avatarInitials: root.avatarInitials
+          workingColor: root.workingColor
         }
 
         MouseArea {
           anchors.fill: parent
           hoverEnabled: true
           acceptedButtons: Qt.LeftButton | Qt.RightButton
-          // Left: focus the Harness window. Right: the fleet popup.
-          onClicked: function (mouse) { if (mouse.button === Qt.RightButton) root.toggle(); else focus.running = true }
+          // Left and right: the fleet popup (the Harness app is optional; Orca users never open it).
+          onClicked: root.toggle()
           ToolTip.visible: containsMouse
           ToolTip.delay: 300
           ToolTip.text: (agent.name || "agent") + "  " + (agent.engine || "") +
@@ -317,6 +328,7 @@ Panel {
         daemonUp: root.daemonUp
         active: root.opened
         reducedMotion: root.reducedMotion
+        workingColor: root.workingColor
         theme: root.theme
         logoMode: root.logoMode
         logoPath: root.logoPath

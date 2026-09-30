@@ -1,7 +1,7 @@
 {
   "plugin": "pi.harness-pulse",
   "name": "Harness Pulse",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "updatePolicy": "Plain-file installation excluded from automatic Git updates. Change only on explicit request.",
   "sha256": {
     "AgentRing.qml": "6516c39809734d61dbdd2681805461812ada1a0180025e0c896ad905e50e3fdc",

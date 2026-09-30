@@ -29,6 +29,8 @@ Item {
   // instead; both empty means a plain ring.
   property string avatarPath: ""
   property string avatarInitials: ""
+  /** Working ring colour: "Accent" (theme accent), "Cyan" or "Green". */
+  property string workingColor: "Accent"
 
   readonly property string state: agent && agent.state ? agent.state : "idle"
   // Spend as a fraction of the per-agent cap, or -1 when no cap is set: drawn as the outer arc.
@@ -48,7 +50,7 @@ Item {
 
   readonly property color stateColor: {
     switch (state) {
-      case "working": return accent
+      case "working": return workingColor === "Cyan" ? "#22d3ee" : workingColor === "Green" ? okay : accent
       case "waiting": return urgent
       case "permission": return danger
       case "failed": return danger
