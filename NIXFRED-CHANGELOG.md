@@ -34,7 +34,7 @@ built with ESP-IDF v5.5 (the version dependencies.lock pins, 5.5.0), 1,659,584 B
   wrap across 12 o'clock, partial redraw equals full redraw, mask) passes under UBSan; CLI specs for
   cableHost and fwPush pass (62), tsc clean. Flashed to the dial on gus over USB (idf.py flash, NVS kept);
   the daemon logged `dial 80:45:6B:35:06:CC on fw 0.0.86-nixfred.1 proto 3` and made no offer.
-  nixfred/device-art/firmware-graphics-host-render.png is a HOST render of the firmware's own drawing
+  nixfred/firmware-graphics-host-render.png is a HOST render of the firmware's own drawing
   calls (test_nixfred_ring with NIXFRED_SHOT_DIR), not a photo of the glass; the firmware has no
   screen-capture path. Not verified: the physical screen by eye, a live permission prompt on the dial.
 - Known: test/run.sh stops at its first compile on this host (glibc hides `strnlen` under -std=c11);
