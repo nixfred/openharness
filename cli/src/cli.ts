@@ -2505,6 +2505,15 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const input: SessionInputController = new SessionInputController({
     beforeSubmit: (id, text, tabId, deliveryId) => backend.swarmPromptScopes.prepare(id, text, tabId, deliveryId),
     getSession: (id) => registry.resolve(id),
+    // nixfred: a typed or spoken prompt (dial voice, app) for an Orca row goes into its Orca terminal, then Enter.
+    // Same switch as answers: watch mode on and answers on. Every send is audited.
+    externalPrompt: async (session, text) => {
+      const terminal = session.external?.orca?.terminal
+      if (!terminal || !(orcaWatch.enabled && orcaWatch.answers)) return false
+      const ok = (await orcaCli.send(terminal, text)) && (await orcaCli.send(terminal, '\r'))
+      nixfred.auditAnswer({ agentId: session.agentId, sessionId: session.sessionId ?? '', route: 'orca', what: 'prompt', value: text.slice(0, 200), ok, terminal })
+      return ok
+    },
     onDelivery: (event) => {
       autonomousDeviceService?.delivery(event)
       backend.orchestratorDelivery(event)

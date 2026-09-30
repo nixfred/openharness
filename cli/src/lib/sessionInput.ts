@@ -105,6 +105,11 @@ export interface SessionInputDeps {
   beforeSubmit?: (agentId: string, content: string, tabId?: string, deliveryId?: string) => (() => void)
   getSession: (sessionId: string) => RegisteredSession | undefined
   validateRuntime: (session: RegisteredSession) => Promise<boolean>
+  /**
+   * nixfred: a prompt for a row this daemon watches but does not own (an Orca terminal). The host types it
+   * into that terminal and answers true when it was accepted. Only present in the fork's cli.ts wiring.
+   */
+  externalPrompt?: (session: RegisteredSession, content: string) => Promise<boolean>
   /** Boolean is retained for direct controller tests and legacy embedders. Production returns dispatch evidence. */
   inject: (terminalTarget: string, content: string) => Promise<boolean | TerminalActionResult>
   /** Host serializes the preflight and paste with other terminal writers. */
@@ -373,6 +378,13 @@ export class SessionInputController {
   /** Preserve the established injection path for every caller that opts out of receipts. */
   private async injectLegacy(sessionId: string, session: RegisteredSession, content: string, tabId?: string): Promise<void> {
     const state = this.state(sessionId)
+    if (session.hosted === 'external' && this.deps.externalPrompt) {
+      const ok = await this.deps.externalPrompt(session, content)
+      console.log(`[inject] ${sid(sessionId)} external ${ok ? 'sent' : 'NOT sent'} · engine=${session.engine} · len=${content.length}`)
+      if (ok) this.deps.onSubmitted?.(sessionId, content)
+      else this.deps.onError(sessionId, 'The message could not be typed into the external terminal.')
+      return
+    }
     if (!(await this.deps.validateRuntime(session))) {
       console.warn(`[inject] ${sid(sessionId)} abort · engine=${session.engine} · process not running`)
       this.deps.onError(sessionId, 'This agent process is no longer running.')
@@ -418,6 +430,14 @@ export class SessionInputController {
 
   private async inject(sessionId: string, session: RegisteredSession, content: string, deliveryId?: string, tabId?: string): Promise<void> {
     const state = this.state(sessionId)
+    if (session.hosted === 'external' && this.deps.externalPrompt) {
+      const ok = await this.deps.externalPrompt(session, content)
+      console.log(`[inject] ${sid(sessionId)} external ${ok ? 'sent' : 'NOT sent'} · engine=${session.engine} · len=${content.length}`)
+      if (ok) this.deps.onSubmitted?.(sessionId, content)
+      if (deliveryId) { state.deliveryId = deliveryId; this.finishDelivery(sessionId, state, ok ? 'delivered' : 'rejected', ok ? undefined : 'external_send_failed') }
+      else this.deps.onError(sessionId, 'The message could not be typed into the external terminal.')
+      return
+    }
     if (!deliveryId) {
       // A local submission keeps its original scheduling. Overlap removes our ability
       // to attribute a later terminal turn to the lamp; it must not block local input.
