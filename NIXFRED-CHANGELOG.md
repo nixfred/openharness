@@ -5,6 +5,28 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Harness Pulse 0.2.0: heavy animation and a fleet view, 2026-09-30 (branch nixfred/heavy-anim-bar)
+
+- Bar rings: working throws a comet with a fading trail; waiting breathes a halo; permission strobes
+  red with a chromatic glitch; failed strobes and glitches once, then holds with a glitch tick every
+  6 s; done fills with an overshoot and a shockwave; offline is a dim dashed ring; idle shrinks to a
+  dot. Spend arc sweeps to new values. Shape paths and render-thread animators replace Canvas.
+- Fleet view popup (right-click, or `qs ipc call nixfred.harness-pulse toggle`): machine hubs with
+  agents in orbit (the orbit turns only while something works), glowing hub and tethers for agents
+  that need you, state chips, pulsing collision badge, spend gauges that sweep up on open, a bounded
+  activity ticker (40 rows, the only thing that scrolls) and a hold-to-stop hexagon that charges edge
+  by edge over 2 s.
+- Public-release settings in the widget settings UI: `avatar` (Auto: avatarPath, else ~/.face, else
+  initials; Initials; None), `avatarPath`, `avatarInitials`, `logo` (Harness, Omarchy read from
+  /usr/share/omarchy/logo.svg at runtime, Custom, None), `logoPath`, plus the existing ones. Every
+  setting documented in the plugin README. Nothing personal ships.
+- The roster is dropped after a minute without the daemon, so the popup never shows stale agents.
+- Verified in Test Drive (Omarchy 4.0.2, quickshell 0.3.1) against a fake daemon with generic
+  machine and agent names: shell log clean apart from the expected missing ~/.face notice; bar,
+  popup, reduced motion, Omarchy logo and connecting states screenshotted. Not verified: the physical
+  press and hold (no pointer injection in the VM), animation smoothness and CPU cost over time (stills
+  only), and a real daemon.
+
 ## nixfred 0.1.3 synced to upstream 56651674, 2026-09-27
 
 - Merged upstream through #399 (engine store paths, Hermes hook timing, session branches). Upstream

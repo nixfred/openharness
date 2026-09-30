@@ -1,13 +1,14 @@
 {
   "plugin": "pi.harness-pulse",
   "name": "Harness Pulse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "updatePolicy": "Plain-file installation excluded from automatic Git updates. Change only on explicit request.",
   "sha256": {
-    "AgentRing.qml": "da63897fceece3cd7fbe542a946b702426f8cb37ebdfbff7e289190eb4bd44f7",
-    "manifest.json": "3aa10e60887506232e79a4a1675d2f1b1e7728961a642179d5476ebe11c2f5cd",
-    "Model.js": "9ae062497cd0b168f305394c4d4f1e53d575dc96f1023370b9aa159a2ffffcd1",
-    "Panel.qml": "25948ca5fbb367b3e3ae8d1ca4a3aea098b17aaabc850eb00b8375f5893c3cb7",
+    "AgentRing.qml": "6516c39809734d61dbdd2681805461812ada1a0180025e0c896ad905e50e3fdc",
+    "FleetView.qml": "2456c50b87238c860a5207f3cbe7d089bf40456ace6ab203b4042184ab77460f",
+    "manifest.json": "9b081a19dcccb07697fb1d6457fd7d929b95109e14d3f593341cad6be4facafb",
+    "Model.js": "ab754509ade7df516b0e48f27e46d2205339a07c4f9f41f078f0cd7ed1322218",
+    "Panel.qml": "8170098dde1e0ebdeb754235e42048399824377c632c0593d64a15d8f43934d0",
     "pulse-feed": "acbade139b1de50d02791aa39fbd833d15a534442e557d788890fc29da5e6598"
   }
 }

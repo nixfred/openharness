@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -10,7 +11,8 @@ Panel {
   id: root
   moduleName: "pi.harness-pulse"
   ipcTarget: "nixfred.harness-pulse"
-  manageIpc: false
+  // The shared Panel IPC gives `open`, `close` and `toggle` on nixfred.harness-pulse for the fleet popup.
+  manageIpc: true
 
   readonly property int refreshIntervalSec: {
     var v = Number(setting("refreshIntervalSec", 1))
@@ -23,8 +25,27 @@ Panel {
   readonly property bool reducedMotion: setting("reducedMotion", false) === true
   readonly property bool showMachine: setting("showMachine", true) !== false
   readonly property string focusWindowClass: String(setting("focusWindowClass", "harness"))
-  // Absolute path to a round-cropped picture of the person the agents wait on; empty means no avatar.
-  readonly property string avatarPath: String(setting("avatarPath", "") || "")
+  // The face shown inside a ring that waits on you. "Auto": avatarPath when set, else ~/.face, else
+  // initials. "Initials": always initials. "None": plain ring. Nothing personal ships in the plugin.
+  readonly property string avatarMode: String(setting("avatar", "Auto") || "Auto")
+  readonly property string avatarSetting: String(setting("avatarPath", "") || "")
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  function expandHome(p) { return p.indexOf("~/") === 0 ? root.homeDir + p.substring(1) : p }
+  // The candidate picture is probed once here, so a missing ~/.face costs one warning, not one per ring.
+  readonly property string avatarPath: avatarProbe.status === Image.Ready ? avatarCandidate : ""
+  Image { id: avatarProbe; visible: false; asynchronous: true; sourceSize.width: 64; sourceSize.height: 64; source: root.avatarCandidate !== "" ? "file://" + root.avatarCandidate : "" }
+  readonly property string avatarCandidate: avatarMode !== "Auto" ? ""
+    : (avatarSetting !== "" ? expandHome(avatarSetting) : (homeDir !== "" ? homeDir + "/.face" : ""))
+  readonly property string avatarInitials: {
+    if (avatarMode === "None") return ""
+    var s = String(setting("avatarInitials", "") || "").trim()
+    if (s === "") s = String(Quickshell.env("USER") || "").substring(0, 1)
+    return s.substring(0, 2).toUpperCase()
+  }
+  // Logo for the popup's idle and connecting states: Omarchy (read from the system at runtime,
+  // never bundled), Harness (a drawn hexagon mark), Custom (logoPath) or None.
+  readonly property string logoMode: String(setting("logo", "Harness") || "Harness")
+  readonly property string logoPath: expandHome(String(setting("logoPath", "") || ""))
   readonly property int ringSize: {
     var v = Number(setting("ringSize", 18))
     return isFinite(v) ? Math.max(12, Math.min(28, Math.round(v))) : 18
@@ -38,6 +59,8 @@ Panel {
   property bool daemonUp: false
   property var theme: ({})
   property int nowMs: Date.now()
+  // agentId -> last state, for the fleet view activity ticker.
+  property var lastStates: null
 
   readonly property string helperPath: {
     var p = Qt.resolvedUrl("pulse-feed").toString()
@@ -60,6 +83,7 @@ Panel {
   }
   Component.onCompleted: themeFile.reload()
 
+  // The clock only ticks while a tooltip or the popup could show it.
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
 
   // pulse-feed polls the daemon and prints one JSON line per poll; exit 3 means daemon down.
@@ -76,10 +100,15 @@ Panel {
         root.hostname = r.hostname
         root.agents = Model.sortAgents(r.agents)
         root.alerts = r.alerts || []
+        var d = Model.diffStates(root.lastStates, root.agents, Date.now())
+        root.lastStates = d.map
+        if (d.events.length > 0) fleetView.pushEvents(d.events)
       }
     }
     onExited: function (code) {
       root.daemonUp = false
+      // A minute without the daemon: the last roster is stale, so drop it rather than show ghosts.
+      if (code === 3) { root.agents = []; root.alerts = []; root.lastStates = null }
       if (code === 3) root.lastError = "Harness daemon not running"
       else if (code !== 0) root.lastError = "pulse-feed exited " + code
       restart.start()
@@ -116,20 +145,19 @@ Panel {
         from: 0; to: 1; duration: 2000
         onFinished: { if (statusGlyph.hold >= 1) { stopAll.running = true; statusGlyph.hold = 0 } }
       }
-      onHoldChanged: holdCanvas.requestPaint()
-      Canvas {
-        id: holdCanvas
+      // Shape, not Canvas: a Canvas repainted per frame flickers on the bar.
+      Shape {
+        id: holdArc
         anchors.centerIn: parent
         width: root.ringSize + 4; height: root.ringSize + 4
         visible: statusGlyph.hold > 0
-        renderStrategy: Canvas.Cooperative
-        onPaint: {
-          var ctx = getContext("2d"); ctx.reset()
-          var c = width / 2
-          ctx.beginPath(); ctx.lineWidth = 2; ctx.lineCap = "round"
-          ctx.strokeStyle = (root.theme && root.theme.red) ? root.theme.red : Color.urgent
-          ctx.arc(c, c, c - 1.5, -Math.PI / 2, -Math.PI / 2 + (1 - statusGlyph.hold) * Math.PI * 2)
-          ctx.stroke()
+        preferredRendererType: Shape.CurveRenderer
+        ShapePath {
+          strokeWidth: 2
+          capStyle: ShapePath.RoundCap
+          fillColor: "transparent"
+          strokeColor: (root.theme && root.theme.red) ? root.theme.red : Color.urgent
+          PathAngleArc { centerX: holdArc.width / 2; centerY: holdArc.height / 2; radiusX: holdArc.width / 2 - 1.5; radiusY: radiusX; startAngle: -90; sweepAngle: (1 - statusGlyph.hold) * 360 }
         }
       }
       MouseArea {
@@ -164,7 +192,6 @@ Panel {
       id: collisionBadge
       anchors.verticalCenter: parent.verticalCenter
       visible: root.alerts.length > 0
-      width: visible ? implicitWidth : 0
       text: "△" + (root.alerts.length > 1 ? String(root.alerts.length) : "")
       color: (root.theme && root.theme.red) ? root.theme.red : Color.urgent
       font.pixelSize: root.ringSize * 0.7
@@ -198,7 +225,7 @@ Panel {
         width: root.slotWidth
         height: root.ringSize + 4
 
-        // A soft dot travels along the row toward a ring that waits on Fred (leads the eye on wide bars).
+        // A soft dot travels along the row toward a ring that waits on you (leads the eye on wide bars).
         Rectangle {
           id: pulseDot
           width: 4; height: 4; radius: 2
@@ -231,12 +258,15 @@ Panel {
           reducedMotion: root.reducedMotion
           theme: root.theme
           avatarPath: root.avatarPath
+          avatarInitials: root.avatarInitials
         }
 
         MouseArea {
           anchors.fill: parent
           hoverEnabled: true
-          onClicked: focus.running = true
+          acceptedButtons: Qt.LeftButton | Qt.RightButton
+          // Left: focus the Harness window. Right: the fleet popup.
+          onClicked: function (mouse) { if (mouse.button === Qt.RightButton) root.toggle(); else focus.running = true }
           ToolTip.visible: containsMouse
           ToolTip.delay: 300
           ToolTip.text: (agent.name || "agent") + "  " + (agent.engine || "") +
@@ -254,8 +284,46 @@ Panel {
     anchors.fill: parent
     enabled: root.agents.length === 0
     hoverEnabled: true
+    acceptedButtons: Qt.LeftButton | Qt.RightButton
+    onClicked: root.toggle()
     ToolTip.visible: containsMouse
     ToolTip.delay: 300
     ToolTip.text: root.daemonUp ? "Harness: no agents" : (root.lastError || "Harness daemon not running")
+  }
+
+  // ---- Fleet popup: right-click the widget (or `toggle` over IPC). ----
+  KeyboardPanel {
+    id: popup
+    anchorItem: row
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: popup.fittedContentWidth(480)
+    contentHeight: popup.fittedContentHeight(fleetView.implicitHeight, 620)
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onCloseRequested: root.close()
+      onTabRequested: function (direction) { root.switchPanel(direction) }
+
+      FleetView {
+        id: fleetView
+        anchors.fill: parent
+        agents: root.agents
+        alerts: root.alerts
+        hostname: root.hostname
+        daemonUp: root.daemonUp
+        active: root.opened
+        reducedMotion: root.reducedMotion
+        theme: root.theme
+        logoMode: root.logoMode
+        logoPath: root.logoPath
+        lastStop: root.lastStop
+        nowMs: root.nowMs
+        onStopAllRequested: stopAll.running = true
+      }
+    }
   }
 }

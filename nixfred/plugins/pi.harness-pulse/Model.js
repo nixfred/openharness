@@ -61,7 +61,7 @@ function parseFeedLine(line) {
   }
 }
 
-// Rank: what needs Fred first. Permission and waiting float left.
+// Rank: what needs a person first. Permission and waiting float left.
 var RANK = { permission: 0, waiting: 1, failed: 2, done: 3, working: 4, idle: 5, offline: 6 };
 
 function sortAgents(agents) {
@@ -87,4 +87,67 @@ function ago(sinceMs, nowMs) {
   if (s < 60) return s + "s";
   if (s < 3600) return Math.round(s / 60) + "m";
   return Math.round(s / 3600) + "h";
+}
+
+// Fleet view: agents grouped by machine, this host first, then by name. Each group carries
+// whether anything on it needs a person, so the hub can glow.
+function groupByMachine(agents, hostname) {
+  var groups = {};
+  var order = [];
+  for (var i = 0; i < agents.length; i++) {
+    var m = agents[i].machine || hostname || "local";
+    if (!groups[m]) { groups[m] = { machine: m, agents: [], needsYou: false, working: false, spendUsd: 0 }; order.push(m); }
+    var g = groups[m];
+    g.agents.push(agents[i]);
+    if (agents[i].state === "waiting" || agents[i].state === "permission" || agents[i].state === "failed") g.needsYou = true;
+    if (agents[i].state === "working") g.working = true;
+    if (agents[i].spend && agents[i].spend.usd) g.spendUsd += agents[i].spend.usd;
+  }
+  order.sort(function (a, b) {
+    if (a === hostname) return -1;
+    if (b === hostname) return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  return order.map(function (m) { return groups[m]; });
+}
+
+// Count per state, for the header chips.
+function stateCounts(agents) {
+  var out = { working: 0, waiting: 0, permission: 0, failed: 0, done: 0, idle: 0, offline: 0 };
+  for (var i = 0; i < agents.length; i++) out[agents[i].state] = (out[agents[i].state] || 0) + 1;
+  return out;
+}
+
+// Activity ticker: compare the previous {agentId: state} map with the new agents and return one
+// event per change. First sight of an agent is an event too ("joined"). Returns {events, map}.
+function diffStates(prevMap, agents, nowMs) {
+  var map = {};
+  var events = [];
+  for (var i = 0; i < agents.length; i++) {
+    var a = agents[i];
+    var key = a.agentId || (a.machine + "/" + a.name);
+    map[key] = a.state;
+    var before = prevMap ? prevMap[key] : undefined;
+    if (before === a.state) continue;
+    events.push({
+      at: nowMs,
+      name: a.name,
+      machine: a.machine,
+      state: a.state,
+      glyph: glyphFor(a.state),
+      text: before === undefined ? "joined, " + (a.label || a.state) : before + " > " + (a.label || a.state)
+    });
+  }
+  if (prevMap) {
+    for (var k in prevMap) {
+      if (map[k] === undefined) events.push({ at: nowMs, name: k.split("/").pop(), machine: "", state: "offline", glyph: glyphFor("offline"), text: "left the fleet" });
+    }
+  }
+  return { events: events, map: map };
+}
+
+function clock(ms) {
+  var d = new Date(ms);
+  function two(n) { return n < 10 ? "0" + n : "" + n; }
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
 }
