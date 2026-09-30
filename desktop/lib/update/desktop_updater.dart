@@ -185,8 +185,13 @@ class DesktopUpdater {
 
   bool get canCheck => !kIsWeb && _enabled && _releaseMode;
 
+  /// nixfred: the fork never offers Autonomous's stock build over itself. Its releases are unsigned
+  /// (OH-6) and would replace the fork's app; the fork updates by rebuilding after an upstream merge.
+  /// `--dart-define=HARNESS_STOCK_UPDATES=true` restores the stock behaviour.
+  static const bool stockUpdatesDefault = bool.fromEnvironment('HARNESS_STOCK_UPDATES');
+
   DesktopUpdater({
-    this._enabled = true,
+    this._enabled = stockUpdatesDefault,
     Dio? dio,
     Future<void> Function(String command)? launchDetached,
     // Defaults to the real manifest (or the --dart-define build-time override — see RELEASE.md's
