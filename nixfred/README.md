@@ -60,6 +60,7 @@ All of them talk to the running daemon over its loopback API (`POST /api/nixfred
 | `harness stop-all [--except=<agentId>]` | Panic stop: cancel every agent turn on this machine |
 | `harness collisions`, `harness lock <repo> [branch]`, `unlock`, `locks`, `branches` | The drift alarm: two agents on one file, folder or branch inside an hour; branch locks per agent |
 | `harness ci` | One pass of the CI-failure watcher (`gh pr checks` per agent branch); runs every 5 min on its own |
+| `harness subs [--json] [--force]`, `harness subs set <claude\|codex\|grok\|kimi> <on\|off>` | Every subscription's weekly (or monthly) percent used, percent banked against an even pace, reset, come-back timer and the next plan to use. Also `GET /api/subscriptions` and the app's Settings, Subscriptions. Ported from [Burn Bar](https://github.com/nixfred/burnbar); see `docs/nixfred-subscriptions.md` |
 | `harness hermes [doctor-done]` | Hermes health per profile: state.db writers, memory budget, isolation, doctor-after-update stamp |
 | `harness dispatch --machine=<id> --repo=<path> [--engine=claude] [--branch=x] "brief"`, `dispatches` | Hand a bounded job to a linked machine; the result comes back off the worker's `DISPATCH_RESULT:` line |
 | `harness clip push --machine=<id> [--file=<path>] [text]` | Clipboard or file drop to a linked machine, sealed end to end; files land in `~/Downloads/harness-drop` |
@@ -68,4 +69,4 @@ All of them talk to the running daemon over its loopback API (`POST /api/nixfred
 | `harness record start|stop <agent>`, `pin <agent> <label>`, `pins`, `asciicast` | tmux pane recording with pinned moments, exported as asciicast v2 |
 | `harness audit [n]` | Tail of the append-only, secret-redacted journal (`data/audit.jsonl`) |
 
-Environment switches: `HARNESS_HERMES_SESSIONS=0` (no paneless Hermes rows), `HARNESS_BRANCH_WATCH=0`, `HARNESS_CI_WATCH=0`, `HARNESS_CI_WATCH_MS`, `HARNESS_DROP_DIR`, `OTEL_EXPORTER_OTLP_ENDPOINT` (spans), `HARNESS_WINDOW_CLASS` (what the notification's Show action focuses).
+Environment switches: `HARNESS_SUBS_WATCH=0` (no subscription polling), `HARNESS_SUBS_MS` (poll interval, default 60000), `HARNESS_HERMES_SESSIONS=0` (no paneless Hermes rows), `HARNESS_BRANCH_WATCH=0`, `HARNESS_CI_WATCH=0`, `HARNESS_CI_WATCH_MS`, `HARNESS_DROP_DIR`, `OTEL_EXPORTER_OTLP_ENDPOINT` (spans), `HARNESS_WINDOW_CLASS` (what the notification's Show action focuses).

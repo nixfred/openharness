@@ -32,6 +32,8 @@ void main() {
       // files, and it reads nothing at all until a provider is switched on, so
       // there is nothing here for a shipped build to hide.
       SettingsSection.usage,
+      // nixfred: reads only this machine's own plan meters, through the local daemon.
+      SettingsSection.subscriptions,
       SettingsSection.customize,
       SettingsSection.notifications,
       SettingsSection.devices,

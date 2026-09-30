@@ -41,6 +41,17 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
   your face inside the ring of an agent waiting on you, a collision badge, and hold-the-hexagon
   for two seconds to stop every agent.
 
+**Your subscriptions, on one screen**
+
+- Settings, Subscriptions in the app and `harness subs [--json]` show every AI plan on the machine
+  (Claude, Codex, Grok, Kimi): the weekly percent used as an arc, the percent banked against an
+  even pace (green when banked, amber or red when over), a burndown line, the reset countdown, a
+  come-back timer when you are over pace, and which plan to use next. `GET /api/subscriptions`
+  serves it and the attention payload carries a compact copy for the bar and the device.
+- Works with no Burn Bar and no Omarchy, on Linux and macOS. A plan that is not on the machine
+  says "not detected". The pace math and sources are ported from
+  [Burn Bar](https://github.com/nixfred/burnbar); see [docs/nixfred-subscriptions.md](docs/nixfred-subscriptions.md).
+
 **Brakes**
 
 - Destructive-action gate (`harness gate`): a per-machine policy asks before `git push`, hard

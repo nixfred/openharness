@@ -14,6 +14,8 @@ enum SettingsSection {
   account(LucideIcons.user300, 'Account'),
   profiles(LucideIcons.monitor300, 'Profiles'),
   usage(LucideIcons.chartNoAxesColumn300, 'Usage'),
+  // nixfred: every AI plan on one screen (weekly used, banked, next plan).
+  subscriptions(LucideIcons.gauge300, 'Subscriptions'),
   customize(LucideIcons.palette300, 'Customize'),
   notifications(LucideIcons.bell300, 'Notifications'),
   devices(LucideIcons.zap300, 'Autonomous robots'),
@@ -88,6 +90,7 @@ const _kSettingsGroups = [
   // which logs are read at all — the pane is off until somebody sets it.
   SettingsGroup('Preferences', [
     SettingsSection.usage,
+    SettingsSection.subscriptions,
     SettingsSection.customize,
     // Beside Customize because it is the same kind of decision — how this Mac behaves while you
     // work — and NOT inside it, which is where the alert switch started. Customize is about how

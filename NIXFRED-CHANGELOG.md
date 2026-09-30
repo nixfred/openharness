@@ -51,6 +51,27 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
   press and hold (no pointer injection in the VM), animation smoothness and CPU cost over time (stills
   only), and a real daemon.
 
+## Subscriptions screen (branch nixfred/subscriptions), 2026-09-30
+
+- One screen for every AI plan on the computer: Settings, Subscriptions in the app, `harness subs
+  [--json]`, `harness subs set <id> on|off`, `GET /api/subscriptions`, a local `subscriptions` frame,
+  and a compact `subscriptions` block on the attention payload for the bar and the device.
+- Per plan: weekly (Kimi: monthly) percent used as an arc, percent banked against an even pace
+  (signed: negative means over pace), a burndown line against the even-pace diagonal, reset
+  countdown, come-back timer when over, a pace sentence, and the "use this plan next" verdict with
+  a glow on that card. Reduced-motion aware; the pane never scrolls.
+- Providers: Claude (OAuth usage endpoint with Claude Code's own login; macOS keychain supported),
+  Codex (rate-limit snapshot in its own session rollouts, no network), Grok (billing snapshot in its
+  own log, no network), Kimi (`/usages` with `KIMI_API_KEY`). Absent providers read "not detected"
+  and make no request. The local GPU is not a subscription card.
+- Pace, banked, come-back and next-plan math ported from Burn Bar (github.com/nixfred/burnbar),
+  with its pace and guidance suites ported case for case (46 tests). Burn Bar is not needed.
+- Docs: `docs/nixfred-subscriptions.md`.
+
+Verified on gus: all four providers live through a local daemon surface and `harness subs`.
+Not verified: macOS keychain path on a real Mac, the frame on the device, the bar widget (follow-up,
+owned by the bar branch).
+
 ## nixfred 0.1.3 synced to upstream 56651674, 2026-09-27
 
 - Merged upstream through #399 (engine store paths, Hermes hook timing, session branches). Upstream

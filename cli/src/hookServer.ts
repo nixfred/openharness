@@ -93,6 +93,8 @@ export interface HookServerHandlers {
   }) => void | GateVerdict | Promise<void | GateVerdict>
   /** GET /api/attention: every agent's attention state for the bar, the device and the inbox. */
   onAttention?: () => unknown
+  /** GET /api/subscriptions: every plan's weekly used, banked, reset and the next-plan verdict (nixfred). */
+  onSubscriptions?: () => Promise<unknown>
   /** POST /api/stop-all: cancel every agent's turn except one (the panic stop). */
   onStopAll?: (exceptAgentId: string | null) => Promise<{ cancelled: string[] }>
   /** POST /api/adopt: register an existing tmux pane as an agent without restarting it. */
@@ -462,6 +464,11 @@ export function startHookServer(
       }
       // Attention snapshot for the bar widget and any local reader: loopback only, read-only, no
       // secrets (names, engines, states). Same trust as /api/status.
+      if (req.method === 'GET' && (url === '/api/subscriptions' || url.startsWith('/api/subscriptions?'))) {
+        if (!handlers.onSubscriptions) { json(503, { error: 'UNAVAILABLE' }); return }
+        try { json(200, await handlers.onSubscriptions()) } catch (e) { json(500, { error: e instanceof Error ? e.message : 'INTERNAL' }) }
+        return
+      }
       if (req.method === 'GET' && url === '/api/attention') {
         json(200, handlers.onAttention ? handlers.onAttention() : { agents: [] }); return
       }
