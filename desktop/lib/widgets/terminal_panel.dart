@@ -36,6 +36,7 @@ import '../terminal/terminal_theme_store.dart';
 import 'attention_glow.dart';
 import '../terminal/terminal_viewport.dart';
 import '../shared/theme/app_theme.dart' as grid;
+import '../nixfred/spend_ring.dart';
 import '../shared/theme/workspace_bar_style.dart';
 import '../theme/app_theme.dart';
 import 'engine_identity.dart';
@@ -2128,10 +2129,14 @@ class _TerminalHeader extends StatelessWidget {
             );
             return Row(
               children: [
-                if (agent != null)
-                  EngineMark.forAgent(agent, size: 17)
-                else
-                  EngineMark(engine: session.engineId, size: 17),
+                // nixfred: the spend arc rings the engine mark when a per-agent cap is set.
+                SpendRing(
+                  attention: notifier.attention,
+                  agentId: session.agentId,
+                  child: agent != null
+                      ? EngineMark.forAgent(agent, size: 17)
+                      : EngineMark(engine: session.engineId, size: 17),
+                ),
                 // Icon and name, the same as every other pane (owner,
                 // 2026-09-15): a harness agent is its harness here, and the
                 // engine it runs on is the dialog's and the tooltip's to say.

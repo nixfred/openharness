@@ -89,3 +89,36 @@ the next cut: face-in-ring, spend arc, fleet glyph, middle-click panic stop, pan
 - Lane glyph: each agent's policy lane (planner, checker, drafter, publisher) rides on the attention payload as `lane`; the bar shows its first letter in the ring's tooltip and, on the device, as a small tag under the agent name. Role and state read together: a publisher waiting is different from a planner waiting.
 - Hermes health arcs: one arc per Hermes profile on the machines screen, green, amber or red, with writers count and memory as the two numbers under it. Red pulses once when a second writer appears.
 - Approvals batching (device, Phase 6): when several agents wait on permission, one screen lists them as pills; a tap approves one, a long press approves all in a lane.
+
+## Desktop app motion and branding (added 2026-09-29)
+
+- Pane frame per state: working sweeps an accent comet around the border (2.4 s a lap), waiting
+  breathes yellow, permission and failed pulse red with a scan band travelling down the side edges
+  (inside the border, never over text; failed opens with the double flash), done draws its border
+  once in green then holds. Colours cross-fade over 280 ms. Idle and offline draw nothing.
+- Spend arc rings the engine mark in the pane header when a per-agent cap is set: accent, amber from
+  80 percent, red at the cap with one pulse as it crosses. While the agent waits on you, the mark
+  becomes your avatar inside a ring in the state colour.
+- Fleet overview (command bar "Fleet overview", or Ctrl+Shift+G): hub, machine hexagons, agent rings.
+  Agents orbit a machine only while one works there; packets flow out along a link while work runs
+  and back in the state colour while an agent there waits on you. Dispatch and clip-drop flows are
+  not drawn: the attention frame does not carry them yet.
+- Boot splash on a cold launch only, 1.5 s, click or any key skips, reduced motion shows a still logo.
+- Reduced motion: the platform's setting or `HARNESS_REDUCED_MOTION=1`. Loops also stop while the
+  window is unfocused and whenever nothing is live.
+
+### Settings keys (desktop `state.json`, written by Settings, Appearance)
+
+| Key | Values | Default |
+|---|---|---|
+| `nixfred_boot_logo` | `omarchy`, `harness`, `custom`, `none` | unset: `omarchy` when `/usr/share/omarchy/logo.svg` exists, else `harness` |
+| `nixfred_boot_logo_path` | copy of the chosen SVG or PNG under `~/.harness/desktop-app-v2/brand/` | unset |
+| `nixfred_avatar` | `generic`, `initials`, `system`, `custom` | `generic` (a neutral person glyph) |
+| `nixfred_avatar_path` | cached copy of the chosen image under the same `brand/` folder | unset |
+| `nixfred_avatar_initials` | up to three letters, upper case | empty |
+
+Custom files must be SVG or PNG, at most 2 MB, with real content (PNG signature, `<svg` tag). A
+rejected file leaves the previous choice in place. A choice whose file has gone falls back to the
+default: Omarchy logo, else the Harness icon; generic avatar. `system` uses `~/.face` and is offered
+only when that file exists. Nothing of Omarchy's is bundled: its wordmark is read from the machine.
+Environment: `HARNESS_NO_SPLASH=1` turns the splash off, `HARNESS_REDUCED_MOTION=1` turns motion off.

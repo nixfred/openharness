@@ -31,6 +31,7 @@ import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
+import 'nixfred/boot_splash.dart';
 
 /// The screen an app puts up once someone is signed in — the desktop's swarm of
 /// panes, or the phone's one-agent-at-a-time shell. It is the only thing the two
@@ -117,14 +118,18 @@ class HarnessApp extends StatelessWidget {
       theme: grid.buildAppTheme(brightness: Brightness.dark),
       // The chosen point size is already applied to every style and terminal
       // cell. A second UI scale would make the chrome disagree with the grid.
+      // nixfred: the Omarchy logo lights up once on a cold launch while the
+      // app builds underneath (lib/nixfred/boot_splash.dart).
       builder: (context, child) => MediaQuery.withNoTextScaling(
-        child: _GridTokenScope(
-          child: keymap == null
-              ? child ?? const SizedBox.shrink()
-              : KeymapProvider(
-                  keymap: keymap!,
-                  child: child ?? const SizedBox.shrink(),
-                ),
+        child: BootSplash(
+          child: _GridTokenScope(
+            child: keymap == null
+                ? child ?? const SizedBox.shrink()
+                : KeymapProvider(
+                    keymap: keymap!,
+                    child: child ?? const SizedBox.shrink(),
+                  ),
+          ),
         ),
       ),
       home: AnalyticsLifecycle(

@@ -1907,6 +1907,9 @@ class AppNotifier extends ChangeNotifier {
   final DialState dial;
   /// nixfred: per-agent attention from the local daemon's `attention` frame.
   final AttentionState attention = AttentionState();
+
+  /// nixfred: whether the fleet overview panel is showing (lib/nixfred/fleet_overview.dart).
+  final ValueNotifier<bool> fleetOverviewOpen = ValueNotifier(false);
   final AgentPreference agentPreference;
   final ProjectHistory projectHistory;
 
