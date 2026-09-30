@@ -434,8 +434,8 @@ export class SessionInputController {
       const ok = await this.deps.externalPrompt(session, content)
       console.log(`[inject] ${sid(sessionId)} external ${ok ? 'sent' : 'NOT sent'} · engine=${session.engine} · len=${content.length}`)
       if (ok) this.deps.onSubmitted?.(sessionId, content)
-      if (deliveryId) { state.deliveryId = deliveryId; this.finishDelivery(sessionId, state, ok ? 'delivered' : 'rejected', ok ? undefined : 'external_send_failed') }
       else this.deps.onError(sessionId, 'The message could not be typed into the external terminal.')
+      if (deliveryId) { state.deliveryId = deliveryId; this.finishDelivery(sessionId, state, ok ? 'delivered' : 'rejected', ok ? undefined : 'external_send_failed') }
       return
     }
     if (!deliveryId) {
