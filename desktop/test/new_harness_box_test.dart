@@ -537,7 +537,7 @@ void main() {
     },
   );
 
-  testWidgets('⌘N opens the box over live panes, and Escape closes it', (
+  testWidgets('⌘N focuses the prompt over live panes and Escape dismisses it', (
     tester,
   ) async {
     newHarnessOpensInBox = true;
@@ -561,7 +561,14 @@ void main() {
     expect(frame.center.dx, tester.view.physicalSize.width / 2);
     expect(frame.bottom, lessThan(tester.view.physicalSize.height));
     expect(find.byKey(const ValueKey('new-harness-input')), findsNothing);
-    expect(FocusManager.instance.primaryFocus!.debugLabel, 'new-harness-form');
+    expect(find.byKey(const ValueKey('new-harness-task')), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('new-harness-task')))
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
     expect(find.byKey(const ValueKey('new-harness-form')), findsNothing);

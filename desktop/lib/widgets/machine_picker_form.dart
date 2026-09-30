@@ -13,6 +13,7 @@ import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
 import 'box_chrome.dart' show ReadlineKeys;
+import 'desktop_chrome.dart';
 import 'link_another_machine_dialog.dart'
     show
         kHarnessDownloadUrl,
@@ -195,6 +196,21 @@ class MachinePickerFormState extends State<MachinePickerForm> {
 
   void _tab(bool forward) {
     if (_composing) return;
+    if (DesktopChrome.of(context)) {
+      final nodes = _nodes;
+      final current = nodes.indexWhere((node) => node.hasFocus);
+      final next = current + (forward ? 1 : -1);
+      if (next >= 0 && next < nodes.length) {
+        final node = nodes[next];
+        node.requestFocus();
+        if (node.context case final context?) Scrollable.ensureVisible(context);
+      } else if (widget.onSwitchPane != null) {
+        widget.onSwitchPane!();
+      } else {
+        _move(forward);
+      }
+      return;
+    }
     widget.onSwitchPane != null ? widget.onSwitchPane!() : _move(forward);
   }
 
@@ -518,20 +534,90 @@ class MachinePickerFormState extends State<MachinePickerForm> {
     FocusNode focus,
     String key,
   ) {
+    final desktop = DesktopChrome.of(context);
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
       terminalThemeStore.value,
     );
     final cell = terminalCellSizeOf(context);
+    if (desktop) {
+      final fieldLabel = switch (label) {
+        'name' => 'Name',
+        'confirm' => 'Confirm password',
+        _ => 'Password',
+      };
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            fieldLabel,
+            style: DesktopChrome.text(size: 12, color: DesktopChrome.muted),
+          ),
+          const SizedBox(height: 6),
+          ReadlineKeys(
+            controller: controller,
+            enabled: !_busy,
+            onChanged: (_) {
+              if (_message != null) setState(() => _message = null);
+            },
+            child: TextField(
+              key: ValueKey(key),
+              controller: controller,
+              focusNode: focus,
+              readOnly: _busy,
+              onTapOutside: (_) {},
+              obscureText:
+                  widget.kind != MachinePickerFormKind.rename && !_showPassword,
+              enableSuggestions: false,
+              autocorrect: false,
+              style: DesktopChrome.text(size: 13),
+              cursorColor: DesktopChrome.accent,
+              decoration: InputDecoration(
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(
+                    grid.AppDesktop.fieldRadius,
+                  ),
+                  borderSide: BorderSide(color: DesktopChrome.rim),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(
+                    grid.AppDesktop.fieldRadius,
+                  ),
+                  borderSide: BorderSide(color: DesktopChrome.rim),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(
+                    grid.AppDesktop.fieldRadius,
+                  ),
+                  borderSide: BorderSide(
+                    color: DesktopChrome.focusRing,
+                    width: grid.AppDesktop.focusWidth,
+                  ),
+                ),
+                filled: true,
+                fillColor: DesktopChrome.field,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 10,
+                ),
+              ),
+              onEditingComplete: () {},
+              onChanged: (_) {
+                if (_message != null) setState(() => _message = null);
+              },
+            ),
+          ),
+        ],
+      );
+    }
     return Row(
       children: [
         SizedBox(
           width: cell.width * 10,
           child: Text(
             '$label >',
-            style: terminalContentStyle(
-              color: theme.foreground.withValues(alpha: .54),
-            ),
+            style: terminalContentStyle(color: theme.muted),
           ),
         ),
         Expanded(
@@ -578,7 +664,9 @@ class MachinePickerFormState extends State<MachinePickerForm> {
   @override
   Widget build(BuildContext context) {
     TerminalFontScope.watch(context);
-    final cell = terminalCellSizeOf(context);
+    grid.AppTheme.watch(context);
+    final desktop = DesktopChrome.of(context);
+    final cell = desktop ? const Size(9, 14) : terminalCellSizeOf(context);
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
       terminalThemeStore.value,
@@ -586,9 +674,17 @@ class MachinePickerFormState extends State<MachinePickerForm> {
     Widget line(String text, {bool selectable = false}) => selectable
         ? SelectableText(
             text,
-            style: terminalContentStyle(color: theme.foreground),
+            style: desktop
+                ? grid.AppType.mono(color: DesktopChrome.foreground)
+                      .copyWith(fontSize: 12)
+                : terminalContentStyle(color: theme.foreground),
           )
-        : Text(text, style: terminalContentStyle(color: theme.foreground));
+        : Text(
+            text,
+            style: desktop
+                ? DesktopChrome.text(size: 13)
+                : terminalContentStyle(color: theme.foreground),
+          );
     final gap = SizedBox(height: cell.height);
     final name = machine?.machine.displayName ?? '';
     final email = app.currentUser?.email;
@@ -600,10 +696,13 @@ class MachinePickerFormState extends State<MachinePickerForm> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          line(
+          Text(
             _setup
                 ? 'Add machine · ${widget.kind == MachinePickerFormKind.app ? 'App' : 'CLI'}'
                 : name,
+            style: desktop
+                ? DesktopChrome.heading()
+                : terminalContentStyle(color: theme.foreground),
           ),
           gap,
           if (_setup) ...[
@@ -680,31 +779,56 @@ class MachinePickerFormState extends State<MachinePickerForm> {
               liveRegion: true,
               child: Text(
                 _busy ? _progress : _message!,
-                style: terminalContentStyle(
-                  color: !_busy && _error
-                      ? theme.yellow
-                      : theme.foreground.withValues(alpha: .54),
-                ),
+                style: desktop
+                    ? DesktopChrome.text(
+                        size: 12,
+                        color: !_busy && _error
+                            ? Theme.of(context).colorScheme.error
+                            : DesktopChrome.muted,
+                      )
+                    : terminalContentStyle(
+                        color: !_busy && _error ? theme.yellow : theme.muted,
+                      ),
               ),
             ),
             gap,
           ],
           _keys(
             Wrap(
-              spacing: cell.width * 2,
-              runSpacing: cell.height,
+              spacing: desktop ? 8 : cell.width * 2,
+              runSpacing: desktop ? 8 : cell.height,
               children: [
                 for (final action in _actions)
-                  TerminalTextAction(
-                    key: ValueKey('machine-form:${_buttonId(action.label)}'),
-                    label: action.label,
-                    padding: EdgeInsets.zero,
-                    focusNode: _buttons.putIfAbsent(
-                      _buttonId(action.label),
-                      () => FocusNode(debugLabel: action.label),
+                  if (desktop)
+                    DesktopPill(
+                      key: ValueKey('machine-form:${_buttonId(action.label)}'),
+                      label: switch (action.label) {
+                        'Show' => 'Show password',
+                        'Hide' => 'Hide password',
+                        _ => action.label,
+                      },
+                      compact: true,
+                      focusNode: _buttons.putIfAbsent(
+                        _buttonId(action.label),
+                        () => FocusNode(debugLabel: action.label),
+                      ),
+                      foregroundColor:
+                          action.label == 'Delete' || action.label == 'Clear'
+                          ? Theme.of(context).colorScheme.error
+                          : null,
+                      onPressed: action.run,
+                    )
+                  else
+                    TerminalTextAction(
+                      key: ValueKey('machine-form:${_buttonId(action.label)}'),
+                      label: action.label,
+                      padding: EdgeInsets.zero,
+                      focusNode: _buttons.putIfAbsent(
+                        _buttonId(action.label),
+                        () => FocusNode(debugLabel: action.label),
+                      ),
+                      onPressed: action.run,
                     ),
-                    onPressed: action.run,
-                  ),
               ],
             ),
             buttons: true,
@@ -746,12 +870,12 @@ class MachinePickerFormState extends State<MachinePickerForm> {
                 [
                   if (hint('picker.accept') case final enter?) '$enter select',
                   if (hint('picker.complete') case final tab?)
-                    '$tab ${widget.onSwitchPane != null ? 'pane' : 'next'}',
+                    '$tab ${!desktop && widget.onSwitchPane != null ? 'pane' : 'next'}',
                   if (hint('picker.cancel') case final escape?) '$escape back',
                 ].join('  ·  '),
-                style: terminalContentStyle(
-                  color: theme.foreground.withValues(alpha: .54),
-                ),
+                style: desktop
+                    ? DesktopChrome.metadata()
+                    : terminalContentStyle(color: theme.muted),
               ),
             ),
           ],

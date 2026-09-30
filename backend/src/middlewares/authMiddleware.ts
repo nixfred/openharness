@@ -64,6 +64,9 @@ export function registerAuthMiddleware(
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     if (shouldSkipAuth(request.url)) return
     const token = bearerToken(request.headers['authorization'])
+    // Anonymous public-link discovery only. With a token, authenticate normally so private links
+    // and commenting use the real account. Never exempt a mutation or the invitation inventory.
+    if (!token && request.method === 'GET' && /^\/api\/shared-agents\/[a-f0-9-]{36}$/.test(request.url.split('?')[0])) return
     if (!token) {
       return reply.code(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Unauthorized' } })
     }

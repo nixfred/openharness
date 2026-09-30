@@ -20,7 +20,6 @@ import 'package:harness_mobile/ws/ws_conn.dart';
 const sampleConfig = AppConfig(
   apiBaseUrl: 'https://sample.invalid',
   autonomousEnv: 'sample',
-  localCliBaseUrl: 'http://sample.invalid',
 );
 
 /// A key-value store that forgets everything when the sample is left.

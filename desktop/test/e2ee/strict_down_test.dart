@@ -46,6 +46,28 @@ Future<RelaySessionCrypto> _session(Map<String, Object> features) async {
 }
 
 void main() {
+  test('team capabilities and peer content are always sealed', () async {
+    for (final features in [
+      <String, Object>{},
+      <String, Object>{'strictDown': 1},
+    ]) {
+      final session = await _session(features);
+      for (final type in ['team', 'team_delivery']) {
+        final out = session.wrapOutgoing({
+          'type': type,
+          'payload': {
+            'requestId': 'team-1',
+            'memberKey': 'private-capability',
+            'text': 'private-question',
+          },
+        });
+        expect(isWrapped(out['payload']), isTrue, reason: type);
+        expect(jsonEncode(out), isNot(contains('private-capability')));
+        expect(jsonEncode(out), isNot(contains('private-question')));
+      }
+    }
+  });
+
   final install = {
     'type': 'dsh_install',
     'payload': {'requestId': 'r', 'url': 'https://example.invalid/h.git'},

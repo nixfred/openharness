@@ -1,7 +1,9 @@
 // The third alert channel: news the operating system delivers, so it reaches somebody whose window
 // is somewhere else. When it is posted, what replaces what, what takes it down, what a click does,
 // and how each platform's notifier is driven.
+import 'dart:async';
 import 'dart:io' show ProcessException, ProcessResult;
+import 'dart:ui' show SemanticsAction, Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -47,6 +49,7 @@ class _Recorder implements SystemNotifier {
       >[];
   final withdrawn = <String>[];
   int authorizations = 0;
+  Completer<void>? showGate;
   void Function(String machineId, String agentId)? tap;
 
   @override
@@ -76,6 +79,7 @@ class _Recorder implements SystemNotifier {
       machineId: machineId,
       agentId: agentId,
     ));
+    await showGate?.future;
     return answer;
   }
 
@@ -142,6 +146,21 @@ void main() {
   });
 
   group('posting', () {
+    test('a delayed OS post cannot resurrect a message already read', () async {
+      final os = _Recorder()..showGate = Completer<void>();
+      final system = SystemNotifications(store: store(), notifier: os);
+      system.post(_alert('a'));
+      system.withdraw('m1', 'a');
+      system.post(_alert('a', title: 'New turn'));
+      expect(os.shown, hasLength(1));
+      expect(os.withdrawn, isEmpty);
+      os.showGate!.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(os.withdrawn, [SystemNotifications.idFor('m1', 'a')]);
+      expect(os.shown, hasLength(2));
+      expect(os.shown.last.title, 'New turn');
+    });
+
     test('nothing while the switch is off', () async {
       final os = _Recorder();
       SystemNotifications(
@@ -161,14 +180,13 @@ void main() {
         system.post(_alert('a', kind: AlertKind.needsYou, title: 'Fix login'));
         system.post(_alert('b'));
         await Future<void>.delayed(Duration.zero);
-        expect(os.shown.map((s) => s.body), [
-          'Finished',
-          'Waiting on you',
-          'Finished',
-        ]);
+        final a = os.shown.where((s) => s.agentId == 'a').toList();
+        final b = os.shown.where((s) => s.agentId == 'b').single;
+        expect(a.map((s) => s.body), ['Finished', 'Waiting on you']);
+        expect(b.body, 'Finished');
         expect(os.shown.first.title, 'Fix login');
-        expect(os.shown[0].id, os.shown[1].id);
-        expect(os.shown[0].id, isNot(os.shown[2].id));
+        expect(a[0].id, a[1].id);
+        expect(a[0].id, isNot(b.id));
         expect(os.shown.first.machineId, 'm1');
         expect(os.shown.first.agentId, 'a');
       },
@@ -237,9 +255,12 @@ void main() {
 
     Future<void> finish(AppNotifier app) =>
         app.handleMachineEventForTest('m1', {
-          'type': 'turn_ended',
+          'type': 'turn_summary',
           'agentId': 'a1',
-          'payload': {'agentId': 'a1'},
+          'payload': {
+            'agentId': 'a1',
+            'notification': {'id': 'result-a1', 'kind': 'done'},
+          },
         });
 
     test('an agent that finishes while the window is behind something reaches the system', () async {
@@ -269,6 +290,23 @@ void main() {
       addTearDown(app.dispose);
       await finish(app);
       app.markAgentSeen('m1', 'a1');
+      await Future<void>.delayed(Duration.zero);
+      expect(os.withdrawn, [SystemNotifications.idFor('m1', 'a1')]);
+    });
+
+    test('reading on the dial withdraws the banner and system notification', () async {
+      final app = wired();
+      addTearDown(app.dispose);
+      await finish(app);
+      await Future<void>.delayed(Duration.zero);
+      expect(app.agentAlerts.alerts, hasLength(1));
+      final token = app.agentUnread.readTokenFor('m1', 'a1')!;
+      await app.handleMachineEventForTest('m1', {
+        'type': 'dial_notification_read',
+        'payload': {'machineId': 'm1', 'agentId': 'a1', 'readToken': token},
+      });
+      expect(app.agentUnread.count, 0);
+      expect(app.agentAlerts.alerts, isEmpty);
       expect(os.withdrawn, [SystemNotifications.idFor('m1', 'a1')]);
     });
   });
@@ -446,6 +484,44 @@ void main() {
             ),
           ),
         );
+
+    testWidgets('each alert switch announces its own purpose and state', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        final os = _Recorder();
+        final system = SystemNotifications(
+          store: store(on: false),
+          notifier: os,
+        );
+        await pump(tester, system);
+        for (final (key, label) in [
+          ('settings-screen-alerts', 'On-screen alerts'),
+          ('settings-alert-sounds', 'Alert sounds'),
+          ('settings-desktop-notifications', 'Desktop notifications'),
+        ]) {
+          final toggle = find.byKey(Key(key));
+          final node = tester.getSemantics(toggle);
+          final before = node.getSemanticsData();
+          expect(before.label, label);
+          expect(before.flagsCollection.isToggled, Tristate.isFalse);
+          expect(before.hasAction(SemanticsAction.tap), isTrue);
+          tester
+              .renderObject(toggle)
+              .owner!
+              .semanticsOwner!
+              .performAction(node.id, SemanticsAction.tap);
+          await tester.pumpAndSettle();
+          final after = tester.getSemantics(toggle).getSemanticsData();
+          expect(after.label, label);
+          expect(after.flagsCollection.isToggled, Tristate.isTrue);
+        }
+        expect(os.authorizations, 1);
+      } finally {
+        semantics.dispose();
+      }
+    });
 
     testWidgets('a switch that asks for permission when turned on', (
       tester,

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { CompanionZoo, readCompanionIdentity, type CompanionIdentity } from './cable/companionIdentity.js'
 import { ensureBundledModelManager } from './dsh/builtins.js'
 import { createDeviceStore, deviceStoreAgents } from './lib/autonomous-device/storeRuntime.js'
 import { mutateDsh } from './dsh/service.js'
 import { HarnessShareOwner } from './sharing/owner.js'
 import { HarnessGrantStore } from './sharing/grants.js'
+import { HarnessCollaborationStore } from './sharing/collaboration.js'
 import { HarnessShareRelay, type SharedMachineReference } from './sharing/relay.js'
 import { SharedViewerPool } from './sharing/viewer.js'
 import { fingerprint as e2eeCoreFingerprint, b64d as e2eeCoreDecode } from './lib/e2ee/core.js'
@@ -25,9 +27,9 @@ import { AutonomousDeviceDirect } from './lib/autonomous-device/direct.js'
 
 import 'dotenv/config'
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, openSync, existsSync, rmSync, statSync } from 'fs'
-import { join, resolve } from 'path'
+import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { spawn } from 'child_process'
+import { execFile as execFileCb, spawn } from 'child_process'
 import { createServer, type Server } from 'http'
 import { createInterface, emitKeypressEvents } from 'readline'
 import { homedir, hostname } from 'os'
@@ -41,7 +43,9 @@ import { ensureUtf8Locale } from './lib/childLocale.js'
 import { DialLog } from './cable/dialLog.js'
 import { buildLogBundle, bundleFileName, redactSecretsInText } from './lib/logBundle.js'
 import { CableSession } from './cable/cableSession.js'
+import { CableFleet } from './cable/cableFleet.js'
 import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor } from './cable/cableHost.js'
+import { terminalActivity } from './cable/terminalActivity.js'
 
 import { MachineListCache, machineListCachePath, withStaleMarker } from './device/machineList.js'
 import { DeviceLink } from './device/deviceLink.js'
@@ -51,6 +55,7 @@ import { engineSessionTitle } from './lib/sessionTitle.js'
 import { installAmpPlugin, installCodexHooks, installCommandCodeHooks, installCursorHooks, installDevinHooks, installGrokHooks, installAgyHooks, installCopilotHooks, installHermesHooks, installKiloPlugin, installOpencodePlugin, installPiExtension, installSessionHooks } from './lib/hooks.js'
 import { PID_FILE, daemonPort, isAlive, isDaemonRunning, readPid } from './lib/daemonState.js'
 import { clearSafeModeMarker, readSafeModeMarker, runBootHandoff, safeModeDisposition, safeModeStatusBody, writeSafeModeMarker } from './lib/daemonSafeMode.js'
+import { awakeTimeout } from './lib/sleepAware.js'
 import {
   BIND_WAIT_MS, connectFailure, defaultLaunchDeps, removePidFileIf, waitForBind, waitForReady,
 } from './lib/daemonLaunch.js'
@@ -61,22 +66,59 @@ import { flashCommand } from './lib/flash.js'
 import { readOrMintComputerId } from './lib/computerIdentity.js'
 import { awaitLoginCallback, extractCallbackParams, LOGIN_TIMEOUT_MESSAGE } from './lib/loginCallback.js'
 import { AuthSessionError, AuthSessionManager, clearAuthSession, readAuthSession, writeAuthSession, type AuthSession } from './lib/authSession.js'
+import { LocalPresence, PAIR_HARNESS_DSH, ZooTurnCounter, ZooTurnReporter } from './lib/zooTurns.js'
+import { ZooLessonReporter } from './lib/zooLessons.js'
+import { DAEMONS_OFF, DAEMONS_OFF_DETAIL, DaemonsSwitch, localKillSwitch, zooPassthrough, type ZooRead } from './lib/daemonsSwitch.js'
 import { handOffToGrid } from './lib/gridHandoff.js'
-import { ensureGridInstalled, type GridInstallResult } from './lib/gridInstall.js'
+import { ensureGridInstalled } from './lib/gridInstall.js'
 import { ensureHarnessGrid, type EnsureStatus } from './lib/gridEnsure.js'
 import { passThroughToGridLogout } from './lib/gridLogout.js'
 import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
 import { warnIfGridSignInRemains } from './lib/gridCredentials.js'
-import { reconcileGridAttach, gridNamesLocal, createGridAttachRunner } from './lib/gridAttach.js'
+import { reconcileGridAttach, gridNamesLocal, createGridAccess } from './lib/gridAttach.js'
 import { signedInGridEmail, resetGridDeriveMemo } from './lib/gridDerive.js'
 import { forgetGridModels, gridAnnotation, keystrokePrewarm, observeMachineList, onGridModelsChanged, warmGridModels } from './lib/gridModels.js'
-import { gridAvailable } from './lib/gridExec.js'
+import { gridAvailable, managedGridPath } from './lib/gridExec.js'
 import { ENGINE_CLI_COMMANDS, ENGINES, PROCESS_ENGINES, engineBin, enginePathOverride } from './lib/engineBin.js'
 import { isTerminalEngine, type AgentEngine } from './engines/types.js'
+import { PairJournal } from './pair/journal.js'
+import { PairSensor } from './pair/sensor.js'
+import { PairBrain } from './pair/brain.js'
+import { PairFleet, relayPairLinkOpener } from './pair/fleet.js'
+import { PairTriage } from './pair/triage.js'
+import { PairVoice, isRosterDaemon } from './pair/voice.js'
+import { PairOwner, type OwnerSubject } from './pair/owner.js'
+import { PairControl, StartedHarnesses } from './pair/control.js'
+import { PairToken } from './pair/token.js'
+import { pairCommand as pairControlCommand, pairRequest, pairVerb, type PairClientDeps } from './pair/client.js'
+import { serveMcp } from './pair/mcp.js'
+import { PairHarness, type PairEngine } from './pair/pairHarness.js'
+import { CompanionIntelligence } from './pair/intelligence.js'
+import { CompanionStartupProfile } from './pair/startupProfile.js'
+import { ConversationReview } from './pair/learn/conversationReview.js'
+import { individualName, pairedIndividual } from './pair/individuals.js'
+import { PlateService } from './pair/plateService.js'
+import { inProjects, PairConfigFile, pairConfigPath, ruleRunner, type PairConfig } from './pair/rules.js'
+import { LessonSignals } from './pair/learn/signals.js'
+import { LessonDistiller } from './pair/learn/distill.js'
+import { LessonStore } from './pair/learn/store.js'
+import { PairLearner, joinProposals } from './pair/learn/propose.js'
+import { ShownLines } from './pair/shown.js'
+import { PairGate, pairingFrom } from './pair/gate.js'
+import { runtimeLessons } from './pair/learn/publish.js'
+import { ApprovalNonces, lessonKeyVerdict, loopbackPeerPid, verifyPerson } from './pair/learn/approval.js'
+import { LessonBorrower } from './pair/learn/borrow.js'
+import { LessonCurator } from './pair/learn/curate.js'
+import { LessonExporter } from './pair/learn/export.js'
+import { LessonUsage } from './pair/learn/usage.js'
+import { probeEngines } from './lib/engineProbe.js'
+import { ensureBuiltinPair } from './dsh/builtins.js'
+import { DEFAULT_AUTONOMY, isAutonomy, type Autonomy } from './pair/floor.js'
+import { randomUUID } from 'node:crypto'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { buildEngineCommandArgv, buildEngineLaunchArgv, commandAvailableInInteractiveShell, dropPermissionFlagIfUnsupported, namedAgentArgs, permissionModeApproves, permissionModeFlags, refusePermissionFlagIfUnsupported, supportsFirstPrompt } from './lib/engineLaunch.js'
 import { workspaceMissing } from './lib/workspaceCheck.js'
-import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, type GridLaunchMachine, type GridWebSearchStatus } from './lib/gridLaunch.js'
+import { buildGridEngineLaunch, describeGridLaunch, gridConflictingEnvToClear, gridEnvVarNames, isApiLaunch, type GridLaunchMachine, type GridWebSearchStatus } from './lib/gridLaunch.js'
 import { HERMES_SYSTEM_MANAGED_DIR } from './lib/gridWebMcp.js'
 import { writeGridConfigDir } from './lib/gridConfigDir.js'
 import { tmuxSupportsSessionEnv, TMUX_SESSION_ENV_MIN } from './lib/tmuxVersion.js'
@@ -120,7 +162,8 @@ import { DshViewerManager } from './dsh/viewer.js'
 import { ViewerLedger } from './dsh/viewerLedger.js'
 import { DshVerdictWatcher, type DshVerdict } from './dsh/verdict.js'
 import { dshCommand, dshUsage } from './dsh/command.js'
-import { ApiConnections } from './lib/apiConnections.js'
+import { ApiConnectionError, ApiConnections } from './lib/apiConnections.js'
+import { refreshApiLaunch, rememberSavedApis } from './lib/apiModels.js'
 import { apiCommand, apiUsage } from './lib/apiCommand.js'
 import { prepareApiInstructions } from './lib/apiInstructions.js'
 import type { AgentDshContext } from './lib/agentFrame.js'
@@ -130,17 +173,8 @@ import {
   permissionModeFromArgv,
   clearPaneRemainOnExit,
   resolvePaneEngineProcess,
-  checkSessionRuntime,
   tmuxPaneState,
 } from './lib/tmux.js'
-import { HerdrBackend } from './lib/herdrBackend.js'
-import {
-  discoverRunningHerdrSessions,
-  herdrHintSelects,
-  listInstalledHerdrSessions,
-  resolveConfiguredHerdrSessions,
-  type HerdrTargetResolution,
-} from './lib/herdrSessions.js'
 import { ALL_TERMINAL_BACKENDS } from './config/terminalConfig.js'
 import { TerminalBackendCoordinator } from './lib/terminalBackendCoordinator.js'
 import { TerminalStreamManager } from './lib/terminalStreamManager.js'
@@ -148,19 +182,19 @@ import { terminalRouteKey, terminalRuntimeLabel } from './lib/terminalRuntime.js
 import { TerminalAgentReconciler } from './lib/terminalAgentReconciler.js'
 import { processRows, type DiscoveredTerminalAgent } from './lib/terminalAgentDiscovery.js'
 import { remoteCommand } from './remoteCommand.js'
+import { tuiCommand } from './tui/index.js'
 import { newCommand } from './lib/newCommand.js'
 import { WebSocket as NewCommandSocket } from 'ws'
 import {
   terminalActionNotStarted,
-  type HookTerminalHint,
   type TerminalActionResult,
   type TerminalRuntimeRef,
   type TmuxRuntimeRef,
 } from './lib/terminalTypes.js'
-import { readTerminalConfigSnapshot, writeTerminalConfigSnapshot } from './lib/terminalConfigSnapshot.js'
 import { Watcher, type HistoryEvent, type LineEvent } from './watcher/watcher.js'
 import { chooseHookAgent, startHookServer } from './hookServer.js'
 import { isLocalSocketName, localSocketPath, type LocalSocketServer } from './lib/localSocket.js'
+import { legacyDaemonStatus, localDaemonStatus, saveDaemonPort } from './lib/daemonEndpoint.js'
 import { commandBarService } from './lib/commandBar.js'
 import { BackendSocket, isLocalClientId } from './backendSocket.js'
 import { AutonomousDeviceService } from './lib/autonomous-device/service.js'
@@ -168,11 +202,17 @@ import { autonomousDeviceLocalRequest } from './lib/autonomous-device/localApi.j
 import { runAutonomousDeviceCommand } from './lib/autonomous-device/command.js'
 import { attachLocalWsServer, LOCAL_WS_PATH, LOCAL_WS_PROTOCOL_VERSION } from './localWsServer.js'
 import { createWindowRouter } from './cable/windowRoute.js'
+import { WindowSelection } from './cable/windowSelection.js'
+import { WindowVisit } from './cable/windowVisit.js'
+import { WindowForm } from './cable/windowForm.js'
 import { RemoteRelayPool } from './lib/remoteRelay.js'
 import { TERMINAL_BINARY_VERSION } from './lib/terminalBinary.js'
 import { foldTranscript, lastTurnTextFromRawLines, lineToEvents, newTurnState, type LiveEvent, type TurnState } from './lib/normalize.js'
 import { AskQuestionController, parseEngineQuestionPane, pollsQuestions, QuestionWatcher } from './lib/askQuestion.js'
+import { teamWriteHold } from './teams/preflight.js'
+import { TeamError } from './teams/model.js'
 import { CommanderMirror, SUBAGENT_IDLE_MS, type CommanderMirrorOpts } from './lib/commander.js'
+import { AgentNotifications } from './lib/agentNotifications.js'
 import {
   setSummaryPoolDeviceConnected,
   shutdownSummaryPool,
@@ -187,14 +227,19 @@ import { E2eeStore } from './lib/e2ee/store.js'
 import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
 import { b64e } from './lib/e2ee/core.js'
 import { MachinePeerStore } from './lib/e2ee/machinePeers.js'
-import { connectWithPassword } from './lib/e2ee/relayClient.js'
+import { connectWithPassword, type PwConnectProgress } from './lib/e2ee/relayClient.js'
+import type { LinkedPeer } from './lib/e2ee/manager.js'
+import { GroupSyncer, relayRequester, SELF_STAMP } from './lib/e2ee/groupSyncer.js'
+import { TrustGroupStore, type GroupMember } from './lib/e2ee/trustGroup.js'
 import {
   startSelfUpdater, restore as restoreUpdate, confirm as confirmUpdate,
   fetchManifest, downloadVerified, canary, stage, semverGt, isLocalDevBuild,
   type Poller, type UpdateEntry,
 } from './lib/selfUpdate.js'
 import { managedNodePath } from './lib/nodeRuntime.js'
-import { ensureLauncher, ensureManagedGrid, ensureManagedRuntime, startGridPinRecheck } from './lib/runtimeInstall.js'
+import { updateManagedTui } from './tui/manage.js'
+import { startTuiUpdater } from './tui/update.js'
+import { ensureHnLauncher, ensureLauncher, ensureManagedGrid, ensureManagedRuntime, startGridPinRecheck } from './lib/runtimeInstall.js'
 import { readdir, stat } from 'fs/promises'
 import { CodexNormalizer, codexTaskError, lastCodexTurnText } from './engines/codex/normalizer.js'
 import { codexSubagentResolverFor } from './engines/codex/subagent.js'
@@ -283,7 +328,7 @@ function terminalHintMachineName(): string {
 
 // The dial's session, held at module scope for the same reason `backendRef` is: shutdown() is defined
 // before the wiring that creates it, and the port has to be released on the way out.
-let cableRef: CableSession | null = null
+let cableRef: CableFleet | null = null
 /** The same object the session holds — module scope so the recap gates can ask which machine is selected
  *  without threading it through every constructor between here and there. */
 let cableHostRef: DaemonCableHost | null = null
@@ -330,22 +375,9 @@ const ATTACH_CONCURRENCY = 4
 // reported by the daemon in words rather than by the app as a timeout.
 const PROXY_BACKEND_TIMEOUT_MS = 20_000
 
-/** Bounds the `POST /api/grid/name` inside the daemon-start grid reconcile, so a stalled control-plane
- *  connection cannot hold it open. */
+/** Bounds the `POST /api/grid/name` a grid set-up makes (`ensureGrid`, `harness grid login`), so a
+ *  stalled control-plane connection cannot hold it open. */
 const GRID_MINT_TIMEOUT_MS = 10_000
-/** How long the grid RPCs will gate on a grid-attach attempt before answering without it, whether or
- *  not it has settled — the ceiling that keeps a stuck attempt from degrading every grid RPC for the
- *  daemon's whole life (`gridReadyProbe`). */
-const GRID_ATTACH_CEILING_MS = 30_000
-/** How many grid-attach attempts one daemon makes before giving up until its next start. A machine
- *  still unattached after this many reachable moments has a problem that retrying will not fix, and
- *  each attempt past that is a grid sign-in — and a token rotation — bought for nothing. */
-const GRID_ATTACH_MAX_ATTEMPTS = 5
-/** The soonest one attempt may follow another. Retries are driven by backend reconnects, and waking
- *  a laptop, changing network or toggling a VPN produces several within seconds; without this floor
- *  one moment of ordinary churn spent the whole allowance above and the feature went quiet for the
- *  daemon's life. Requests inside the window are deferred to its end, not dropped. */
-const GRID_ATTACH_MIN_INTERVAL_MS = 60_000
 
 /** Between session-binding attempts for a process whose engine store is not resolvable yet. */
 const REPAIR_RETRY_MS = 60_000
@@ -384,11 +416,14 @@ Machine:
   harness reset                stop the adapter and clear local CLI state
   harness status               show whether it's running (+ version)
   harness logs export          zip the last 7 days of logs (app, CLI, dial, daemon) to the Desktop
+  harness tui                  all of Harness in this terminal: swarms, panes, every machine (⌥O ⌥P ⌥N)
   harness new [agent] [@machine] [folder|name] [-- task]
                                make a harness from a shell: \`harness new\` is claude here; see \`harness new -h\`
   harness machines             list the machines on this account (this computer's is marked)
   harness search <words>       find the conversation on this computer that said them: every turn of
-                               every session, live or stopped (--limit=N, --json)
+                               every harness, live or stopped (--limit=N, --json)
+  harness channel --help       consult agents in a swarm and read shared collaboration history
+  harness team --help          advanced team commands and correlated agent replies
   harness machines delete <id> remove ANOTHER machine (refuses this one; use \`harness logout\`)
   harness remote               from a Harness terminal tile: open a terminal on another of your machines and move this tile to it
   harness version              print the installed version (v${VERSION})
@@ -413,6 +448,8 @@ ${apiUsage}
 Browser end-to-end encryption:
   harness autonomous-device <command>     pair/status/list/revoke an Autonomous device
   harness pair <code>          pair a BROWSER (code shown on the machine page)
+  harness pair <verb>          your paired daemon's control interface: status, list_harnesses,
+                               read_harness, brief, mcp, … (harness pair status --help)
   harness pairings             list paired clients
   harness unpair <#|fp>        unpair one browser (by list number or fingerprint)
   harness unpair --all         unpair every browser
@@ -427,6 +464,10 @@ every future connect, until you change or clear it:
                                (--name=<label> names the machine in messages instead of its id)
   harness link list            list machines this one has linked
   harness link unlink <id>     remove a linked machine's trust
+  harness group list           machines and phones that trust each other through links: link one
+                               machine and every member reaches it both ways, no more passwords
+  harness group sync           compare with every reachable member now (it also happens on its own)
+  harness group remove <id>    drop a member (machine id, # or fingerprint) from every member
   (both \`remote-password set\` and \`link connect\` prompt for the password interactively, or read one
   line from stdin with --stdin; add --json for NDJSON output instead of the human-readable text)
 
@@ -450,6 +491,7 @@ function tildify(p: string): string {
 
 /** The currently-running script — dist/cli.js when built, src/cli.ts under tsx. */
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
+ensureHnLauncher(SCRIPT_PATH)
 
 /**
  * Start the daemon that succeeds this one, on whatever bytes are in `~/.harness/cli` right now.
@@ -487,6 +529,7 @@ function spawnDaemonChild(extraEnv: Record<string, string>): ReturnType<typeof s
  */
 const daemonBoot: {
   updater: Poller | null
+  tuiUpdater: Poller | null
   /** The hook server, once bound — the only thing a mid-boot handoff has to release. */
   hookServer: Server | null
   /** Its Unix-socket twin (lib/localSocket.ts), when one could be opened. Read by `/api/status`. */
@@ -497,7 +540,7 @@ const daemonBoot: {
   safeMode: string | null
   handingOff: boolean
   applyStagedUpdate: (version: string) => void | Promise<void>
-} = { updater: null, hookServer: null, localSocket: null, markNotReady: null, safeMode: null, handingOff: false, applyStagedUpdate: bootHandoff }
+} = { updater: null, tuiUpdater: null, hookServer: null, localSocket: null, markNotReady: null, safeMode: null, handingOff: false, applyStagedUpdate: bootHandoff }
 
 /**
  * Hand the machine to a newer build without finishing start-up.
@@ -515,6 +558,7 @@ const daemonBoot: {
 function bootHandoff(version: string): void {
   if (daemonBoot.handingOff) return
   daemonBoot.handingOff = true
+  daemonBoot.tuiUpdater?.stop()
   runBootHandoff(VERSION, version, {
     // The hook port has no fallback: a successor that cannot bind it is a daemon that does not come up.
     closeServer: () => {
@@ -678,42 +722,6 @@ type SignInOutcome =
   | { signedIn: false }
 
 /**
- * Sign this computer in to its grid too, and make sure the account's private harness grid exists.
- *
- * ⚠️ **Best-effort, always.** A machine with no `grid`, one too old for `--harness`, a grid sign-in
- * that fails, a backend that predates `POST /api/grid/name` — every one of them is a sentence on
- * stderr and a harness sign-in that still succeeds. The harness is what the person asked for; the
- * grid is what it can usually also arrange. `harness grid login` stays the explicit path, where the
- * same failure IS the command's failure and exits non-zero.
- *
- * Returns what happened, so `--json` callers can carry it on their own result line.
- */
-async function attachGridToSignIn(
-  token: string,
-  json: boolean,
-  installing: Promise<GridInstallResult> = ensureGridInstalled(),
-): Promise<Record<string, unknown>> {
-  const note = (line: string): void => { if (!json) console.error(`  · ${line}`) }
-  // A machine with no `grid` gets one first, from grid's own installer — the sign-in that follows
-  // is what makes it useful, and "install the grid CLI yourself" was the sentence every fresh
-  // machine used to stop at. Best-effort: a failed install is a note, and the hand-off below then
-  // reports the missing binary exactly as before. A forced sign-in starts the install before it
-  // takes the daemon spawn lock and hands the promise in (see loginCommand): the installer is
-  // account-agnostic and can run for minutes, and neither the browser wait nor a start queued on
-  // that lock should be spent on it.
-  const install = await installing
-  if (install.status === 'installed') note(install.message)
-  else if (install.status !== 'present') note(install.message)
-  const handoff = await handOffToGrid(token, { json: true })
-  if (handoff.code !== 'OK') {
-    note(handoff.message)
-    return { grid: { signedIn: false, code: handoff.code } }
-  }
-  const { status, name } = await ensureAccountGrid(note)
-  return { grid: { signedIn: true, ensured: status, ...(name ? { name } : {}) } }
-}
-
-/**
  * The account's private grid exists — its name minted or read, then the grid itself created if it is
  * not there yet.
  *
@@ -757,21 +765,12 @@ async function loginCommand(
   // command and says so with `--entry-point=desktop`. Analytics only — it names no privilege.
   const entryPoint = opts.entryPoint ?? 'cli'
   const emit = (line: Record<string, unknown>): void => { if (json) console.log(JSON.stringify(line)) }
-  const succeed = async (alreadySignedIn: boolean, installing?: Promise<GridInstallResult>): Promise<SignInOutcome> => {
-    // `chained` is `harness grid login`, which runs the hand-off itself and reports it as its own
-    // result — doing it here too would sign in to the grid twice and print two answers for one act.
-    let grid: Record<string, unknown> = {}
-    if (!opts.chained) {
-      try {
-        grid = await attachGridToSignIn(await new AuthSessionManager(backendHttpBase()).accessToken(), json, installing)
-      } catch {
-        // The harness session is already saved and valid; a grid step that throws is still only a
-        // grid step. Never let it turn a completed sign-in into a failure.
-        grid = {}
-      }
-    }
+  // Harness only. Grid is an add-on: this computer is signed in to it the first time a grid feature is
+  // used (`ensureGrid` in the daemon, `lib/gridAttach.ts`) — with this session's token, no second
+  // browser — and never as a side effect of signing in to Harness.
+  const succeed = async (alreadySignedIn: boolean): Promise<SignInOutcome> => {
     if (opts.chained) return { signedIn: true, alreadySignedIn }
-    if (json) emit(alreadySignedIn ? { type: 'result', status: 'success', alreadySignedIn: true, ...grid } : { type: 'result', status: 'success', ...grid })
+    if (json) emit(alreadySignedIn ? { type: 'result', status: 'success', alreadySignedIn: true } : { type: 'result', status: 'success' })
     else if (alreadySignedIn) console.log('\n  ✓ Already signed in. Run `harness start` to connect this computer.\n')
     else console.log('\n  ✓ Signed in. Run `harness start` to connect this computer.\n')
     return { signedIn: true, alreadySignedIn }
@@ -804,15 +803,8 @@ async function loginCommand(
   // reads whatever session is on disk: for as long as the browser is open, the old account's. The
   // daemon it spawned came up on the old account and stayed — the `harness start` this command
   // recommends afterwards found it "already running" — so the whole switch, from the stop until the
-  // new session (and its grid hand-off) is on disk, holds the daemon spawn lock: a start that lands
+  // new session is on disk, holds the daemon spawn lock: a start that lands
   // meanwhile waits its turn and then reads the new session.
-  //
-  // The grid CLI install is the one long thing in there that needs no account, so it starts NOW —
-  // before the lock, before the old daemon is stopped — and runs under the browser wait; `succeed`
-  // awaits only what is left of it. The handler keeps a failed download from being an unhandled
-  // rejection while nobody is waiting on it: the sign-in reads the outcome later, as a note.
-  const installing = opts.chained ? undefined : ensureGridInstalled()
-  installing?.catch(() => { /* reported where it is awaited */ })
   try {
     return await withSpawnLock('login', async () => {
       // ⚠️ A daemon running WITHOUT a session holds no account to switch away from, and stopping it
@@ -820,7 +812,7 @@ async function loginCommand(
       // the browser. There is nothing to race either: the lock is held, and the identity swap happens
       // afterwards, once there is an identity to swap to (`restartDaemonForIdentity`).
       if (readAuthSession()) await stopDaemonProcess()
-      return await browserSignIn(json, emit, () => succeed(false, installing), entryPoint)
+      return await browserSignIn(json, emit, () => succeed(false), entryPoint)
     }, {
       onWaiting: (owner) => console.error(`  the daemon is ${describeSpawnLockOwner(owner)} — waiting for it to finish…`),
     })
@@ -1196,6 +1188,16 @@ async function downloadCanaryStage(entry: UpdateEntry, dir: string, log: (m: str
   return true
 }
 
+/** An explicit hn update manages only the installed bundle, never a checkout or a canary. */
+function isInstalledCli(): boolean {
+  const installedCli = join(env.ADAPTER_CLI_DIR, 'cli.js')
+  try {
+    const running = statSync(SCRIPT_PATH)
+    const installed = statSync(installedCli)
+    return running.dev === installed.dev && running.ino === installed.ino
+  } catch { return SCRIPT_PATH === installedCli }
+}
+
 /** `harness update` — force the self-update NOW instead of waiting for the daemon's
  *  background poll. Checks the manifest; if a newer build exists it stops any running daemon first (so
  *  its poller can't race our staging), swaps in the new bytes, then relaunches on them. No-op on a
@@ -1217,6 +1219,12 @@ async function updateCommand(force: boolean): Promise<void> {
     process.exit(0)
   }
   console.log(`▸ Checking for updates…  (current v${VERSION})`)
+  // hn has its own release cadence. An already-current CLI must still refresh an installed hn;
+  // a failed optional download must not stop the CLI from updating.
+  if (isInstalledCli()) {
+    try { await updateManagedTui(SCRIPT_PATH, force, (line) => console.log(line)) }
+    catch (error) { console.warn(`  hn update failed; continuing with the CLI update: ${error instanceof Error ? error.message : error}`) }
+  }
   let entry: UpdateEntry | null = null
   try { entry = await fetchManifest(env.ADAPTER_UPDATE_URL, env.ADAPTER_UPDATE_KEY) }
   catch (e) { console.error(`✗ Could not reach the update manifest: ${e instanceof Error ? e.message : e}`); process.exit(1) }
@@ -1326,9 +1334,8 @@ async function logout(): Promise<void> {
  * already wears the right id (a `harness login` on a computer that was signed in all along).
  */
 async function restartDaemonForIdentity(): Promise<void> {
-  // OUR daemon, by its pid file, before anything is asked over the port: the port is fixed and shared,
-  // and a login run against an isolated data dir (a test, a second HOME) must not reach across to a
-  // daemon that is not its own and restart it.
+  // OUR daemon, by its pid file and private socket. A login in another HOME must never restart a
+  // different OS user's daemon just because it happens to hold the default TCP port.
   const pid = readPid()
   if (!pid || !isAlive(pid)) return
   const daemon = await runningDaemonStatus()
@@ -1445,25 +1452,37 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     console.log(`[update] self-update off · running a dev/repo build (v${VERSION}), not the installed copy`)
   }
 
+  // Keep the CLI's recovery updater armed first. hn is an independent, optional download.
+  daemonBoot.tuiUpdater = startTuiUpdater({
+    currentVersion: VERSION,
+    isInstalledCopy,
+    disabled: env.ADAPTER_UPDATE_DISABLE,
+    intervalMs: env.ADAPTER_UPDATE_CHECK_MS,
+    slotSecond: env.ADAPTER_UPDATE_SLOT_SEC,
+  })
+
   const savedApis = new ApiConnections(env.ADAPTER_DATA_DIR)
+  // Before any agent is probed: one already running on a saved API's model reports that model.
+  rememberSavedApis(savedApis)
   const prepareApiTools = (cwd: string | null | undefined, engine: string): void => {
     if (!cwd) return
     try { prepareApiInstructions(savedApis, cwd, engine) }
     catch { console.warn('[apis] Tool instructions could not be added. Saved connections remain available through harness api.') }
   }
 
-  // The managed grid follows its pin on EVERY daemon start — this one, and the restart a self-update
-  // ends in — not only on `--repair`: the pin is expected to move, and a machine installed last month
-  // has to notice. Not awaited here: a download must never hold the control port back, and every grid
-  // call resolves the binary afresh (`gridBinaryPath`), so whatever lands is picked up as it lands.
-  // Best-effort by construction — it returns rather than throws — and the fatal guard above is the
-  // net under the promise itself. The promise is kept so the grid reconcile below can wait for the
-  // pinned binary before it hands a token over.
-  const managedGridReady = ensureManagedGrid((m) => console.log(`[grid-runtime] ${m}`))
-  void managedGridReady
+  // A managed grid already here follows its pin on EVERY daemon start — this one, and the restart a
+  // self-update ends in — not only on `--repair`: the pin is expected to move, and a machine installed
+  // last month has to notice. A machine with none gets none from a start: grid is an add-on, installed
+  // the first time a grid feature is used (`ensureGrid`, below). Not awaited: a download must never
+  // hold the control port back, and every grid call resolves the binary afresh (`gridBinaryPath`), so
+  // whatever lands is picked up as it lands. Best-effort by construction — it returns, never throws.
+  const followGridPin = (): Promise<unknown> => managedGridPath()
+    ? ensureManagedGrid((m) => console.log(`[grid-runtime] ${m}`))
+    : Promise.resolve(null)
+  void followGridPin()
   // …and keeps following it while this daemon runs: a pin moved after the start reaches it within ten
   // minutes rather than at the next restart (`startGridPinRecheck`).
-  startGridPinRecheck()
+  startGridPinRecheck({ ensure: followGridPin })
 
   registry.load()
   // Persisted locators are hints until this process has observed their terminal root and PID/start marker.
@@ -1472,28 +1491,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   await registry.transaction(() => {
     for (const session of registry.list()) registry.setActive(session.agentId, false)
   })
-  // Unset means AUTO: watch every backend usable on this machine. Herdr is retired, so that set is
-  // tmux and only tmux (see config/terminalConfig.ts) — `parseTerminalBackends` drops a `herdr` still
-  // named in someone's environment rather than refusing to boot on it.
-  //
-  // NB this deliberately mirrors `parseTerminalConfig` instead of calling it, and the two must not
-  // drift: both read ALL_TERMINAL_BACKENDS for the AUTO case.
+  // Unset means AUTO: watch every backend usable on this machine, which is tmux and only tmux (see
+  // config/terminalConfig.ts). `parseTerminalBackends` drops a retired `herdr` still named in someone's
+  // environment rather than refusing to boot on it.
   const backendsExplicit = env.TERMINAL_BACKENDS !== undefined
-  const herdrSessionsExplicit = env.HERDR_SESSIONS !== undefined
   const terminalConfig = {
     backends: env.TERMINAL_BACKENDS ?? ALL_TERMINAL_BACKENDS,
-    // Always empty: `backends` can no longer contain 'herdr', so every Herdr path below short-circuits
-    // and there is nothing left to name sessions for. HERDR_SESSIONS still parses so an existing
-    // environment does not fail boot; it simply selects nothing.
-    herdrSessions: [] as readonly string[],
-  }
-  /** The names in play right now: the operator's allowlist, or whatever Herdr currently reports. */
-  let activeHerdrSessions: readonly string[] = terminalConfig.herdrSessions
-  const resolveHerdrTargets = async (): Promise<HerdrTargetResolution[]> => {
-    if (!terminalConfig.backends.includes('herdr')) return []
-    return herdrSessionsExplicit
-      ? resolveConfiguredHerdrSessions(terminalConfig.herdrSessions, () => listInstalledHerdrSessions(env.HERDR_BIN))
-      : discoverRunningHerdrSessions(env.HERDR_BIN)
   }
   // Before ANY tmux call: a daemon that came up outside a terminal (the usual shape after a reboot)
   // has a minimal PATH, and every `execFile('tmux', …)` below would ENOENT. Ask the user's own login
@@ -1516,7 +1519,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       console.error(`[tmux] unavailable: ${tmuxPath.reason} · install tmux and verify \`tmux -V\`,`
         + ' then restart — agents cannot be created or restored until then')
     } else if (tmuxPath.state === 'adopted') {
-      console.log(`[tmux] not on the daemon PATH · adopted ${tmuxPath.from} from the user's login shell`)
+      console.log(`[tmux] not on the daemon PATH · adopted ${tmuxPath.path} · ${tmuxPath.from}`)
     }
   }
   // The desktop's pane colours, for tmux's `window-style` (lib/hostTheme.ts): the last ones the app
@@ -1524,114 +1527,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // reaches sessions created after it without rebuilding the backend.
   let hostTheme: HostTheme = loadHostTheme() ?? DEFAULT_HOST_THEME
   const tmuxBackend = terminalConfig.backends.includes('tmux') && !tmuxUnavailable ? new TmuxBackend(() => hostTheme) : null
-  const herdrTargets = await resolveHerdrTargets()
-  activeHerdrSessions = herdrTargets.map((target) => target.sessionName)
-  const resolvedHerdrPaths = herdrTargets.flatMap((target) => target.state === 'available' ? [target.endpoint.socketPath] : [])
-  // Only an operator-named pair of aliases is a configuration error worth refusing to start over.
-  // Discovery cannot produce one — resolveConfiguredHerdrSessions already downgrades aliased sessions to
-  // unavailable — and a machine that never asked for Herdr must not fail to start because of it.
-  if (herdrSessionsExplicit && new Set(resolvedHerdrPaths).size !== resolvedHerdrPaths.length) {
-    throw new Error('two configured Herdr session names resolve to the same canonical endpoint')
-  }
-  const herdrStartup = await Promise.all(herdrTargets.map(async (target) => {
-    if (target.state === 'unavailable') return { sessionName: target.sessionName, state: 'unavailable' as const, reason: target.reason }
-    const backend = new HerdrBackend(target.endpoint)
-    const ping = await backend.client.ping()
-    if (ping.ok) return { sessionName: target.sessionName, state: 'available' as const, backend }
-    return {
-      sessionName: target.sessionName,
-      state: ping.code === 'protocol_mismatch' ? 'incompatible' as const : 'unavailable' as const,
-      reason: ping.reason,
-    }
-  }))
-  const herdrBackends = herdrStartup.flatMap((target) => target.state === 'available' ? [target.backend] : [])
-  const herdrTargetStates = new Map(herdrStartup.map((target) => [target.sessionName, {
-    state: target.state,
-    ...(target.state === 'available' ? {} : { reason: target.reason }),
-  }]))
-  // Fatal only when the operator asked for these backends. Auto-detection must never let a Herdr this
-  // build does not speak (a newer protocol, say) take down a daemon whose user never mentioned Herdr.
-  if (backendsExplicit && !tmuxBackend && herdrStartup.length > 0
-    && herdrStartup.every((target) => target.state === 'incompatible')) {
-    throw new Error('every enabled terminal backend is protocol-incompatible')
-  }
-  const terminalBackends = [...(tmuxBackend ? [tmuxBackend] : []), ...herdrBackends]
+  const terminalBackends = tmuxBackend ? [tmuxBackend] : []
   const terminals = new TerminalBackendCoordinator(
     terminalBackends,
     terminalConfig.backends,
-    activeHerdrSessions,
   )
-  const refreshHerdrTargets = async (): Promise<void> => {
-    if (!terminalConfig.backends.includes('herdr')) return
-    const resolved = await resolveHerdrTargets()
-    // A session started after the daemon shows up here, on the next pass — which is the whole point:
-    // discovery, not configuration, decides what is watched.
-    activeHerdrSessions = resolved.map((target) => target.sessionName)
-    const available = resolved.filter((target): target is Extract<typeof target, { state: 'available' }> => target.state === 'available')
-    const aliased = new Set<string>()
-    const byPath = new Map<string, string>()
-    for (const target of available) {
-      const owner = byPath.get(target.endpoint.socketPath)
-      if (owner) { aliased.add(owner); aliased.add(target.sessionName) }
-      else byPath.set(target.endpoint.socketPath, target.sessionName)
-    }
-
-    const recovered = new Map(herdrBackends.map((backend) => [backend.endpoint.sessionName, backend]))
-    for (const target of resolved) {
-      if (target.state === 'unavailable') {
-        herdrTargetStates.set(target.sessionName, { state: 'unavailable', reason: target.reason })
-        continue
-      }
-      if (aliased.has(target.sessionName)) {
-        recovered.delete(target.sessionName)
-        herdrTargetStates.set(target.sessionName, { state: 'incompatible', reason: 'configured Herdr sessions alias one endpoint' })
-        continue
-      }
-      const backend = new HerdrBackend(target.endpoint)
-      const ping = await backend.client.ping()
-      if (!ping.ok) {
-        if (ping.code === 'protocol_mismatch') recovered.delete(target.sessionName)
-        herdrTargetStates.set(target.sessionName, {
-          state: ping.code === 'protocol_mismatch' ? 'incompatible' : 'unavailable',
-          reason: ping.reason,
-        })
-        continue
-      }
-      recovered.set(target.sessionName, backend)
-      herdrTargetStates.set(target.sessionName, { state: 'available' })
-    }
-    herdrBackends.splice(0, herdrBackends.length, ...activeHerdrSessions.flatMap((name) => {
-      const backend = recovered.get(name)
-      return backend ? [backend] : []
-    }))
-    terminalBackends.splice(0, terminalBackends.length, ...(tmuxBackend ? [tmuxBackend] : []), ...herdrBackends)
-    terminals.replaceBackends(terminalBackends)
-    terminals.setHerdrSessionOrder(activeHerdrSessions)
-    if (herdrBackends.length === activeHerdrSessions.length) {
-      writeTerminalConfigSnapshot(env.ADAPTER_DATA_DIR, terminalConfig, herdrBackends.map((backend) => backend.endpoint))
-    }
-  }
-  const completeHerdrSnapshot = !terminalConfig.backends.includes('herdr')
-    || herdrBackends.length === activeHerdrSessions.length
-  if (completeHerdrSnapshot) {
-    writeTerminalConfigSnapshot(
-      env.ADAPTER_DATA_DIR,
-      terminalConfig,
-      herdrBackends.map((backend) => backend.endpoint),
-    )
-  } else {
-    const previous = readTerminalConfigSnapshot(env.ADAPTER_DATA_DIR)
-    const previousNames = previous?.herdrEndpoints.map((endpoint) => endpoint.sessionName) ?? []
-    if (JSON.stringify(previousNames) !== JSON.stringify(activeHerdrSessions)
-      || !previous?.backends.includes('herdr')) {
-      // The configured allowlist changed but cannot be resolved completely. Publish a fail-closed
-      // snapshot rather than leaving an old endpoint authorized for daemon-down hooks.
-      writeTerminalConfigSnapshot(env.ADAPTER_DATA_DIR, {
-        backends: terminalConfig.backends.filter((backend) => backend !== 'herdr'),
-        herdrSessions: [],
-      }, [])
-    }
-  }
   console.log(`[terminal] enabled backends: ${terminalConfig.backends.join(', ')}`)
   if (tmuxBackend) {
     // Before the first inventory: sessions a pre-prefix build named `<engine>-<ts>` are renamed to
@@ -1664,11 +1564,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         ? `[env] read ${count} variables from the login shell in ${Date.now() - t0}ms (engine one-shots only)`
         : '[env] could not read a login shell environment — engine one-shots use the daemon environment only')
     })
-  }
-  for (const target of herdrStartup) {
-    console.log(target.state === 'available'
-      ? `[terminal] Herdr session ${target.sessionName}: available`
-      : `[terminal] Herdr session ${target.sessionName}: ${target.state} (${target.reason})`)
   }
 
   const terminalSession = (target: string): RegisteredSession | undefined => registry.resolve(target)
@@ -1782,16 +1677,102 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // NB: hooks are installed AFTER the hook server binds (below), with the port it actually got — the
   // server may fall back to a free port if env.PORT is taken, and the hooks must point at the real one.
 
+  // THE DAEMONS SWITCH (lib/daemonsSwitch.ts, daemons/README.md "Off switches"). Every daemon deploy ships
+  // dark: until the account's zoo answers 200 — or, signed out, a guest window says its person consented —
+  // nothing daemon-related runs here: no sensor or journal, no brain, no learning, no pair harness, no zoo
+  // reports, no timers, and one backend request, the probe. HARNESS_DAEMONS=0 in this environment or
+  // "daemons": false in pair.jsonc keeps all of it off whatever the server says. What it switches is bound
+  // further down (onDaemonsChanged, onZooRead), and it starts once all of that is wired.
+  let onDaemonsChanged: (on: boolean) => void = () => {}
+  let onZooRead: (read: ZooRead) => void = () => {}
+  const daemonsKilled = localKillSwitch({ file: pairConfigPath() })
+  const daemons = new DaemonsSwitch({
+    read: () => proxyBackend('GET', '/api/zoo'),
+    signedIn: () => readAuthSession() !== null,
+    killed: daemonsKilled,
+    onChange: (on) => onDaemonsChanged(on),
+    onRead: (read) => onZooRead(read),
+  })
+  /** The hook server's `/api/zoo` passthrough for windows: DAEMONS_OFF when killed here, else the backend's answer. */
+  const zooProxy = zooPassthrough({ proxy: (method, path, body) => proxyBackend(method, path, body), killed: daemonsKilled, observe: (read) => daemons.observe(read) })
+  // THE PAIR SENSOR (pair/sensor.ts, daemons/BRAIN.md). Every daemon runs one for its own harnesses:
+  // no model, just turns, questions and recaps, journaled for whichever computer you sit down at. Off
+  // until daemons are on and the account's zoo has a paired daemon — see onZooRead, bound once the backend
+  // proxy exists. `onPairToggled` is bound the same way, to things declared further down.
+  let onPairToggled: (on: boolean) => void = () => {}
+  /** The thinking half (pair/brain.ts), built once the relay pool exists. */
+  let pairBrain: PairBrain | null = null
+  /**
+   * What the person confirmed at a window (pair/gate.ts, daemons/BRAIN.md "Security"): the zoo's autonomy
+   * and pair.jsonc are requests; a level above `suggest`, and rules, take effect only after their yes.
+   */
+  const pairGate = new PairGate({ file: join(env.ADAPTER_DATA_DIR, 'pair', 'confirmed.json'), onEvent: (event) => pairBrain?.onGate(event) }, DEFAULT_AUTONOMY)
+  /** How much the daemon may do on its own right now (pair/floor.ts): the level the gate let through. */
+  const pairAutonomy = (): Autonomy => pairGate.autonomy()
+  /** HARNESSD_PAIR_TOKEN (pair/token.ts): rotated at every launch of the pair harness. */
+  const pairToken = new PairToken(join(env.ADAPTER_DATA_DIR, 'pair', 'token'))
+  /** `talk` / `daemon_talk`: the person's words to the pair harness — bound once it can be started. */
+  let pairTalk: (text: string, companionUid?: string) => Promise<Record<string, unknown>> = async () => ({ ok: false, error: 'UNSUPPORTED' })
+  /** A turn started or ended on the pair harness: it is in use (its idle pause waits). Bound with it. */
+  let pairHarnessActivity: (agentId: string) => void = () => {}
+  let companionPromptContext: (agentId: string) => string | null = () => null
+  let companionProfileChanged: () => void = () => {}
+  let isCollectionAgent: (agentId: string) => boolean = () => false
+  /** The person's pair.jsonc (pair/rules.ts): the model opt-in, learning's opt-ins, and the rules act-within-rules runs here. */
+  const pairConfig = new PairConfigFile(pairConfigPath())
+  /** pair.jsonc as the person confirmed it (pair/gate.ts): a new or changed file waits for their yes. */
+  const pairRulesConfig = (): PairConfig => pairGate.rules(pairConfig.load())
+  /** A question opened on this machine: answer it by rule if the dial and a rule say so. Bound with the owner. */
+  let pairRules: (agentId: string, requestId: string) => void = () => {}
+  /** The pair harness is the daemon's own: its turns are nobody's news (no notification, no count). */
+  const isPairHarnessSession = (sessionId: string): boolean => registry.bySession(sessionId)?.dsh === PAIR_HARNESS_DSH
+  const pairSensor = new PairSensor({
+    machineId: () => backendRef?.machineId ?? session?.machineId ?? computerId(),
+    journal: new PairJournal({ dir: join(env.ADAPTER_DATA_DIR, 'pair') }),
+    describe: (agentId) => {
+      const s = registry.resolve(agentId)
+      if (!s) return null
+      return {
+        name: projectDisplayName(s),
+        engine: s.engine,
+        excluded: isTerminalEngine(s.engine) ? 'terminal' : s.dsh === PAIR_HARNESS_DSH ? 'pair' : null,
+        cwd: s.cwd ?? null,
+      }
+    },
+    onEnabledChanged: (on) => onPairToggled(on),
+  })
+  // LEARNING (pair/learn, daemons/LEARNING.md): the lessons folder, and what this machine notices in its own
+  // harnesses' events while pairing is on. The learner that distills and proposes is bound with the brain.
+  const lessonStore = new LessonStore({ root: env.HARNESS_LESSONS_DIR, now: Date.now })
+  let pairLearner: PairLearner | null = null
+  // When each lesson was last read by a session (pair/learn/usage.ts): always on, it only reads events.
+  const lessonUsage = new LessonUsage({ store: lessonStore, now: Date.now })
+  const lessonSignals = new LessonSignals({
+    now: Date.now,
+    machine: () => terminalHintMachineName(),
+    file: join(env.ADAPTER_DATA_DIR, 'pair', 'learn', 'signals.json'),
+    home: homedir(),
+    onSignal: (signal) => pairLearner?.signal(signal),
+  })
+  /** The approved lesson skills a harness session in `workspace` loads (the Store runtime path). Never throws.
+   *  None while daemons are off: a launch is exactly what it was before them. */
+  const lessonsFor = (workspace: string) => {
+    if (!daemons.on()) return null
+    try { return runtimeLessons(lessonStore, workspace) } catch { return null }
+  }
   const syncSession = (s: RegisteredSession, opts: { device?: boolean } = {}): void => {
     // A terminal is not the dial's business (see `deviceAgentRow`): it is never upserted there, and
     // the one time it must be REMOVED from there — the engine it adopted has exited — the caller
     // sends that `agent_deleted` itself, because this row is still very much alive for the app.
     if (isTerminalEngine(s.engine)) opts = { ...opts, device: false }
     if (!registry.terminalAvailable(s.agentId)) {
+      pairSensor.removed(s.agentId)
+      lessonSignals.forget(s.agentId)
       backendRef?.send({ type: 'agent_deleted', payload: { agentId: s.agentId } })
       if (opts.device !== false) backendRef?.sendCommander({ type: 'agent_deleted', payload: { agentId: s.agentId } })
       return
     }
+    if (s.launch?.state === 'failed') pairSensor.failed(s.agentId, s.launch.detail ?? s.launch.error)
     void projectFrame(s, runtimeProfiles.selectedModel(s))
       .then((project) => {
         const frame = { type: 'agent_synced', payload: { agent: project } }
@@ -1871,6 +1852,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onUrl: (agentId, url) => {
       dshFrameFor(agentId).viewerUrl = url
       backendRef?.viewerForwarder.refresh(agentId)
+      backendRef?.interactiveViewers.refresh(agentId)
       syncCompanion(agentId)
     },
     log: (line) => console.log(line),
@@ -1937,7 +1919,10 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       const title = engineSessionTitle(session, terminals.titleFor(session, titles))
       if (!title) continue
       const before = projectDisplayName(session)
-      const updated = registry.updateTitle(session.sessionId, title)
+      // Fall back to the agent id: a terminal that became an engine harness (e.g. opencode typed
+      // into a New Terminal) has no engine session id — nothing fired a session-start hook — but its
+      // pane title is still readable and should still rename the harness.
+      const updated = registry.updateTitle(session.sessionId || session.agentId, title)
       if (!updated) continue
       const after = projectDisplayName(updated)
       if (after !== before) {
@@ -1949,6 +1934,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   let autonomousDeviceDirect: AutonomousDeviceDirect | undefined
   let deviceStoreRef: ReturnType<typeof createDeviceStore> | undefined
   let autonomousDeviceService: AutonomousDeviceService | undefined
+  let appFormWindow: { machineId: string; connId: string } | undefined
   let appVoiceFocus: { machineId: string; agentId: string; connId: string } | undefined
   let backendRef: BackendSocket | undefined
   let fullReconcile: (announceDevice?: boolean) => Promise<void> = async () => {}
@@ -1961,6 +1947,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // not. Both are just "the id this daemon serves under" to everything downstream — the local
   // websocket binds clients to it, the app selects by it — and the backend binds a machine to the
   // computer id at login, so a sign-in ADOPTS this machine rather than minting a second one.
+  // The trust group (lib/e2ee/groupSyncer.ts). Built once the relay pool exists, far below; the hook
+  // handlers and the backend callbacks declared before then reach it through this.
+  let groupSyncer: GroupSyncer | null = null
   const backend = new BackendSocket(session?.machineId ?? computerId(), auth, (connected) => {
     if (!connected) return
     const sessions = registry.advertised()
@@ -1973,36 +1962,26 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backendRef = backend
   backend.viewerTargetProvider = (agentId) => dshViewers.forwardingUrl(agentId)
 
-  // Bring this machine's grid sign-in into line with its harness sign-in, in the background.
-  // This is what makes a machine that signed in to the harness BEFORE grid existed usable after an
-  // update: it has the `grid` binary now (above), but no grid credentials and no grid to point at
-  // until something signs it in — and the login *event* that used to do that never fires again for
-  // an already-signed-in account. Reconciling on daemon start (the path every update takes) removes
-  // the `harness logout` / `harness login` a person would otherwise have to run by hand.
-  //
-  // Best-effort and non-blocking: it awaits the managed grid, mints/reads the account's name, and
-  // signs in + creates the grid only when the machine is not already there. The RPCs that need the
-  // name wait briefly for it through `gridReadyProbe`.
-  //
-  // ⚠️ Retried on backend RECONNECT, not just at start, and this is not belt-and-braces: the daemon
-  // OUTLIVES the desktop app (it must keep running after the window closes), and `harness start`
-  // against a live daemon returns without starting a new one. So "start" can be days ago, and a
-  // single attempt that lost to a control plane which was not reachable yet — the ordinary shape of
-  // a daemon coming up with the network — would leave the account with no grid until the next real
-  // restart. A connect is the evidence the control plane is reachable, so it is when to try again.
-  // How long the RPCs gate on an attempt, and how many attempts there are, live in the runner —
-  // `lib/gridAttach.ts`, beside the reconcile itself, so the coordination has a unit test rather
-  // than only a comment. Everything below is the daemon-shaped half: what one attempt actually does.
   try { ensureBundledModelManager() }
   catch (error) { console.warn('[model-manager] Could not prepare the bundled harness:', error instanceof Error ? error.message : String(error)) }
 
-  const gridAttach = createGridAttachRunner({
-    maxAttempts: GRID_ATTACH_MAX_ATTEMPTS,
-    minIntervalMs: GRID_ATTACH_MIN_INTERVAL_MS,
-    ceilingMs: GRID_ATTACH_CEILING_MS,
-    log: (line) => console.log(`[grid-attach] ${line}`),
-    attempt: () => reconcileGridAttach({
-      managedGridReady,
+  // Grid is an add-on (`lib/gridAttach.ts`): nothing on this path installs `grid`, signs this machine in
+  // to it or creates a grid. The first grid feature a person uses — the models picker's Set up, a local
+  // model's Get or Use, an agent moved onto a grid model, the Model Manager — asks `backend.ensureGrid`,
+  // which does it then, with this machine's harness token (no second browser) and, only for what needs
+  // one, the account's own grid. It used to run here on every start and every reconnect.
+  const gridLog = (line: string): void => console.log(`[grid-attach] ${line}`)
+  const gridAccess = createGridAccess({
+    signedIn: () => signedInGridEmail() !== null,
+    log: gridLog,
+    attempt: ({ ownGrid, signedInThisRun }) => reconcileGridAttach({
+      // The pinned managed runtime first; grid's own installer when there is none to follow.
+      installCli: async () => {
+        await ensureManagedGrid((m) => console.log(`[grid-runtime] ${m}`))
+        if (gridAvailable()) return
+        const installed = await ensureGridInstalled()
+        if (installed.status !== 'present') gridLog(installed.message)
+      },
       gridAvailable: () => gridAvailable(),
       // The backend mints and remembers the name; this CLI holds neither the account's email nor its
       // id. An older backend (no route) answers nothing, which the reconcile treats as "no grid yet".
@@ -2024,15 +2003,16 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         resetGridDeriveMemo()
         clearGridMcpUrlCache()
       },
-      log: (line) => console.log(`[grid-attach] ${line}`),
-    }),
+      log: gridLog,
+    }, { ownGrid, signedInThisRun }),
   })
-
-  // While an attempt is running AND within its ceiling, the RPCs that need the grid name wait
-  // briefly on it; otherwise they read the name directly.
-  backend.gridReadyProbe = () => gridAttach.probe()
-  onBackendConnected = () => gridAttach.run()
-  gridAttach.run()
+  backend.ensureGrid = (request) => gridAccess.ensure(request)
+  // Offline, for every list read: is there a `grid` here holding a sign-in? What decides whether the
+  // picker offers local and shared models or a Set up row.
+  backend.gridSetUp = () => gridAvailable() && signedInGridEmail() !== null
+  // Re-read the zoo on every reconnect as well, while daemons are on: a `zoo_changed` sent while the link
+  // was down is lost. Off, a reconnect asks nothing (lib/daemonsSwitch.ts).
+  onBackendConnected = () => { daemons.connected() }
 
   /**
    * Is ANY device surface watching this machine?
@@ -2068,7 +2048,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
 
   const deviceIsWatching = (): boolean => backend.hasCommander() || cableWatchingLocal() || backend.autonomousDeviceConnected()
   /** Anyone who can DRAW a question: a device, a cabled dial, or a desktop window on this computer. */
-  const someoneCanAnswer = (): boolean => deviceIsWatching() || backend.hasLocalClient()
+  // ...or the pair brain, while pairing is on: it watches every harness on every machine, so a question
+  // on a computer nobody is sitting at must still be read for the computer somebody is.
+  const someoneCanAnswer = (): boolean => deviceIsWatching() || backend.hasLocalClient() || pairSensor.enabled()
   const terminalStreams = new TerminalStreamManager({
     terminals,
     resolveAgent: (agentId) => registry.resolve(agentId),
@@ -2085,6 +2067,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       return { kind: backend.e2ee.sessionRole(connId) === 'device' ? 'device' : 'web', name: label }
     },
     streamingAvailable: tmuxBackend != null,
+    onScopedInput: (id, bytes, tabId, pasted) => backend.swarmPromptScopes.raw(id, bytes, tabId, pasted),
     diagnostic: (event, fields) => console.log(`[terminal-stream] ${event}`, fields),
     // The keystroke prewarm (grid-reads-without-waking issue 03): typing into a pane whose agent runs on
     // a sleeping grid starts that grid while the person types. Here, in the daemon's own input path, so
@@ -2519,13 +2502,26 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   ): Promise<boolean> =>
     attaches.attach(session, reset, () => attachSessionNow(session, reset, replayCursorFromStart, replayFromStart))
   const input: SessionInputController = new SessionInputController({
+    beforeSubmit: (id, text, tabId, deliveryId) => backend.swarmPromptScopes.prepare(id, text, tabId, deliveryId),
     getSession: (id) => registry.resolve(id),
     onDelivery: (event) => {
       autonomousDeviceService?.delivery(event)
       backend.orchestratorDelivery(event)
+      backend.teamDelivery(event)
+    },
+    beforeTeamWrite: async session => {
+      const capture = await captureTerminal(session.agentId)
+      return teamWriteHold(session.engine, capture)
     },
     validateRuntime: validateTerminal,
     inject: (id, text) => deviceInput.legacyWrite(id, () => submitTerminalAction(id, text)),
+    injectTeam: (id, text, deliveryId) => deviceInput.legacyWrite(id, async () => {
+      const session = registry.resolve(id)
+      const reason = session ? teamWriteHold(session.engine, await captureTerminal(id)) : 'team_waiting_unavailable'
+      if (reason) return { state: 'failed', dispatch: 'not_started', reason }
+      if (!backend.teamCanWrite(deliveryId)) return terminalActionNotStarted('team_waiting_control')
+      return submitTerminalAction(id, text)
+    }),
     sendKey: (id, key) => deviceInput.legacyWrite(id, () => keyTerminalAction(id, key)),
     capture: captureTerminal,
     onError: (sessionId, message) => {
@@ -2655,23 +2651,30 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // that gap is exactly where the stale recap used to flash back.
     const target = payload.sessionId || payload.agentId
     if (typeof target === 'string' && target) { showAwaitingAnswer(target); nixfred.attention.answered(agentIdFor(target)) }
-    void questions.answer(payload)
+    // Returned so the client that answered hears a refusal — STALE_QUESTION when the dialog changed
+    // before its answer arrived — as `question_response_result`.
+    return questions.answer(payload)
   }
+  /** The transcript's open tool calls for a session (CommanderMirror.openTools), bound once the mirror exists. */
+  let openToolsOf: (sessionId: string) => Array<{ name: string; input: unknown }> = () => []
+  // What is still being asked, by session — handed to a window that connects later (openQuestions below).
+  const openQuestions = new Map<string, Record<string, unknown>>()
+  const agentNotifications = new AgentNotifications()
   const questionWatcher = new QuestionWatcher({
     getSession: (id) => registry.resolve(id),
     capture: captureTerminal,
     hasDevice: () => someoneCanAnswer(),
     isDriving: (sessionId) => questions.isDriving(sessionId),
-    onQuestion: (sessionId, requestId, shaped, permission) => {
+    onQuestion: (sessionId, requestId, shaped, detail) => {
       deviceInput.setUserAction(agentIdFor(sessionId), true)
-      nixfred.attention.question(agentIdFor(sessionId), permission === true, shaped[0]?.q ?? '')
+      nixfred.attention.question(agentIdFor(sessionId), detail?.permission === true, shaped[0]?.q ?? '')
       questions.remember(requestId, sessionId)
       showAwaitingAnswer(sessionId)
       const asked = {
         type: 'commander_question',
         agentId: agentIdFor(sessionId),
         dbSessionId: sessionId,
-        payload: { requestId, questions: shaped },
+        payload: { requestId, questions: shaped, notification: agentNotifications.asked(sessionId, requestId) },
       }
       backend.sendCommander(asked)
       // ...and to the window on this computer. `sendCommander` is `webEligible: false`, so until this
@@ -2686,12 +2689,18 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // today: a remote machine's watcher is gated on ITS OWN audience, which a window attached over
       // here is not part of either way.
       backend.sendLocal(asked)
+      // With the WHOLE dialog: the pair's floor reads every line of the command, not the clipped title —
+      // and the transcript's open tool calls, so it reads the exact command rather than its wrapped paint.
+      pairSensor.question(agentIdFor(sessionId), requestId, shaped, detail ? { ...detail, tools: openToolsOf(sessionId) } : detail)
+      pairRules(agentIdFor(sessionId), requestId)
+      openQuestions.set(sessionId, asked)
       console.log(`[question] ${sid(sessionId)} asking the user · "${preview(shaped[0]?.q ?? '')}" · req=${requestId}`)
     },
     // Answered somewhere else — the app, or the pane by hand. Every client drawing it is told to stop
     // waiting, down the SAME path the question itself took, so the dial and the WiFi device cannot
     // disagree about whether a question is still open.
     onQuestionGone: (sessionId, requestId) => {
+      agentNotifications.answered(sessionId, requestId)
       deviceInput.setUserAction(agentIdFor(sessionId), false)
       const closed = {
         type: 'commander_question_close',
@@ -2704,6 +2713,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // one already answered. This is the mechanism behind "answer anywhere": the dial is cabled to
       // this very computer, so the dial and this window are always the same machine's audience.
       backend.sendLocal(closed)
+      pairSensor.questionGone(agentIdFor(sessionId), requestId)
+      openQuestions.delete(sessionId)
       console.log(`[question] ${sid(sessionId)} answered elsewhere · closing on every client · req=${requestId}`)
     },
   })
@@ -2750,6 +2761,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     return role?.role === 'worker' || (role?.role === 'director' && role.busy)
   }
   const mirror = new CommanderMirror({
+    notifications: agentNotifications,
+    notifyWithoutDevice: true,
     send: (frame) => backend.sendCommander(frame),
     sendWeb: (frame) => backend.send(frame), // turn_summary_pending / turn_summary → web indicator
     hasDevice: () => deviceIsWatching(),        // device-gate the LLM recap (mirror node)
@@ -2761,7 +2774,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     agentIdFor: (sessionId) => registry.bySession(sessionId)?.agentId,
     // An Orchestrator specialist's turn end, or the Director's while specialists are still out, is not
     // announced: the person asked to hear from the main agent once, not from every sub-agent.
-    isSubagent: isSubagentSession,
+    // The pair harness's turns are silent on the dial too, like a sub-agent's.
+    isSubagent: (sessionId: string) => isSubagentSession(sessionId) || isPairHarnessSession(sessionId),
     // A claude sub-agent still at work is one whose transcript is still growing:
     // `<session>/subagents/agent-<id>.jsonl` beside the parent's (the same file enrichSubagentStats
     // reads). Written in the last SUBAGENT_IDLE_MS = alive; the held turn end waits for it.
@@ -2795,8 +2809,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
     dataDir: env.ADAPTER_DATA_DIR,
     recapForce: env.RECAP_FORCE,
-    alwaysGenerate: env.RECAP_WITHOUT_DEVICE,
+    // Pairing needs a recap per turn for the brief, device or not (SUMMARY_MODE=local makes it free).
+    alwaysGenerate: () => env.RECAP_WITHOUT_DEVICE || pairSensor.enabled(),
+    onSummary: (sessionId, summary) => pairSensor.recap(registry.bySession(sessionId)?.agentId ?? sessionId, summary.recap),
   })
+  openToolsOf = (sessionId) => mirror.openTools(sessionId)
   // Recaps are STORED under the engine session id — that is what lets `--resume` bring the last recap
   // back under a brand-new agent — but they are ASKED FOR by agent id, which is the only id the device
   // and the voice router know. Resolve across the two, or every tile restores empty.
@@ -2916,6 +2933,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   runtimeProfiles.onChanged = (sessionId) => {
     const session = registry.resolve(sessionId)
     if (session) syncSession(session)
+    companionProfileChanged()
   }
 
   // Turn heartbeat (5s): pushes `turn_heartbeat` to the web while the turn is open (keeps its 10s
@@ -2966,6 +2984,40 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     heartbeats.set(sessionId, timer)
   }
 
+  // Turns that count toward the zoo's eggs and the paired daemon's bond (lib/zooTurns.ts): a turn a
+  // person started, seen live, in a session that is not a sub-agent, a terminal or the pair harness.
+  // Reported once a minute as `zoo.turn` through the same signed-in path as /api/zoo; a guest's turns
+  // are the desktop client's to count, so nothing is counted while signed out. Each carries its minutes
+  // and whether it finished while the person was away from this computer (no active local window or
+  // `hn` for 30 minutes: zooPresence, fed below beside the pair brain), which is what earns night eggs.
+  const zooPresence = new LocalPresence()
+  const zooTurnCounter = new ZooTurnCounter({
+    eligible: (sessionId) => {
+      const session = registry.bySession(sessionId)
+      return !!session && !isTerminalEngine(session.engine) && session.dsh !== PAIR_HARNESS_DSH && !isSubagentSession(sessionId)
+    },
+    away: () => zooPresence.away(),
+  })
+  // Both only while daemons are on; a 404 on their POST is a server with daemons off, which the switch learns.
+  const postZooOps = async (body: unknown): Promise<ZooRead> => {
+    const answer = await proxyBackend('POST', '/api/zoo/ops', body)
+    daemons.observe(answer)
+    return answer
+  }
+  const zooTurnReporter = new ZooTurnReporter({
+    post: (body) => postZooOps(body),
+    signedIn: () => readAuthSession() !== null,
+    enabled: () => daemons.on(),
+    machineId: () => backend.machineId,
+  })
+  // Bond for a lesson the person approved (lib/zooLessons.ts, the learner's `credit`): `zoo.lesson` through the
+  // same signed-in path. A guest's approval is only journaled (`learned`).
+  const zooLessonReporter = new ZooLessonReporter({
+    post: (body) => postZooOps(body),
+    signedIn: () => readAuthSession() !== null,
+    enabled: () => daemons.on(),
+  })
+
   emitSessionEvents = (sessionId: string, events: ReturnType<CursorNormalizer['ingest']>, opts?: { resumed?: boolean; replay?: boolean }): void => {
     if (!events.length || !registry.bySession(sessionId)?.active) return
     const usageSession = registry.bySession(sessionId)
@@ -2992,15 +3044,25 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       if (event.type === 'turn_ended') {
         if (!opts?.resumed && !opts?.replay) nixfred.attention.turnEnded(agentId, { aborted: event.payload.aborted === true })
         if (opts?.resumed || opts?.replay) frame.replay = true
-        if (isSubagentSession(sessionId)) frame.subagent = true
+        // The pair harness is the daemon talking to you, not work finishing: no app notifies on it.
+        if (isSubagentSession(sessionId) || isPairHarnessSession(sessionId)) frame.subagent = true
       }
+      if (event.type === 'turn_started' || event.type === 'turn_ended') pairHarnessActivity(agentId)
       backend.send(frame)
       if (event.type === 'turn_started' || event.type === 'turn_ended') sessionSearch?.touch(sessionId)
+      // The pair sensor reads the same two flags the apps do: a replay is a baseline, a sub-agent is nobody's news.
       if (event.type === 'turn_started') {
+        pairSensor.turnStarted(agentId, { replay: !!(opts?.resumed || opts?.replay), subagent: isSubagentSession(sessionId) })
+      } else if (event.type === 'turn_ended') {
+        pairSensor.turnEnded(agentId, { replay: frame.replay === true, subagent: frame.subagent === true, aborted: event.payload.aborted === true })
+      }
+      if (event.type === 'turn_started') {
+        if (daemons.on()) zooTurnCounter.started(sessionId, { replay: !!(opts?.resumed || opts?.replay) })
         if (!opts?.resumed && !opts?.replay) nixfred.attention.turnStarted(agentId, event.payload.userMessage)
         turnStartedAt.set(sessionId, Date.now())
         console.log(`[turn] ${sid(sessionId)} started · engine=${registry.bySession(sessionId)?.engine ?? 'claude'} · bytes=${Buffer.byteLength(event.payload.userMessage, 'utf8')}`)
         input.onTurnStarted(agentIdFor(sessionId), event.payload.userMessage)
+        if (!opts?.resumed && !opts?.replay) backend.swarmPromptScopes.started(agentId, event.payload.userMessage, 'transcript', registry.bySession(sessionId)?.engine)
         deviceInput.onTurnStarted(agentId, event.payload.userMessage)
         autonomousDeviceService?.turnStarted(agentId)
         startHeartbeat(sessionId)
@@ -3010,6 +3072,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         // and marking it pre-turn is how a restarted daemon never announced a question Codex had open.
         if (!opts?.resumed) questionWatcher.noteTurnStart(sessionId)
       } else if (event.type === 'turn_ended') {
+        const counted = zooTurnCounter.ended(sessionId, { replay: !!(opts?.resumed || opts?.replay), aborted: event.payload.aborted === true })
+        if (counted) zooTurnReporter.count(counted)
         const startedAt = turnStartedAt.get(sessionId)
         turnStartedAt.delete(sessionId)
         // Say when a turn was KILLED. The log previously showed an interrupt as a fresh `[turn] started
@@ -3034,7 +3098,21 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         // to the device and self-cancels once mirror.heartbeat() reports idle (summary done).
       }
     }
-    mirror.ingest(events, sessionId)
+    // Real work and the person's collection conversation can teach lessons. Archived
+    // pair chats, sub-agents and replay stay excluded. Tool-free background reviews
+    // never register as agents, so they cannot feed their own results back in here.
+    const learnFrom = registry.bySession(sessionId)
+    if (learnFrom && pairSensor.enabled() && !isTerminalEngine(learnFrom.engine) && !isSubagentSession(sessionId) &&
+      (!isPairHarnessSession(sessionId) || isCollectionAgent(learnFrom.agentId))) {
+      lessonSignals.ingest({ agentId: learnFrom.agentId, sessionId, engine: learnFrom.engine, cwd: learnFrom.cwd ?? null }, events,
+        { replay: !!(opts?.resumed || opts?.replay) })
+    }
+    // A session reading a lesson is its use (the curator's clock), pairing or not — daemons on — never a
+    // replay or a terminal.
+    if (learnFrom && daemons.on() && !isTerminalEngine(learnFrom.engine)) {
+      lessonUsage.ingest({ cwd: learnFrom.cwd ?? null }, events, { replay: !!(opts?.resumed || opts?.replay) })
+    }
+    mirror.ingest(events, sessionId, { replay: !!(opts?.resumed || opts?.replay) })
     // Subscribed devices only (lib/autonomous-device/stream.ts). A transcript re-read is history, not live.
     if (!opts?.replay) autonomousDeviceService?.stream(agentIdFor(sessionId), events)
   }
@@ -3085,6 +3163,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     syncRecapPool()
     turnStates.delete(sessionId)
     turnStartedAt.delete(sessionId)
+    zooTurnCounter.forget(sessionId)
     codexNormalizers.delete(sessionId)
     cursorNormalizers.delete(sessionId)
     opencodeReaders.get(sessionId)?.stop()
@@ -3114,6 +3193,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     runtimeProfiles.forget(sessionId)
     void watcher.removeSession(sessionId)
     stopHeartbeat(sessionId)
+    backend.swarmPromptScopes.forget(doomed?.agentId ?? sessionId)
     input.forget(doomed?.agentId ?? sessionId)
     deviceInput.forget(doomed?.agentId ?? sessionId)
     if (!opts.keepAgent) detachDsh(announceId)
@@ -3132,7 +3212,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // A terminal is never the dial's business, and `syncSession` forces that for it anyway.
     announceSession: session => announceSession(session, { device: false }),
     invalidateTerminalControl,
-    forgetInput: agentId => { input.forget(agentId); deviceInput.forget(agentId) },
+    forgetInput: agentId => { backend.swarmPromptScopes.forget(agentId); input.forget(agentId); deviceInput.forget(agentId) },
     detachDsh,
     syncRecapPool,
     warn: (message, error) => console.warn(message, error),
@@ -3376,6 +3456,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     })
     if (!result || !result.isNew) return
     if (previousOwner && previousOwner.agentId !== result.entry.agentId) {
+      backend.swarmPromptScopes.forget(previousOwner.agentId)
       input.forget(previousOwner.agentId)
       deviceInput.forget(previousOwner.agentId)
       announceSession(previousOwner)
@@ -3387,11 +3468,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   }
 
   const agentReconciler = new TerminalAgentReconciler({
+    // The hook server starts before restore. Its early SessionStart hints must not run a full
+    // discovery scan over rows whose panes have not been recreated yet (and archive those rows).
+    deferUntilStart: true,
     current: () => registry.list(),
     backends: terminalBackends,
     backendOrder: terminalConfig.backends,
-    herdrSessionOrder: terminalConfig.herdrSessions,
-    beforeProbe: refreshHerdrTargets,
     transaction: (apply) => registry.transaction(apply),
     onDiscovered: async (observed) => {
       const launching = observed.runtimes
@@ -3522,6 +3604,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     onDormant: async (agent, reason) => {
       if (!agent.active) return
       invalidateTerminalControl(agent.agentId)
+      backend.swarmPromptScopes.forget(agent.agentId)
       input.forget(agent.agentId)
       deviceInput.forget(agent.agentId)
       if (agent.sessionId) {
@@ -3629,6 +3712,72 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     return { status: res.status, body: json }
   }
 
+  // PAIRING IS ON only while daemons are on (lib/daemonsSwitch.ts) and the account's zoo has a paired daemon
+  // (daemons/README.md, "The zoo"). The zoo is account state, read through the same proxy the window uses —
+  // the switch's probe is that read — and re-read on `zoo_changed` and on every reconnect. Signed out there
+  // is no account zoo: a guest's window keeps its own and says which daemon is paired in `daemon_presence`
+  // (pair/brain.ts), which is what `guestPair` holds. A backend that cannot be reached keeps the last answer
+  // rather than switching pairing off on a blip.
+  // `pair` is the paired individual's SPECIES (its voice and lore; the zoo names the individual by uid) and
+  // `name` what the person calls it, `pip the tim` (pair/individuals.ts).
+  // INDIVIDUAL ART (pair/plateService.ts): each individual's plates, drawn here in a worker thread with the
+  // generated models, kept under the data folder, served to windows (`daemon_plate_get`, Unix socket) and
+  // phones (`pair_plate_get`, sealed). Idle, and nothing on disk touched, while daemons are off.
+  const plates = new PlateService({ dir: join(env.ADAPTER_DATA_DIR, 'pair', 'plates') })
+  const companionZoo = new CompanionZoo()
+  let zooPair: { known: boolean; pair: string | null; name: string | null; autonomy: Autonomy; consent: boolean; consentAt: string | null } = { known: false, pair: null, name: null, autonomy: DEFAULT_AUTONOMY, consent: false, consentAt: null }
+  let guestPair: string | null = null
+  let guestCompanion: CompanionIdentity | null = null
+  let guestAutonomy: Autonomy | null = null
+  let guestConsent = false
+  // The autonomy dial rides with the pair: the account's zoo, or a guest window's own (daemon_presence).
+  // Nothing is watched until the person said yes on the first-day consent screen (zoo `consent.watching`,
+  // or a guest window's `consent`): until then the sensor stays off and the dial stays at watch.
+  const applyPair = (): void => {
+    // Daemons off: nothing is paired, and the dial is left as it was (nothing reads it).
+    if (!daemons.on()) { pairSensor.setPair(null); return }
+    const pairing = pairingFrom(zooPair, { pair: guestPair, autonomy: guestAutonomy, consent: guestConsent }, DEFAULT_AUTONOMY)
+    // A request: a step above `suggest` waits for the person's yes at a window (pair/gate.ts), and a yes
+    // holds only under the consent (`epoch`) it was given in.
+    pairGate.setRequested(pairing.autonomy, { keepConfirmed: !pairing.consented, epoch: pairing.epoch })
+    // A guest window names only a species; the account's zoo names the individual too.
+    pairSensor.setPair(pairing.pair, zooPair.known && pairing.pair === zooPair.pair ? zooPair.name : null)
+    // Pairing on or off already refreshed the brain (onPairToggled); another daemon paired, or the dial moved,
+    // reaches the windows attached here now. The brain sends only what they were not already sent.
+    pairBrain?.refresh()
+  }
+  onZooRead = (result) => {
+    if (result.status === 200) {
+      const zoo = (result.body.data as { zoo?: { autonomy?: unknown; consent?: { watching?: unknown; at?: unknown } | null } } | undefined)?.zoo
+      companionZoo.observe(zoo, Date.now(), (result.body.data as { revision?: number } | undefined)?.revision)
+      // The zoo holds individuals and `paired` names one by uid; the brain speaks as its species.
+      const paired = pairedIndividual(zoo)
+      const pair = paired && isRosterDaemon(paired.id) ? paired : null
+      const at = zoo?.consent?.at
+      zooPair = {
+        known: true, pair: pair?.id ?? null, name: pair ? individualName(pair) : null,
+        autonomy: isAutonomy(zoo?.autonomy) ? zoo.autonomy : DEFAULT_AUTONOMY,
+        consent: zoo?.consent?.watching === true, consentAt: typeof at === 'string' && at.length <= 64 ? at : null,
+      }
+      // A uid not seen before is a hatch: its art is drawn now, before a window asks (idle while daemons are off).
+      plates.observeZoo(zoo)
+    } else if (result.status === 401) {
+      companionZoo.reset()
+      zooPair = { known: false, pair: null, name: null, autonomy: DEFAULT_AUTONOMY, consent: false, consentAt: null }
+    }
+    applyPair()
+  }
+  // Only a server with the zoo on sends it: the switch asks at once, whatever it had cached.
+  backend.onZooChanged = () => daemons.zooChanged()
+  backend.pairService = pairSensor
+  // The phone's sealed `pair_plate_get` (a window's `daemon_plate_get` is bound with the local socket).
+  backend.plateService = { get: (payload) => plates.get(payload) as Promise<Record<string, unknown>> }
+  // `harness pair` and the MCP server: DAEMONS_OFF while off, before any verb runs.
+  backend.daemonsOn = () => daemons.on()
+  // An open question the watcher already announced before pairing came on is announced again, so the
+  // sensor hears it too (clients dedupe a repeated push by requestId).
+  onPairToggled = (on) => { if (on) questionWatcher.reset(); pairBrain?.refresh() }
+
   // Built HERE rather than beside the cable stack that also uses it (further down), because the hook
   // server starts long before that point and agent restore can sit between the two. A cache bound late
   // is a cache that is still null exactly when a cold boot during an outage needs it most.
@@ -3642,6 +3791,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     machineId: () => backend.machineId,
     identity: sharingIdentity.getIdentity(),
     grants: new HarnessGrantStore(join(env.ADAPTER_DATA_DIR, 'harness-shares.json')),
+    collaboration: new HarnessCollaborationStore(join(env.ADAPTER_DATA_DIR, 'harness-collaboration.json')),
+    autonomousEnv: env.AUTONOMOUS_ENV,
     terminals, resolveAgent: (id) => registry.resolve(id),
     send: (id, type, payload) => backend.sendObserver(id, type, payload),
     publish: (method, path, body) => proxyBackend(method, path, body),
@@ -3751,7 +3902,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     sendToAgent: (agentId, text) => submitAgent(agentId, text),
   })
 
-  const { server: hookServer, port: hookPort, localSocket } = await startHookServer(env.PORT, {
+  const { server: hookServer, port: hookPort, localSocket } = await startHookServer(daemonPort(), {
+    onPromptContext: (agentId) => companionPromptContext(agentId),
     onCommandBar: commandBarService,
     onAttention: () => nixfred.attentionPayload(),
     onSubscriptions: () => nixfred.subs.collect(),
@@ -3782,14 +3934,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       if (!callerPid) return null
       const resolved: TerminalRuntimeRef[] = []
       for (const hint of runtimeHints ?? []) {
-        if (hint.backend === 'tmux') {
-          if (tmuxBackend) resolved.push({ backend: 'tmux', paneId: hint.paneId })
-          continue
-        }
-        const backend = herdrBackends.find((candidate) => herdrHintSelects(candidate.endpoint, hint))
-        if (!backend) continue
-        const runtime = await backend.resolveRuntimeHint(hint.paneId)
-        if (runtime.state === 'succeeded') resolved.push(runtime.value)
+        if (tmuxBackend) resolved.push({ backend: 'tmux', paneId: hint.paneId })
       }
       for (const runtime of resolved) await agentReconciler.triggerHint(runtime, engine)
 
@@ -3815,8 +3960,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
        * Caller ancestry is the strongest evidence and stays the first choice, but it assumes every engine
        * spawns its hook from inside its own process tree — and Cursor does not. Measured on both
        * backends: `agent` in a pane registers fine, then every one of its hooks is rejected because the
-       * process that POSTs is not a descendant of the pane's engine, so no session ever binds. It is not
-       * a Herdr problem; tmux fails identically.
+       * process that POSTs is not a descendant of the pane's engine, so no session ever binds.
        *
        * Keep that exception specific to Cursor. A delayed hook from an exited process can still name
        * a pane now owned by its replacement; the pane and hook credential alone cannot prove that a
@@ -3828,21 +3972,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         if (!candidate) continue
         if (callerBelongsTo(candidate)) candidates.set(candidate.agentId, candidate)
         else onHintedRuntime.set(candidate.agentId, candidate)
-      }
-      // A moved Herdr pane may leave an inherited stale route. Caller/process correlation is the
-      // deterministic fallback, but only within a configured Herdr session named by the hook.
-      if (!candidates.size && runtimeHints?.some((hint) => hint.backend === 'herdr')) {
-        const configuredSessions = new Set(runtimeHints
-          .filter((hint): hint is Extract<HookTerminalHint, { backend: 'herdr' }> => hint.backend === 'herdr')
-          .flatMap((hint) => herdrBackends
-            .filter((backend) => herdrHintSelects(backend.endpoint, hint))
-            .map((backend) => backend.endpoint.sessionName)))
-        for (const candidate of registry.list()) {
-          if (candidate.engine !== engine || !callerBelongsTo(candidate)) continue
-          if (candidate.runtimes.some((runtime) => runtime.backend === 'herdr' && configuredSessions.has(runtime.sessionName))) {
-            candidates.set(candidate.agentId, candidate)
-          }
-        }
       }
       const choice = chooseHookAgent([...candidates.values()], [...onHintedRuntime.values()], engine)
       if (choice.agent) {
@@ -3864,6 +3993,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       return null
     },
     onRegistered: handleRegistered,
+    onPromptSubmitted: (id, text) => backend.swarmPromptScopes.started(id, text, 'hook', registry.byAgent(id)?.engine),
     onSessionEnd,
     // Command Code's PreToolUse — the one live "a turn is running" signal this engine has. Without it the
     // adapter only learned of a turn from Stop, and emitted turn_started+turn_ended in the same
@@ -4064,6 +4194,19 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
     onClearRemotePassword: () => { backend.clearRemotePassword(); return { status: 200, body: { ok: true } } },
     onRemotePasswordStatus: () => ({ status: 200, body: backend.remotePasswordStatus() }),
+    onTrustLinkedPeer: (peer) => {
+      backend.trustPeer({ ...peer, kind: 'machine' })
+      groupSyncer?.linked({ ...peer, kind: 'machine' })
+      return { status: 200, body: { ok: true } }
+    },
+    onGroupList: () => ({ status: 200, body: { self: groupSelf(), members: new TrustGroupStore().list() } }),
+    onGroupSync: () => { void groupSyncer?.syncAll(); return { status: 200, body: { ok: true } } },
+    onGroupRemove: (selector) => {
+      const found = findGroupMember(selector)
+      if (!found.ok) return { status: found.error === 'AMBIGUOUS' ? 409 : 404, body: { error: found.error } }
+      groupSyncer?.remove(found.pub)
+      return { status: 200, body: { label: found.label, fingerprint: found.fingerprint } }
+    },
     // Local dashboard (GET /api/status): adapter health + computer fingerprint + local pairings. It
     // deliberately does NOT expose chat/transcripts — those live in the cloud web (WEB_URL/commander).
     onStatus: async () => ({
@@ -4073,6 +4216,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // logout restarts the daemon, and the window between the file changing and the restart landing
       // is exactly when the app asks — the answer it needs is the file's.
       signedIn: readAuthSession() !== null,
+      // Whether this daemon runs its daemons (lib/daemonsSwitch.ts): the server's answer and the kill switch.
+      daemons: (({ on, server, killed }) => ({ on, server, killed: killed !== null }))(daemons.state()),
       version: VERSION,
       localWs: {
         path: LOCAL_WS_PATH,
@@ -4107,18 +4252,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       config: {
         watching: `${terminalConfig.backends.join(' + ')} terminals across all supported engines`,
         terminalBackends: terminalConfig.backends,
-        // What is watched NOW, not what was configured at boot: under auto-detection the session set is
-        // discovered per pass, so reporting the (empty) configured list would answer the wrong question
-        // for the one person most likely to ask it — someone checking why their pane is not showing up.
-        herdrSessions: activeHerdrSessions,
         terminalSelection: backendsExplicit ? 'configured' : 'auto',
         terminalTargets: [
           ...(tmuxBackend ? [{ backend: 'tmux', instance: 'default', state: 'configured' }] : []),
-          ...activeHerdrSessions.map((sessionName) => ({
-            backend: 'herdr',
-            sessionName,
-            ...(herdrTargetStates.get(sessionName) ?? { state: 'unavailable', reason: 'not yet resolved' }),
-          })),
         ],
         dormantAgents: registry.list().filter((session) => !session.active).length,
         dataDir: tildify(env.ADAPTER_DATA_DIR),
@@ -4157,8 +4293,22 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // route and hears about everyone else's edits as `desk_changed` (backendSocket.ts).
     onDeskRead: () => proxyBackend('GET', '/api/desk'),
     onDeskOps: (body) => proxyBackend('POST', '/api/desk/ops', body),
+    onExperimentalRead: () => proxyBackend('GET', '/api/experimental-settings'),
+    onExperimentalWrite: (body) => proxyBackend('PATCH', '/api/experimental-settings', body),
+    // The account's zoo — see backend routes/zoo.ts. Same shape as the desk: read and ops proxied,
+    // everyone else's changes heard as `zoo_changed`. The backend requires the account's creature
+    // opt-in. Signed out, proxyBackend answers 401 NOT_SIGNED_IN.
+    // Killed on this computer (lib/daemonsSwitch.ts): a 404 DAEMONS_OFF without asking, which a window reads
+    // exactly as the server's own 404 — daemons hidden. Otherwise verbatim, and the switch learns from it.
+    onZooRead: () => zooProxy.read(),
+    onZooOps: (body) => zooProxy.ops(body),
     onStore: (method, path, body) => proxyBackend(method, path, body),
-  }, { socketPath: localSocketPath(env.ADAPTER_DATA_DIR, env.PORT) })
+  }, { socketPath: localSocketPath(env.ADAPTER_DATA_DIR, env.PORT), allowPortFallback: true })
+  try { saveDaemonPort(env.ADAPTER_DATA_DIR, env.PORT, hookPort) } catch (error) {
+    await localSocket?.close()
+    hookServer.close()
+    throw error
+  }
   // Claim the pid file for OURSELVES, and only now that the control port is bound. It used to be
   // written by whoever spawned us — so a parent that died mid-handover left a daemon nothing could
   // manage — and then, for a while, by us at the top of this function, before the bind — so a child
@@ -4176,11 +4326,13 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   // already has).
   const relayIdentityStore = new E2eeStore()
   relayIdentityStore.init()
+  const relayPeers = new MachinePeerStore()
   const relayPool = new RemoteRelayPool(
     auth,
     env.BACKEND_WS_URL.replace(/\/$/, ''),
     relayIdentityStore.getIdentity(),
-    new MachinePeerStore(),
+    relayPeers,
+    { onSessionReady: (machineId) => groupSyncer?.sessionOpened(machineId) },
   )
   // The fleet dispatcher rides the same pool the window uses to reach a linked machine: one
   // E2EE-terminated session per machine, frames fanned out to whoever attached.
@@ -4203,6 +4355,396 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       close: () => session.detach(),
     }
   })
+  // Every machine and phone linked to this one, directly or through another member, trusts every other:
+  // rosters are swapped over any session that opens, and pushed on whenever they change.
+  groupSyncer = new GroupSyncer({
+    store: new TrustGroupStore(),
+    peers: new MachinePeerStore(),
+    self: groupSelf,
+    trust: (peer) => backend.trustPeer(peer),
+    untrust: (pub) => { backend.untrustPeer(pub) },
+    paired: () => backend.pairedPeers(),
+    request: relayRequester(relayPool, () => readAuthSession()?.autonomousEnv ?? env.AUTONOMOUS_ENV),
+    dropSessions: (machineId) => { relayPool.invalidate(machineId); relayPool.invalidateIsolated(machineId) },
+    reachable: () => {
+      // Only a list the backend answered says who is offline; otherwise try every member.
+      const { machines, source } = machineListCache.list()
+      return source !== 'backend' ? null : new Set(machines.filter((m) => m.state !== 'offline').map((m) => m.machineId))
+    },
+    log: (line) => console.log(line),
+  })
+  backend.groupSync = groupSyncer
+  backend.onPeerLinked = (peer) => groupSyncer?.linked(peer)
+  backend.onUnpaired = (pub) => groupSyncer?.unpaired(pub)
+  if (session?.machineId) groupSyncer.start()
+  // THE PAIR BRAIN (pair/brain.ts, daemons/BRAIN.md): thinks only while a window or `hn` is attached to
+  // THIS daemon — the computer you are at. Other linked machines are read over background relay sessions
+  // (never the window's own) with sealed `pair_*`. Everything it says goes out through sendLocal.
+  const pairFleet = new PairFleet({
+    local: {
+      machineId: () => backend.machineId,
+      name: () => terminalHintMachineName(),
+      snapshot: () => pairSensor.snapshot(),
+      subscribe: (listener) => pairSensor.subscribe(listener),
+      journal: (payload) => pairSensor.journal(payload),
+    },
+    machines: () => machineListCache.list().machines
+      .filter((m) => !m.local)
+      .map((m) => ({ machineId: m.machineId, name: m.name, linked: relayPeers.get(m.machineId) !== null, online: m.state !== 'offline' })),
+    open: relayPairLinkOpener({
+      acquire: (machineId, sink, onClosed) => relayPool.acquireIsolated(machineId, readAuthSession()?.autonomousEnv ?? env.AUTONOMOUS_ENV,
+        { type: 'machine_select', payload: { machineId } }, sink, onClosed),
+      newId: () => randomUUID(),
+    }),
+    onChange: (change) => pairBrain?.onFleetChange(change),
+  })
+  // THE OWNING MACHINE'S HALF of every pair write (pair/owner.ts): a key pressed here, the pair harness's
+  // tool call, a rule, or another machine's brain over sealed pair_* — all go through the same floor, and
+  // every action is journaled. `agent_delete` is Stop/Pause (the conversation is kept); nothing here can
+  // delete, restart, fork or bypass.
+  const pairSubject = (s: RegisteredSession, status: OwnerSubject['status']): OwnerSubject => ({
+    agentId: s.agentId, name: projectDisplayName(s), engine: s.engine, status,
+    untouchable: isTerminalEngine(s.engine) ? 'terminal' : s.dsh === PAIR_HARNESS_DSH ? 'pair' : null,
+    cwd: s.cwd ?? null, dsh: s.dsh ?? null,
+  })
+  const pairOwner = new PairOwner({
+    sensor: pairSensor,
+    autonomy: () => pairAutonomy(),
+    subject: (agentId) => {
+      const live = registry.resolve(agentId)
+      if (live && registry.terminalAvailable(live.agentId)) return pairSubject(live, 'live')
+      const stopped = stoppedAgents.get(agentId)
+      return stopped ? pairSubject(stopped, 'stopped') : null
+    },
+    subjects: () => {
+      const live = registry.advertised()
+      return [...live.map((s) => pairSubject(s, 'live')), ...stoppedAgents.available(live).map((s) => pairSubject(s, 'stopped'))]
+    },
+    recent: (agentId) => ({
+      recaps: (backend.recentProvider?.(agentId, 3) ?? []).map((r) => r?.recap || r?.text || '').filter(Boolean),
+      asks: backend.recentAsksProvider?.(agentId, 3) ?? [],
+    }),
+    // Keyed by the question's own text; AskQuestionController checks the dialog on screen is still
+    // `requestId` before a single key goes in, and answers STALE_QUESTION otherwise.
+    keyAnswer: ({ agentId, requestId, question, option }) => questions.answer({ agentId, requestId, answers: { [question || 'answer']: option } })
+      .then((result) => result.ok ? { ok: true as const } : { ok: false as const, error: result.error, detail: result.detail }),
+    message: (agentId, text, deliveryId) => {
+      if (!backend.onMessage) throw new Error('message handler not wired')
+      // The daemon's own words are never the person correcting an agent (pair/learn/signals.ts).
+      lessonSignals.daemonSent(agentId, text)
+      backend.onMessage(agentId, text, deliveryId)
+    },
+    cancel: (agentId) => backend.onCancel?.(agentId),
+    // Mode `ask`, bypass off, always: the daemon never starts anything that approves itself.
+    create: async ({ engine, cwd, prompt, name }) => {
+      if (!backend.onCreateAgent) return { ok: false, error: 'UNSUPPORTED' }
+      if (!ENGINES.includes(engine as AgentEngine)) return { ok: false, error: 'INVALID_ENGINE' }
+      const created = await backend.onCreateAgent({
+        engine: engine as AgentEngine, cwd, bypassPermission: false, permissionMode: 'ask',
+        grid: null, codexHome: null, dsh: null, prompt, name, agent: null,
+      })
+      return created.ok ? { ok: true, agentId: created.session.agentId } : created
+    },
+    stop: async (agentId) => {
+      if (!backend.onDeleteAgent) throw Object.assign(new Error('stop is not wired'), { code: 'UNSUPPORTED' })
+      await backend.onDeleteAgent(agentId)
+    },
+    resume: async (agentId) => {
+      if (!backend.onResumeAgent) return { ok: false, error: 'UNSUPPORTED' }
+      const resumed = await backend.onResumeAgent(agentId)
+      return resumed.ok ? { ok: true } : resumed
+    },
+    newId: () => randomUUID(),
+  })
+  backend.pairOwner = pairOwner
+  // AUTONOMY act-within-rules (pair/rules.ts): this machine's rules answer this machine's questions, through
+  // the same owner floor as a key — journaled by `rule`, reported afterwards by whichever brain is watching.
+  const runRules = ruleRunner({
+    active: () => pairSensor.enabled() && pairAutonomy() === 'act-within-rules',
+    config: () => pairRulesConfig(),
+    question: (agentId) => pairSensor.harness(agentId)?.question ?? null,
+    subject: (agentId) => {
+      const s = registry.resolve(agentId)
+      return s ? { name: projectDisplayName(s), engine: s.engine, cwd: s.cwd ?? null } : null
+    },
+    answer: (input, by, why) => pairOwner.answer(input, by, why),
+    log: (line) => console.log(line),
+  })
+  pairRules = (agentId, requestId) => { void runRules(agentId, requestId).catch(() => {}) }
+  // Which window was shown which line (pair/shown.ts): every pair frame that carries a keyed id goes out
+  // through these, so a key counts only from a window that received its line and said it drew it.
+  const pairShown = new ShownLines(Date.now)
+  const pairSendLocal = pairShown.sender((frame) => backend.sendLocal(frame), () => backend.localClientIds())
+  const pairSendLocalTo = pairShown.senderTo((connId, frame) => backend.sendLocalTo(connId, frame))
+  const pairVoice = new PairVoice({ sendLocal: pairSendLocal, now: Date.now })
+  // THE CONTROL INTERFACE (pair/control.ts): the pair harness's tools, behind the loopback `pair` request —
+  // `harness pair <verb>` and the harnessd MCP server. Writes need the pair harness's token and pass the
+  // autonomy dial; then this machine's PairOwner, or another machine's over the fleet's sealed link.
+  // PERSON-ONLY lesson actions (pair/learn/approval.ts): the process asking, found by its loopback port, must
+  // not descend from a harness pane (or from this daemon); a verified caller gets a one-time nonce.
+  const lessonNonces = new ApprovalNonces(Date.now)
+  const verifyLessonCaller = (connId: string) => verifyPerson(connId, {
+    peerPort: (id) => localWsServer.peerPort(id),
+    localPort: () => hookPort,
+    peerPid: (peer, local) => loopbackPeerPid(peer, local),
+    processes: () => processRows(),
+    harnessPanePids: async () => { const inventory = await listTmuxPanes(); return inventory.ok ? inventory.panes.map((pane) => pane.rootPid) : null },
+  })
+  const pairControl = new PairControl({
+    owner: pairOwner,
+    fleet: pairFleet,
+    local: {
+      machineId: () => backend.machineId,
+      name: () => terminalHintMachineName(),
+      journal: (payload) => pairSensor.journal(payload),
+      harnesses: () => pairSensor.snapshot().harnesses,
+    },
+    pairing: { enabled: () => pairSensor.enabled(), pairedDaemon: () => pairSensor.pairedDaemon(),
+      pairedUid: () => zooPair.known ? companionZoo.identity?.uid ?? null : guestCompanion?.uid ?? null },
+    autonomy: () => pairAutonomy(),
+    tokenMatches: (candidate) => pairToken.matches(candidate),
+    voice: pairVoice,
+    present: () => !!pairBrain?.isActive && pairBrain.present(),
+    started: new StartedHarnesses(join(env.ADAPTER_DATA_DIR, 'pair', 'started.json')),
+    changed: () => pairBrain?.stateChanged(),
+    lessons: async (payload) => pairLearner ? pairLearner.local(payload) : { ok: false, error: 'UNSUPPORTED' },
+    lessonReview: async (connId, id) => pairBrain?.reviewLesson(connId, id) ?? { ok: false, error: 'UNSUPPORTED' },
+    person: { verify: verifyLessonCaller, nonces: lessonNonces },
+    now: Date.now,
+    newId: () => randomUUID(),
+  })
+  backend.pairControl = pairControl
+  // THE PAIR HARNESS (pair/pairHarness.ts): the daemon as a conversation, started or resumed when you talk
+  // to it, paused when idle. Mode ask, the harnessd MCP server injected, a fresh token every launch.
+  const pairHarness = new PairHarness({
+    pairedDaemon: () => pairSensor.pairedDaemon(),
+    pairedName: () => pairSensor.pairedName(),
+    pairedUid: () => zooPair.known ? companionZoo.identity?.uid ?? null : guestCompanion?.uid ?? null,
+    collectionUids: () => zooPair.known ? companionZoo.uids : guestCompanion ? [guestCompanion.uid] : [],
+    engine: async (preferred) => {
+      if (!preferred) return null // A new collection chooses its engine in the viewer.
+      const found = await probeEngines([preferred]).catch(() => [])
+      return found.some(e => e.engine === preferred && e.installed) ? preferred : null
+    },
+    // The launcher when this daemon is the installed release it runs; otherwise exactly this process.
+    mcpCommand: () => {
+      const launcher = join(env.HARNESS_BIN_DIR, 'harness')
+      const script = process.argv[1] ? resolve(process.argv[1]) : ''
+      return script === join(env.ADAPTER_CLI_DIR, 'cli.js') && existsSync(launcher) ? [launcher] : [process.execPath, ...process.execArgv, script]
+    },
+    token: pairToken,
+    workspace: join(env.ADAPTER_DATA_DIR, 'pair', 'workspace'),
+    stateFile: join(env.ADAPTER_DATA_DIR, 'pair', 'harness.json'),
+    install: (files) => ensureBuiltinPair(PAIR_HARNESS_DSH, files),
+    find: () => {
+      const live = registry.advertised()
+      return [
+        ...live.filter((s) => s.dsh === PAIR_HARNESS_DSH).map((s) => ({ agentId: s.agentId, status: 'live' as const, engine: s.engine as PairEngine, hasConversation: !!s.sessionId })),
+        ...stoppedAgents.available(live).filter((s) => s.dsh === PAIR_HARNESS_DSH).map((s) => ({ agentId: s.agentId, status: 'stopped' as const, engine: s.engine as PairEngine, hasConversation: !!s.sessionId })),
+      ]
+    },
+    create: async ({ engine, cwd, prompt, name }) => {
+      if (!backend.onCreateAgent) return { ok: false, error: 'UNSUPPORTED' }
+      const created = await backend.onCreateAgent({
+        engine, cwd, bypassPermission: false, permissionMode: 'ask', grid: null, codexHome: null,
+        dsh: PAIR_HARNESS_DSH, prompt, name, agent: null,
+      })
+      return created.ok ? { ok: true, agentId: created.session.agentId } : created
+    },
+    resume: async (agentId) => {
+      if (!backend.onResumeAgent) return { ok: false, error: 'UNSUPPORTED' }
+      const resumed = await backend.onResumeAgent(agentId)
+      return resumed.ok ? { ok: true } : resumed
+    },
+    stop: async (agentId) => { await backend.onDeleteAgent?.(agentId) },
+    send: (agentId, text) => backend.onMessage?.(agentId, text, randomUUID()),
+    working: (agentId) => {
+      const sessionId = registry.resolve(agentId)?.sessionId
+      return !!sessionId && mirror.isBusy(sessionId)
+    },
+    now: Date.now,
+  })
+  pairTalk = (text, uid) => pairHarness.talk(text, uid)
+  isCollectionAgent = (agentId) => agentId === pairHarness.agentId()
+  companionPromptContext = (agentId) => daemons.on() ? pairHarness.context(agentId) : null
+  pairHarnessActivity = (agentId) => { if (daemons.on()) pairHarness.activity(agentId) }
+  const companionStartupProfile = new CompanionStartupProfile({
+    current: () => {
+      if (!daemons.on() || !pairSensor.pairedDaemon()) return null
+      const session = registry.advertised().find(s => s.agentId === pairHarness.agentId())
+      return session?.dsh === PAIR_HARNESS_DSH ? session : null
+    },
+    capture: (id) => captureTerminal(id, 60),
+  })
+  const companionIntelligence = new CompanionIntelligence({
+    enabled: () => daemons.on() && !!pairSensor.pairedDaemon(),
+    current: () => {
+      const agentId = pairHarness.agentId()
+      if (!agentId) return null
+      const live = registry.advertised().find(s => s.agentId === agentId)
+      const session = live ?? stoppedAgents.get(agentId)
+      if (!session || session.dsh !== PAIR_HARNESS_DSH) return null
+      return { agentId, sessionId: session.sessionId, engine: session.engine,
+        profile: runtimeProfiles.selectedModel(session), stopped: !live,
+        startup: live ? companionStartupProfile.selected(session) : null,
+        codexHome: session.codexHome, customProvider: !!(session.grid || session.gridLaunch || session.gateway) }
+    },
+    directory: join(env.ADAPTER_DATA_DIR, 'pair', 'reasoning'),
+    stateFile: join(env.ADAPTER_DATA_DIR, 'pair', 'intelligence.json'),
+  })
+  companionProfileChanged = () => { companionIntelligence.status(); pairBrain?.stateChanged() }
+  // The collection's DSH supplies learning and triage with its observed model. The
+  // experiment and watching consent still gate everything; there is no second model switch.
+  const lessonProjects = (): string[] =>
+    [...new Set([...registry.advertised(), ...stoppedAgents.available(registry.advertised())].map((s) => s.cwd).filter((cwd): cwd is string => !!cwd))]
+  const lessonDistiller = new LessonDistiller({ oneshot: companionIntelligence.run, modelEnabled: () => companionIntelligence.ready(), now: Date.now, home: homedir() })
+  const conversationReview = new ConversationReview({
+    directory: join(env.ADAPTER_DATA_DIR, 'pair', 'learn'),
+    scope: () => daemons.on() && pairSensor.pairedDaemon() ? pairHarness.learningScope() : null,
+    pairedDaemon: () => pairSensor.pairedDaemon(), intelligence: () => companionIntelligence.status(),
+    turns: (from, to) => sessionSearch?.recentConversations(from, to) ?? null,
+    cwd: (id) => registry.resolve(id)?.cwd ?? stoppedAgents.get(id)?.cwd ?? null,
+    machine: () => terminalHintMachineName(), distiller: lessonDistiller, store: lessonStore, now: Date.now,
+    home: homedir(), changed: () => pairBrain?.stateChanged(),
+  })
+  pairLearner = new PairLearner({
+    store: lessonStore,
+    distiller: lessonDistiller,
+    history: conversationReview,
+    intelligence: () => companionIntelligence.status(),
+    queueFile: () => {
+      const id = pairHarness.learningScope()
+      return id ? join(env.ADAPTER_DATA_DIR, 'pair', 'learn', `queue-${id}.json`) : null
+    },
+    pairedDaemon: () => pairSensor.pairedDaemon(),
+    autonomy: () => pairAutonomy(),
+    voice: pairVoice,
+    sendLocal: pairSendLocal,
+    present: () => !!pairBrain?.isActive && pairBrain.present(),
+    focused: (agentId) => pairBrain?.isFocused(backend.machineId, agentId) ?? false,
+    busy: () => pairSensor.snapshot().harnesses.some((h) => h.working),
+    projects: lessonProjects,
+    // Notes into AGENTS.md only for a project the person opted in; every other project's go to .harness/lessons.md.
+    agentsMd: (dir) => inProjects(dir, pairRulesConfig().learn.agentsMd),
+    learned: ({ daemon, lesson }) => { pairSensor.learned({ daemon, name: lesson.name, agentId: lesson.from[0]?.agentId, engine: lesson.from[0]?.engine }) },
+    // Bond for the daemon that found it: `zoo.lesson`, signed in only (a guest's is the journal entry above).
+    credit: (daemon, lesson) => { zooLessonReporter.credit(lesson.id, daemon) },
+    // L2 (daemons/LEARNING.md). Borrow: opt-in, read-only, from the engines' own stores.
+    borrowEnabled: () => pairRulesConfig().learn.borrow,
+    borrower: new LessonBorrower({
+      store: lessonStore,
+      sources: { hermesHome: env.HERMES_HOME, claudeProjectsDir: env.CLAUDE_PROJECTS_DIR, codexHome: env.CODEX_HOME },
+      projects: lessonProjects, machine: () => terminalHintMachineName(), now: Date.now, home: homedir(), log: (line) => console.log(line),
+    }),
+    // Check: usage, and the daily curator (stale at 30 days unused, archived at 90).
+    usage: lessonUsage,
+    curator: new LessonCurator({
+      store: lessonStore, usage: lessonUsage, now: Date.now,
+      busy: () => pairSensor.snapshot().harnesses.some((h) => h.working),
+      archived: (record) => { pairLearner?.withdrawn(record) },
+      log: (line) => console.log(line),
+    }),
+    // Export: opt-in, only files Harness wrote are ever touched.
+    exportTo: () => pairRulesConfig().learn.export,
+    exporter: new LessonExporter({
+      store: lessonStore,
+      dirs: {
+        agents: join(homedir(), '.agents', 'skills'),
+        claude: join(process.env.CLAUDE_CONFIG_DIR || dirname(env.CLAUDE_PROJECTS_DIR), 'skills'),
+      },
+      destinations: () => pairRulesConfig().learn.export,
+    }),
+    machineId: () => backend.machineId,
+    changed: () => pairBrain?.stateChanged(),
+    home: homedir(),
+    now: Date.now,
+    log: (line) => console.log(line),
+  })
+  pairBrain = new PairBrain({
+    pairing: { enabled: () => pairSensor.enabled(), pairedDaemon: () => pairSensor.pairedDaemon() },
+    fleet: pairFleet,
+    // Template first, then this collection's selected model when it is ready.
+    triage: new PairTriage({ oneshot: companionIntelligence.run, modelEnabled: () => companionIntelligence.ready(), now: Date.now, budgetMs: 30_000 }),
+    companionHarness: () => ({ ...companionIntelligence.status(), agentId: pairHarness.agentId(), engine: pairHarness.engine() }),
+    voice: pairVoice,
+    proposals: joinProposals(pairControl, pairLearner),
+    autonomy: () => pairAutonomy(),
+    sendLocal: pairSendLocal,
+    sendLocalTo: pairSendLocalTo,
+    shown: pairShown,
+    gate: pairGate,
+    // A key sent on to another machine is journaled here too, with the window it came from.
+    relayed: (fields) => { pairSensor.relayed(fields) },
+    // A lesson's key (pair/learn/approval.ts): never a tool client, never a process inside a harness pane.
+    lessonKey: (connId) => lessonKeyVerdict(connId, { isTool: (conn) => backend.isToolClient(conn), verify: verifyLessonCaller }),
+    lessonReview: (id) => pairLearner!.review(id),
+    // A key pressed on a line about THIS machine's harness: the owner's floor, then the dialog's own
+    // requestId, checked as the keys go in (STALE_QUESTION, nothing typed, when it changed).
+    answer: (input) => pairOwner.answer(input, 'key'),
+    onGuestPair: (daemonId, identity) => {
+      guestPair = isRosterDaemon(daemonId) ? daemonId : null
+      const parsed = readCompanionIdentity(identity)
+      guestCompanion = parsed?.id === guestPair ? parsed : null
+      applyPair()
+    },
+    onGuestAutonomy: (level) => { guestAutonomy = isAutonomy(level) ? level : null; applyPair() },
+    onGuestConsent: (watching) => { guestConsent = watching; applyPair() },
+    onActiveChanged: (active) => setVoiceRouterDeviceConnected(backend.hasCommander() || active),
+    talk: (text, uid) => pairTalk(text, uid),
+    open: async (uid, engine) => {
+      const previousEngine = pairHarness.engine()
+      const result = await pairHarness.open(uid, engine)
+      if (result.ok) {
+        if (engine && engine !== previousEngine) {
+          companionIntelligence.cancel()
+          conversationReview.engineChanged()
+        }
+        pairBrain?.stateChanged()
+        return { ...result, engine: pairHarness.engine() }
+      }
+      return result
+    },
+    now: Date.now,
+  })
+  // DAEMONS ON AND OFF (lib/daemonsSwitch.ts): the only timers the pair keeps whatever happens — the learner's
+  // tick and the pair.jsonc re-read — run only while daemons are on. Off takes everything back to idle: no
+  // pairing (the sensor, brain and learner stop with it), nothing waiting to be reported, the pair harness
+  // paused if it was live (its conversation kept).
+  let learnTick: ReturnType<typeof setInterval> | null = null
+  let pairConfigTick: ReturnType<typeof setInterval> | null = null
+  onDaemonsChanged = (on) => {
+    plates.setOn(on)
+    if (on) {
+      // pair.jsonc is read when something needs it, and on this tick: a "daemons": false in it switches
+      // everything off within the tick (before the rest of the file is read), and any other change asks for
+      // the person's yes soon.
+      pairRulesConfig()
+      learnTick ??= setInterval(() => { void pairLearner?.tick().catch((err) => console.warn(`[learn] tick failed: ${err instanceof Error ? err.message : err}`)) }, 60_000)
+      learnTick.unref?.()
+      pairConfigTick ??= setInterval(() => { daemons.recheck(); if (daemons.on()) pairRulesConfig() }, 30_000)
+      pairConfigTick.unref?.()
+    } else {
+      if (learnTick) { clearInterval(learnTick); learnTick = null }
+      if (pairConfigTick) { clearInterval(pairConfigTick); pairConfigTick = null }
+      zooTurnCounter.clear()
+      zooTurnReporter.clear()
+      zooLessonReporter.clear()
+      void pairHarness.off().catch(() => {})
+      conversationReview.stop()
+      pairLearner?.cancelReviews()
+      companionIntelligence.cancel()
+      companionZoo.reset(); guestCompanion = null
+    }
+    applyPair()
+    pairBrain?.refresh()
+  }
+  backend.onLocalClient = (connId, attached) => {
+    if (attached) { zooPresence.attached(connId); pairBrain?.clientAttached(connId) }
+    else { zooPresence.detached(connId); pairBrain?.clientDetached(connId) }
+  }
+  for (const connId of backend.localClientIds()) { zooPresence.attached(connId); pairBrain.clientAttached(connId) }
+  // Everything the switch turns on is wired: the one probe (or, signed out, nothing until a guest window asks).
+  daemons.start()
   // Spoken tasks go to the WINDOW to be routed, not to the copy of the router in this process.
   //
   // Built here because both ends need it: the local socket hands it the window's replies, and the cable
@@ -4219,18 +4761,43 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     log: (line) => console.log(`[cable] ${line}`),
   })
 
+  const windowSelection: WindowSelection = new WindowSelection({
+    focus: () => appVoiceFocus,
+    send: (connId, payload) => localWsServer.sendToWindow(connId, { type: 'dial_selection', payload }),
+  })
+  const windowForm = new WindowForm({
+    focus: () => appFormWindow,
+    send: (connId, payload) => localWsServer.sendToWindow(connId, { type: 'dial_form', payload }),
+    log: (line) => console.log(`[cable] ${line}`),
+  })
+  const windowVisit = new WindowVisit({
+    focus: () => appVoiceFocus,
+    send: (connId, payload) => localWsServer.sendToWindow(connId, { type: 'dial_visit', payload }),
+  })
   const localWsServer = attachLocalWsServer(hookServer, {
     localSocketServer: localSocket?.server ?? null,
     shareRelay,
+    onSelectionReply: (connId, machineId, payload) => windowSelection.reply(connId, machineId, payload),
+    onVisitReply: (connId, machineId, payload) => windowVisit.reply(connId, machineId, payload),
+    onFormReply: (connId, machineId, payload) => windowForm.reply(connId, machineId, payload),
+    onAppDisconnect: (machineId, connId) => {
+      if (appFormWindow?.connId === connId) appFormWindow = undefined
+      if (appVoiceFocus?.connId === connId) appVoiceFocus = undefined
+      windowForm.disconnected(connId)
+      windowSelection.focusChanged()
+      autonomousDeviceService?.appFocus(machineId, null, connId)
+    },
     // The window and the dial are one desk: opening an agent in the app brings the dial to it, switching
     // the dial's machine first when the app moved to another one.
     onDevicePrepareOpened: (operationId, agentId) => deviceStoreRef?.acknowledgeReveal(operationId, agentId),
     onAppFocusState: (machineId, agentId, connId, expectedRevision) => {
       // A delayed automatic selection cannot replace a newer explicit user choice.
       if (expectedRevision && autonomousDeviceService?.focusSnapshot().focusRevision !== expectedRevision) return false
+      appFormWindow = { machineId, connId }
       if (agentId === null) {
         if (appVoiceFocus?.connId === connId) appVoiceFocus = undefined
       } else appVoiceFocus = { machineId, agentId, connId }
+      windowSelection.focusChanged()
       autonomousDeviceService?.appFocus(machineId, agentId, connId)
     },
     onAppFocus: (machineId, agentId) => { void cableRef?.followApp(machineId, agentId) },
@@ -4240,7 +4807,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // The window looked at a harness, so the dial's drawer row for it is stale.
     // The dial's own tap already reaches the window (`agent.open`); this is the
     // return leg, and the pair is what keeps the badge and the pill equal.
-    onAgentSeen: (agentId) => { nixfred.attention.seen(agentId); void cableRef?.agentSeen(agentId) },
+    onAgentSeen: (agentId, readToken) => { nixfred.attention.seen(agentId); void cableRef?.agentSeen(agentId, readToken) },
     // Agents the window has a tile for. A finished turn on one of these is
     // already in front of the person, so the dial updates its tile in silence
     // rather than beeping about something being looked at.
@@ -4308,7 +4875,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // first fifteen they can SEE. An earlier cut put open tiles first, on the theory that working on
     // something is a statement about relevance; it is, but it also made the fifteen unpredictable from
     // the screen, and predictable beat clever here (owner's call).
-    onRouteTask: async (text) => {
+    onRouteTask: backend.ownerCommands.onRouteTask = async (text) => {
       const host = cableHostRef
       if (!host) return { agentId: '', machineId: '', name: '', confidence: 0, reason: 'no agent list yet', candidates: [], weighed: 0, machines: 0, via: '' }
       // Whatever the daemon knows right now. This also kicks a refresh of the remote machines, so a list
@@ -4420,19 +4987,74 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // backend.onMessage.
     //
     // That distinction is the whole of remote support: onMessage resolves the id against THIS computer's
-    // registry, so a remote agent lands as "This agent is no longer available" — an error about an agent
+    // registry, so a remote agent lands as "This harness is no longer available" — an error about an agent
     // that is alive and answering on another machine. sendTurn is the fork that already knows the
     // difference (local → the same door the web and the hooks use, remote → the fleet), and it is the
     // one the dial has been using for every voice turn.
     // A window that connects after the dial did has missed the `dial_status` that announced it.
     dialStatus: () => cableHostRef?.currentDialStatus() ?? { attached: false },
-    onRouteSend: (agentId, text) => {
+    /*
+     * A window changing a device's settings. Addressed by the fleet's id, so a second robot on the same
+     * desk is not dragged along — every other cable command broadcasts on purpose (they all show the
+     * same desktop), but a preference belongs to the glass it was set on.
+     *
+     * Nothing is answered here. The device replies to its own `settings.set` with the values it now
+     * holds, and that reaches the window as an ordinary `dial_status`.
+     */
+    onDialSettings: (id, patch) => {
+      void cableRef?.setSettings(id, patch as Parameters<NonNullable<typeof cableRef>['setSettings']>[1])
+        .then(result => {
+          if (!result.ok) console.log(`[cable] settings for ${id || 'no device'}: ${result.error}`)
+        })
+    },
+    openQuestions: () => [...openQuestions.values()],
+    onRouteSend: backend.ownerCommands.onRouteSend = (agentId, text) => {
       const sent = cableHostRef?.sendTurn(agentId, text) ?? { ok: false as const, machine: '', reason: 'no agent list yet' }
       console.log(`[route] ⌘K → ${sid(agentId)} · bytes=${Buffer.byteLength(text, 'utf8')}`
         + (sent.ok ? '' : ` · REFUSED: ${sent.reason}${sent.machine ? ` (${sent.machine})` : ''}`))
       return sent
     },
     onVoiceRouteReply: (voiceId, reply) => windowRouter.reply(voiceId, reply),
+    // A key from a window: it counts only if this window was shown the line (pair/shown.ts, BRAIN.md Security),
+    // and a lesson's only if it is the person's too (the brain's `lessonKey`).
+    // While daemons are off (lib/daemonsSwitch.ts) every one of these is answered DAEMONS_OFF — a result the
+    // window reads as "hide daemons", never an error that breaks it — and nothing else happens.
+    onDaemonAct: (connId, payload, reply) => {
+      const off = !daemons.on() ? DAEMONS_OFF : !pairBrain ? 'UNSUPPORTED' : null
+      if (off) { reply({ type: 'daemon_act_result', payload: { requestId: payload.requestId, id: payload.id, ok: false, error: off, ...(off === DAEMONS_OFF ? { detail: DAEMONS_OFF_DETAIL } : {}) } }); return }
+      void pairBrain!.onKey(connId, payload, (frame) => { reply(frame) })
+    },
+    onDaemonShown: (connId, payload) => { if (daemons.on()) pairBrain?.onShown(connId, payload) },
+    // The person's yes (or no) to a setting the gate holds back, from a window that showed it.
+    onDaemonConfirm: (connId, payload, reply) => {
+      const off = !daemons.on() ? DAEMONS_OFF : !pairBrain ? 'UNSUPPORTED' : null
+      if (off) { reply({ type: 'daemon_confirm_result', payload: { requestId: payload.requestId, kind: payload.kind, nonce: payload.nonce, ok: false, error: off, ...(off === DAEMONS_OFF ? { detail: DAEMONS_OFF_DETAIL } : {}) } }); return }
+      pairBrain!.onConfirm(connId, payload, (frame) => { reply(frame) })
+    },
+    // The person talking to their daemon, from a window: forwarded to the pair harness (which starts or
+    // wakes for it), rate-limited, with what it costs.
+    onDaemonTalk: (connId, payload, reply) => {
+      const off = !daemons.on() ? DAEMONS_OFF : !pairBrain ? 'UNSUPPORTED' : null
+      if (off) { reply({ type: 'daemon_talk_result', payload: { requestId: payload.requestId, ok: false, error: off, ...(off === DAEMONS_OFF ? { detail: DAEMONS_OFF_DETAIL } : {}) } }); return }
+      void pairBrain!.onTalk(connId, payload, (frame) => { reply(frame) })
+    },
+    onDaemonOpen: (connId, payload, reply) => {
+      const off = !daemons.on() ? DAEMONS_OFF : !pairBrain ? 'UNSUPPORTED' : null
+      if (off) { reply({ type: 'daemon_open_result', payload: { requestId: payload.requestId, ok: false, error: off, ...(off === DAEMONS_OFF ? { detail: DAEMONS_OFF_DETAIL } : {}) } }); return }
+      void pairBrain!.onOpen(connId, payload, (frame) => { reply(frame) })
+    },
+    // Presence: whether the person is here (the zoo's away turns) always; the rest only while daemons are
+    // on. Signed out, a window bound to this machine saying its guest zoo has the person's consent is what
+    // turns them on (guests keep working as before, but only when a window asks).
+    // An individual's art, for any client on the socket: DAEMONS_OFF while off (the service says so).
+    onDaemonPlate: (_connId, payload, reply) => {
+      void plates.get(payload).then((answer) => { reply({ type: 'daemon_plate', payload: { requestId: payload.requestId, ...answer } }) })
+    },
+    onDaemonPresence: (connId, payload, meta) => {
+      zooPresence.presence(connId, payload)
+      if (meta.ui && 'consent' in payload) daemons.guestConsent(payload.consent === true)
+      if (daemons.on()) pairBrain?.onPresence(connId, payload, meta)
+    },
     machineId: backend.machineId,
     backend,
     relayPool,
@@ -4457,12 +5079,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     hookStep('codex', () => installCodexHooks(hookPort))
     hookStep('cursor', () => installCursorHooks(hookPort))
     hookStep('opencode', () => installOpencodePlugin(hookPort))
-    // The `grid` CLI the Grid harness shells out to, for a machine that signed in before this
-    // existed or whose sign-in could not fetch it. In the background: a download must not hold
-    // the daemon's own start, and nothing here waits on it.
-    void ensureGridInstalled().then((result) => {
-      if (result.status !== 'present') console.log(`[grid] ${result.message}`)
-    })
     hookStep('kilo', () => installKiloPlugin(hookPort))
     hookStep('pi', () => installPiExtension(hookPort))
     // A self-update refreshes plugin files here; running engine processes pick them up according to each
@@ -4626,15 +5242,29 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         console.warn(`[dsh] ${id} is not installed on this machine · cannot restore its harness context`)
         return null
       }
-      return prepareHarnessLaunch(installed, workspace, engine, runtimeKey, { privateGrid: backend.gridName() })
+      return prepareHarnessLaunch(installed, workspace, engine, runtimeKey, { privateGrid: backend.gridName() }, null, lessonsFor(workspace))
     },
   }
   // Whatever the source (the row itself, or a grid override the desktop just sent), the agent's DSH,
   // workspace and named agent come from the row: a retarget must not silently drop the harness the
   // agent is, or bring a pane opened as `harness-compute` back as a general session.
-  const relaunchOverrides = (session: RegisteredSession, source: LaunchSource = session): Promise<LaunchOverridesResult> => {
+  // An agent on a saved API's model relaunches with that API's endpoint and key as saved now, so a key
+  // pasted since takes effect, and a removed API is refused rather than kept on its old key.
+  const relaunchOverrides = async (session: RegisteredSession, source: LaunchSource = session): Promise<LaunchOverridesResult> => {
     prepareApiTools(session.cwd, session.engine)
-    return buildLaunchOverrides(launchOverridesDeps, session.engine, { dsh: session.dsh ?? null, dshRuntime: session.dshRuntime ?? null, cwd: session.cwd, agent: session.agent ?? null, ...source }, session.agentId)
+    let gridLaunch = source.gridLaunch ?? null
+    if (gridLaunch && isApiLaunch(gridLaunch)) {
+      try {
+        gridLaunch = refreshApiLaunch(savedApis, gridLaunch)
+      } catch (error) {
+        return {
+          ok: false,
+          error: 'API_UNAVAILABLE',
+          detail: error instanceof ApiConnectionError ? error.message : `${gridLaunch.networkName} could not be read from saved APIs.`,
+        }
+      }
+    }
+    return buildLaunchOverrides(launchOverridesDeps, session.engine, { dsh: session.dsh ?? null, dshRuntime: session.dshRuntime ?? null, cwd: session.cwd, agent: session.agent ?? null, ...source, gridLaunch }, session.agentId)
   }
 
   /**
@@ -4882,6 +5512,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const PANE_POLLED_ENGINES = new Set(['devin', 'cursor', 'grok', 'agy', 'opencode', 'kilo'])
   const PANE_POLL_MS = 15_000
   setInterval(() => {
+    void companionStartupProfile.refresh().then(() => companionProfileChanged()).catch(() => undefined)
     for (const session of registry.list()) {
       if (!PANE_POLLED_ENGINES.has(session.engine)) continue
       void captureTerminal(session.agentId, 60)
@@ -4907,7 +5538,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   backend.onCommanderJoin = () => { setSummaryPoolDeviceConnected(deviceIsWatching()); mirror.replayAll(); questionWatcher.reset() } // re-announce an open question
   backend.onCommanderPresenceChanged = (connected) => {
     setSummaryPoolDeviceConnected(connected || backend.autonomousDeviceConnected())
-    setVoiceRouterDeviceConnected(connected)   // warm the voice-router worker while a device is connected
+    // Warm the voice-router worker while a device is connected — or while the pair brain may need it.
+    setVoiceRouterDeviceConnected(connected || pairBrain?.isActive === true)
   }
 
   // Web cancel (C-c) interrupts the turn — claude writes no end_turn line to close it, so stop the
@@ -5220,7 +5852,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         console.warn(`[agent] create ${dsh} refused · ${detail}`)
         return { ok: false, error: 'DSH_MATERIALIZE_FAILED', detail }
       }
-      const prepared = harnessLaunchOrRefusal(() => prepareHarnessLaunch(installed, cwd, engine, label, dshAccount))
+      const prepared = harnessLaunchOrRefusal(() => prepareHarnessLaunch(installed, cwd, engine, label, dshAccount, null, lessonsFor(cwd)))
       if (!prepared.ok) return prepared
       dshEnv = prepared.launch.env
       dshArgs = prepared.launch.args
@@ -5402,7 +6034,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       const cwd = source.cwd
       const sourceKey = forkRuntimeKey({ cwd, agentId: source.agentId, dshRuntime: source.dshRuntime })
       const prepared = harnessLaunchOrRefusal(() => prepareHarnessLaunch(installed, cwd, engine, label,
-        { privateGrid: backend.gridName() }, sourceKey))
+        { privateGrid: backend.gridName() }, sourceKey, lessonsFor(cwd)))
       if (!prepared.ok) return prepared
       dshEnv = prepared.launch.env
       dshArgs = prepared.launch.args
@@ -5576,8 +6208,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     const session = registry.resolve(agentId)
     if (!session) return { ok: false, error: 'AGENT_NOT_FOUND' }
     const pane = session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
-    // Only tmux panes can be respawned. A Herdr-hosted agent has no equivalent, and saying so is better
-    // than a generic failure the user cannot act on.
+    // Only tmux panes can be respawned. Saying so is better than a generic failure the user cannot act on.
     if (!pane) return { ok: false, error: 'RETARGET_UNSUPPORTED_BACKEND', detail: `${session.engine} is not running in a tmux pane` }
     // The swap kills a process it has validated by pid + start marker. Without one there is nothing to
     // validate, and respawning over a pane whose occupant we cannot identify is how you replace
@@ -5805,7 +6436,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     if (!session.tmuxPane || !tmuxBackend) return { ok: false, error: 'RESTART_UNSUPPORTED_BACKEND' }
     const target = { ...session }
     const current = () => operationCurrent() && sameRestartTarget(target)
-    const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The agent changed or stopped during restart.' } as const
+    const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The harness changed or stopped during restart.' } as const
     if (!current()) return changed
     // Both branches below `cd` into the row's folder before they exec, and both have already killed
     // (or respawned over) the old process by the time that `cd` fails. Ask first, over a live agent.
@@ -5894,7 +6525,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     }
   })
 
-  const submitAgent = (id: string, content: string, deliveryId?: string): void => {
+  const submitAgent = (id: string, content: string, deliveryId?: string, tabId?: string): void => {
     const record = registry.resolve(id)
     const sessionId = record?.sessionId ?? id
     const engine = record?.engine ?? 'claude'
@@ -5916,10 +6547,10 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         const loop = await nixfred.loopCheck(like, adapted)
         if (!loop.run) { console.log(`[msg] ${sid(sessionId)} held: ${loop.reason}`); return }
       }
-      input.submit(record?.agentId ?? sessionId, adapted, deliveryId)
+      input.submit(record?.agentId ?? sessionId, adapted, deliveryId, tabId)
     })().catch((err) => console.error('[msg] submit failed:', err instanceof Error ? err.message : err))
   }
-  backend.onMessage = (id, content, deliveryId) => submitAgent(id, content, deliveryId)
+  backend.onMessage = (id, content, deliveryId, tabId) => submitAgent(id, content, deliveryId, tabId)
 
   // Hermes sessions with no pane (Desktop bots, Bot Mode profiles, gateway): read off every Hermes
   // store and registered as hosted rows, so the whole fleet is on the roster, not just tmux panes.
@@ -5961,6 +6592,19 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     console.log('[hermes-store] disabled (HARNESS_HERMES_SESSIONS=0)')
   }
   backend.onCancelOrchestratorMessage = id => input.cancelDelivery(id)
+  backend.readChannelDesk = async () => {
+    const response = await proxyBackend('GET', '/api/tab-channels')
+    if (response.status === 404) throw new TeamError('CHANNELS_UNSUPPORTED', 'Tab channels are not enabled on this Harness server.')
+    if (response.status !== 200 || response.body.success !== true) throw new Error('The saved channel directory is unavailable.')
+    return response.body.data
+  }
+  backend.writeChannelSettings = async enabled => {
+    const response = await proxyBackend('PATCH', '/api/tab-channels/settings', { enabled })
+    if (response.status === 404) throw new TeamError('CHANNELS_UNSUPPORTED', 'Update the Harness server to configure swarm collaboration.')
+    if (response.status !== 200 || response.body.success !== true) throw new TeamError('CHANNEL_SETTINGS_FAILED', 'The swarm setting could not be saved. Refresh Settings to check its state.')
+    return response.body.data
+  }
+  backend.startTeams()
 
   // Keep the log file under its cap. This daemon writes it through an inherited stdout fd, so a size
   // check on a timer is the only place that can see it grow — `prepareLogFile` at spawn time alone
@@ -6004,6 +6648,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     console.log(`[update] applying ${VERSION} → ${newVersion} — restarting daemon`)
     registry.flush()
     daemonBoot.updater?.stop()
+    daemonBoot.tuiUpdater?.stop()
     agentReconciler.stop()
     clearInterval(logTrimTimer)
     clearInterval(runtimeReconcileTimer)
@@ -6114,6 +6759,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     void cableRef?.stop()
     deviceLinkRef?.stop()
     daemonBoot.updater?.stop()
+    daemonBoot.tuiUpdater?.stop()
     agentReconciler.stop()
     clearInterval(logTrimTimer)
     clearInterval(runtimeReconcileTimer)
@@ -6137,6 +6783,11 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     await dshViewers.stopAll()
     await dshVerdicts.stop()
     autonomousDeviceDirect?.stop()
+    // The last minute's turns, best effort: an update restart should not lose them, nor wait on them.
+    daemons.stop()
+    zooTurnReporter.stop()
+    zooLessonReporter.stop()
+    await Promise.race([Promise.all([zooTurnReporter.flush(), zooLessonReporter.flush()]), new Promise((resolve) => setTimeout(resolve, 2000).unref())])
     await backend.stop()
     try { if (readPid() === process.pid) rmSync(PID_FILE, { force: true }) } catch { /* ignore */ }
     process.exit(0)
@@ -6228,6 +6879,17 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   })
 
   const cableHost = new DaemonCableHost({
+    // Zoo selection is visual identity; it does not require consent to watch terminal activity.
+    // Guest identity is only a fallback while signed out, never another account's cached choice.
+    companion: () => daemons.on() ? (zooPair.known ? zooPair.pair : readAuthSession() ? null : guestPair) : null,
+    companionIdentity: () => daemons.on() ? (zooPair.known ? companionZoo.identity : readAuthSession() ? null : guestCompanion) : null,
+    companionMilestone: () => daemons.on() ? companionZoo.milestone : null,
+    activityText: async (agentId) => {
+      const session = registry.resolve(agentId)
+      if (!session || (session.engine !== 'claude' && session.engine !== 'codex')) return null
+      const screen = await terminals.capture(session, { mode: 'visible', ansi: false })
+      return terminalActivity(session.engine, screen.state === 'succeeded' ? screen.value : null)
+    },
     machineName: () => { try { return readFileSync(MACHINE_NAME_FILE, 'utf8').trim() || 'This machine' } catch { return 'This machine' } },
     machineId: () => backend.machineId,
     computerId: () => computerId(),
@@ -6239,7 +6901,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // The dial's own object, forwarded verbatim. It used to be rebuilt here as `{ [requestId]: optionId }`
     // — keyed by the REQUEST id rather than by the question key `onQuestionAnswer` expects, so the answer
     // named a question that does not exist.
-    answer: (agentId, requestId, answers) => backend.onQuestionAnswer?.({ agentId, requestId, answers }),
+    answer: (agentId, requestId, answers) => { void backend.onQuestionAnswer?.({ agentId, requestId, answers }) },
+    answerReviewed: async answer => (await questions.answer({ agentId: answer.agentId, requestId: answer.requestId,
+      answers: answer.answers, expectedQuestions: answer.questions, selectedLabels: answer.selections, freeTextKeys: answer.freeTextKeys })).ok,
     recent: (id, n) => mirror.recent(registry.resolve(id)?.sessionId || id, n),
     recentAsks: (id) => mirror.recentAsks(registry.resolve(id)?.sessionId || id),
     runtimeProfile: (session) => runtimeProfiles.selectedModel(session),
@@ -6259,6 +6923,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // than opening a tab, and an older window that does not know the field opens one as before.
     opened: (machineId, agentId, reason) =>
       backend.sendLocal({ type: 'dial_open', payload: { machineId, agentId, ...(reason ? { reason } : {}) } }),
+    notificationRead: (machineId, agentId, readToken) =>
+      backend.sendLocal({ type: 'dial_notification_read', payload: { machineId, agentId, readToken } }),
     forked: (machineId, agentId, sourceAgentId) => backend.sendLocal({ type: 'dial_forked', payload: { machineId, agentId, sourceAgentId } }),
     // The dial's Fork: the same path the window's `agent_fork` takes, then `forked` above lands on it.
     forkAgent: async (agentId) => {
@@ -6277,6 +6943,12 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     dialStatus: (status) => backend.sendLocal({ type: 'dial_status', payload: status }),
     // Words spoken on the overview belong to whichever agent the window's palette picks.
     routeInWindow: (text, cmd) => windowRouter.ask(text, cmd),
+    selectPassage: command => windowSelection.command(command),
+    clearSelection: () => windowSelection.cancel(),
+    visit: command => windowVisit.command(command),
+    clearVisit: () => windowVisit.cancel(),
+    form: command => windowForm.command(command),
+    clearForm: () => windowForm.clear(),
     log: (line) => console.log(`[cable] ${line}`),
   }, fleet)
   cableHostRef = cableHost
@@ -6288,7 +6960,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   if (existsSync(legacyDialLog)) {
     try { writeFileSync(legacyDialLog, `moved to ${join(env.HARNESS_LOGS_DIR, 'dial-YYYYMMDD.log')}\n`) } catch { /* best effort */ }
   }
-  const cable = new CableSession(cableHost, new DialLog(env.HARNESS_LOGS_DIR))
+  const cable = new CableFleet(CableSession, cableHost, env.HARNESS_LOGS_DIR, DialLog,
+    { serials: process.env.HARNESS_DIAL_SERIALS?.split(',').map(s => s.trim()).filter(Boolean) })
   cableRef = cable
 
   const deviceStore = createDeviceStore({ dataDir: env.ADAPTER_DATA_DIR, machineId: backend.machineId,
@@ -6323,7 +6996,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
     cancelDelivery: id => deviceInput.cancelDelivery(id),
     stop: id => cancelAgent(id, true),
-    answer: (agentId, requestId, answers) => questions.answer({ agentId, requestId, answers, allowPermissions: false }),
+    answer: async (agentId, requestId, answers) => (await questions.answer({ agentId, requestId, answers, allowPermissions: false })).ok,
     recent: (id, n) => mirror.recent(registry.byAgent(id)?.sessionId ?? id, n),
     fullText: id => mirror.lastFullText(registry.byAgent(id)?.sessionId ?? id),
     emit: (frame, deviceId) => backend.emitAutonomousDeviceEvent(frame, deviceId),
@@ -6403,6 +7076,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     // the wheel is not pointed at still belongs to a tile the user can see — and dropping it is what a
     // tile that never leaves "Working…" looks like from the outside.
 
+    if (event.kind === 'questionClosed') { void cable.questionClose(event.agentId, event.requestId); return }
     if (event.kind === 'question') { void cable.question(event.agentId, event.requestId, event.questions); return }
     if (event.kind === 'processing') void cable.turnStarted(event.agentId, event.text)
     else if (event.kind === 'done') void cable.turnDone(event.agentId)
@@ -6438,11 +7112,9 @@ async function runForeground(session: AuthSession | null): Promise<void> {
  */
 async function runningDaemonStatus(): Promise<{ version: string; sessions: number; machineId: string | null; connected: boolean } | null> {
   try {
-    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/status`, {
-      signal: AbortSignal.timeout(1_500),
-    })
-    if (!res.ok) return null
-    const body: unknown = await res.json()
+    const body = await localDaemonStatus(env.ADAPTER_DATA_DIR, env.PORT)
+      ?? await legacyDaemonStatus(daemonPort(), readPid(), computerId())
+    if (!body) return null
     const status = body as { version?: unknown; sessions?: unknown; machineId?: unknown; connected?: unknown } | null
     const version = typeof status?.version === 'string' && status.version ? status.version : VERSION
     const sessions = Array.isArray(status?.sessions) ? status.sessions.length : 0
@@ -6648,9 +7320,11 @@ function clearAdapterState(): void {
     ]) {
       rmSync(join(dir, name), { recursive: true, force: true })
     }
-    // One daemon socket per control port (lib/localSocket.ts) — whichever ports have run here.
+    // Private sockets and actual TCP port records — whichever configured ports have run here.
     try {
-      for (const name of readdirSync(dir)) if (isLocalSocketName(name)) rmSync(join(dir, name), { force: true })
+      for (const name of readdirSync(dir)) {
+        if (isLocalSocketName(name) || /^daemon-\d+\.json$/.test(name)) rmSync(join(dir, name), { force: true })
+      }
     } catch { /* no such directory */ }
   }
   if (dataDir === cliDir) rmStateFiles(dataDir)
@@ -6814,7 +7488,11 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
 
 /** `harness pair <code>` — send a browser/device pairing code to the running daemon (localhost). */
 async function pairCommand(code: string | undefined): Promise<void> {
-  if (!code) { console.error('Usage: harness pair <code>   (the code is shown on the browser or device)'); process.exit(1) }
+  if (!code) {
+    console.error('Usage: harness pair <code>   (the code is shown on the browser or device)')
+    console.error('       harness pair <verb>   your daemon\'s control interface (harness pair status --help)')
+    process.exit(1)
+  }
   const { res, json } = await daemonCall('POST', '/api/pair', { code })
   const body = json as { label?: string; fingerprint?: string; error?: string }
   if (res.ok) {
@@ -7125,51 +7803,36 @@ async function linkConnectCommand(machineId: string | undefined, stdin: boolean,
     console.log('  this proves you know it; nothing needs approving there.\n')
     password = await promptPassword(`  Remote password for ${machineId}: `)
   }
-  const auth = new AuthSessionManager(backendHttpBase())
-  let accessToken: string
-  try {
-    accessToken = await auth.accessToken()
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err)
-    const message = `Could not refresh this computer's SSO session (${detail}). Run: harness login`
-    if (json) console.log(JSON.stringify({ ok: false, error: 'AUTH_FAILED', message }))
-    else console.error(`\n  ✗ ${message}\n`)
-    process.exit(1)
-    return
-  }
-  const store = new E2eeStore()
-  store.init()
-  const result = await connectWithPassword({
-    targetMachineId: machineId,
-    password,
-    selfIdentity: store.getIdentity(),
-    accessToken,
-    backendWsBase: env.BACKEND_WS_URL.replace(/\/$/, ''),
-    autonomousEnv: session.autonomousEnv,
-    onProgress: json ? (stage) => console.log(JSON.stringify({ stage })) : undefined,
-  })
+  const result = await linkMachineWithPassword(machineId, password, displayName, json ? (stage) => console.log(JSON.stringify({ stage })) : undefined)
   if (!result.ok) {
-    const message = humanizeLinkError(result.error, displayName || machineId, result.retryAt)
     if (json) {
-      console.log(JSON.stringify({ ok: false, error: result.error, message, ...(result.retryAt !== undefined ? { retryAt: result.retryAt } : {}) }))
+      console.log(JSON.stringify({ ok: false, error: result.error, message: result.message, ...(result.retryAt !== undefined ? { retryAt: result.retryAt } : {}) }))
     } else {
-      console.error(`\n  ✗ ${message}\n`)
+      console.error(`\n  ✗ ${result.message}\n`)
     }
     process.exit(1)
     return
   }
-  new MachinePeerStore().pin(machineId, b64e(result.peerPub), 'harness link', Date.now())
-  if (json) { console.log(JSON.stringify({ ok: true, fingerprint: result.fingerprint, machineId })); process.exit(0) }
-  console.log(`\n  ✓ Linked machine ${machineId}`)
-  console.log(`    fingerprint  ${result.fingerprint}   — verify it matches \`harness remote-password status\`'s output on the other machine\n`)
+  if (json) { console.log(JSON.stringify({ ok: true, fingerprint: result.fingerprint, machineId, mutual: result.mutual })); process.exit(0) }
+  console.log(`\n  ✓ Linked machine ${machineId}${result.mutual ? ' — both ways' : ''}`)
+  console.log(`    fingerprint  ${result.fingerprint}   — verify it matches \`harness remote-password status\`'s output on the other machine`)
+  if (!result.mutual) console.log(`    ${machineId} runs an older harness: it can't reach this machine back until it is updated and linked again.`)
+  console.log('')
   process.exit(0)
 }
 
 /**
  * The link itself, as `harness link connect` and `harness remote` both do it: this computer's SSO
  * token and identity, the remote password proved against THAT machine, and its peer pinned here.
+ * This machine says who it is inside the handshake, so a target that understands it pins it back;
+ * when it did (`mutual`), that machine is trusted here as a client too — one link, both directions.
  */
-async function linkMachineWithPassword(machineId: string, password: string, displayName?: string): Promise<{ ok: true; fingerprint: string } | { ok: false; error: string; message: string }> {
+async function linkMachineWithPassword(
+  machineId: string,
+  password: string,
+  displayName?: string,
+  onProgress?: (stage: PwConnectProgress) => void,
+): Promise<{ ok: true; fingerprint: string; mutual: boolean } | { ok: false; error: string; message: string; retryAt?: number }> {
   const session = readAuthSession()
   if (!session) return { ok: false, error: 'NOT_SIGNED_IN', message: 'Not signed in. Run: harness login' }
   const auth = new AuthSessionManager(backendHttpBase())
@@ -7189,10 +7852,55 @@ async function linkMachineWithPassword(machineId: string, password: string, disp
     accessToken,
     backendWsBase: env.BACKEND_WS_URL.replace(/\/$/, ''),
     autonomousEnv: session.autonomousEnv,
+    onProgress,
+    self: { kind: 'machine', label: hostname(), ...(session.machineId ? { machineId: session.machineId } : {}) },
   })
-  if (!result.ok) return { ok: false, error: result.error, message: humanizeLinkError(result.error, displayName || machineId, result.retryAt) }
-  new MachinePeerStore().pin(machineId, b64e(result.peerPub), 'harness link', Date.now())
-  return { ok: true, fingerprint: result.fingerprint }
+  if (!result.ok) return { ok: false, error: result.error, message: humanizeLinkError(result.error, displayName || machineId, result.retryAt), retryAt: result.retryAt }
+  const label = displayName || machineId
+  new MachinePeerStore().pin(machineId, b64e(result.peerPub), label, Date.now())
+  const mutual = result.mutual && !!session.machineId
+  if (mutual) await trustLinkedMachine({ pub: b64e(result.peerPub), machineId, kind: 'machine', label })
+  return { ok: true, fingerprint: result.fingerprint, mutual }
+}
+
+/** Trust a just-linked machine as a client of THIS one. The running daemon holds paired.json in memory
+ *  (and rewrites it whole), so the write has to go through it; with no daemon, the file is written directly. */
+async function trustLinkedMachine(peer: LinkedPeer): Promise<void> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/link/trust-peer`, {
+      method: 'POST',
+      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' },
+      body: JSON.stringify(peer),
+    })
+    if (res.ok) return
+  } catch { /* fall back to the disk-backed store below */ }
+  const store = new E2eeStore()
+  store.init()
+  if (!store.isPaired(peer.pub)) store.addPaired(peer.pub, peer.label, Date.now(), 'web', { machineId: peer.machineId, kind: peer.kind })
+  // The daemon seeds the group from this pin and pairing when it next starts, and syncs from there.
+}
+
+/** This machine as its trust group knows it — see groupSyncer.ts's SELF_STAMP for the stamp. */
+let groupSelfPub: string | null = null
+function groupSelf(): GroupMember {
+  groupSelfPub ??= b64e(new E2eeStore().init().pub)
+  const machineId = readAuthSession()?.machineId
+  return { pub: groupSelfPub, kind: 'machine', label: hostname(), at: SELF_STAMP, ...(machineId ? { machineId } : {}) }
+}
+
+/** A trust-group member by machine id, list number, or fingerprint (full or unique prefix). */
+function findGroupMember(selector: string): { ok: true; pub: string; label: string; fingerprint: string } | { ok: false; error: 'NOT_FOUND' | 'AMBIGUOUS' } {
+  const members = new TrustGroupStore().list()
+  const norm = (v: string): string => v.toUpperCase().replace(/[·\s-]/g, '')
+  const byIndex = /^\d+$/.test(selector) ? members[Number(selector) - 1] : undefined
+  const byMachine = members.find((m) => m.machineId === selector)
+  const hit = byMachine ?? byIndex ?? (() => {
+    const matches = members.filter((m) => norm(m.fingerprint).startsWith(norm(selector)))
+    return matches.length > 1 ? 'AMBIGUOUS' as const : matches[0]
+  })()
+  if (hit === 'AMBIGUOUS') return { ok: false, error: 'AMBIGUOUS' }
+  if (!hit || !selector.trim()) return { ok: false, error: 'NOT_FOUND' }
+  return { ok: true, pub: hit.pub, label: hit.label, fingerprint: hit.fingerprint }
 }
 
 /** `harness link list` — machines this one has linked (CLI-to-CLI/machine-node trust, not browsers). */
@@ -7214,15 +7922,72 @@ async function linkListCommand(): Promise<void> {
 /** `harness link unlink <machineId>` — remove a linked machine's trust pin. */
 async function linkUnlinkCommand(machineId: string | undefined): Promise<void> {
   if (!machineId) { console.error('Usage: harness link unlink <machineId>   (see: harness link list)'); process.exit(1) }
-  const removed = new MachinePeerStore().unlink(machineId)
+  // Through the daemon: the machine leaves the trust group, so every other member drops it too.
+  const viaGroup = await daemonGroupRemove(machineId as string)
+  const removed = new MachinePeerStore().unlink(machineId as string) || viaGroup
   if (!removed) {
     console.error(`\n  ✗ No linked machine matches "${machineId}".`)
     console.error('  ▸ Run `harness link list` to see what\'s linked.\n')
     process.exit(1)
     return
   }
-  console.log(`\n  ✓ Unlinked ${machineId}\n`)
+  console.log(`\n  ✓ Unlinked ${machineId}${viaGroup ? ' — and removed from your trust group' : ''}\n`)
   process.exit(0)
+}
+
+/** Ask the running daemon to remove a trust-group member; false when there is no daemon or no match. */
+async function daemonGroupRemove(selector: string): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/remove`, {
+      method: 'POST',
+      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' },
+      body: JSON.stringify({ selector }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** `harness group list|sync|remove` — every machine and phone that trusts every other through links. */
+async function groupCommand(sub: string | undefined, arg: string | undefined, json: boolean): Promise<void> {
+  if (!sub || sub === 'list') {
+    const members = new TrustGroupStore().list()
+    if (json) { console.log(JSON.stringify({ members })); process.exit(0) }
+    if (!members.length) {
+      console.log('\n  No trust group yet. Link another machine (`harness link connect <machineId>`) or a phone to start one.\n')
+      process.exit(0)
+    }
+    console.log('\n  Trust group — each of these reaches every other without a password:\n')
+    members.forEach((m, i) => {
+      const id = m.kind === 'machine' ? m.machineId : 'viewer app'
+      console.log(`   ${String(i + 1).padStart(2)}. ${m.label}  ${id}  ${m.fingerprint}`)
+    })
+    console.log('')
+    process.exit(0)
+  }
+  if (sub === 'sync') {
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/sync`, { method: 'POST', headers: { 'x-adapter-local': '1' } })
+      if (!res.ok) throw new Error(String(res.status))
+    } catch {
+      console.error('\n  ✗ Harness is not running here. Run: harness start\n')
+      process.exit(1)
+    }
+    console.log('\n  ✓ Comparing with every reachable member now.\n')
+    process.exit(0)
+  }
+  if (sub === 'remove') {
+    if (!arg) { console.error('Usage: harness group remove <machineId|#|fingerprint>   (see: harness group list)'); process.exit(1) }
+    if (!(await daemonGroupRemove(arg as string))) {
+      console.error(`\n  ✗ Could not remove "${arg}" — no member matches, or harness is not running here (harness start).\n`)
+      process.exit(1)
+    }
+    console.log(`\n  ✓ Removed ${arg} from the trust group. Every member drops it as they sync.\n`)
+    process.exit(0)
+  }
+  console.error(`Unknown command: group ${sub}`)
+  process.exit(1)
 }
 
 /** One row of `GET /api/machines`. Only the fields this CLI shows are declared. */
@@ -7416,8 +8181,13 @@ async function logsExportCommand(json: boolean): Promise<void> {
 }
 
 import { orchestratorCommand } from './orchestrator/command.js'
+import { teamCommand } from './teams/command.js'
+import { channelCommand } from './teams/channelCommand.js'
 
 // ── arg parse ──────────────────────────────────────────────────────────────────────────────────
+// `hn` is the terminal client's short name (like tmux, fzf): the same CLI, entered at `tui`. A call
+// back into this CLI from `hn` (login, start) is marked and runs as plain `harness`.
+if (/^hn(\.js)?$/.test(process.argv[1]?.split(/[\\/]/).pop() ?? '') && process.env.HARNESS_SELF !== '1') process.argv.splice(2, 0, 'tui')
 const [, , cmd, ...rest] = process.argv
 const flags = rest.filter((a) => a.startsWith('-'))
 const args = rest.filter((a) => !a.startsWith('-'))
@@ -7489,7 +8259,8 @@ const enterSafeMode = (err: unknown): void => {
   // itself was what failed, or we never got that far — take the port for the status alone, so the app
   // still reads not-ready rather than down. A port we cannot take at all leaves only a ticking clock.
   if (!daemonBoot.hookServer) {
-    const hosts = loopbackHosts(env.PORT)
+    const port = daemonPort()
+    const hosts = loopbackHosts(port)
     const status = createServer((req, res) => {
       if (!isLoopbackRequest(req, hosts)) { res.writeHead(403).end(); return }
       const body = safeModeStatusBody({
@@ -7500,23 +8271,31 @@ const enterSafeMode = (err: unknown): void => {
       res.end(JSON.stringify(body))
     })
     status.on('error', (e) => {
-      console.error(`[safe-mode] could not serve status on ${env.PORT}: ${e instanceof Error ? e.message : e}`)
+      console.error(`[safe-mode] could not serve status on ${port}: ${e instanceof Error ? e.message : e}`)
       // A ref'd timer, unlike the updater's: something has to hold the event loop open.
       setInterval(() => console.log(`[safe-mode] still waiting for a fixed build · v${VERSION}`), 10 * 60_000)
     })
-    status.listen(env.PORT, '127.0.0.1')
+    status.listen(port, '127.0.0.1')
   }
 
   // Bounded on purpose. A cause that has since cleared — tmux not yet on PATH after a reboot, a lock
   // file, a port held for a moment — would otherwise leave the machine wedged in a state nobody
   // respawns over, because not-ready is exactly what stops the app trying again.
+  // Counted in AWAKE time: a plain timer spent a closed lid on this clock and exited the daemon on the
+  // first loop turn after the wake, taking every local terminal with it (see lib/sleepAware.ts).
   if (env.ADAPTER_SAFE_MODE_MS > 0) {
-    setTimeout(() => leave(`no fix arrived within ${Math.round(env.ADAPTER_SAFE_MODE_MS / 60_000)}m — letting a clean start try`, 1),
-      env.ADAPTER_SAFE_MODE_MS).unref?.()
+    awakeTimeout(() => leave(`no fix arrived within ${Math.round(env.ADAPTER_SAFE_MODE_MS / 60_000)}m — letting a clean start try`, 1),
+      env.ADAPTER_SAFE_MODE_MS)
   }
 }
 
 switch (cmd) {
+  case 'team':
+    teamCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'channel':
+    channelCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
   case 'orchestrator':
     orchestratorCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
@@ -7550,11 +8329,48 @@ switch (cmd) {
     runForeground(readAuthSession()).catch(enterSafeMode)
     break
   case 'autonomous-device':
-    runAutonomousDeviceCommand(rest, env.ADAPTER_DATA_DIR, env.PORT).then(code => { process.exitCode = code }).catch(onError)
+    runAutonomousDeviceCommand(rest, env.ADAPTER_DATA_DIR, daemonPort()).then(code => { process.exitCode = code }).catch(onError)
     break
-  case 'pair':
-    pairCommand(args[0]).catch(onError)
+  case 'pair': {
+    // `harness pair <code>` pairs a browser; `harness pair <verb>` is the daemon's control interface
+    // (pair/client.ts). No pairing code is ever one of the verbs.
+    const verb = pairVerb(args[0])
+    if (!verb) { pairCommand(args[0]).catch(onError); break }
+    const pairClient: PairClientDeps = {
+      port: daemonPort(),
+      machineId: async () => process.env.HARNESSD_MACHINE_ID || (await runningDaemonStatus())?.machineId || null,
+      connect: (url) => new NewCommandSocket(url),
+      env: process.env,
+    }
+    if (verb === 'mcp') {
+      // stdout is the protocol: anything else printed there would corrupt it.
+      console.log = (...line: unknown[]) => console.error(...line)
+      const at = rest.findIndex((word) => word === '--token-file' || word.startsWith('--token-file='))
+      const tokenFile = at < 0 ? null : rest[at]!.includes('=') ? rest[at]!.slice('--token-file='.length) : rest[at + 1] ?? null
+      serveMcp({ input: process.stdin, output: process.stdout, version: VERSION, call: (payload) => pairRequest({ ...pairClient, tokenFile }, payload),
+        log: (line) => console.error(line) })
+        .then(() => { process.exitCode = 0 }).catch(onError)
+      break
+    }
+    // `lessons approve` asks the person at this terminal; with no terminal (an agent's shell tool) it refuses.
+    const confirm = process.stdin.isTTY && process.stderr.isTTY
+      ? (question: string) => new Promise<boolean>((resolve) => {
+        const rl = createInterface({ input: process.stdin, output: process.stderr })
+        rl.question(question, (answer) => { rl.close(); resolve(/^y(es)?$/i.test(answer.trim())) })
+      })
+      : null
+    // Which tmux session this shell is in: a harness pane never approves a lesson (the daemon checks again).
+    const paneSession = (): Promise<string | null> => {
+      const pane = process.env.TMUX_PANE
+      if (!pane || !process.env.TMUX) return Promise.resolve(null)
+      return new Promise((resolve) => {
+        execFileCb('tmux', ['display-message', '-p', '-t', pane, '#{session_name}'], { timeout: 2_000 }, (err, stdout) => resolve(err ? null : String(stdout).trim() || null))
+      })
+    }
+    pairControlCommand(rest, { ...pairClient, confirm, paneSession, output: (line) => process.stdout.write(`${line}\n`), error: (line) => console.error(line) })
+      .then((code) => { process.exitCode = code }).catch(onError)
     break
+  }
   case 'browser-link':
   case 'e2ee-link':
     // Browser setup links served the retired web client. Said plainly rather than falling to "unknown
@@ -7605,6 +8421,9 @@ switch (cmd) {
       error: (line) => console.error(line),
     }).then((code) => { process.exitCode = code }).catch(onError)
     break
+  case 'tui':
+    tuiCommand(rest, { port: env.PORT, dataDir: env.ADAPTER_DATA_DIR, identity: wantedDaemonIdentity }).then((code) => { process.exitCode = code }).catch(onError)
+    break
   case 'remote':
     remoteCommand({
       tmuxPane: process.env.TMUX_PANE,
@@ -7654,6 +8473,9 @@ switch (cmd) {
     else if (args[0] === 'list') linkListCommand().catch(onError)
     else if (args[0] === 'unlink') linkUnlinkCommand(args[1]).catch(onError)
     else { console.error(`Unknown command: link ${args[0] ?? ''}`); usage(1) }
+    break
+  case 'group':
+    groupCommand(args[0], args[1], flags.includes('--json')).catch(onError)
     break
   case 'remote-password':
     if (args[0] === 'set') remotePasswordSetCommand(flags.includes('--json'), flags.includes('--stdin')).catch(onError)

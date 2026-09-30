@@ -1,16 +1,18 @@
 import 'package:dio/dio.dart';
 
 import '../api/api_client.dart';
+import '../api/access_token_source.dart';
 import '../core/config.dart';
 import '../logging/http_log.dart';
 
 /// A sign-in or refresh that produced no usable session.
-class DirectAuthException implements Exception {
+class DirectAuthException implements AccessTokenFailure {
   const DirectAuthException(this.message, {this.signedOut = false});
 
   final String message;
 
   /// The session is gone for good: retrying cannot help, only signing in again.
+  @override
   final bool signedOut;
 
   @override

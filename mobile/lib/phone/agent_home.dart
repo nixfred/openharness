@@ -12,6 +12,7 @@ import 'agent_index.dart';
 import 'agent_swipe.dart';
 import 'agent_swipe_list.dart';
 import 'agents_page.dart' show openNewAgent;
+import 'daemon_chip.dart';
 import 'desk_groups.dart';
 import 'link_page.dart';
 import 'machines_tab.dart';
@@ -353,7 +354,7 @@ class _AgentHomeState extends State<AgentHome> {
     // Every other machine may be up and loaded while the one holding the remembered agent is still
     // dialling — without this the wait would draw as "No agents yet".
     if (_waitingForRestore) return 'Connecting to your machine…';
-    if (_waitingForDesk) return 'Opening your tabs…';
+    if (_waitingForDesk) return 'Opening your swarms…';
     return null;
   }
 
@@ -1089,10 +1090,19 @@ class _AgentHomeEmpty extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              TtyText(
-                machine.displayName,
-                size: TtySize.meta,
-                color: tty.green,
+              // The machine, and the paired daemon at the line's right end —
+              // where a terminal's title carries it. See `daemon_chip.dart`.
+              Row(
+                children: [
+                  Expanded(
+                    child: TtyText(
+                      machine.displayName,
+                      size: TtySize.meta,
+                      color: tty.green,
+                    ),
+                  ),
+                  const DaemonChip(margin: EdgeInsets.only(left: 12)),
+                ],
               ),
               const Spacer(),
               TtyText(

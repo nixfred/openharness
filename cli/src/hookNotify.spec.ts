@@ -2,12 +2,10 @@ import { execFileSync, spawn, spawnSync } from 'child_process'
 import { createServer } from 'http'
 import { createServer as createNetServer } from 'net'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
-import { homedir, tmpdir } from 'os'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-
-const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 // Every case here spawns the real hook as a child process, and several spawn shell shims for tmux, ps
 // and sqlite3 on top of that. On a loaded machine — this file runs alongside 88 others — that chain
@@ -77,7 +75,8 @@ function runHook(opts: RunHookOpts): Promise<string> {
       const executable = opts.processExecutable ?? (opts.processEngine === 'cursor' ? 'agent' : opts.processEngine)
       const processArgs = opts.processArgs ?? executable
       writeFileSync(join(binDir, 'tmux'), '#!/bin/sh\necho 7000\n', { mode: 0o755 })
-      writeFileSync(join(binDir, 'ps'), `#!/bin/sh\nprintf '%s\\n' '7000 1 zsh Mon Aug 10 10:00:00 2026 -zsh' '7001 7000 ${executable} Mon Aug 10 10:00:01 2026 ${processArgs}' '${process.pid} 7001 node Mon Aug 10 10:00:02 2026 hook-parent'\n`, { mode: 0o755 })
+      const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+      writeFileSync(join(binDir, 'ps'), `#!/bin/sh\nprintf '%s\\n' '7000 1 zsh Mon Aug 10 10:00:00 2026 -zsh' ${shellQuote(`7001 7000 ${executable} Mon Aug 10 10:00:01 2026 ${processArgs}`)} '${process.pid} 7001 node Mon Aug 10 10:00:02 2026 hook-parent'\n`, { mode: 0o755 })
       if (opts.processEngine === 'cursor') {
         const target = join(binDir, 'cursor-agent-target')
         writeFileSync(target, '#!/bin/sh\n', { mode: 0o755 })
@@ -128,14 +127,14 @@ function runHook(opts: RunHookOpts): Promise<string> {
 }
 
 /** A throwaway localhost adapter that records every hook POST. */
-async function collect(): Promise<{ port: number; requests: Array<{ url: string; body: Record<string, unknown> }> }> {
+async function collect(response: Record<string, unknown> = {}): Promise<{ port: number; requests: Array<{ url: string; body: Record<string, unknown> }> }> {
   const requests: Array<{ url: string; body: Record<string, unknown> }> = []
   const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => { raw += chunk.toString() })
     req.on('end', () => {
       requests.push({ url: req.url ?? '', body: JSON.parse(raw) as Record<string, unknown> })
-      res.end('{}')
+      res.end(JSON.stringify(response))
     })
   })
   servers.push(server)
@@ -146,6 +145,38 @@ async function collect(): Promise<{ port: number; requests: Array<{ url: string;
 }
 
 describe('hook notify terminal scope', () => {
+  it.each(['claude', 'codex'] as const)('adds daemon-verified companion context to the actual %s user turn', async engine => {
+    const additionalContext = 'Companions collection context: selected GNU; retain this conversation.'
+    const { port, requests } = await collect({ ok: true, additionalContext })
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    const input = recordings[engine].input
+    const stdout = await runHook({ port, engine, tmuxPane: '%42', input })
+    expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } })
+    expect(requests[0]?.body.prompt).toBe(input.prompt)
+    expect(await runHook({ port, engine, tmuxPane: '%42', input: { ...input, hook_event_name: 'SessionStart' } })).toBe('')
+  })
+  it.each(['claude', 'codex', 'grok'] as const)('forwards the actual %s accepted prompt without changing the model input', async engine => {
+    const { port, requests } = await collect()
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    const input = recordings[engine].input
+    const stdout = await runHook({ port, engine, tmuxPane: '%42', input })
+    expect(requests).toContainEqual({ url: '/api/hook/session-start', body: expect.objectContaining({
+      hookEvent: 'UserPromptSubmit', prompt: input.prompt, engine,
+    }) })
+    expect(stdout).toBe('')
+  })
+  it.each(['claude', 'codex', 'grok'] as const)('still announces an oversized %s prompt so earlier scope is cleared', async engine => {
+    const { port, requests } = await collect()
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    for (const prompt of ['x'.repeat(140_000), '\u0000'.repeat(30_000)]) {
+      const stdout = await runHook({ port, engine, tmuxPane: '%42', input: { ...recordings[engine].input, prompt } })
+      expect(stdout).toBe('')
+    }
+    expect(requests).toHaveLength(2)
+    for (const request of requests) expect(request).toMatchObject({ url: '/api/hook/session-start', body: {
+      hookEvent: 'UserPromptSubmit', prompt: '', engine,
+    } })
+  })
   it('refuses a symlinked hook credential instead of authenticating with its target', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-credential-link-'))
     tmpDirs.push(dir)
@@ -517,148 +548,6 @@ describe('hook notify terminal scope', () => {
     expect(registry).toMatchObject([{ sessionId: 'codex-session', engine: 'codex', tmuxPane: '%8' }])
   })
 
-  /**
-   * Skipped when the suite itself runs as root (common in a container). `checkedSocket` rejects a
-   * root-OWNED directory that is group-writable — `(stat.uid === 0 && permissions & 0o020)` — because
-   * under root ownership the group bit really does let another account plant a socket. The rule is
-   * correct; it is this case's premise ("the owner is a normal account") that does not hold as root.
-   * Same precedent as the getuid()===0 guard in lib/fsBrowse.spec.ts.
-   */
-  it.skipIf(isRoot)('uses only a configured, validated Herdr endpoint for daemon-down registration', async () => {
-    const dir = mkdtempSync(join(homedir(), '.adapter-hook-herdr-'))
-    tmpDirs.push(dir)
-    chmodSync(dir, 0o775)
-    const dataDir = join(dir, 'data')
-    const claudeProjectsDir = join(dir, 'claude-projects')
-    const transcriptPath = join(claudeProjectsDir, 'demo', 'herdr-session.jsonl')
-    const socketPath = join(dir, 'herdr.sock')
-    mkdirSync(join(claudeProjectsDir, 'demo'), { recursive: true })
-    mkdirSync(dataDir, { recursive: true })
-    chmodSync(dataDir, 0o755)
-    writeFileSync(transcriptPath, '{}\n')
-    const server = createNetServer((socket) => {
-      let raw = ''
-      socket.on('data', (chunk) => { raw += chunk.toString('utf8') })
-      socket.on('end', () => {
-        const request = JSON.parse(raw.trim()) as { id: string; method: string }
-        const result = request.method === 'ping'
-          ? { type: 'pong', version: '0.8.0', protocol: 19 }
-          : request.method === 'pane.get'
-            ? { type: 'pane_info', pane: { pane_id: 'w1:p1', terminal_id: 'terminal-1' } }
-            : { type: 'pane_process_info', process_info: { pane_id: 'w1:p1', shell_pid: 7000 } }
-        socket.end(`${JSON.stringify({ id: request.id, result })}\n`)
-      })
-    })
-    netServers.push(server)
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve))
-    chmodSync(socketPath, 0o600)
-    const socket = statSync(socketPath)
-    writeFileSync(join(dataDir, 'terminal-config.json'), `${JSON.stringify({
-      version: 1,
-      updatedAt: Date.now(),
-      backends: ['herdr'],
-      herdrEndpoints: [{
-        sessionName: 'test', endpointId: 'endpoint-test', socketPath,
-        generation: { device: socket.dev, inode: socket.ino },
-      }],
-    })}\n`, { mode: 0o600 })
-    chmodSync(join(dataDir, 'terminal-config.json'), 0o644)
-
-    await runHook({
-      port: 9,
-      processEngine: 'claude',
-      dataDir,
-      claudeProjectsDir,
-      env: { HERDR_PANE_ID: 'w1:p1', HERDR_SESSION: 'test', HERDR_SOCKET_PATH: socketPath },
-      input: {
-        hook_event_name: 'SessionStart', session_id: 'herdr-session', transcript_path: transcriptPath, cwd: '/tmp/demo',
-      },
-    })
-
-    expect(JSON.parse(readFileSync(join(dataDir, 'registry.json'), 'utf8'))).toMatchObject([{
-      schemaVersion: 2,
-      active: true,
-      sessionId: 'herdr-session',
-      primaryRuntimeKey: 'herdr\u0000endpoint-test\u0000w1:p1',
-      runtimes: [{
-        backend: 'herdr', endpointId: 'endpoint-test', sessionName: 'test', terminalId: 'terminal-1', paneId: 'w1:p1',
-      }],
-    }])
-    expect(JSON.parse(readFileSync(join(dataDir, 'registry.json'), 'utf8'))[0]).not.toHaveProperty('tmuxPane')
-    expect(statSync(join(dataDir, 'terminal-config.json')).mode & 0o777).toBe(0o600)
-  })
-
-  it('rejects a world-writable Herdr endpoint parent during daemon-down registration', async () => {
-    const dir = mkdtempSync(join(homedir(), '.adapter-hook-herdr-world-writable-'))
-    tmpDirs.push(dir)
-    const dataDir = join(dir, 'data')
-    const claudeProjectsDir = join(dir, 'claude-projects')
-    const transcriptPath = join(claudeProjectsDir, 'demo', 'herdr-session.jsonl')
-    const socketPath = join(dir, 'herdr.sock')
-    mkdirSync(join(claudeProjectsDir, 'demo'), { recursive: true })
-    mkdirSync(dataDir, { mode: 0o700 })
-    writeFileSync(transcriptPath, '{}\n')
-    let requestCount = 0
-    const server = createNetServer((socket) => {
-      requestCount++
-      socket.end()
-    })
-    netServers.push(server)
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve))
-    chmodSync(socketPath, 0o600)
-    const socket = statSync(socketPath)
-    writeFileSync(join(dataDir, 'terminal-config.json'), `${JSON.stringify({
-      version: 1,
-      updatedAt: Date.now(),
-      backends: ['herdr'],
-      herdrEndpoints: [{
-        sessionName: 'test', endpointId: 'endpoint-test', socketPath,
-        generation: { device: socket.dev, inode: socket.ino },
-      }],
-    })}\n`, { mode: 0o600 })
-    chmodSync(dir, 0o777)
-
-    await runHook({
-      port: 9,
-      processEngine: 'claude',
-      dataDir,
-      claudeProjectsDir,
-      env: { HERDR_PANE_ID: 'w1:p1', HERDR_SESSION: 'test', HERDR_SOCKET_PATH: socketPath },
-      input: {
-        hook_event_name: 'SessionStart', session_id: 'herdr-session', transcript_path: transcriptPath, cwd: '/tmp/demo',
-      },
-    })
-
-    expect(requestCount).toBe(0)
-    expect(() => readFileSync(join(dataDir, 'registry.json'), 'utf8')).toThrow()
-  })
-
-  it('rejects a group-writable Herdr config without changing or trusting it', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-herdr-unsafe-config-'))
-    tmpDirs.push(dir)
-    const dataDir = join(dir, 'data')
-    const config = join(dataDir, 'terminal-config.json')
-    mkdirSync(dataDir, { mode: 0o700 })
-    writeFileSync(config, `${JSON.stringify({
-      version: 1,
-      updatedAt: Date.now(),
-      backends: ['herdr'],
-      herdrEndpoints: [],
-    })}\n`, { mode: 0o600 })
-    chmodSync(config, 0o660)
-
-    await runHook({
-      port: 9,
-      processEngine: 'claude',
-      dataDir,
-      env: { HERDR_PANE_ID: 'w1:p1', HERDR_SESSION: 'test', HERDR_SOCKET_PATH: join(dir, 'herdr.sock') },
-      input: { hook_event_name: 'SessionStart', session_id: 'unsafe-config' },
-    })
-
-    expect(statSync(config).mode & 0o777).toBe(0o660)
-    expect(() => readFileSync(join(dataDir, 'registry.json'), 'utf8')).toThrow()
-  })
-
   it('does not treat engine names in unrelated process arguments as an offline agent', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-process-false-positive-'))
     tmpDirs.push(dir)
@@ -721,6 +610,26 @@ describe('hook notify terminal scope', () => {
       })
       expect(() => readFileSync(join(dataDir, 'registry.json'), 'utf8')).toThrow()
     }
+  })
+
+  it.each([
+    "import sys, runpy; sys.path.insert(0, '/opt/custom'); runpy.run_module('hermes_cli.main', run_name='__main__')",
+    "import os, re, sys; sys.path.insert(0, '/opt/custom'); import hermes_bootstrap; from hermes_cli.main import main; sys.exit(main())",
+    "import os, sys, runpy; os.environ.pop('PYTHONHOME', None); sys.path.insert(0, '/opt/custom'); os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or '/home/demo/.hermes'; import hermes_bootstrap; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)",
+  ])('offline Hermes discovery follows a managed Python bootstrap: %s', async (source) => {
+    const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-hermes-launcher-'))
+    tmpDirs.push(dir)
+    const common = {
+      port: 9, tmuxPane: '%82', engine: 'hermes' as const, processEngine: 'hermes' as const,
+      processExecutable: '/home/demo/.her', hermesHome: join(dir, 'hermes'), hermesSource: 'cli' as const,
+      input: { hook_event_name: 'on_session_start', session_id: '20260810_120000_a1b2c3' },
+    }
+    await runHook({ ...common, dataDir: join(dir, 'data'), processArgs: `/opt/python3 -I -I -c ${source}` })
+    expect(JSON.parse(readFileSync(join(dir, 'data', 'registry.json'), 'utf8'))).toMatchObject([
+      { engine: 'hermes', tmuxPane: '%82', processIdentity: { pid: 7001 } },
+    ])
+    await runHook({ ...common, dataDir: join(dir, 'unrelated'), processArgs: `python3 worker.py -c ${source}` })
+    expect(() => readFileSync(join(dir, 'unrelated', 'registry.json'), 'utf8')).toThrow()
   })
 
   it('still binds a CLI Hermes session when its store is slow to answer, as on a loaded machine', async () => {

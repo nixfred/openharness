@@ -114,6 +114,10 @@ Future<void> runHarnessStart(HarnessCliRunner runner) async {
 
 Future<void> _defaultSpawnCommand() => runHarnessStart(HarnessCliRunner());
 
+Future<void> _defaultStopCommand() async {
+  await HarnessCliRunner().run(['stop']);
+}
+
 /// The wall-clock window in which the supervisor may spawn `harness start`: seconds :10–:20 of
 /// every minute. The CLI's own updater ticks at :45 (`ADAPTER_UPDATE_SLOT_SEC` in the harness CLI's
 /// `config/env.ts`), so a spawn and an update handoff — both of which take the daemon's spawn lock —
@@ -192,6 +196,7 @@ class LocalCliDiscovery {
   final Dio _dio;
   final LocalMachineIdentity identity;
   final Future<void> Function() _spawnCommand;
+  final Future<void> Function() _stopCommand;
 
   /// Which way the daemon is reached — its socket or the loopback port. Shared
   /// with REST and the local WebSocket; [probe] decides it.
@@ -202,12 +207,14 @@ class LocalCliDiscovery {
     Dio? dio,
     LocalMachineIdentity? identity,
     Future<void> Function()? spawnCommand,
+    Future<void> Function()? stopCommand,
     LocalDaemonTransport? transport,
   }) : identity = identity ?? LocalMachineIdentity(),
        transport =
            transport ??
            LocalDaemonTransport.detect(Uri.parse(config.localCliBaseUrl)),
        _spawnCommand = spawnCommand ?? _defaultSpawnCommand,
+       _stopCommand = stopCommand ?? _defaultStopCommand,
        _dio =
            dio ??
            Dio(
@@ -281,6 +288,26 @@ class LocalCliDiscovery {
     return last;
   }
 
+  /// Stops the running daemon and starts one from this process, so the new daemon descends from
+  /// the app (see `core/process_responsibility.dart` on why that matters). Returns the probe
+  /// [ensureRunning] ends on.
+  Future<LocalCliProbe> restart({
+    Duration stopTimeout = const Duration(seconds: 10),
+  }) async {
+    try {
+      await _stopCommand();
+    } catch (_) {
+      // Judged by the port below, not by the exit code.
+    }
+    final deadline = DateTime.now().add(stopTimeout);
+    var seen = await probe();
+    while (seen.alive && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 250));
+      seen = await probe();
+    }
+    return ensureRunning();
+  }
+
   /// Keeps the local daemon alive for as long as the returned [Timer] runs: polls [probe] every
   /// [checkInterval] and, when the port has gone quiet, spawns `harness start` and gives it a short
   /// grace window to bind its port before concluding the attempt failed. Failed spawn attempts back
@@ -326,8 +353,11 @@ class LocalCliDiscovery {
     void Function(LocalCliEndpoint endpoint)? onReady,
     void Function(LocalCliEndpoint endpoint)? onSnapshot,
     void Function(bool online)? onBackendOnline,
+    Future<void> Function(int pid)? checkOwner,
   }) {
     var backoff = initialBackoff;
+    // The daemon pid [checkOwner] last saw: it is asked once per daemon, not once per tick.
+    int? ownerCheckedPid;
     var nextSpawnAllowedAt = DateTime.now();
     var quietTicks = 0;
     var wasReady = false;
@@ -377,6 +407,17 @@ class LocalCliDiscovery {
           }
           final seen = await probe();
           observe(seen);
+          // A new daemon — replaced from a terminal while the app is open, say. Awaited inside the
+          // tick so the spawn path below cannot race a restart [checkOwner] makes.
+          final seenPid = seen.pid;
+          if (checkOwner != null &&
+              seen.ready &&
+              seenPid != null &&
+              seenPid != ownerCheckedPid) {
+            ownerCheckedPid = seenPid;
+            await checkOwner(seenPid);
+            return;
+          }
           // Running — ready or on its way. Nothing to spawn, nothing to back off from.
           if (seen.alive) return;
           quietTicks += 1;
@@ -392,8 +433,26 @@ class LocalCliDiscovery {
           // Asked here and not on every tick because it costs a `harness auth status` process, and
           // the respawn point is already rate-limited by the backoff above — so this runs once per
           // spawn attempt rather than once every [checkInterval].
-          if (stillSignedIn != null && !await stillSignedIn()) {
-            onSignedOut?.call();
+          //
+          // Asked BESIDE the spawn, never before it: the spawn goes ahead whatever the answer, so
+          // waiting for it only delays the one thing that brings the terminals back. It used to be
+          // awaited first, and a check that threw — `auth status` sitting out the refresh lock a
+          // dying daemon left behind, 30s, the app's own timeout for it — skipped the spawn and left
+          // the terminals dark until something else happened to start the daemon (measured
+          // 2026-09-28 18:47: a minute and eight seconds). A slow answer still arrives and is still
+          // told; a failed one is not a sign-out.
+          final signedInCheck = stillSignedIn?.call();
+          if (signedInCheck != null) {
+            unawaited(
+              signedInCheck.then(
+                (signedIn) {
+                  if (!signedIn) onSignedOut?.call();
+                },
+                onError: (Object error) => debugPrint(
+                  'LocalCliDiscovery.startSupervising: auth check failed: $error',
+                ),
+              ),
+            );
           }
           try {
             await _spawnCommand();

@@ -73,7 +73,9 @@ class _TtyPrimaryButtonState extends State<TtyPrimaryButton> {
         : _down
         ? Color.alphaBlend(Colors.black.withValues(alpha: 0.18), tty.green)
         : tty.green;
-    final ink = !enabled && !widget.busy ? tty.faint : tty.theme.black;
+    final ink = !enabled && !widget.busy
+        ? tty.faint
+        : tty.onFill(tty.theme.black);
     return Semantics(
       button: true,
       enabled: enabled,
@@ -227,62 +229,6 @@ class TtyBackButton extends StatelessWidget {
   }
 }
 
-/// A section's header: small, faint, upper case — `NEEDS YOU`, `RECENT`.
-class TtySectionHeader extends StatelessWidget {
-  const TtySectionHeader(this.text, {super.key, this.color, this.trailing});
-
-  final String text;
-  final Color? color;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    final tty = Tty.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Tty.origin, 20, Tty.origin, 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              text.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              softWrap: false,
-              style: tty
-                  .style(
-                    color: color ?? tty.faint,
-                    size: TtySize.meta - 1,
-                    weight: FontWeight.w600,
-                  )
-                  .copyWith(letterSpacing: 0.8),
-            ),
-          ),
-          ?trailing,
-        ],
-      ),
-    );
-  }
-}
-
-/// A 1px rule across the screen, inset like a grouped list's separator.
-class TtyRule extends StatelessWidget {
-  const TtyRule({super.key, this.indent = 16});
-
-  final double indent;
-
-  @override
-  Widget build(BuildContext context) {
-    final tty = Tty.of(context);
-    return Padding(
-      padding: EdgeInsets.only(left: indent),
-      child: SizedBox(
-        height: 1,
-        child: ColoredBox(color: tty.dim.withValues(alpha: 0.6)),
-      ),
-    );
-  }
-}
-
 /// A form row: a faint label, its value, and `›` — tapped to change the value.
 class TtyFormRow extends StatelessWidget {
   const TtyFormRow({
@@ -317,35 +263,49 @@ class TtyFormRow extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(Tty.origin, 10, Tty.origin, 10),
         child: Row(
           children: [
-            SizedBox(
-              width: labelWidth,
-              child: TtyText(label, color: tty.faint, size: TtySize.meta),
-            ),
+            // The label on the value's FIRST line: centred on a value with a note under it, it
+            // sat beside the note and read as that note's label.
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
                 children: [
-                  Text(
-                    value,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: tty.style(
-                      color: valueColor ?? tty.text,
-                      size: TtySize.row,
-                      weight: FontWeight.w600,
+                  SizedBox(
+                    width: labelWidth,
+                    child: TtyText(label, color: tty.faint, size: TtySize.meta),
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: tty.style(
+                            color: valueColor ?? tty.text,
+                            size: TtySize.row,
+                            weight: FontWeight.w600,
+                          ),
+                        ),
+                        if (detail case final detail?
+                            when detail.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          // Two lines, then an ellipsis: a note like approvals' meaning is a sentence.
+                          Text(
+                            detail,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: tty.style(
+                              color: tty.faint,
+                              size: TtySize.meta,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  if (detail case final detail? when detail.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    // Two lines, then an ellipsis: a note like approvals' meaning is a sentence.
-                    Text(
-                      detail,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: tty.style(color: tty.faint, size: TtySize.meta),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -474,7 +434,7 @@ class _TtyFieldState extends State<TtyField> {
           hintText: widget.hint,
           hintMaxLines: multi ? 3 : 1,
           hintStyle: tty.style(
-            color: tty.faint,
+            color: tty.placeholder,
             size: multi ? TtySize.row : TtySize.title,
           ),
         ),
@@ -567,7 +527,7 @@ class TtyFieldMic extends StatelessWidget {
               child: Icon(
                 live ? LucideIcons.arrowUp300 : LucideIcons.mic300,
                 size: 18,
-                color: live ? tty.theme.brightWhite : tty.text,
+                color: live ? tty.onFill(tty.theme.brightWhite) : tty.text,
               ),
             ),
           ),

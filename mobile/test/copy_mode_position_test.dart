@@ -10,9 +10,8 @@ import 'package:xterm/xterm.dart';
 
 import 'voice_fakes.dart';
 
-/// Reading back through the history while the agent keeps writing: output
-/// never moves the screen being read, tmux's copy-mode position says where the
-/// reader is, and one tap on it is back at the end.
+/// Reading back through the history while the agent keeps writing: no position
+/// is drawn for it — the owner took tmux's `[42/1380]` out.
 void main() {
   late AppNotifier notifier;
   late TerminalSession session;
@@ -88,30 +87,18 @@ void main() {
     expect(position(), findsNothing);
   });
 
-  testWidgets('scrolled up, the position shows and counts; a tap goes back', (
-    tester,
-  ) async {
-    await pumpPage(tester);
-    await tester.drag(find.byType(TerminalView), const Offset(0, 300));
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(position(), findsOneWidget);
-    final before = (tester.widget(position()) as Text).data!;
-
-    output('newer output\r\n');
-    await tester.pump();
-    await tester.pump();
-    final after = (tester.widget(position()) as Text).data!;
-    expect(after, isNot(before), reason: 'new lines below count up');
-
-    await tester.tap(position());
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(position(), findsNothing);
-
-    // Following again: more output keeps it gone.
-    output('newest output\r\n');
-    await tester.pump();
-    await tester.pump();
-    expect(position(), findsNothing);
-  });
+  testWidgets(
+    'scrolled up there is no position either — the owner took it out',
+    (tester) async {
+      await pumpPage(tester);
+      await tester.drag(find.byType(TerminalView), const Offset(0, 300));
+      await tester.pump(const Duration(milliseconds: 100));
+      // "We don't need the scrolling indicator" (2026-09-27): no `[42/1380]` while reading back.
+      expect(position(), findsNothing);
+      output('newer output\r\n');
+      await tester.pump();
+      await tester.pump();
+      expect(position(), findsNothing);
+    },
+  );
 }

@@ -119,7 +119,7 @@ void main() {
       final id = command(stroke.toString());
       expect(harnessCommandById[id]?.action, shortcut.action);
     }
-    for (final retired in ['cmd+shift+h', 'cmd+shift+k', 'cmd+u']) {
+    for (final retired in ['cmd+shift+h', 'cmd+shift+k', 'cmd+u', 'cmd+y']) {
       expect(command(retired), isNull, reason: retired);
     }
     expect(command('cmd+alt+left'), isNull);

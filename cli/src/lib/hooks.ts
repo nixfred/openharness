@@ -475,9 +475,8 @@ export const MachineRegister = async ({ directory, worktree, project }) => {
   const seen = new Set()
   const post = async (sessionID) => {
     const pane = process.env.TMUX_PANE
-    const herdrPane = process.env.HERDR_PANE_ID
     const token = hookToken()
-    if ((!pane && !herdrPane) || !token || !sessionID || seen.has(sessionID)) return
+    if (!pane || !token || !sessionID || seen.has(sessionID)) return
     seen.add(sessionID)
     try {
       await fetch("http://127.0.0.1:${port}/api/hook/session-start", {
@@ -492,7 +491,6 @@ export const MachineRegister = async ({ directory, worktree, project }) => {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: "tmux", paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: "herdr", paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       })
@@ -778,10 +776,9 @@ export default function (pi: ExtensionAPI) {
 
   const register = async (ctx: any) => {
     const pane = process.env.TMUX_PANE;
-    const herdrPane = process.env.HERDR_PANE_ID;
     let token = "";
     try { token = readFileSync(${JSON.stringify(join(env.ADAPTER_DATA_DIR, 'hook-credential'))}, "utf8").trim(); } catch {}
-    if ((!pane && !herdrPane) || !token) return;
+    if (!pane || !token) return;
     // Pi knows the session file path immediately but only WRITES it once the first assistant message
     // lands. Sending a path that isn't on disk yet is rejected by the daemon (it validates the file),
     // so announce without one first and attach the real path on a later turn.
@@ -804,7 +801,6 @@ export default function (pi: ExtensionAPI) {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: "tmux", paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: "herdr", paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       });
@@ -892,8 +888,7 @@ const SESSIONS_DIR = ${JSON.stringify(sessionsDir)}
 
 export default function (amp: any) {
   const pane = process.env.TMUX_PANE
-  const herdrPane = process.env.HERDR_PANE_ID
-  if (!pane && !herdrPane) return
+  if (!pane) return
 
   // NOT \`process.cwd()\`: Bun runs a plugin with the PLUGIN's directory as its cwd, so that reports
   // \`<project>/.amp/plugins\` (measured). \`PWD\` is inherited from the shell that launched plain Amp.
@@ -947,7 +942,6 @@ export default function (amp: any) {
           callerPid: process.pid,
           runtimeHints: [
             ...(pane ? [{ backend: 'tmux', paneId: pane }] : []),
-            ...(herdrPane ? [{ backend: 'herdr', paneId: herdrPane, sessionName: process.env.HERDR_SESSION, socketPath: process.env.HERDR_SOCKET_PATH }] : []),
           ],
         }),
       })

@@ -37,7 +37,10 @@ void main() {
         final pane = app.adoptSessionForTest(terminal('a0', frames));
         final original = app.activeSwarm;
         await mount(tester, app, nativeTabs: nativeTabs);
-        expect(find.byKey(const ValueKey('swarm-search-button')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('swarm-search-button')),
+          nativeTabs ? findsNothing : findsOneWidget,
+        );
         expect(
           harnessCommandById.containsKey('navigation.quick_open'),
           isFalse,

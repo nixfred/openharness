@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -65,8 +65,9 @@ describe('session work from transcript through Git and PR history', () => {
     vi.spyOn(sessionGitHistory, 'get').mockImplementation(target => history.get(target))
     vi.spyOn(sessionGitHistory, 'observe').mockImplementation((target, context) => history.observe(target, context))
     vi.spyOn(sessionGitHistory, 'recordPullRequest').mockImplementation((...args) => history.recordPullRequest(...args))
-    vi.spyOn(github, 'readGitPullRequest').mockImplementation(github.createPullRequestReader(execute))
-    vi.spyOn(github, 'readPullRequestUrl').mockImplementation(github.createPullRequestUrlReader(execute))
+    vi.spyOn(github, 'readGitPullRequest').mockImplementation(github.createPullRequestReader(execute, () => now))
+    vi.spyOn(github, 'readBranchPullRequest').mockImplementation(github.createBranchPullRequestReader(execute, () => now))
+    vi.spyOn(github, 'readPullRequestUrl').mockImplementation(github.createPullRequestUrlReader(execute, () => now))
     rows = [pr(12, 'hn/nfc'), pr(13, 'hn/preview')]
   })
   afterEach(async () => {
@@ -74,10 +75,55 @@ describe('session work from transcript through Git and PR history', () => {
     vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true })
   })
 
+  it.each(['claude', 'codex', 'grok'] as const)('tracks %s branches and PRs without any tool receipts', async engine => {
+    agent.engine = engine
+    agent.cwd = ship
+    agent.transcriptPath = null
+    const first = await frame()
+    expect(first.gitContext).toMatchObject({ state: 'workspace', current: { branch: 'hn/nfc' },
+      history: { branches: [{ branch: 'hn/nfc' }] } })
+    expect(await readSessionGitPullRequest(agent, { history: true })).toMatchObject({
+      history: { pullRequests: [{ result: { number: 12, state: 'Open' } }] },
+    })
+    git(ship, 'switch', '-c', 'hn/preview')
+    forgetAgentProject(ship)
+    const next = await frame()
+    expect(next.gitContext.current?.branch).toBe('hn/preview')
+    expect(next.gitContext.history?.branches.map(b => b.branch).sort()).toEqual(['hn/nfc', 'hn/preview'])
+    rows[0] = pr(12, 'hn/nfc', true)
+    now += 61_000
+    const refreshed = await readSessionGitPullRequest(agent, { history: true })
+    expect('history' in refreshed && refreshed.history.pullRequests.map(p => p.result?.status === 'found' && [p.result.number, p.result.state]))
+      .toEqual([[13, 'Open'], [12, 'Merged']])
+    // Another session's branch exists in the same repository, but has no association here.
+    expect(next.gitContext.history?.branches.some(b => b.branch === 'original')).toBe(false)
+  })
+
+  it('discovers earlier PRs from saved branch identities even after the branch is deleted', async () => {
+    agent.engine = 'grok'; agent.cwd = ship; agent.transcriptPath = null
+    await frame() // Branch observed, but nobody opened its PR badge or details.
+    git(ship, 'switch', '-c', 'hn/preview')
+    git(ship, 'branch', '-D', 'hn/nfc')
+    forgetAgentProject(ship)
+    rows[0] = pr(12, 'hn/nfc', true)
+    const result = await readSessionGitPullRequest(agent, { history: true })
+    expect('history' in result && result.history.pullRequests.map(p => p.result?.status === 'found' && [p.result.number, p.result.state]))
+      .toEqual([[13, 'Open'], [12, 'Merged']])
+  })
+
+  it('keeps completed PRs when the same branch also has open work', async () => {
+    agent.cwd = ship; agent.transcriptPath = null
+    rows = [pr(12, 'hn/nfc', true), pr(14, 'hn/nfc')]
+    const result = await readSessionGitPullRequest(agent, { history: true })
+    expect('history' in result && result.history.pullRequests.map(p => p.result?.status === 'found' && [p.result.number, p.result.state]))
+      .toEqual([[14, 'Open'], [12, 'Merged']])
+  })
+
   it('shows the observed checkout, follows branch switches, and retains merged PRs after removal/restart', async () => {
+    agent.cwd = ship
     await receipt('nfc', join(ship, 'tui'), 12)
     const first = await frame()
-    expect(first.project?.branch).toBe('original')
+    expect(first.project?.branch).toBe('hn/nfc')
     expect(first.gitContext.current).toMatchObject({ cwd: ship, branch: 'hn/nfc', worktree: true })
     const expected = { cwd: ship, branch: 'hn/nfc', remote: 'github.com/acme/app' }
     expect(await readSessionGitPullRequest(agent, { expected })).toMatchObject({ status: 'found', number: 12, context: expected })
@@ -89,13 +135,13 @@ describe('session work from transcript through Git and PR history', () => {
     expect(second.gitContext.version!.revision).toBeGreaterThan(first.gitContext.version!.revision)
     expect((await readSessionGitPullRequest(agent, { expected })).status).toBe('unavailable')
     expect(await readSessionGitPullRequest(agent)).toMatchObject({ status: 'found', number: 13 })
-    expect(agent.cwd).toBe(home)
+    expect(agent.cwd).toBe(ship)
 
     git(home, 'worktree', 'remove', '--force', ship)
     git(home, 'branch', '-D', 'hn/nfc', 'hn/preview')
     rows = rows.map(p => pr(p.number, p.head.ref, true))
     const removed = await readSessionGitPullRequest(agent, { history: true })
-    expect(removed).toMatchObject({ status: 'unavailable', gitContext: { state: 'unavailable', current: null } })
+    expect(removed).toMatchObject({ status: 'unavailable', gitContext: { checkouts: [] } })
     expect('history' in removed && removed.history.pullRequests.map(p => p.result?.status === 'found' && p.result.state)).toEqual(['Merged', 'Merged'])
     await history.settled()
     const restarted = await new SessionGitHistoryStore(join(directory, 'history')).get(agent)
@@ -106,7 +152,28 @@ describe('session work from transcript through Git and PR history', () => {
     expect('history' in offline && offline.history.pullRequests).toEqual(restarted.pullRequests)
   })
 
+  it('recovers recorded Codex batches into branch history and a merged PR despite later unknown activity', async () => {
+    agent.engine = 'codex'
+    const recorded = (await readFile(new URL('./fixtures/session-work-codex.jsonl', import.meta.url), 'utf8'))
+      .replaceAll('/workspace/happy-owl/cli', `${ship}/tui`).replaceAll('/workspace/happy-owl', ship)
+    await writeFile(agent.transcriptPath!, line({ timestamp: new Date(now).toISOString(), type: 'turn_context', payload: { cwd: ship } }) + recorded + [
+      { timestamp: '2026-09-28T00:30:00Z', type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'unknown', name: 'exec', input: 'await arbitraryScript();' } },
+      { timestamp: '2026-09-28T00:30:01Z', type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'unknown', output: 'Script completed\nOutput:\n' } },
+    ].map(line).join(''))
+    usage.changed(agent); await usage.settled()
+    rows = [pr(397, 'hn/nfc', true)]
+    const value = await frame()
+    expect(value.gitContext).toMatchObject({ state: 'multiple', current: null,
+      history: { pullRequests: [{ url: 'https://github.com/acme/app/pull/397' }] } })
+    expect(value.gitContext.checkouts?.map(p => p.branch)).toEqual(['original', 'hn/nfc'])
+    expect(value.gitContext.history?.branches.map(p => p.branch).sort()).toEqual(['hn/nfc', 'original'])
+    const result = await readSessionGitPullRequest(agent, { history: true })
+    expect(result).toMatchObject({ history: { pullRequests: [{ result: { status: 'found', number: 397, state: 'Merged' } }] } })
+    expect(agent.cwd).toBe(home)
+  })
+
   it('rejects a badge if work moves while GitHub is answering', async () => {
+    agent.cwd = ship
     await receipt('nfc', ship)
     vi.mocked(github.readGitPullRequest).mockImplementation(async () => {
       await receipt('elsewhere', home)
@@ -114,7 +181,19 @@ describe('session work from transcript through Git and PR history', () => {
     })
     expect(await readSessionGitPullRequest(agent, {
       expected: { cwd: ship, branch: 'hn/nfc', remote: 'github.com/acme/app' },
-    })).toMatchObject({ status: 'unavailable', context: { cwd: home, branch: 'original' } })
+    })).toMatchObject({ status: 'unavailable', context: { cwd: home, branch: 'original', remote: 'github.com/acme/app' } })
+  })
+
+  it('binds the header PR to recent work while retaining the assigned checkout and other branches', async () => {
+    await receipt('ship', join(ship, 'tui'))
+    const value = await frame()
+    expect(value.project?.branch).toBe('original')
+    expect(value.gitContext).toMatchObject({ state: 'multiple', current: null,
+      recentWork: { project: { cwd: ship, branch: 'hn/nfc' } } })
+    const expected = { cwd: ship, branch: 'hn/nfc', remote: 'github.com/acme/app' }
+    expect(await readSessionGitPullRequest(agent, { expected })).toMatchObject({ status: 'found', number: 12, context: expected })
+    expect((await readSessionGitPullRequest(agent, { expected: { ...expected, cwd: home, branch: 'original' } })).status).toBe('unavailable')
+    expect(agent.cwd).toBe(home)
   })
 
   it('refreshes the visible open-first page, including multiple PRs for one branch', async () => {

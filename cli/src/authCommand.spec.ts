@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'child_process'
 import { createServer, type Server } from 'http'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -58,6 +58,14 @@ function envFor(root: string, backendUrl?: string): NodeJS.ProcessEnv {
     DISABLE_GRID_INSTALL: 'true',
     ...(backendUrl ? { BACKEND_WS_URL: backendUrl } : {}),
   }
+}
+
+/** A `grid` that records every call it gets, at the path [envFor] hands the child — for pinning that
+ *  signing in to Harness runs none. Returns where the calls land (absent while there were none). */
+function recordingGrid(root: string): string {
+  const calls = join(root, 'grid-calls')
+  writeFileSync(join(root, 'grid-unavailable'), `#!/bin/sh\necho "$*" >> '${calls}'\nexit 0\n`, { mode: 0o755 })
+  return calls
 }
 
 function runSync(root: string, args: string[], backendUrl?: string) {
@@ -164,22 +172,17 @@ describe('harness login --json', () => {
   it('already-signed-in short-circuit emits a single success result line', async () => {
     const root = tempRoot()
     seedSession(root)
+    const gridCalls = recordingGrid(root)
     const { base } = await fakeBackend({
       resolveComputer: () => ({ machine: { machineId: 'm_seeded' } }),
     })
     const result = await runAsync(root, ['login', '--json'], base)
     expect(result.status).toBe(0)
     const lines = result.stdout.trim().split('\n').map((l) => JSON.parse(l))
-    // The sign-in now also hands its token to `grid` and makes sure the account's private grid
-    // exists — best-effort, reported on this line rather than allowed to change its status. There is
-    // no `grid` on PATH in this test, so it reports the attempt and the harness sign-in still
-    // succeeds, which is the property worth pinning.
-    expect(lines).toEqual([{
-      type: 'result',
-      status: 'success',
-      alreadySignedIn: true,
-      grid: { signedIn: false, code: expect.any(String) },
-    }])
+    // Harness only: grid is an add-on, signed in the first time a grid feature is used — so the line
+    // says nothing about grid, and not one `grid` command ran, though a `grid` was right there.
+    expect(lines).toEqual([{ type: 'result', status: 'success', alreadySignedIn: true }])
+    expect(existsSync(gridCalls)).toBe(false)
   })
 
   it('emits a BACKEND_ERROR result line (not a stack trace) when authorize-native is unreachable', async () => {
@@ -199,6 +202,7 @@ describe('harness login --json', () => {
       resolveComputer: () => ({ machine: { machineId: 'm_new' } }),
     })
 
+    const gridCalls = recordingGrid(root)
     const child = spawn(process.execPath, [TSX, CLI_SOURCE, 'login', '--json'], {
       cwd: CLI_ROOT,
       env: envFor(root, base),
@@ -228,12 +232,8 @@ describe('harness login --json', () => {
     expect(exitCode).toBe(0)
     // Drain any trailing buffered line after exit.
     if (stdout.trim()) lines.push(JSON.parse(stdout.trim()))
-    // Same contract as the already-signed-in line: the grid hand-off is reported here, and its
-    // failure (no `grid` on PATH in this test) never changes `status`.
-    expect(lines[1]).toEqual({
-      type: 'result',
-      status: 'success',
-      grid: { signedIn: false, code: expect.any(String) },
-    })
+    // Same contract as the already-signed-in line: a fresh Harness sign-in signs in to Harness alone.
+    expect(lines[1]).toEqual({ type: 'result', status: 'success' })
+    expect(existsSync(gridCalls)).toBe(false)
   }, 15_000)
 })

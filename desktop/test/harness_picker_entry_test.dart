@@ -1,3 +1,4 @@
+import 'support/launch_menu.dart';
 import 'support/open_harness.dart';
 
 import 'dart:io';
@@ -147,10 +148,7 @@ void main() {
           findsOneWidget,
         );
         await capture('creation');
-        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-        await tester.pump();
-        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-        await tester.pumpAndSettle();
+        await openLaunchRow(tester, 'agent');
         await capture('creation-options');
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();

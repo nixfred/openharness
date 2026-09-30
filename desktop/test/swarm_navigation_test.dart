@@ -338,7 +338,7 @@ void main() {
     );
   }
 
-  test('opening a swarm restores its saved focus and zoom', () async {
+  test('opening a tab restores its saved focus and zoom', () async {
     final app = createApp();
     addTearDown(app.dispose);
     app.adoptSessionForTest(terminal('a0', []));

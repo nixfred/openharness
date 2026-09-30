@@ -25,6 +25,11 @@ describe('Codex hook installation', () => {
   beforeEach(() => {
     codexHome = mkdtempSync(join(tmpdir(), 'adapter-codex-hooks-'))
     cursorHome = mkdtempSync(join(tmpdir(), 'adapter-cursor-hooks-'))
+    // Cursor's config overrides outrank CURSOR_HOME. Isolate this fallback fixture
+    // from the runner's XDG settings and any installed Cursor profile.
+    vi.stubEnv('CURSOR_CONFIG_DIR', '')
+    vi.stubEnv('CURSOR_DATA_DIR', '')
+    vi.stubEnv('XDG_CONFIG_HOME', '')
   })
 
   afterEach(() => {
@@ -32,6 +37,7 @@ describe('Codex hook installation', () => {
     rmSync(cursorHome, { recursive: true, force: true })
     delete process.env.CODEX_HOME
     delete process.env.CURSOR_HOME
+    vi.unstubAllEnvs()
   })
 
   it('merges foreign hooks and installs the canonical catch hooks idempotently', async () => {

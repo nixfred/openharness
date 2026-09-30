@@ -25,6 +25,30 @@ void main() {
     }
   });
 
+  test('observed effort stays with the validated model', () {
+    for (final (effort, label) in [
+      ('low', 'Low'),
+      ('high', 'High'),
+      ('xhigh', 'XHigh'),
+      ('max', 'Max'),
+      ('auto', 'Auto'),
+      ('none', 'None'),
+      ('future-effort', 'future-effort'),
+    ]) {
+      final details = runtimeModelDetails(
+        'runtime-v1:a:codex:gpt-6-astra@$effort',
+        agentId: 'a',
+        engine: 'codex',
+      )!;
+      expect(details.effort, effort);
+      expect(
+        modelLabelWithEffort(details.name, details.effort),
+        'GPT-6 Astra · $label',
+      );
+    }
+    expect(modelLabelWithEffort('GPT-6 Astra', null), 'GPT-6 Astra');
+  });
+
   test('missing, stale and malformed runtime metadata has no model label', () {
     for (final value in <Object?>[
       null,
@@ -48,6 +72,7 @@ void main() {
         isNull,
         reason: '$value',
       );
+      expect(runtimeModelDetails(value, agentId: 'a', engine: 'codex'), isNull);
     }
     expect(
       runtimeModelName('runtime-v1:a:codex:gpt-6-astra@high', agentId: 'a'),

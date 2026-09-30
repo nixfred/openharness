@@ -598,7 +598,7 @@ export function lastCodexTurnText(rawLines: string[]): LastTurnText | null {
     // A `/goal` turn has no `user_message` — its prompt lives in the injected goal context.
     if (raw.type === 'response_item' && string(item.type) === 'message') {
       const objective = goalObjective(item)
-      if (objective) { userMessage = `/goal ${objective}`; assistantText = '' }
+      if (objective) { userMessage = `/goal ${objective}`; assistantText = ''; finalText = ''; sawPhase = false }
       continue
     }
     if (raw.type !== 'event_msg') continue
@@ -611,7 +611,7 @@ export function lastCodexTurnText(rawLines: string[]): LastTurnText | null {
       if (message) take(item, message)
     }
   }
-  const text = sawPhase && finalText ? finalText : assistantText
+  const text = sawPhase ? finalText : assistantText
   return text ? { userMessage, assistantText: text } : null
 }
 

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { compatibleModels, contextLadder, LocalModels, readRunRecords, type GridInventory } from './localModels.js'
+import { baseModel, compatibleModels, contextLadder, LocalModels, modelBudget, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
 import { GridFleetRpc, type GridFleetResult } from './gridFleetRpc.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
 
@@ -105,20 +105,18 @@ describe('local model discovery and lifecycle', () => {
     expect(JSON.stringify(snapshot)).not.toContain('test-only-token')
   })
 
-  it('paginates all compatible models and does not fetch incompatible trailing pages', async () => {
-    request.mockImplementation(async (_url, init) => {
-      const page = JSON.parse(String(init?.body)).page
-      return response({ models: [card(`org/Model${page}-GGUF`)], runnable_total: 2, pagination: { page, total_pages: 7 } })
-    })
+  it('fetches only the first ranked page of popular models, like grid catalog', async () => {
+    request.mockResolvedValue(response({ models: [card('org/Model1-GGUF'), card('org/Model2-GGUF')], pagination: { page: 1, total_pages: 7 } }))
     expect((await service.list('home')).models).toHaveLength(2)
-    expect(request).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ browse: true, page: 1, page_size: 50 })
   })
 
-  it('rejects catalog pagination that repeats a page', async () => {
+  it('returns the first page as-is without looping pages or a pagination notice', async () => {
     request.mockResolvedValue(response({ models: [card()], runnable_total: 100, pagination: { page: 1, total_pages: 7 } }))
-    // Fresh Response objects (bodies are single-consumption).
-    request.mockImplementation(async () => response({ models: [card()], runnable_total: 100, pagination: { page: 1, total_pages: 7 } }))
-    expect((await service.list('home')).notice).toContain('incomplete')
+    const snapshot = await service.list('home')
+    expect(snapshot.models).toHaveLength(1)
+    expect(snapshot.notice).toBeFalsy()
   })
 
   it('downloads, loads and verifies without another user step', async () => {
@@ -421,28 +419,100 @@ describe('local model discovery and lifecycle', () => {
     expect(String(request.mock.calls[0][0])).toBe(`${base ?? 'https://api-grid.autonomous.ai'}/v1/grid/catalog`)
   })
 
-  it.each(['http failure', 'missing rows', 'empty intermediate page', 'unbounded pages'])('handles a catalog %s without inventing compatibility', async scenario => {
-    request.mockImplementation(async (_url, init) => {
-      const page = JSON.parse(String(init?.body)).page
-      return scenario === 'http failure' ? new Response('private detail', { status: 401 })
-        : response(scenario === 'missing rows' ? { error: 'private detail' }
-          : { models: scenario === 'empty intermediate page' ? [] : [card()], pagination: { page, total_pages: 101 } })
-    })
+  it.each(['http failure', 'missing rows'])('handles a catalog %s without inventing compatibility', async scenario => {
+    request.mockImplementation(async () =>
+      scenario === 'http failure' ? new Response('private detail', { status: 401 })
+        : response({ error: 'private detail' }))
     const snapshot = await service.list('home')
     expect(snapshot.models).toEqual([])
     expect(snapshot.notice).toBeTruthy()
     expect(JSON.stringify(snapshot)).not.toContain('private detail')
-    expect(request.mock.calls.length).toBeLessThanOrEqual(100)
   })
 
-  it('supports an unpaginated catalog, prefers a useful small download, and skips unfitted versions', async () => {
-    const large = card('org/Large-GGUF'), small = card('org/Fast-GGUF')
+  it('supports an unpaginated catalog, offers a fast model before a big slow one, and skips unfitted versions', async () => {
+    const large = card('org/Large-GGUF'), small = { ...card('org/Fast-GGUF'), fit: { ...card().fit, est_tok_s: 30 } }
     large.versions[0].size_bytes = 20 * 1024 ** 3
     small.versions[0].size_bytes = 2 * 1024 ** 3
     small.versions.push({ ...small.versions[0], version: 'Q8', size_bytes: 4 * 1024 ** 3 })
     small.versions.push({ ...small.versions[0], version: 'unknown', size_bytes: undefined as any })
     request.mockImplementation(async () => response({ models: [large, small] }))
     expect((await service.list('home')).models.map(m => [m.name, m.recommended])).toEqual([['Fast', true], ['Large', false]])
+  })
+
+  it('offers what a coding agent can work with first: a faithful quant, fast enough, then bigger, then the catalog order', async () => {
+    // [id, estimated tok/s, billions of parameters, quant] in the catalog's own order.
+    const rows: [string, number | undefined, number | undefined, string?][] = [
+      ['org/Dense-70B-GGUF', 8, 70],                    // big, and slow on this machine
+      ['org/Qwen-35B-A3B-GGUF', 21, 35],
+      ['org/Qwen-35B-A3B-MTP-GGUF', 21, 35],            // a variant of the one above
+      ['org/Tiny-4B-GGUF', 27, 4],
+      ['org/Retrained-35B-A3B-GGUF', 22, 35],           // a fine-tune: the same MoE shape
+      ['org/Renamed-35B-GGUF', 21, 35],                 // a fine-tune: the same size, speed and weights
+      ['org/Coder-Next-GGUF', 25, undefined, 'MXFP4_MOE'], // no count: read off 48 GB of MXFP4 weights
+      ['org/Unknown-9B-GGUF', undefined, 9],            // no estimate: not known to be fast
+      ['org/gpt-oss-safeguard-20b-GGUF', 24, 20],       // a safety classifier, not a coding model
+      ['org/Giant-122B-A10B-GGUF', 30, 122, 'Q2_K_XL'], // biggest and fast, at 2 bits a weight
+    ]
+    catalogCards = rows.map(([id, estimate, params, quant]) => {
+      const row: Record<string, any> = card(id)
+      row.versions[0].pull_spec = `${id}:${id.split('/')[1]}.gguf`
+      if (estimate !== undefined) row.fit = { ...row.fit, est_tok_s: estimate }
+      if (params !== undefined) row.params_b = params
+      if (quant) {
+        row.fit = { ...row.fit, version: quant }
+        row.versions[0] = { ...row.versions[0], version: quant, ...(quant === 'MXFP4_MOE' ? { size_bytes: 48e9 } : {}) }
+      }
+      return row as ReturnType<typeof card>
+    })
+    const snapshot = await service.list('home')
+    expect(snapshot.models.map(model => model.name)).toEqual([
+      'Coder-Next', 'Qwen-35B-A3B', 'Tiny-4B',
+      'Dense-70B', 'Unknown-9B',
+      'Giant-122B-A10B',
+      'Qwen-35B-A3B-MTP', 'Retrained-35B-A3B', 'Renamed-35B',
+    ])
+    expect(snapshot.models[0].recommended).toBe(true)
+  })
+
+  it('ranks without regard to where a model was in the catalog once speed or size tells them apart', () => {
+    const at = (name: string, estTokS: number, paramsB: number, size = 1) =>
+      ({ id: `org/${name}`, name, pull: `org/${name}:${name}.gguf`, file: `${name}.gguf`, files: [`${name}.gguf`], size, quant: 'Q4', estTokS, paramsB })
+    expect(rankForCoding([at('Slow-Big', 5, 70), at('Fast-Small', 25, 4), at('Fast-Big', 25, 30)]).map(c => c.name))
+      .toEqual(['Fast-Big', 'Fast-Small', 'Slow-Big'])
+    // At exactly the floor a model counts as fast enough.
+    expect(rankForCoding([at('Slow', 19.9, 30), at('Enough', 20, 4)]).map(c => c.name)).toEqual(['Enough', 'Slow'])
+    // Two models of one size are two models when their weights or speed differ.
+    expect(rankForCoding([at('Moe-35B', 78, 35, 20e9), at('Dense-35B', 30, 35, 20e9), at('Other-35B', 78, 35, 24e9)]).map(c => c.name))
+      .toEqual(['Moe-35B', 'Dense-35B', 'Other-35B'])
+  })
+
+  it('fits the catalog to half the machine, and never to more than grid says is free', () => {
+    const device = (usable: number, total?: number, backend = 'metal') =>
+      ({ backend, usable_bytes: usable * 1024 ** 3, ...(total ? { memory: { total_gb: total } } : {}) })
+    expect(modelBudget(device(54, 64))).toBe(32 * 1024 ** 3)
+    expect(modelBudget(device(20, 64))).toBe(20 * 1024 ** 3)
+    expect(modelBudget(device(54))).toBe(54 * 1024 ** 3)
+    // No GPU: the model lives in system RAM, shared like unified memory.
+    expect(modelBudget(device(28, 32, 'cpu'))).toBe(16 * 1024 ** 3)
+    expect(modelBudget({})).toBeUndefined()
+  })
+
+  it("gives the catalog all of an NVIDIA card's free VRAM, whatever the system RAM", () => {
+    // A 24 GB card in a 32 GB PC: VRAM is not system RAM, and nothing else is waiting for it.
+    expect(modelBudget({ backend: 'cuda', usable_bytes: 23 * 1024 ** 3, memory: { total_gb: 32 } })).toBe(23 * 1024 ** 3)
+    // Two 24 GB cards in a 64 GB PC.
+    expect(modelBudget({ backend: 'cuda', usable_bytes: 46 * 1024 ** 3, memory: { total_gb: 64 } })).toBe(46 * 1024 ** 3)
+  })
+
+  it('names one base model across its variants, and a fine-tune under its own name apart', () => {
+    for (const name of ['Qwen3.6-35B-A3B', 'Qwen3.6-35B-A3B-MTP', 'unsloth/Qwen3.6-35B-A3B-MTP-GGUF', 'Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf']) {
+      expect(baseModel(name)).toBe('qwen3.6-35b-a3b')
+    }
+    expect(baseModel('gemma-4-E4B-it-qat')).toBe(baseModel('gemma-4-E4B-it'))
+    expect(baseModel('GLM-4.7-Flash-REAP-23B-A3B')).toBe(baseModel('GLM-4.7-Flash'))
+    expect(baseModel('Qwen3-VL-30B-A3B-Thinking')).toBe(baseModel('Qwen3-VL-30B-A3B-Instruct'))
+    expect(baseModel('Qwen-AgentWorld-35B-A3B')).not.toBe(baseModel('Qwen3.6-35B-A3B'))
+    expect(baseModel('Qwen3.5-9B')).not.toBe(baseModel('Qwen3.5-4B'))
   })
 
   it.each(['failed command', 'invalid json'])('disables actions when inventory returns %s', async scenario => {
@@ -742,6 +812,71 @@ describe('local model discovery and lifecycle', () => {
     const ack = await service.act('home', 'local:Small-Q4.gguf', 'start'); await service.settled()
     expect(ack.operation).toMatchObject({ phase: 'failed', error: expect.stringContaining(scenario === 'memory changed' ? 'make room' : 'no longer available') })
     expect(calls.filter(args => args.includes('join'))).toHaveLength(1)
+  })
+
+  it('tells, per model, the window and speed the catalog expects on this machine, and the free disk', async () => {
+    catalogCards = [{ ...card(), params_b: 9, fit: { ...card().fit, est_tok_s: 21.3 } } as ReturnType<typeof card>, card('org/Bare-GGUF')]
+    catalogCards[1].versions[0].pull_spec = 'org/Bare-GGUF:Bare-Q4.gguf'
+    const snapshot = await service.list('home')
+    expect(snapshot.models[0]).toMatchObject({ name: 'Small', contextWindow: 131072, estTokS: 21.3, paramsB: 9 })
+    // A catalog row that does not say is shown without, never as zero.
+    expect(snapshot.models[1]).not.toHaveProperty('estTokS')
+    expect(snapshot.models[1]).not.toHaveProperty('paramsB')
+    expect(snapshot.freeDiskBytes).toBeGreaterThan(0)
+  })
+
+  it("tells the catalog the machine's measured bandwidth and compute, which its speed estimates rest on", async () => {
+    const original = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => args[0] === 'device-info'
+      ? ok({ device_class: 'apple-silicon', backend: 'metal', usable_bytes: 54 * 1024 ** 3, memory: { total_gb: 64 },
+        mem_bandwidth_gbps: 400, compute_gflops: 15600 })
+      : original(args, output))
+    await service.list('home')
+    const sent = request.mock.calls.find(([url]) => String(url).includes('/catalog'))!
+    // Half of its 64 GB, not the 54 GB grid reports free: the rest stays for everything else it runs.
+    expect(JSON.parse(String(sent[1]?.body)).device).toEqual({ device_class: 'apple-silicon', usable_bytes: 32 * 1024 ** 3,
+      backend: 'metal', mem_bandwidth_gbps: 400, compute_gflops: 15600 })
+  })
+
+  it('leaves out a measurement the machine did not report, so the catalog falls back to its own', async () => {
+    await service.list('home')
+    const sent = request.mock.calls.find(([url]) => String(url).includes('/catalog'))!
+    const device = JSON.parse(String(sent[1]?.body)).device
+    expect(device).not.toHaveProperty('mem_bandwidth_gbps')
+    expect(device).not.toHaveProperty('compute_gflops')
+  })
+
+  it('names one model the same whatever its quantization', () => {
+    for (const name of ['Qwen3.6-35B-A3B', 'unsloth/Qwen3.6-35B-A3B-GGUF', 'Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf', 'Qwen3.6-35B-A3B-Q4_K_M',
+      'qwen3.6-35b-a3b-bf16', 'Qwen3.6-35B-A3B-IQ4_XS', 'Qwen3.6-35B-A3B-MXFP4_MOE']) {
+      expect(modelFamily(name)).toBe('qwen3.6-35b-a3b')
+    }
+    // Another model of the family stays another model.
+    expect(modelFamily('Qwen3.6-35B-A3B-MTP')).not.toBe(modelFamily('Qwen3.6-35B-A3B'))
+  })
+
+  it('does not offer to download another quantization of a model this machine already has', async () => {
+    catalogCards = [card(), card('org/Other-GGUF')]
+    catalogCards[1].versions[0].pull_spec = 'org/Other-GGUF:Other-Q4.gguf'
+    // Small at Q8, imported from an existing setup and serving: the catalog's Q4 of it is a second copy.
+    serving = true
+    await writeFile(join(home, 'models', 'Small-Q8_0.gguf'), Buffer.alloc(96))
+    await writeFile(join(records, 'remote.json'), JSON.stringify({ node_id: 'local-node',
+      engines: [{ endpoint_url: null, models: ['Small-Q8_0.gguf'] }], advertise_as: [] }))
+    await writeFile(join(records, 'remote.heartbeat'), '')
+    run.mockImplementation(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'device-info') return ok({ device_class: 'apple-silicon', backend: 'metal', usable_bytes: 54 * 1024 ** 3, memory: { total_gb: 64 } })
+      if (args.includes('ls')) return ok([{ grid: 'home', id: 'grid-home' }])
+      if (args.includes('info') && args.includes('--json')) return ok({ grid: 'home', status: 'running' })
+      if (args.includes('engines')) return ok([{ node_id: 'local-node', online: true, models: ['Small-Q8_0.gguf'] }])
+      return ok()
+    })
+    const snapshot = await service.list('home')
+    expect(snapshot.models.map(model => [model.id, model.state])).toEqual([
+      ['org/Other-GGUF', 'available'],
+      ['local:Small-Q8_0.gguf', 'running'],
+    ])
   })
 
   it('keeps imported downloads visible, merges catalog matches, and removes deleted files', async () => {

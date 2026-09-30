@@ -216,14 +216,24 @@ class _DismissOnEscape extends StatelessWidget {
         // not every dialog focuses something of its own — so the scope takes
         // focus itself when nothing else claims it.
         //
-        // ⚠️ `Focus`, not `FocusScope`. Both autofocus, and a descendant that
-        // also autofocuses (the model picker's search field) wins either way —
-        // but a `FocusScope` additionally becomes the dialog's focus ROOT,
-        // which changes where traversal wraps and what `unfocus` falls back
-        // to. Nothing here wants to move those; this only needs to be a node
-        // in the chain that holds focus when no descendant asks for it.
+        // ⚠️ **A `FocusScope`, not a `Focus`, and the difference is the
+        // dialog's own field.** An autofocus is only granted to a scope that
+        // has no focused child yet, and the first one asked wins. A plain
+        // `Focus` here asks the ROUTE's scope, and it asks first — an
+        // ancestor registers during build, while a `TextField` registers its
+        // autofocus a frame later — so it took the route's focus and every
+        // autofocusing field inside was refused: the rename dialog opened
+        // with no caret and no keyboard, its name selected for a first key
+        // that could not reach it. As a scope of its own, this node holds
+        // focus only until something inside asks: a field's autofocus goes to
+        // THIS scope, which has no focused child, and is granted.
+        //
+        // Being a scope also makes it where traversal wraps and where an
+        // `unfocus` lands; it wraps the whole dialog, so both visit exactly
+        // what the route's own scope would, and a field that lets go leaves
+        // focus inside the `Shortcuts`, where Escape still works.
         // `skipTraversal` keeps it out of the tab order it is not a stop in.
-        child: Focus(autofocus: true, skipTraversal: true, child: child),
+        child: FocusScope(autofocus: true, skipTraversal: true, child: child),
       ),
     );
   }

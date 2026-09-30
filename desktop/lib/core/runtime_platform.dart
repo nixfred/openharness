@@ -7,6 +7,15 @@ import 'package:flutter/foundation.dart';
 abstract final class RuntimePlatform {
   static bool get isMacOS => !kIsWeb && io.Platform.isMacOS;
   static bool get isLinux => !kIsWeb && io.Platform.isLinux;
+
+  /// The Linux build running inside Windows Subsystem for Linux (WSLg). WSL
+  /// sets `WSL_DISTRO_NAME` for what it starts, and its kernels name
+  /// themselves `…-microsoft-standard-WSL2`. Not a supported platform — only
+  /// the places where WSLg behaves unlike a Linux desktop read this.
+  static bool get isWsl =>
+      isLinux &&
+      (environment['WSL_DISTRO_NAME'] != null ||
+          operatingSystemVersion.toLowerCase().contains('microsoft'));
   static bool get isWindows => !kIsWeb && io.Platform.isWindows;
   static bool get isIOS => !kIsWeb && io.Platform.isIOS;
   static bool get isAndroid => !kIsWeb && io.Platform.isAndroid;

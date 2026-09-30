@@ -324,40 +324,30 @@ StatusLineParts statusLineParts({
   return StatusLineParts(style, parts);
 }
 
+/// The PR stays compact inside the last ribbon segment. Its icon is drawn from
+/// the shared Octicon asset, outside the text formatter.
 StatusLineParts pullRequestStatusLineParts({
   required int number,
   required String state,
   StatusLineStyle style = StatusLineStyle.standard,
-}) {
-  final tone = switch (state) {
-    'Open' => StatusLineTone.green,
-    'Merged' => StatusLineTone.magenta,
-    'Closed' => StatusLineTone.red,
-    _ => StatusLineTone.muted,
-  };
-  if (style.segmented) {
-    return StatusLineParts(style, [
-      StatusLineSegment(
-        '#$number $state',
-        foreground: state == 'Open' || state == 'Draft'
-            ? StatusLineTone.black
-            : StatusLineTone.white,
-        background: tone,
-      ),
-    ]);
-  }
-  return StatusLineParts(style, [
-    StatusLineSegment(
-      '#$number ',
-      foreground: switch (style) {
-        StatusLineStyle.robbyrussell => StatusLineTone.blue,
-        StatusLineStyle.pure => StatusLineTone.muted,
-        _ => tone,
-      },
-    ),
-    StatusLineSegment(state, foreground: tone),
-  ]);
-}
+}) => StatusLineParts(style, [
+  StatusLineSegment(
+    '#$number',
+    foreground: !style.segmented
+        ? StatusLineTone.foreground
+        : state == 'Open' || state == 'Draft'
+        ? StatusLineTone.black
+        : StatusLineTone.white,
+    background: !style.segmented
+        ? null
+        : switch (state) {
+            'Open' => StatusLineTone.green,
+            'Merged' => StatusLineTone.magenta,
+            'Closed' => StatusLineTone.red,
+            _ => StatusLineTone.muted,
+          },
+  ),
+]);
 
 /// Resolved once in Dart so the Flutter preview and native bar use identical
 /// ANSI colors. Backgrounds are static theme styling, not Git clean/dirty state.
@@ -386,6 +376,7 @@ List<StatusLinePaintSegment> statusLinePaintSegments(
   TerminalTheme theme, {
   bool color = true,
   int segmentOffset = 0,
+  Color? surfaceBackground,
 }) {
   color = color && parts.style != StatusLineStyle.standard;
   Color resolve(StatusLineTone tone) =>
@@ -408,8 +399,11 @@ List<StatusLinePaintSegment> statusLinePaintSegments(
         StatusLineTone.orange => theme.yellow,
       };
   Color ink(StatusLineSegment part) {
-    if (!color) return theme.foreground;
-    final foreground = resolve(part.foreground);
+    final foreground = color ? resolve(part.foreground) : theme.foreground;
+    if (part.background == null && surfaceBackground != null) {
+      return statusLineInkOnSurface(foreground, surfaceBackground);
+    }
+    if (!color) return foreground;
     if (part.background == null || !_presetColors.containsKey(parts.style)) {
       return foreground;
     }
@@ -449,6 +443,33 @@ List<StatusLinePaintSegment> statusLinePaintSegments(
         branchSymbol: parts.segments[i].branchSymbol,
       ),
   ];
+}
+
+/// A terminal status style can also sit on a light desktop surface. Keep its
+/// colors when readable and adjust only the ink that would disappear there.
+/// Callers without a surface keep the exact terminal/native status palette.
+Color statusLineInkOnSurface(Color ink, Color surface) {
+  final ground = surface.computeLuminance();
+  double contrast(Color color) {
+    final light = Color.alphaBlend(color, surface).computeLuminance();
+    return light > ground
+        ? (light + .05) / (ground + .05)
+        : (ground + .05) / (light + .05);
+  }
+
+  if (contrast(ink) >= 4.5) return ink;
+  const black = Color(0xFF000000), white = Color(0xFFFFFFFF);
+  final target = contrast(black) > contrast(white) ? black : white;
+  var low = 0.0, high = 1.0;
+  for (var i = 0; i < 20; i++) {
+    final mid = (low + high) / 2;
+    if (contrast(Color.lerp(ink, target, mid)!) < 4.5) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return Color.lerp(ink, target, high)!;
 }
 
 /// The four named Starship presets include a status-only palette, as their

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { emptySessionWork, ingestSessionWork, sessionWorkSnapshot, shellWorkLocations, validSessionWork } from './sessionWork.js'
 
 const at = '2026-09-27T13:00:00.000Z'
@@ -125,7 +126,7 @@ describe('per-session work receipts', () => {
     f.start('search', { query: 'hello' }, 'WebSearch'); f.finish('search')
     expect(f.snapshot()?.uncertain).toBe(false)
     f.start('unknown', { command: 'cd "$TASK" && test' }); f.finish('unknown')
-    expect(f.snapshot()).toMatchObject({ current: [], locations: [{ cwd: '/one' }], uncertain: true })
+    expect(f.snapshot()).toMatchObject({ current: [{ cwd: '/one' }], locations: [{ cwd: '/one' }], uncertain: true })
   })
 
   it('uses explicit Codex workdir and turn context, including code mode without evaluation', () => {
@@ -142,7 +143,7 @@ describe('per-session work receipts', () => {
     f.row({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'dynamic', name: 'exec',
       input: 'if (false) text(await tools.exec_command({"cmd":"test","workdir":"/fake"}));' } })
     f.finish('dynamic')
-    expect(f.snapshot()).toMatchObject({ current: [], uncertain: true })
+    expect(f.snapshot()).toMatchObject({ current: [{ cwd: '/code' }], uncertain: true })
   })
 
   it('tracks file tools without treating a mentioned path as a checkout', () => {
@@ -185,5 +186,70 @@ describe('per-session work receipts', () => {
     expect(validSessionWork(f.state)).toBe(true)
     expect(validSessionWork({ ...f.state, current: [{ cwd: '/bad\n', at }] })).toBe(false)
     expect(validSessionWork({ ...f.state, pullRequests: [{ url: 'javascript:bad', cwd: null, at }] })).toBe(false)
+  })
+
+  it('recovers this session’s yielded PR creation and parallel work from recorded Codex blocks', () => {
+    const f = fixture('codex')
+    f.row({ type: 'turn_context', payload: { cwd: '/workspace/happy-owl' } })
+    const rows = readFileSync(new URL('./fixtures/session-work-codex.jsonl', import.meta.url), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    for (const row of rows) f.row(row)
+    expect(f.snapshot()).toMatchObject({ uncertain: false,
+      current: [{ cwd: '/workspace/happy-owl' }, { cwd: '/workspace/happy-owl/cli' }],
+      pullRequests: [{ url: 'https://github.com/acme/app/pull/397', cwd: '/workspace/happy-owl' }] })
+    expect(Object.keys(f.state.running)).toHaveLength(0)
+    expect(validSessionWork(JSON.parse(JSON.stringify(f.state)))).toBe(true)
+    // A later unsupported call cannot erase the checkout or PR we just verified.
+    f.row({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'unsupported', name: 'exec', input: 'await arbitraryScript();' } })
+    f.finish('unsupported')
+    expect(f.snapshot()).toMatchObject({ uncertain: true, current: [{ cwd: '/workspace/happy-owl' }, { cwd: '/workspace/happy-owl/cli' }] })
+    expect(f.snapshot()?.pullRequests).toHaveLength(1)
+  })
+
+  it('retains confirmed work during pending and failed commands without claiming the attempted checkout', () => {
+    const f = fixture('codex')
+    f.start('known', { cmd: 'pwd', workdir: '/confirmed' }); f.finish('known', '{"exit_code":0}')
+    f.start('attempt', { cmd: 'test', workdir: '/unconfirmed' })
+    expect(f.snapshot()).toMatchObject({ uncertain: true, current: [{ cwd: '/confirmed' }] })
+    f.finish('attempt', '{"exit_code":1}')
+    expect(f.snapshot()).toMatchObject({ uncertain: true, current: [{ cwd: '/confirmed' }] })
+    expect(f.snapshot()?.locations.map(row => row.cwd)).toEqual(['/confirmed'])
+  })
+
+  it('does not trust missing, misindexed or rejected parallel receipts', () => {
+    for (const result of [{ i: 1, status: 'fulfilled', value: { exit_code: 0 } }, { i: 0, status: 'rejected', reason: 'failed' }, {}]) {
+      const f = fixture('codex')
+      f.row({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'batch', name: 'exec',
+        input: 'const results=await Promise.allSettled([tools.exec_command({cmd:"pwd",workdir:"/fake"})]); for(let i=0;i<results.length;i++) text({i,...results[i]});' } })
+      f.finish('batch', [{ type: 'input_text', text: JSON.stringify(result) }])
+      expect(f.snapshot()).toMatchObject({ uncertain: true, current: [], locations: [] })
+    }
+  })
+
+  it('keeps parallel successes and failures distinct, regardless of output order', () => {
+    const f = fixture('codex')
+    f.row({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'batch', name: 'exec',
+      input: 'const results=await Promise.all([tools.exec_command({cmd:"test",workdir:"/failed"}),tools.exec_command({cmd:"pwd",workdir:"/confirmed"})]); for(const result of results) text(result);' } })
+    f.finish('batch', [{ type: 'input_text', text: '{"exit_code":1}' }, { type: 'input_text', text: '{"exit_code":0}' }])
+    expect(f.snapshot()).toMatchObject({ uncertain: true, current: [{ cwd: '/confirmed' }], locations: [{ cwd: '/confirmed' }] })
+    f.start('next', { cmd: 'pwd', workdir: '/next' }); f.finish('next', '{"exit_code":0}')
+    expect(f.snapshot()).toMatchObject({ uncertain: false, current: [{ cwd: '/next' }] })
+  })
+
+  it('correlates a partially yielded batch across checkpoint and cell/process waits', () => {
+    const f = fixture('codex')
+    f.row({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'batch', name: 'exec',
+      input: 'text(await tools.exec_command({cmd:"pwd",workdir:"/one"})); text(await tools.exec_command({cmd:"gh pr create",workdir:"/two"}));' } })
+    f.finish('batch', [{ type: 'input_text', text: '{"exit_code":0,"output":"/one"}' },
+      { type: 'input_text', text: 'Script running with cell ID cell-1' }])
+    expect(f.snapshot()).toMatchObject({ uncertain: true, current: [{ cwd: '/one' }] })
+    expect(validSessionWork(JSON.parse(JSON.stringify(f.state)))).toBe(true)
+    f.start('cell-poll', { cell_id: 'cell-1' }, 'wait')
+    f.finish('cell-poll', [{ type: 'input_text', text: 'Script completed\nOutput:\n' },
+      { type: 'input_text', text: '{"session_id":77,"output":""}' }])
+    f.start('process-poll', { session_id: 77, chars: '' }, 'write_stdin')
+    f.finish('process-poll', '{"exit_code":0,"output":"https://github.com/acme/app/pull/12"}')
+    expect(f.snapshot()).toMatchObject({ uncertain: false, current: [{ cwd: '/two' }],
+      pullRequests: [{ url: 'https://github.com/acme/app/pull/12', cwd: '/two' }] })
+    expect(Object.keys(f.state.running)).toHaveLength(0)
   })
 })

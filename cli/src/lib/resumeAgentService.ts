@@ -17,7 +17,7 @@ import type { LaunchOverrides, LaunchOverridesResult } from './launchOverrides.j
 import type { AgentRestartCoordinator } from './restartAgent.js'
 
 export interface ResumeAgentServiceDeps {
-  registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch'>
+  registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
   stoppedAgents: StoppedAgentStore
   tmuxBackend: CreateAgentPaneDeps['tmuxBackend'] | null
   restartJobs: AgentRestartCoordinator
@@ -83,6 +83,10 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     })
     if (!ownsRoute()) return resumeChanged
     if (result.ok) {
+      // A probe proves the new PID but does not publish it. Persist that proof before readiness;
+      // an engine whose hook is delayed or absent must still be attachable and stoppable now.
+      if (!result.session.processIdentity
+        || !registry.updateProcessIdentity(saved.agentId, result.session.processIdentity)) return resumeChanged
       await clearPaneRemainOnExit(saved.tmuxPane)
       if (!ownsRoute()) return resumeChanged
       stoppedAgents.finishResume(saved.agentId)
@@ -93,11 +97,12 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
       // asking WHICH proof confirmed it got that wrong in both directions, so ask the row instead.
       const confirmed = registry.byAgent(saved.agentId)
       const ready = confirmed?.launch?.state === 'ready'
-        ? result.session
+        ? confirmed
         : registry.setLaunch(saved.agentId, { state: 'ready' }) ?? result.session
       console.log(`[resume] ${sid(saved.agentId)} confirmed · engine=${saved.engine}`
         + ` · hook=${(confirmed?.lastHookAt ?? 0) > 0 ? 'yes' : 'no'} · ${result.resumed ? 'same conversation' : 'fresh'}`)
       announceSession(ready)
+      return { ...result, session: ready }
     } else if (result.error !== 'AGENT_CHANGED') {
       const row = registry.byAgent(saved.agentId)!
       const failed = registry.setLaunch(row.agentId, { state: 'failed', error: result.error, detail: result.detail })

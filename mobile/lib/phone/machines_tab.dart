@@ -122,8 +122,7 @@ class _Body extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(Tty.origin, 0, Tty.origin, 8),
             child: Text(
-              'Your harnesses run on these. Each one is unlocked with its own '
-              'phone password.',
+              'Your harnesses run on these.',
               style: tty.style(size: TtySize.meta, color: tty.faint),
             ),
           ),
@@ -161,7 +160,7 @@ class _Body extends StatelessWidget {
       PhoneMachineStatus.needsPassword => (
         'locked',
         tty.yellow,
-        'tap to unlock with its phone password',
+        'tap to unlock: scan its code',
       ),
       PhoneMachineStatus.offline => (
         'asleep',

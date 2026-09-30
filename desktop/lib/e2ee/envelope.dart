@@ -13,14 +13,27 @@ const int e2eVersion = 1;
 /// to the CLI's own list, because a type missing here fails nowhere: the frame simply leaves in the
 /// clear, and for terminal_* the relay then drops it as TERMINAL_FRAME_REJECTED.
 const Set<String> encryptedDownTypes = {
+  'team',
+  'team_delivery',
   'harness_share_list',
   'harness_share_invite',
   'harness_share_remove',
+  'harness_share_link',
+  'harness_share_comments',
+  'harness_share_comment_post',
+  'harness_share_comment_remove',
   // Harness's application RPC extensions (CLI e2ee/applicationFrames.ts).
   'grid_fleet_capabilities',
   'grid_fleet_run',
   'grid_fleet_cancel',
   'machine_resources',
+  'phone_pair',
+  'viewer_surface',
+  'api_connections',
+  'orchestrator',
+  'command_bar',
+  'route_task',
+  'route_send',
   'grid_fleet_models_list',
   'grid_fleet_model_start',
   'grid_fleet_model_download',
@@ -42,6 +55,8 @@ const Set<String> encryptedDownTypes = {
   'fs_list_dir',
   'project_preview',
   'git_project_info',
+  // The trust-group roster swap (`viewer/group_sync.dart`): the keys every member trusts.
+  'group_sync',
   'codex_profiles_list',
   'codex_profile_link',
   // Asks the machine to read its OWN agent accounts' usage (cli/src/lib/accountUsage.ts). Missing

@@ -49,14 +49,14 @@ class CodexLedgerScanner implements LedgerScanner {
     final roots = this.roots;
     if (roots.isEmpty) {
       return const LedgerScanResult.unavailable(
-        'No home directory to read Codex sessions from',
+        'No home directory to read Codex conversations from',
       );
     }
     return scanJsonlUsage(
       provider: provider,
       roots: roots,
       previous: previous,
-      missingMessage: 'No Codex sessions on this computer',
+      missingMessage: 'No Codex conversations on this computer',
       parse: _parse,
     );
   }

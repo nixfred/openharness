@@ -26,7 +26,7 @@ describe('generated discovery scripts', () => {
 
     const src = readFileSync(join(piHome, 'agent', 'extensions', 'launcher-register.ts'), 'utf-8')
     expect(src).toContain('process.env.TMUX_PANE')
-    expect(src).toContain('process.env.HERDR_PANE_ID')
+    expect(src).not.toContain('HERDR')
     expect(src).not.toContain('MACHINE_ID')
     expect(src).not.toContain('launcherId')
   })
@@ -40,9 +40,9 @@ describe('generated discovery scripts', () => {
 
     const src = readFileSync(join(pluginDir, 'launcher-register.js'), 'utf-8')
     expect(src).toContain('process.env.TMUX_PANE')
-    expect(src).toContain('process.env.HERDR_PANE_ID')
+    expect(src).not.toContain('HERDR')
     expect(src).not.toContain('MACHINE_ID')
     expect(src).not.toContain('launcherId')
-    expect(src).toContain('if ((!pane && !herdrPane)')
+    expect(src).toContain('if (!pane || !token')
   })
 })

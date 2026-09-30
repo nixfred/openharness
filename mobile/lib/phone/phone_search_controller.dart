@@ -267,7 +267,11 @@ class PhoneSearchController extends ChangeNotifier {
       return row;
     }
     final id = row.agentId == null ? null : row.id;
-    if (id != null) history?.remember(id);
+    if (id != null) {
+      history?.remember(id);
+      // Found from search: the phone's own Cmd-O, a first-egg habit.
+      notifier.daemonHabits.found();
+    }
     return row;
   }
 

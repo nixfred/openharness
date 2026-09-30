@@ -45,10 +45,16 @@ class ProfilesSection extends StatelessWidget {
                     machine,
                     localId: localId,
                     sharedName: (names[machine.displayName] ?? 0) > 1,
+                    unavailable: _unavailable(machine),
                   ),
                   control: _choice(
                     selected: selected == machine.machineId,
-                    onPressed: () => notifier.setMachineProfile(machine.machineId),
+                    // A computer this window cannot reach has no live tabs to
+                    // narrow down to, so it cannot be chosen until it is back.
+                    // One already chosen stays shown.
+                    onPressed: _unavailable(machine) == null
+                        ? () => notifier.setMachineProfile(machine.machineId)
+                        : null,
                   ),
                 ),
             ],
@@ -58,18 +64,38 @@ class ProfilesSection extends StatelessWidget {
     },
   );
 
-  String _detail(Machine machine, {String? localId, required bool sharedName}) {
+  /// Why [machine] cannot be chosen right now, or null when it can: this
+  /// window has no live connection to it, it has to be linked again, or it
+  /// reports itself offline.
+  String? _unavailable(Machine machine) {
+    final state = notifier.stateOf(machine.machineId);
+    if (state == null || state.needsLink) return 'Not connected.';
+    if (state.nodeOnline == false) return 'Offline.';
+    if (state.connectionStatus != ConnectionStatus.connected) {
+      return 'Not connected.';
+    }
+    return null;
+  }
+
+  String _detail(
+    Machine machine, {
+    String? localId,
+    required bool sharedName,
+    String? unavailable,
+  }) {
     final where = machine.machineId == localId
         ? 'This computer. Tabs whose agents are all here.'
         : 'That computer. Tabs whose agents are all there.';
-    if (!sharedName) return where;
     final short = machine.machineId.length > 8
         ? machine.machineId.substring(0, 8)
         : machine.machineId;
-    return '$where ($short)';
+    final named = sharedName ? '$where ($short)' : where;
+    return unavailable == null ? named : '$unavailable $named';
   }
 
-  Widget _choice({required bool selected, required VoidCallback onPressed}) {
+  /// [onPressed] null is a machine that cannot be chosen now: the button is
+  /// disabled. A chosen one reads Showing, and is disabled for being chosen.
+  Widget _choice({required bool selected, required VoidCallback? onPressed}) {
     return OutlinedButton(
       onPressed: selected ? null : onPressed,
       child: Text(selected ? 'Showing' : 'Show'),

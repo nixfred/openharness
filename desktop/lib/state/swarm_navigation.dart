@@ -329,6 +329,7 @@ class SwarmDestination {
     this.members = const {},
     this.isStore = false,
     this.isCreate = false,
+    this.isNote = false,
     this.task,
     this.external,
     Iterable<String?> searchFields = const [],
@@ -389,6 +390,10 @@ class SwarmDestination {
   /// What the create row would start the new harness on: what was typed.
   final String? task;
 
+  /// A line the box answers with, not a place to go (`xyzzy`: "Nothing
+  /// happens."). Return never takes it.
+  final bool isNote;
+
   /// A conversation Harness did not start; opening it resumes it as a harness.
   final ExternalSessionRef? external;
   final bool current;
@@ -406,6 +411,7 @@ class SwarmDestination {
       !isGroup &&
       !isCommand &&
       !isCreate &&
+      !isNote &&
       !isModel &&
       !isStoreEntry &&
       pickerQuery == null &&
@@ -922,7 +928,7 @@ Future<bool> activateSwarmSearchSelection(
         .where((tab) => tab.id == destinationSwarmId)
         .firstOrNull;
     if (placement == HarnessPlacement.currentTab) {
-      if (target == null || target.isStore || target.isOrchestrator) {
+      if (target == null || target.isUtility || target.isOrchestrator) {
         return false;
       }
       final existing = target.panes.any(
@@ -1182,7 +1188,7 @@ Swarm? _matchingGroupSwarm(AppNotifier app, SwarmDestination destination) {
 
 String _agentCountLabel(Iterable<String?> ids) {
   final count = ids.whereType<String>().length;
-  return '$count ${count == 1 ? 'agent' : 'agents'}';
+  return '$count ${count == 1 ? 'harness' : 'harnesses'}';
 }
 
 String _countLabel(int count, String noun) {

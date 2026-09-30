@@ -21,7 +21,176 @@ import 'package:harness/widgets/web_download_button.dart';
 import 'package:harness/widgets/swarm_switcher.dart';
 import 'package:web/web.dart' as web;
 
+class _StartupApp extends AppNotifier {
+  _StartupApp()
+    : super(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: null,
+      );
+
+  bool inventoryLoaded = false;
+  @override
+  bool get machineInventoryLoaded => inventoryLoaded;
+}
+
+MachineState _startupMachine(
+  _StartupApp app,
+  String id, {
+  ConnectionStatus status = ConnectionStatus.disconnected,
+  bool needsLink = false,
+}) {
+  final machine = Machine(
+    machineId: id,
+    name: id,
+    authMode: MachineAuthMode.remote,
+  );
+  app.machines.add(machine);
+  final state = MachineState(machine)
+    ..nodeOnline = true
+    ..connectionStatus = status
+    ..needsLink = needsLink;
+  app.machineStates[id] = state;
+  return state;
+}
+
+Future<void> _mountStartup(WidgetTester tester, _StartupApp app) async {
+  app.currentUser = const CurrentUserProfile(email: 'browser@example.test');
+  final selected = app.selectedMachineId;
+  app.newSwarm(newTabPage: true);
+  app.selectedMachineId = selected;
+  tester.view.physicalSize = const Size(1280, 800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: grid.buildAppTheme(brightness: Brightness.dark),
+      home: SwarmScreen(notifier: app),
+    ),
+  );
+  await tester.pump(const Duration(milliseconds: 200));
+  await tester.pump();
+}
+
 void main() {
+  testWidgets('a connected machine keeps the startup picker closed', (
+    tester,
+  ) async {
+    final app = _StartupApp()..inventoryLoaded = true;
+    _startupMachine(app, 'Unlinked machine', needsLink: true);
+    final connected = _startupMachine(
+      app,
+      'Saved machine',
+      status: ConnectionStatus.connected,
+    );
+    app.selectedMachineId = 'Unlinked machine';
+    await _mountStartup(tester, app);
+    final picker = find.byType(SwarmSearchResults);
+    expect(picker, findsNothing);
+
+    // A later network interruption must not turn into a surprise startup dialog.
+    connected.connectionStatus = ConnectionStatus.disconnected;
+    connected.nodeOnline = false;
+    app.notifyListeners();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(picker, findsNothing);
+
+    // Deliberately selecting an unlinked machine still opens its setup.
+    connected.connectionStatus = ConnectionStatus.connected;
+    connected.nodeOnline = true;
+    app.showMachinePane('Unlinked machine');
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    expect(picker, findsOneWidget);
+    expect(
+      tester.widget<SwarmSearchResults>(picker).search.selected?.machineId,
+      'Unlinked machine',
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    app.notifyListeners();
+    await tester.pump();
+    expect(picker, findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  for (final pending in [
+    ConnectionStatus.connecting,
+    ConnectionStatus.reconnecting,
+  ]) {
+    testWidgets('startup waits for a saved machine that is $pending', (
+      tester,
+    ) async {
+      final app = _StartupApp()..inventoryLoaded = true;
+      _startupMachine(app, 'Unlinked machine', needsLink: true);
+      final saved = _startupMachine(app, 'Saved machine', status: pending);
+      app.selectedMachineId = 'Unlinked machine';
+      await _mountStartup(tester, app);
+      expect(find.byType(SwarmSearchResults), findsNothing);
+      saved.connectionStatus = ConnectionStatus.connected;
+      app.notifyListeners();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byType(SwarmSearchResults), findsNothing);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyM);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        tester
+            .widget<SwarmSearchResults>(find.byType(SwarmSearchResults))
+            .search
+            .scopePrefix,
+        '@',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    });
+  }
+
+  testWidgets('first visit offers machines once after discovery is complete', (
+    tester,
+  ) async {
+    final app = _StartupApp();
+    await _mountStartup(tester, app);
+    final picker = find.byType(SwarmSearchResults);
+    expect(picker, findsNothing);
+    app.inventoryLoaded = true;
+    app.notifyListeners();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    expect(picker, findsOneWidget);
+    expect(
+      tester.widget<SwarmSearchResults>(picker).search.rows.last.title,
+      'Add machine',
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    app.notifyListeners();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(picker, findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('startup offers machines when saved connections are offline', (
+    tester,
+  ) async {
+    final app = _StartupApp()..inventoryLoaded = true;
+    final machine = _startupMachine(app, 'Offline machine');
+    machine.nodeOnline = false;
+    app.selectedMachineId = machine.machine.machineId;
+    await _mountStartup(tester, app);
+    expect(find.byType(SwarmSearchResults), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
   test(
     'a late model response cannot cross an account change in JavaScript',
     () {

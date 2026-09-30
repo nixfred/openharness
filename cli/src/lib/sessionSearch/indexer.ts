@@ -261,6 +261,11 @@ export class SessionSearchIndex {
     return this.opts.store.session(sessionId)
   }
 
+  /** A bounded snapshot of the dated conversation text already indexed on this machine. */
+  recentConversations(from: number, to: number) {
+    return { ...this.opts.store.recentConversations(from, to), indexing: this.queue.size + (this.running ? 1 : 0) }
+  }
+
   /** Moves a session to the head of the queue. */
   private front(sessionId: string): void {
     const rest = [...this.queue].filter((id) => id !== sessionId)

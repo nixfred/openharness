@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/config.dart';
@@ -145,6 +146,61 @@ void main() {
     // folders and engines as it opens, and this fixture has no machine to ask.
     expect(pushed, hasLength(1));
     expect(find.byType(TerminalSearchOverlay), findsNothing);
+  });
+
+  group('VoiceOver', () {
+    // VoiceOver keeps one-finger swipes for itself, and xterm draws no semantics: the terminal
+    // node is the only way it reaches the agent's words, Find and a new harness.
+    SemanticsNode terminalNode(WidgetTester tester) =>
+        tester.getSemantics(find.bySemanticsLabel(RegExp(r', terminal$')));
+
+    testWidgets('reads the agent\'s name and its last lines', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpFocus(tester);
+      final node = terminalNode(tester);
+      expect(node.label, 'a, terminal');
+      expect(node.value, endsWith('output line 399'));
+      expect(node.value.split('\n'), hasLength(6));
+      handle.dispose();
+    });
+
+    testWidgets('Find is an action, and it opens Find', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpFocus(tester);
+      final node = terminalNode(tester);
+      final find_ = node.getSemanticsData().customSemanticsActionIds!.map(
+        CustomSemanticsAction.getAction,
+      );
+      expect(find_.map((a) => a!.label), containsAll(['Find', 'New harness']));
+      node.owner!.performAction(
+        node.id,
+        SemanticsAction.customAction,
+        CustomSemanticsAction.getIdentifier(
+          const CustomSemanticsAction(label: 'Find'),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TerminalSearchOverlay), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('New harness is an action, and it opens the form', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final pushed = await pumpFocus(tester);
+      final node = terminalNode(tester);
+      node.owner!.performAction(
+        node.id,
+        SemanticsAction.customAction,
+        CustomSemanticsAction.getIdentifier(
+          const CustomSemanticsAction(label: 'New harness'),
+        ),
+      );
+      expect(pushed, hasLength(1));
+      handle.dispose();
+    });
   });
 }
 

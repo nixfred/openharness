@@ -21,7 +21,7 @@ export interface AutonomousDeviceAgent { agentId: string; name: string; engine: 
 const AGENT_RECAP_MAX_CHARS = 200
 export interface AutonomousDeviceDelivery { deliveryId: string; sessionId: string; state: ReceiptState; reason?: string }
 export interface AutonomousDeviceServiceOptions {
-  resultJournal?: Pick<DeviceResultJournal, 'load' | 'save'>
+  resultJournal?: Pick<DeviceResultJournal, 'load' | 'save'> & Partial<Pick<DeviceResultJournal, 'archive'>>
   inputConsumed?: (agentId: string, text: string) => void
   store?: AutonomousDeviceStore
   machineId: string; serverInstanceId?: string; now?: () => number
@@ -312,7 +312,22 @@ export class AutonomousDeviceService {
     this.now = options.now ?? Date.now
     this.streams = new AgentStreams({ machineId: options.machineId, serverInstanceId: this.serverInstanceId,
       send: (deviceId, frame) => this.options.emit?.(frame, deviceId) })
-    const snapshot = options.resultJournal?.load()
+    let snapshot = options.resultJournal?.load()
+    // Written on this computer under ANOTHER machine id: a sign-in to another account, a switch of
+    // backend, a machine re-registered. Its dedupe cannot apply here — every request naming that
+    // machine is refused as MACHINE_MISMATCH before a reservation is looked up — so it is set aside,
+    // not trusted and not treated as corruption. Throwing here kept the whole daemon in safe mode
+    // after a legitimate identity change, with every terminal on this computer down with it.
+    if (object(snapshot) && typeof snapshot.machineId === 'string' && snapshot.machineId
+      && snapshot.machineId !== options.machineId) {
+      const owner = snapshot.machineId
+      // Keeping a copy is a courtesy to a switch back; failing to keep one must not bring back the very
+      // start-up failure this avoids. The fresh journal's first save replaces the file either way.
+      let kept: string | undefined
+      try { kept = options.resultJournal?.archive?.(owner) } catch { /* not kept */ }
+      console.log(`[device] result journal belongs to machine ${owner.slice(0, 8)} — ${kept ? `kept as ${kept}` : 'discarded'}, starting fresh`)
+      snapshot = undefined
+    }
     if (snapshot !== undefined) {
       if (!object(snapshot) || snapshot.version !== 1 || snapshot.machineId !== options.machineId
         || !Array.isArray(snapshot.entries) || !Array.isArray(snapshot.results)) throw new Error('Invalid Device result journal; refusing to lose delivery dedupe')

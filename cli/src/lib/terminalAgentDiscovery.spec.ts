@@ -11,55 +11,29 @@ const claude = (pid: number, parentPid: number): ProcessRow => ({ pid, parentPid
 const tmux: TerminalRootObservation = {
   runtime: { backend: 'tmux', paneId: '%1' }, rootPid: 10, cwd: '/work',
 }
-const herdr: TerminalRootObservation = {
-  runtime: {
-    backend: 'herdr', endpointId: 'endpoint-a', sessionName: 'default', terminalId: 'terminal-a', paneId: 'w1:p1',
-  },
-  rootPid: 20,
-  cwd: '/work',
+const nested: TerminalRootObservation = {
+  runtime: { backend: 'tmux', paneId: '%2' }, rootPid: 20, cwd: '/work',
 }
 
-describe('backend-neutral process discovery', () => {
-  it('deduplicates nested/coexisting roots by engine PID and start marker', () => {
+describe('process discovery', () => {
+  it('deduplicates nested roots by engine PID and start marker', () => {
     const result = discoverTerminalAgentsFromSnapshot(
-      [tmux, herdr],
+      [tmux, nested],
       [shell(10, 1), shell(20, 10), claude(30, 20)],
       999,
-      ['tmux', 'herdr'],
-      ['default'],
+      ['tmux'],
     )
     expect(result.agents).toHaveLength(1)
     expect(result.agents[0].runtimes).toHaveLength(2)
-    expect(result.agents[0].primaryRuntimeKey).toBe(terminalRouteKey(herdr.runtime))
+    expect(result.agents[0].primaryRuntimeKey).toBe(terminalRouteKey(nested.runtime))
   })
 
-  it('keeps duplicate public Herdr routes distinct across endpoints', () => {
-    const second = {
-      ...herdr,
-      runtime: { ...herdr.runtime, endpointId: 'endpoint-b', sessionName: 'work', terminalId: 'terminal-b' },
-      rootPid: 40,
-    } as TerminalRootObservation
+  it('chooses the nearest root as primary', () => {
     const result = discoverTerminalAgentsFromSnapshot(
-      [herdr, second],
-      [shell(20, 1), claude(30, 20), shell(40, 1), claude(50, 40)],
-      999,
-      ['herdr'],
-      ['default', 'work'],
-    )
-    expect(result.agents).toHaveLength(2)
-    expect(result.agents.map((agent) => agent.primaryRuntimeKey)).toEqual([
-      terminalRouteKey(herdr.runtime),
-      terminalRouteKey(second.runtime),
-    ])
-  })
-
-  it('chooses the nearest root before configured backend order', () => {
-    const result = discoverTerminalAgentsFromSnapshot(
-      [tmux, herdr],
+      [tmux, nested],
       [shell(20, 1), shell(25, 20), shell(10, 25), claude(30, 10)],
       999,
-      ['tmux', 'herdr'],
-      ['default'],
+      ['tmux'],
     )
     expect(result.agents[0].primaryRuntimeKey).toBe(terminalRouteKey(tmux.runtime))
   })

@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, rm, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { agentProject, canonicalRepository } from './agentProject.js'
+import { agentProject, canonicalRepository, createAgentProjectReader, type AgentProject } from './agentProject.js'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
@@ -27,6 +27,10 @@ describe('owning-machine project metadata', () => {
     expect(await agentProject(cwd, 100)).toMatchObject({ cwd, root: await realpath(root), remote: 'github.com/org/app', branch: 'main' })
     git('symbolic-ref', 'HEAD', 'refs/heads/feature/real-branch')
     expect(await agentProject(cwd, 20_000)).toMatchObject({ branch: 'feature/real-branch' })
+    expect(await agentProject(cwd, 40_000)).toMatchObject({ branch: 'feature/real-branch' })
+    git('remote', 'set-url', 'origin', 'git@github.com:Org/Other.git')
+    git('symbolic-ref', 'HEAD', 'refs/heads/next')
+    expect(await agentProject(cwd, 60_000)).toMatchObject({ remote: 'github.com/org/other', branch: 'next' })
   })
   it('names a linked worktree for its repository rather than its folder', async () => {
     const root = await mkdtemp(join(tmpdir(), 'harness-v2-worktree-')); roots.push(root)
@@ -52,5 +56,68 @@ describe('owning-machine project metadata', () => {
     expect(await agentProject(null)).toBeNull()
     expect(await agentProject('relative')).toBeNull()
     expect(await agentProject('/tmp/unsafe\n')).toBeNull()
+  })
+
+  it('checks metadata without running Git again for unchanged historical folders', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'harness-v2-project-cache-')); roots.push(root)
+    let calls = 0
+    const reader = createAgentProjectReader(async cwd => {
+      calls++
+      return { name: 'folder', cwd, root: null, remote: null, branch: null }
+    })
+    await reader.read(root, 0)
+    await reader.read(root, 20_000) // establish stable inputs across a lookup
+    const stable = await reader.read(root, 40_000)
+    expect(calls).toBe(2)
+    expect(await reader.read(root, 60_000)).toBe(stable)
+    expect(calls).toBe(2)
+    await reader.read(root, 90_000) // included config files get a bounded full refresh
+    expect(calls).toBe(3)
+    reader.forget(root)
+    await reader.read(root, 90_001)
+    expect(calls).toBe(4)
+  })
+
+  it('does not extend reuse across a nested repository appearing or a racing checkout', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'harness-v2-project-race-')); roots.push(root)
+    const cwd = join(root, 'nested'); await mkdir(cwd)
+    const marker = join(cwd, '.git')
+    let calls = 0
+    const reader = createAgentProjectReader(async path => {
+      calls++
+      if (calls >= 3) {
+        await writeFile(join(marker, 'HEAD'), `ref: refs/heads/branch-${calls}\n`)
+        return { name: 'nested', cwd: path, root: cwd, remote: null, branch: `branch-${calls - 1}` }
+      }
+      return { name: 'folder', cwd: path, root: null, remote: null, branch: null }
+    })
+    await reader.read(cwd, 0)
+    await reader.read(cwd, 20_000)
+    await reader.read(cwd, 40_000)
+    expect(calls).toBe(2)
+    await mkdir(marker)
+    await writeFile(join(marker, 'HEAD'), 'ref: refs/heads/branch-2\n')
+    await reader.read(cwd, 60_000)
+    expect(calls).toBe(3)
+    await reader.read(cwd, 80_000)
+    await reader.read(cwd, 100_000)
+    expect(calls).toBe(5) // each lookup changed HEAD; none can become a stable cached fact
+  })
+
+  it('shares queued work past TTL and cache capacity instead of duplicating subprocesses', async () => {
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    let calls = 0
+    const reader = createAgentProjectReader(async cwd => {
+      calls++
+      await gate
+      return { name: 'folder', cwd, root: null, remote: null, branch: null } satisfies AgentProject
+    })
+    const first = reader.read('/missing/harness-project-0', 0)
+    const rest = Array.from({ length: 1050 }, (_, i) => reader.read(`/missing/harness-project-${i + 1}`, 0))
+    expect(reader.read('/missing/harness-project-0', 90_000)).toBe(first)
+    expect(calls).toBe(1051)
+    finish()
+    await Promise.all([first, ...rest])
   })
 })

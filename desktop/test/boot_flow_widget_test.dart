@@ -2,6 +2,7 @@ import 'support/resource_picker.dart';
 import 'support/workspace_tools.dart';
 import 'swarm_interactions_test.dart' show chord;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/services.dart';
 
 import 'dart:async';
@@ -22,7 +23,6 @@ import 'package:harness/update/desktop_updater.dart';
 import 'package:harness/update/manual_update_check.dart';
 import 'package:harness/widgets/update_notice.dart';
 import 'package:harness/widgets/bootstrapping_screen.dart';
-import 'package:harness/widgets/terminal_progress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -547,7 +547,7 @@ void main() {
     // the wordmark left when the screen stopped being a logo over a button.
     expect(find.text('Your agents, wherever they run'), findsOneWidget);
     expect(find.text('Sign in'), findsOneWidget);
-    expect(find.byIcon(Icons.login), findsOneWidget);
+    expect(find.byIcon(AppIcons.logIn), findsOneWidget);
   });
 
   testWidgets('bootstrapping shows branded startup screen (pre-login)', (
@@ -566,8 +566,8 @@ void main() {
     // LoginScreen. Keep this on the real RootShell so notifier wiring remains
     // covered as well as the standalone screen's presentation tests.
     expect(find.byType(BootstrappingScreen), findsOneWidget);
-    expect(find.byType(TerminalProgressLine), findsOneWidget);
-    expect(find.text(r'$ harness start'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('Opening your workspace'), findsOneWidget);
     expect(find.text('Opening Harness…'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
   });
@@ -583,8 +583,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text(r'$ harness doctor'), findsOneWidget);
-    expect(find.textContaining('read-only'), findsOneWidget);
+    expect(find.text('Checking this computer'), findsOneWidget);
+    expect(find.text("This check doesn't install anything."), findsOneWidget);
     expect(find.text('ENVIRONMENT SETUP'), findsNothing);
     expect(find.text('Pre-flight check'), findsNothing);
   });
@@ -613,7 +613,7 @@ void main() {
 
       expect(app.status, AppStatus.checkingEnvironment);
       expect(
-        find.text('all checks passed · opening your workspace'),
+        find.text('All checks passed. Opening your workspace…'),
         findsOneWidget,
       );
       expect(find.text('Continue to sign in'), findsNothing);
@@ -870,14 +870,14 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.byType(TerminalProgressLine), findsOneWidget);
+    expect(find.byType(BootstrappingScreen), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
 
     app.status = AppStatus.unauthenticated;
     app.notifyListeners();
     await tester.pump();
 
-    expect(find.byType(TerminalProgressLine), findsNothing);
+    expect(find.byType(BootstrappingScreen), findsNothing);
     expect(find.text('Sign in'), findsOneWidget);
   });
 
@@ -911,10 +911,12 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await chord(tester, LogicalKeyboardKey.keyN);
       await tester.pumpAndSettle();
-      // With no machine to open an agent on, New opens machine setup in the shared picker.
+      // Creation without a machine opens the same picker as Cmd-M.
       expect(resourceScope('@'), findsOneWidget);
-      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      expect(resourceSearch(tester).rows.last.title, 'Add machine');
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       expect(find.text('Add machine · App'), findsOneWidget);
@@ -1018,7 +1020,7 @@ void main() {
   });
 
   testWidgets(
-    'offline selected agent retains its Swarm view with an offline message',
+    'offline selected agent retains its Tab view with an offline message',
     (tester) async {
       final app = makeNotifier(AppStatus.authenticated);
       const machine = Machine(
@@ -1131,7 +1133,7 @@ void main() {
         ),
         findsNothing,
       );
-      expect(resourceSearch(tester).selected!.machineId, machine.machineId);
+      expect(resourceSearch(tester).selected?.machineId, machine.machineId);
       expect(find.text('Offline'), findsWidgets);
       expect(find.text('Harness is offline'), findsNothing);
       expect(find.text('harness start'), findsNothing);
@@ -1183,12 +1185,7 @@ void main() {
 
     await openWorkspaceManagement(tester, 'machines');
     await tester.pumpAndSettle();
-    await selectResource(
-      tester,
-      resourceSearch(tester).rows
-          .firstWhere((row) => row.machineId == 'link-machine')
-          .id,
-    );
+    await selectResource(tester, 'machine:link-machine');
     await tester.tap(
       find.byKey(const ValueKey('resource-action:picker.resource_connect')),
     );
@@ -1268,12 +1265,7 @@ void main() {
 
     await openWorkspaceManagement(tester, 'machines');
     await tester.pumpAndSettle();
-    await selectResource(
-      tester,
-      resourceSearch(tester).rows
-          .firstWhere((row) => row.machineId == 'link-machine')
-          .id,
-    );
+    await selectResource(tester, 'machine:link-machine');
     await tester.tap(
       find.byKey(const ValueKey('resource-action:picker.resource_connect')),
     );

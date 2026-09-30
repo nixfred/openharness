@@ -646,7 +646,9 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
   final lower = text.toLowerCase();
   final branch =
       (harness.agent['project'] as Map?)?['branch'] as String? ?? 'main';
-  final onIt = [verb('Thinking', 200), say('On it — ${text.trim()}', 900)];
+  // What it is on, in a few words of its own — never the person's words said back to them. An
+  // agent repeating what it was told read as a script, the one thing the sample must not.
+  List<SampleStep> onIt(String line) => [verb('Thinking', 200), say(line, 900)];
 
   if (_mentions(lower, ['stop', 'wait', 'pause', 'cancel', 'hold'])) {
     // Asked to stop, the busy harness stops being busy too.
@@ -661,7 +663,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
   }
   if (_mentions(lower, ['diff', 'changes', 'changed'])) {
     return [
-      ...onIt,
+      ...onIt('Here is what changed.'),
       tool('Bash', 'git diff --stat', [
         '${place.file} | 9 ++++++---',
         '${place.testFile} | 14 ++++++++++++++',
@@ -680,7 +682,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
   }
   if (_mentions(lower, ['commit', 'push'])) {
     return [
-      ...onIt,
+      ...onIt('Committing it.'),
       tool('Bash', 'git add -A && git commit -m "Refresh before expiry"', [
         '[$branch 3f9c2e1] Refresh before expiry',
         '2 files changed, 20 insertions(+), 3 deletions(-)',
@@ -690,7 +692,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
   }
   if (_mentions(lower, ['left', 'status', 'remaining', 'progress', 'next'])) {
     return [
-      ...onIt,
+      ...onIt('Here is where it stands.'),
       todos(const [
         Todo('Reproduce the bug', done: true),
         Todo('Fix it', done: true),
@@ -707,7 +709,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
     final adding = _mentions(lower, ['add', 'write', 'new']);
     if (adding) {
       return [
-        ...onIt,
+        ...onIt('Adding tests for it.'),
         tool('Read', place.file, ['Read 96 lines']),
         tool('Write', place.testFile, ['Wrote 34 lines to ${place.testFile}']),
         verb('Testing', 300),
@@ -716,7 +718,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
       ];
     }
     return [
-      ...onIt,
+      ...onIt('Running the tests first.'),
       verb('Testing', 300),
       tool(
         'Bash',
@@ -750,7 +752,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
         )
         .join();
     return [
-      ...onIt,
+      ...onIt('Building `$slug`.'),
       tool('Read', place.file, ['Read 96 lines']),
       tool('Write', file, ['Wrote 42 lines to $file']),
       diff(place.file, [DiffLine(3, '+', "import { $camel } from './$slug';")]),
@@ -763,7 +765,7 @@ List<SampleStep> sampleReply(SampleHarness harness, String text) {
     ];
   }
   return [
-    ...onIt,
+    ...onIt('On it.'),
     tool('Read', place.file, ['Read 96 lines']),
     diff(place.file, place.edit),
     verb('Testing', 300),

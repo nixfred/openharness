@@ -1,8 +1,9 @@
 import 'dart:convert';
 
 import 'local_key_value_store.dart';
+import 'permission_modes.dart';
 
-/// Remembers an agent choice, independently of a machine, profile or permission.
+/// Remembers agent choices and each agent's last explicit approval mode.
 class AgentPreference {
   AgentPreference(this.storage);
   final LocalKeyValueStore? storage;
@@ -19,12 +20,28 @@ class AgentPreference {
   bool advancedOpen = false;
   List<String> recentHarnesses = const [];
   final _enginesByHarness = <String, String>{};
+  final _permissionsByEngine = <String, String>{};
+  String? permissionModeFor(String engine) => _permissionsByEngine[engine];
   String? engineFor(String? harnessId) =>
       _enginesByHarness[harnessId ?? 'coding'];
 
   /// The agents harnesses were created with, most recent first — what New
   /// Harness lists before anything is typed.
   List<String> recent = const [];
+
+  List<String>? _recentChoices;
+
+  /// Actual launch choices, interleaving coding agents and specialized
+  /// harnesses. A harness's backend is not a second launch by the user.
+  /// Older preferences recorded the two lists separately; preserve their last
+  /// known choice first when migrating that history.
+  List<String> get recentChoices =>
+      _recentChoices ??
+      <String>{
+        ?harness ?? value,
+        ...recentHarnesses,
+        ...recent,
+      }.take(recentCapacity).toList(growable: false);
 
   Future<void>? _loading;
   Future<void> _writes = Future.value();
@@ -90,7 +107,23 @@ class AgentPreference {
           : null;
       recent = ids(data['agents'], false);
       recentHarnesses = ids(data['harnesses'], true);
+      if (data['choices'] case final List choices) {
+        _recentChoices = choices
+            .whereType<String>()
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .take(recentCapacity)
+            .toList(growable: false);
+      }
       advancedOpen = data['advancedOpen'] == true;
+      if (data['permissionsByEngine'] case final Map permissions) {
+        for (final engine in kEnginePermissionModes.keys) {
+          final mode = permissions[engine];
+          if (permissionModesOf(engine).any((item) => item.id == mode)) {
+            _permissionsByEngine[engine] = mode as String;
+          }
+        }
+      }
       if (data['enginesByHarness'] case final Map choices) {
         for (final entry in choices.entries) {
           if (entry.key is String &&
@@ -116,6 +149,17 @@ class AgentPreference {
     return _save();
   }
 
+  /// Explicit composer selections become the next form's defaults without
+  /// recording an agent launch or changing the recent-use order.
+  Future<void> selectLaunch(String engine, {String? harnessId}) async {
+    await load();
+    _revision++;
+    value = engine;
+    harness = harnessId;
+    _enginesByHarness[harnessId ?? 'coding'] = engine;
+    await _save();
+  }
+
   /// [agent] was just used to create a harness: it moves to the front of
   /// [recent].
   Future<void> remember(String agent, {String? harnessId}) async {
@@ -125,6 +169,11 @@ class AgentPreference {
       harnessId = agent;
       agent = value ?? '';
     }
+    final choice = harnessId ?? agent;
+    _recentChoices = <String>{
+      if (choice.isNotEmpty) choice,
+      ...recentChoices,
+    }.take(recentCapacity).toList(growable: false);
     harness = harnessId;
     if (agent.isNotEmpty) {
       value = agent;
@@ -150,14 +199,24 @@ class AgentPreference {
     await _save();
   }
 
+  Future<void> selectPermissionMode(String engine, String mode) async {
+    if (!permissionModesOf(engine).any((item) => item.id == mode)) return;
+    await load();
+    _permissionsByEngine[engine] = mode;
+    _revision++;
+    await _save();
+  }
+
   Future<void> _save() {
     final snapshot = jsonEncode({
       'engine': value,
       'harness': harness,
       'agents': recent,
       'harnesses': recentHarnesses,
+      'choices': recentChoices,
       'enginesByHarness': _enginesByHarness,
       'advancedOpen': advancedOpen,
+      'permissionsByEngine': _permissionsByEngine,
     });
     return _writes = _writes.then((_) async {
       try {

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,9 @@ import '../core/models.dart';
 import '../core/test_run.dart';
 import '../shortcuts/app_keymap.dart';
 import '../shortcuts/keymap.dart';
+import '../models/api_connections_controller.dart'
+    show ApiModels, contextWindowLabel;
+import '../models/local_model.dart';
 import '../models/model_search_catalog.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/app_state.dart';
@@ -22,6 +26,8 @@ import 'api_picker_form.dart';
 import 'swarm_search_preview.dart';
 import 'swarm_preview_scroll.dart';
 import 'terminal_text_action.dart';
+import 'desktop_chrome.dart';
+import 'key_hints.dart';
 
 const resourcePickerCommands = {
   'picker.resource_toggle',
@@ -77,6 +83,8 @@ class SwarmResourcePreview extends StatefulWidget {
     required this.onRefocus,
     required this.onModalChanged,
     required this.onCommands,
+    this.resourcePollInterval,
+    this.onViewMachine,
   });
   final SwarmSearchController search;
   final SearchPreviewControls controls;
@@ -84,6 +92,14 @@ class SwarmResourcePreview extends StatefulWidget {
   final VoidCallback onRefocus;
   final ValueChanged<bool> onModalChanged;
   final VoidCallback onCommands;
+
+  /// Override the resource refresh cadence for an isolated fixture. Omitted
+  /// intervals poll every ten seconds in the app and stay disabled in tests.
+  final Duration? resourcePollInterval;
+
+  /// Where View takes a machine instead of scoping the picker to it, when
+  /// the host composition asks for that ([WorkspaceChrome.viewMachineCloses]).
+  final ValueChanged<String>? onViewMachine;
 
   @override
   State<SwarmResourcePreview> createState() => _SwarmResourcePreviewState();
@@ -144,16 +160,44 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     widget.onRefocus();
   }
 
-  void _focusActions({bool last = false}) {
+  bool _isOnline(MachineState machine) =>
+      machine.nodeOnline != false &&
+      !machine.needsLink &&
+      machine.connectionStatus == ConnectionStatus.connected;
+
+  /// Scope the picker to this machine's harnesses — the same list Enter on
+  /// a project/machine group opens, so Rename/Delete are not the only doors.
+  void _viewMachine() {
+    final selected = row;
+    if (selected == null) return;
+    if (widget.onViewMachine case final view?) {
+      view(selected.machineId!);
+      return;
+    }
+    if (!widget.search.scopeToGroup(selected.id)) return;
+    widget.onRefocus();
+  }
+
+  void _focusActions() {
     final selectedId = row?.id;
     if (selectedId == null) return;
-    void focus() {
+    void focus({bool afterBuild = false}) {
       if (!mounted || row?.id != selectedId) return;
       final actions = _visibleActions()
           .where((a) => a.onPressed != null)
           .toList();
-      final action = last ? actions.lastOrNull : actions.firstOrNull;
+      final action = actions.firstOrNull;
       final node = action == null ? _actionFocus : _buttonFocus[action.command];
+      // A selection can arrive immediately before Return, before its preview
+      // has built these buttons. Retry once after that frame rather than
+      // focusing an unattached scope and losing the first keyboard action.
+      if (!afterBuild && action != null && node?.context == null) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => focus(afterBuild: true),
+        );
+        WidgetsBinding.instance.ensureVisualUpdate();
+        return;
+      }
       (node ?? _actionFocus).requestFocus();
       if (node?.context case final context?) Scrollable.ensureVisible(context);
     }
@@ -166,15 +210,11 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     }
   }
 
-  bool _traverseActions(bool forward, {bool stay = false}) {
+  bool _traverseActions(bool forward) {
     if (row == null ||
         widget.search.showsTypeHints ||
         !widget.search.supportsPreview) {
       return false;
-    }
-    if (!_actionFocus.hasFocus) {
-      _focusActions(last: !forward);
-      return true;
     }
     final actions = _visibleActions()
         .where((a) => a.onPressed != null)
@@ -185,9 +225,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     final next = index < 0
         ? (forward ? 0 : actions.length - 1)
         : index + (forward ? 1 : -1);
-    if (next < 0 || next >= actions.length) {
-      if (!stay) widget.onRefocus();
-    } else {
+    if (next >= 0 && next < actions.length) {
       final node = _buttonFocus[actions[next].command]!;
       node.requestFocus();
       if (node.context case final context?) Scrollable.ensureVisible(context);
@@ -239,9 +277,12 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     widget.controls.dispatch = _dispatch;
     widget.controls.commands = _commands;
     widget.search.addListener(_searchChanged);
-    if (!kUnderTest) {
+    final interval =
+        widget.resourcePollInterval ??
+        (kUnderTest ? null : const Duration(seconds: 10));
+    if (interval != null) {
       _resourceTimer = Timer.periodic(
-        const Duration(seconds: 10),
+        interval,
         (_) => unawaited(_readResources()),
       );
     }
@@ -250,12 +291,24 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   SwarmPreviewScrollController _scrollController() =>
       SwarmPreviewScrollController(
         search: widget.search,
-        lineHeight: () => terminalCellSizeOf(context).height,
+        lineHeight: () => DesktopChrome.of(context)
+            ? MediaQuery.textScalerOf(context).scale(13) * 1.5
+            : terminalCellSizeOf(context).height,
       );
 
   @override
   void didUpdateWidget(SwarmResourcePreview oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.controls != widget.controls) {
+      if (oldWidget.controls.dispatch == _dispatch) {
+        oldWidget.controls.dispatch = null;
+      }
+      if (oldWidget.controls.commands == _commands) {
+        oldWidget.controls.commands = null;
+      }
+      widget.controls.dispatch = _dispatch;
+      widget.controls.commands = _commands;
+    }
     if (oldWidget.search != widget.search) {
       oldWidget.search.removeListener(_searchChanged);
       widget.search.addListener(_searchChanged);
@@ -266,8 +319,10 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
 
   @override
   void dispose() {
-    widget.controls.dispatch = null;
-    widget.controls.commands = null;
+    // A new palette can register its preview before the previous overlay is
+    // disposed. Only release this preview's own callbacks.
+    if (widget.controls.dispatch == _dispatch) widget.controls.dispatch = null;
+    if (widget.controls.commands == _commands) widget.controls.commands = null;
     widget.search.removeListener(_searchChanged);
     _resourceTimer?.cancel();
     _actionFocus.dispose();
@@ -300,7 +355,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       return true;
     }
     if (command == 'picker.resource_add_api' && widget.search.isModelMode) {
-      _editApi(null);
+      _addApi();
       return true;
     }
     if (command == 'picker.focus_actions') {
@@ -309,7 +364,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     }
     if (_actionFocus.hasFocus &&
         (command == 'picker.next' || command == 'picker.previous')) {
-      return _traverseActions(command == 'picker.next', stay: true);
+      return _traverseActions(command == 'picker.next');
     }
     if (command == 'picker.cancel') {
       if (!_actionFocus.hasFocus) return false;
@@ -317,6 +372,9 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       return true;
     }
     if (command == 'picker.accept') {
+      // An empty result remains an inert picker, including the native command
+      // bridge. Consume Return so it cannot escape to the workspace beneath it.
+      if (row == null) return true;
       if (_actionFocus.hasFocus) {
         if (_focusedResource != row?.id) {
           widget.onRefocus();
@@ -328,8 +386,12 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         action?.onPressed?.call();
         return true;
       }
+      // Get on a model the harness can run is Get and Use in one step: the choose path, as Use is.
       if (widget.search.canSelectModel(row) ||
-          widget.search.isModelDownloadsRow(row)) {
+          widget.search.canGetModelForUse(row) ||
+          widget.search.isModelDownloadsRow(row) ||
+          widget.search.isGridSetupRow(row) ||
+          widget.search.canExpandApi(row)) {
         _open();
         return true;
       }
@@ -338,7 +400,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           final selected = row!;
           unawaited(_run(() => widget.search.getModel(selected)));
         }
-        if (row?.isCreate == true) _editApi(null);
+        if (row?.isCreate == true) _addApi();
         // Model rows perform Use/Get directly; unavailable rows stay put.
         return true;
       }
@@ -397,17 +459,17 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       for (final filter in SessionFilter.values)
         _ResourceAction(
           switch (filter) {
-            SessionFilter.all => 'Show all sessions',
-            SessionFilter.needsInput => 'Show sessions needing input',
-            SessionFilter.running => 'Show running sessions',
-            SessionFilter.paused => 'Show paused sessions',
+            SessionFilter.all => 'Show all harnesses',
+            SessionFilter.needsInput => 'Show harnesses needing input',
+            SessionFilter.running => 'Show running harnesses',
+            SessionFilter.paused => 'Show paused harnesses',
           },
           () => widget.search.setSessionFilter(filter),
           command: 'picker.filter.${filter.name}',
         ),
       for (final sort in SessionSort.values)
         _ResourceAction(
-          'Sort sessions: ${sort.label}',
+          'Sort harnesses: ${sort.label}',
           () => widget.search.setSessionSort(sort),
           command: 'picker.sort.${sort.name}',
         ),
@@ -432,6 +494,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           title:
               {
                     'picker.resource_toggle',
+                    'picker.resource_view',
                     'picker.resource_rename',
                     'picker.resource_settings',
                     'picker.resource_remove',
@@ -455,6 +518,9 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       _pending.add(id);
       _errors.remove(id);
     });
+    // A control becomes disabled while its request is running. Return to the
+    // query before Flutter drops that button's focus into an unnamed scope.
+    if (_actionFocus.hasFocus) widget.onRefocus();
     String? error;
     try {
       error = await action();
@@ -478,8 +544,8 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
 
   HarnessSession? get _session {
     final selected = row;
-    if (selected?.agentId == null) return null;
-    final machine = app.stateOf(selected!.machineId!);
+    if (selected == null || selected.agentId == null) return null;
+    final machine = app.stateOf(selected.machineId!);
     final agent = machine?.agents
         .where((agent) => agent.id == selected.agentId)
         .firstOrNull;
@@ -553,6 +619,52 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   Widget _actionButtons() {
     final target = row?.id;
     final cell = terminalCellSizeOf(context);
+    final desktop = DesktopChrome.of(context);
+    Widget button(_ResourceAction action) {
+      final node = _buttonFocus.putIfAbsent(
+        action.command,
+        () => FocusNode(debugLabel: action.label),
+      );
+      final VoidCallback? invoke = action.onPressed == null
+          ? null
+          : () {
+              if (row?.id != target) return;
+              // Resolve again so stale widgets cannot act on an old resource.
+              final current = _visibleActions()
+                  .where((a) => a.command == action.command)
+                  .firstOrNull;
+              current?.onPressed?.call();
+            };
+      if (desktop) {
+        final shortcut = effectiveCommandHint(
+          context,
+          action.command,
+          contextKind: KeymapContext.picker,
+        );
+        return Semantics(
+          liveRegion: action.label == 'Working…',
+          child: DesktopPill(
+            key: ValueKey('resource-action:${action.command}'),
+            focusNode: node,
+            label: action.label,
+            compact: true,
+            onPressed: invoke,
+            foregroundColor: action.command == 'picker.resource_remove'
+                ? Theme.of(context).colorScheme.error
+                : null,
+            tooltip: [action.label, ?shortcut].join(' · '),
+          ),
+        );
+      }
+      return TerminalTextAction(
+        key: ValueKey('resource-action:${action.command}'),
+        focusNode: node,
+        label: action.label,
+        padding: EdgeInsets.zero,
+        onPressed: invoke,
+      );
+    }
+
     final controls = Focus(
       focusNode: _actionFocus,
       onFocusChange: (focused) {
@@ -561,34 +673,13 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       },
       child: Wrap(
         key: const ValueKey('swarm-search-resource-actions'),
-        spacing: cell.width * 2,
-        runSpacing: cell.height,
-        children: [
-          for (final action in _visibleActions())
-            TerminalTextAction(
-              key: ValueKey('resource-action:${action.command}'),
-              focusNode: _buttonFocus.putIfAbsent(
-                action.command,
-                () => FocusNode(debugLabel: action.label),
-              ),
-              label: action.label,
-              padding: EdgeInsets.zero,
-              onPressed: action.onPressed == null
-                  ? null
-                  : () {
-                      if (row?.id != target) return;
-                      // Resolve again so stale widgets cannot operate on an old resource.
-                      final current = _visibleActions()
-                          .where((a) => a.command == action.command)
-                          .firstOrNull;
-                      current?.onPressed?.call();
-                    },
-            ),
-        ],
+        spacing: desktop ? 8 : cell.width * 2,
+        runSpacing: desktop ? 8 : cell.height,
+        children: [for (final action in _visibleActions()) button(action)],
       ),
     );
-    void next() => _traverseActions(true, stay: true);
-    void previous() => _traverseActions(false, stay: true);
+    void next() => _traverseActions(true);
+    void previous() => _traverseActions(false);
     if (KeymapTheme.of(context) != null) {
       return KeymapRegion(
         contextKind: KeymapContext.picker,
@@ -614,6 +705,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   }
 
   Widget _controlHints() {
+    final desktop = DesktopChrome.of(context);
     String? key(String command) => effectiveCommandHint(
       context,
       command,
@@ -629,27 +721,30 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           key('picker.control_next') != null)
         '${key('picker.control_previous')}/${key('picker.control_next')} move',
       if (starting)
-        'Starting…'
+        widget.search.usingLabel ?? 'Starting…'
       else if (key('picker.accept') case final enter?
           when managing ||
               row?.isModel != true ||
               widget.search.canSelectModel(row) ||
               widget.search.canGetModel(row) ||
-              widget.search.isModelDownloadsRow(row))
+              widget.search.isModelDownloadsRow(row) ||
+              widget.search.isGridSetupRow(row) ||
+              widget.search.canExpandApi(row))
         '$enter ${managing
             ? 'select'
             : widget.search.canSelectModel(row)
             ? 'Use'
             : widget.search.canGetModel(row)
             ? 'Get'
-            : widget.search.isModelDownloadsRow(row)
+            : widget.search.isModelDownloadsRow(row) || widget.search.isGridSetupRow(row) || widget.search.canExpandApi(row)
             ? widget.search.actionLabel(row)
             : _isManagement
             ? _machineSetup
                   ? 'setup'
                   : 'Manage'
             : widget.search.actionLabel(row)}',
-      if (key('picker.complete') case final tab?) '$tab pane',
+      if (key('picker.complete') case final tab?)
+        '$tab ${desktop ? 'controls' : 'pane'}',
       if (key('picker.cancel') case final escape? when managing || starting)
         '$escape ${starting ? 'cancel' : 'back'}',
     ];
@@ -660,15 +755,15 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     );
     return Padding(
       padding: EdgeInsets.symmetric(
-        horizontal: cell.width * 2,
-        vertical: cell.height,
+        horizontal: desktop ? 18 : cell.width * 2,
+        vertical: desktop ? 12 : cell.height,
       ),
       child: Text(
         hints.join('  ·  '),
         key: const ValueKey('resource-control-hints'),
-        style: terminalContentStyle(
-          color: theme.foreground.withValues(alpha: .54),
-        ),
+        style: desktop
+            ? DesktopChrome.text(size: 11, color: DesktopChrome.muted)
+            : terminalContentStyle(color: theme.muted),
       ),
     );
   }
@@ -676,17 +771,27 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   List<_ResourceAction> _actions() {
     final search = widget.search;
     final selected = row;
-    final busy = _pending.contains(selected?.id ?? search.title);
+    if (selected == null) return const [];
+    final busy = _pending.contains(selected.id);
     if (search.isModelDownloadsRow(selected)) {
       return [
         _ResourceAction(
-          search.modelDownloadsVisible ? 'Hide catalog' : 'Get models',
+          search.actionLabel(selected),
           _open,
           command: 'picker.accept',
         ),
       ];
     }
-    if (selected?.isCreate == true) {
+    if (search.isGridSetupRow(selected)) {
+      return [
+        _ResourceAction(
+          search.actionLabel(selected),
+          search.models!.manager.settingUpGrid || app.signingIn ? null : _open,
+          command: 'picker.accept',
+        ),
+      ];
+    }
+    if (selected.isCreate) {
       if (search.isMachineMode) {
         return [
           _ResourceAction(
@@ -705,14 +810,14 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         return [
           _ResourceAction(
             'Add',
-            busy ? null : () => _editApi(null),
+            busy ? null : _addApi,
             command: 'picker.accept',
           ),
         ];
       }
       return [
         _ResourceAction(
-          selected!.title.replaceFirst('New ', 'Create '),
+          selected.title.replaceFirst('New ', 'Create '),
           busy ? null : _open,
           command: 'picker.accept',
         ),
@@ -720,11 +825,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     }
     if (search.isStoreMode) {
       return [
-        _ResourceAction(
-          'Open in Store',
-          selected == null ? null : _open,
-          command: 'picker.accept',
-        ),
+        _ResourceAction('Open in Store', _open, command: 'picker.accept'),
       ];
     }
     if (search.isModelMode) {
@@ -760,7 +861,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                         (get
                             ? local.canStart
                             : search.canSelectModel(selected)))
-                ? !stop && !get
+                ? !stop && (!get || search.canGetModelForUse(selected))
                       ? _open
                       : () => unawaited(
                           _run(() async {
@@ -776,8 +877,23 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           ),
         ];
       }
+      if (model?.apiModel != null) {
+        return [
+          _ResourceAction(
+            'Use',
+            !busy && search.canSelectModel(selected) ? _open : null,
+            command: 'picker.accept',
+          ),
+        ];
+      }
       if (api != null) {
         return [
+          if (search.canExpandApi(selected))
+            _ResourceAction(
+              search.actionLabel(selected),
+              _open,
+              command: 'picker.accept',
+            ),
           _ResourceAction(
             'Edit',
             busy ? null : () => _editApi(api.id),
@@ -805,11 +921,17 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         ),
       ];
     }
-    if (selected?.isMachine == true) {
-      final machine = app.stateOf(selected!.machineId!);
+    if (selected.isMachine) {
+      final machine = app.stateOf(selected.machineId!);
       if (machine == null) return [];
       final secondary = _secondaryActions();
       return [
+        if (_isOnline(machine))
+          _ResourceAction(
+            'View',
+            _viewMachine,
+            command: 'picker.resource_view',
+          ),
         ...secondary.where((a) => a.command == 'picker.resource_connect'),
         ...secondary.where((a) => a.command == 'picker.resource_settings'),
         if (!machine.machine.isShared)
@@ -837,7 +959,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       _ResourceAction(
         session?.needsInput == true
             ? 'Answer'
-            : selected?.isProject == true
+            : selected.isProject
             ? 'Harnesses'
             : session?.agent.isStopped == true
             ? 'Resume & open'
@@ -865,6 +987,8 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     ];
   }
 
+  void _addApi() => _editApi(null);
+
   void _editApi(String? id, {bool removing = false}) {
     final catalog = widget.search.models;
     if (catalog == null) return;
@@ -883,6 +1007,9 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       _apiFormOpen = false;
       _apiResource = null;
     });
+    // The editor owned the keys, and a removed widget reports no focus change: hand them back to
+    // the list, or arrows keep acting for a pane that is no longer there.
+    widget.search.setManaging(false);
     if (id?.isNotEmpty == true) {
       final search = widget.search;
       if (!search.rows.any((row) => row.modelId == 'model:api:$id')) {
@@ -915,7 +1042,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         if (selected?.isCreate != true)
           _ResourceAction(
             'Add API connection',
-            () => _editApi(null),
+            _addApi,
             command: 'picker.resource_add_api',
           ),
         if (model?.api case final api?) ...[
@@ -1008,12 +1135,50 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   }
 
   Widget _modelPreview() {
-    final catalog = widget.search.models!;
-    if (widget.search.isModelDownloadsRow(row)) {
+    final catalog = widget.search.models;
+    if (catalog == null) return _details(['No matching models']);
+    if (widget.search.isGridSetupRow(row)) {
+      final manager = catalog.manager;
+      final here = thisComputerName();
+      // Signed out of Harness: the set-up is done with the Harness account, so this starts there.
+      // What a person reads names Harness only; Grid is how it works, not what they chose.
+      final signedOut = app.isGuest;
       return _details([
-        'Get models',
-        'Browse models available to download on your machines.',
+        'Local & shared models',
+        'Download models to run on $here, and use the models other people share with you.',
+        '',
+        if (signedOut) ...[
+          "You're using Harness on this computer only. Local and shared models belong to your "
+              'Harness account, so you need to sign in to use them.',
+          "Sign in opens in your browser. Setup finishes here on its own once you're signed in.",
+        ] else
+          "Set up gets $here ready for them with your Harness account. You won't be asked to "
+              'sign in again.',
+        if (manager.settingUpGrid) ...[
+          '',
+          'Setting up…',
+        ] else if (manager.setUpWaitsForSignIn) ...[
+          '',
+          'Signing in… Finish in your browser, and setup continues here.',
+        ] else if (!signedOut && manager.gridSetupError != null) ...[
+          '',
+          'Could not set up: ${manager.gridSetupError}',
+        ],
       ], controls: true);
+    }
+    if (widget.search.isModelDownloadsRow(row)) {
+      return _details(
+        widget.search.modelDownloadsVisible
+            ? [
+                'Show fewer',
+                'Keep only the catalog\'s top ${SwarmSearchController.shownDownloads} in the list.',
+              ]
+            : [
+                'More models',
+                'The rest of the models the grid catalog ranks for this machine, best first.',
+              ],
+        controls: true,
+      );
     }
     final entry = model;
     if (entry == null) {
@@ -1021,88 +1186,326 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         catalog.manager.scanning ? 'Finding models…' : 'No matching models',
       ]);
     }
+    final desktop = DesktopChrome.of(context);
+    final cell = desktop ? const Size(8, 16) : terminalCellSizeOf(context);
+    final theme = terminalThemeFor(
+      grid.AppTheme.palette.value,
+      terminalThemeStore.value,
+    );
     final local = entry.local;
     final owner = entry.controller ?? catalog.manager;
     final operation = local == null ? null : owner.operationFor(local);
     final pending = local != null && owner.pendingId == local.id;
-    String window(double seconds) => seconds % 86400 == 0
-        ? '${(seconds / 86400).toInt()}d'
-        : seconds % 3600 == 0
-        ? '${(seconds / 3600).toInt()}h'
-        : '${seconds.toInt()}s';
+    final opActive = operation?.active == true;
+    // API entries have their own dedicated preview; keep main's dispatch.
+    if (entry.api != null) return _apiPreview(entry);
+
+    String windowLabel(double? seconds) {
+      if (seconds == null) return '—';
+      if (seconds > 0 && seconds % 86400 == 0) {
+        return '${(seconds / 86400).toInt()}d';
+      }
+      if (seconds > 0 && seconds % 3600 == 0) {
+        return '${(seconds / 3600).toInt()}h';
+      }
+      return '${(seconds / 60).round()}m';
+    }
+
+    final inUse = widget.search.modelRowInUse(row!);
+    // The daemon refuses a download without its size and a gigabyte to spare; say so before Get.
+    final size = local?.sizeBytes, free = owner.freeDiskBytes;
+    final diskShort =
+        local != null &&
+        !local.downloaded &&
+        !pending &&
+        !opActive &&
+        size != null &&
+        free != null &&
+        size + _kGiB > free;
+    // "this Mac" in a sentence, "This Mac" as a value; another machine by its name.
+    final machineName =
+        identical(owner, catalog.manager) &&
+            (owner.machine?.isLocalMachine ?? true)
+        ? thisComputerName()
+        : entry.node ?? 'its machine';
+    final machineTitle = machineName == thisComputerName()
+        ? '${machineName[0].toUpperCase()}${machineName.substring(1)}'
+        : machineName;
+
+    // The status word is the catalog's own [localStatus] so the pane and the
+    // list row can never disagree (both come from the same [_refresh] snapshot);
+    // no re-derivation from a possibly-stale operation on the pane side.
+    final statusWord = local != null
+        ? catalog.localStatus(local, controller: owner)
+        : entry.status;
+
+    Widget labelValue(String label, String value) {
+      if (desktop) return _desktopDetail(label, value);
+      return Padding(
+        padding: EdgeInsets.only(bottom: cell.height * .6),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            SizedBox(
+              width: cell.width * 9,
+              child: Text(
+                label,
+                style: terminalContentStyle(color: theme.muted),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: terminalContentStyle(color: theme.foreground),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget errorLine(String text) {
+      return Padding(
+        padding: EdgeInsets.only(top: cell.height),
+        child: Text(
+          text,
+          style: desktop
+              ? DesktopChrome.text(
+                  size: 12,
+                  color: Theme.of(context).colorScheme.error,
+                )
+              : terminalContentStyle(color: theme.yellow),
+        ),
+      );
+    }
+
+    return ListView(
+      controller: _scroll,
+      padding: EdgeInsets.symmetric(
+        horizontal: cell.width * 2,
+        vertical: cell.height,
+      ),
+      children: [
+        Text(
+          entry.name,
+          style: desktop
+              ? DesktopChrome.text(size: 15, medium: true)
+              : terminalContentStyle(color: theme.foreground)
+                    .copyWith(fontWeight: FontWeight.bold),
+        ),
+        SizedBox(height: cell.height),
+        Text(
+          inUse ? '$statusWord · this harness is on it' : statusWord,
+          style: desktop
+              ? DesktopChrome.text(size: 12, color: DesktopChrome.muted)
+              : terminalContentStyle(color: theme.foreground),
+        ),
+        if (widget.search.modelUseErrorId == entry.id &&
+            widget.search.modelUseError != null)
+          errorLine(widget.search.modelUseError!),
+        SizedBox(height: cell.height),
+        if (local != null) ...[
+          // What decides between models: what it costs to get, whether it fits, how fast it answers.
+          if (local.sizeBytes case final size?)
+            labelValue(
+              local.downloaded ? 'Size' : 'Download',
+              [
+                gigabytesLabel(size),
+                if (!local.downloaded && owner.freeDiskBytes != null)
+                  '${gigabytesLabel(owner.freeDiskBytes!)} free',
+              ].join(' · '),
+            ),
+          if ((local.sizeBytes, owner.memoryBytes) case (
+            final size?,
+            final memory?,
+          ))
+            labelValue(
+              'Memory',
+              '${size <= memory ? 'fits' : 'needs ${gigabytesLabel(size)}'} · '
+                  '$machineName has ${gigabytesLabel(memory)}',
+            ),
+          if (local.running && local.tokensPerSecond != null)
+            labelValue(
+              'Speed',
+              '${local.tokensPerSecond!.toStringAsFixed(1)} tok/s',
+            )
+          else if (local.estTokS case final estimate?)
+            labelValue(
+              'Speed',
+              '~${estimate.round()} tok/s on $machineName (estimate)',
+            ),
+          if (local.contextWindow case final window?)
+            labelValue('Context', contextWindowLabel(window.toInt())),
+          if (local.paramsB case final params?)
+            labelValue(
+              'Params',
+              '${params == params.roundToDouble() ? params.toInt() : params}B',
+            ),
+          labelValue('Quant', local.quantization ?? '—'),
+          labelValue('Machine', machineTitle),
+          if (local.running &&
+              local.requests != null &&
+              local.windowSeconds != null)
+            labelValue(
+              'Window',
+              '${local.requests!.toInt()} req / ${windowLabel(local.windowSeconds)}',
+            ),
+          if (local.resting)
+            labelValue('State', 'Resting until your next message'),
+          if (diskShort)
+            errorLine('Free up disk space on $machineName to get it.')
+          else if (!local.downloaded &&
+              !owner.supportsDownload &&
+              local.canStart &&
+              !pending &&
+              !opActive)
+            errorLine(
+              'Downloads and starts on ${entry.node ?? 'this machine'}.',
+            ),
+          if (_enterSentence(local) case final sentence?) ...[
+            SizedBox(height: cell.height * .4),
+            Text(
+              sentence,
+              style: desktop
+                  ? DesktopChrome.text(size: 12, color: DesktopChrome.muted)
+                  : terminalContentStyle(color: theme.foreground),
+            ),
+          ],
+        ] else ...[
+          if (!desktop || entry.node != null || entry.source == 'Local')
+            labelValue(
+              'Machine',
+              entry.node ??
+                  (entry.source == 'Local' ? machineTitle : entry.source),
+            ),
+          if (entry.subscription case final subscription?) ...[
+            ...((subscription['details'] as List?) ?? const [])
+                .map((d) => '$d')
+                .where((d) => d != entry.status)
+                .take(3)
+                .map((d) => labelValue('Detail', d)),
+          ],
+          labelValue('Source', entry.source),
+        ],
+        if (widget.search.modelUseReason(row) case final reason?
+            when reason != 'No active harness' &&
+                reason != entry.status &&
+                reason != 'Tools only' &&
+                reason != 'Download first')
+          errorLine(switch (reason) {
+            'Claude only' => 'Use this subscription in a Claude harness.',
+            'Codex only' => 'Use this subscription in a Codex harness.',
+            'Other account' =>
+              'This account is not signed in on the harness’s machine.',
+            'Not serving' => 'Not serving on ${entry.node ?? 'its host'}.',
+            _ => reason,
+          }),
+        if (entry.own && local == null && owner.scanning)
+          errorLine('Finding model controls…'),
+        if (!identical(owner, catalog.manager)) ...[
+          if (owner.machine?.connectionStatus != ConnectionStatus.connected)
+            errorLine('Connect to ${entry.node} to manage its models.')
+          else if (owner.error case final err?)
+            errorLine(err),
+        ],
+        if (operation?.error case final err?) errorLine(err),
+        if (catalog.manager.error case final err?) errorLine(err),
+        if (!desktop) ...[SizedBox(height: cell.height), _actionButtons()],
+      ],
+    );
+  }
+
+  static const _kGiB = 1024 * 1024 * 1024;
+
+  /// What Enter does on a model of yours, in words, under its facts. Nothing when it does nothing.
+  String? _enterSentence(LocalModel local) {
+    final search = widget.search;
+    final selected = row;
+    if (selected == null || search.modelRowInUse(selected)) return null;
+    // One local model runs at a time: a second one waits for the first to stop.
+    final other = search.otherRunningModel(selected)?.name;
+    if (search.canGetModelForUse(selected)) {
+      return 'Get downloads it, starts it, and moves this harness onto it.';
+    }
+    if (search.canGetModel(selected)) {
+      return other == null
+          ? 'Get downloads it.'
+          : 'Get downloads it. Stop $other to run it: one local model runs at a time.';
+    }
+    if (search.canSelectModel(selected)) {
+      return local.running
+          ? 'Use moves this harness onto it.'
+          : other == null
+          ? 'Use starts it and moves this harness onto it.'
+          : 'Stop $other first: one local model runs at a time.';
+    }
+    return null;
+  }
+
+  static const _kDetailLabelColumns = 9;
+
+  /// A saved API, or one of its models: a summary line, then labelled facts, then what it is for.
+  Widget _apiPreview(ModelSearchEntry entry) {
+    final api = entry.api!;
+    final listed = widget.search.models!.manager.apis.models[api.id];
+    final model = entry.apiModel;
+    if (model != null) {
+      final reason = widget.search.modelUseReason(row);
+      return _details([
+        entry.name,
+        [
+          api.name,
+          if (model.contextWindow case final window?)
+            '${contextWindowLabel(window)} context',
+        ].join(' · '),
+        '',
+        if (model.name case final name?) ('Name', name),
+        ('Via', '${api.name} · ${api.host}'),
+        '',
+        if (reason == null)
+          'Use runs this harness on it, with the key saved on '
+              '${widget.search.models!.manager.apis.hostLabel}.'
+        else if (reason == 'Other machine')
+          'Its key is saved on ${widget.search.models!.manager.apis.hostLabel}, '
+              'so only the harnesses there can run on it.'
+        else
+          reason,
+      ], controls: true);
+    }
+    final count = listed?.models.length ?? 0;
+    // One line for what the API is for: a harness runs on its models (Use), or harness agents call
+    // it (Tools) — fal.ai, Replicate, and any API that lists no models a coding agent can run on.
+    final summary = !api.servesModels || count > 0
+        ? null
+        : switch (listed) {
+            ApiModels(loading: true) => 'Loading models…',
+            ApiModels(error: _?) => 'Models unavailable',
+            _ => null,
+          };
     return _details([
       entry.name,
-      if (widget.search.modelUseErrorId == entry.id)
-        ?widget.search.modelUseError,
-      [
-        if (local == null) entry.source,
-        ?entry.node,
-        if (local?.sizeBytes case final size?)
-          '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB',
-      ].join(' · '),
-      if (local != null) ...[
-        if (local.running &&
-            (local.tokensPerSecond != null || local.requests != null))
-          [
-            if (local.tokensPerSecond case final speed?)
-              '${speed.toStringAsFixed(1)} tok/s',
-            if (local.requests != null && local.windowSeconds != null)
-              '${local.requests!.toInt()} requests / ${window(local.windowSeconds!)}',
-          ].join(' · '),
-        if (local.resting) 'Resting until your next message',
-        if (pending || operation?.active == true || operation?.failed == true)
-          catalog.localStatus(local, controller: owner),
-        ?operation?.error,
-        if (!local.downloaded &&
-            !owner.supportsDownload &&
-            local.canStart &&
-            !pending &&
-            operation?.active != true)
-          'Downloads and starts on ${entry.node ?? 'this machine'}.',
-      ] else if (entry.status != 'Available')
-        entry.status,
-      if (widget.search.modelUseReason(row) case final reason?
-          when reason != 'No active harness' &&
-              reason != entry.status &&
-              reason != 'Tools only' &&
-              reason != 'Download first')
-        switch (reason) {
-          'Claude only' => 'Use this subscription in a Claude harness.',
-          'Codex only' => 'Use this subscription in a Codex harness.',
-          'Other account' =>
-            'This account is not signed in on the harness’s machine.',
-          'Not serving' => 'Not serving on ${entry.node ?? 'its host'}.',
-          _ => reason,
-        },
-      if (entry.own && local == null && owner.scanning)
-        'Finding model controls…',
-      if (!identical(owner, catalog.manager)) ...[
-        if (owner.machine?.connectionStatus != ConnectionStatus.connected)
-          'Connect to ${entry.node} to manage its models.'
-        else
-          ?owner.error,
-      ],
-      if (entry.api case final api?) ...[
-        api.baseUrl,
-        api.keyEnv,
-        'Available to harness tools on this computer.',
-      ],
-      if (entry.subscription case final subscription?) ...[
-        ...((subscription['details'] as List?) ?? const [])
-            .map((detail) => '$detail')
-            .where((detail) => detail != entry.status),
-      ],
+      ['API', ?summary].join(' · '),
+      '',
+      ('URL', api.baseUrl),
+      if (count > 0)
+        (
+          'Use',
+          'pick one of its $count ${count == 1 ? 'model' : 'models'} to run a harness on it',
+        )
+      else if (summary == null)
+        (
+          'Tools',
+          'harness agents on this computer can call it with the saved key',
+        ),
+      if (listed?.error case final error?) ...['', error],
     ], controls: true);
   }
 
   Widget _machinePreview() {
     final machine = app.stateOf(row!.machineId!);
     if (machine == null) return _details([row!.title, 'Unavailable']);
-    final online =
-        machine.nodeOnline != false &&
-        !machine.needsLink &&
-        machine.connectionStatus == ConnectionStatus.connected;
-    final resources = online
+    final resources = _isOnline(machine)
         ? widget.search.machineResources[row!.machineId]
         : null;
     final status = machine.nodeOnline == false
@@ -1133,12 +1536,78 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     ], controls: true);
   }
 
-  Widget _details(List<String> lines, {bool controls = false}) {
+  Widget _desktopDetail(String label, String value) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = MediaQuery.textScalerOf(context).scale(12) / 12;
+        final style = DesktopChrome.text(size: 12, color: DesktopChrome.muted);
+        // Keep the shared label column wide enough for its longest label in
+        // the actual system font, including enlarged accessibility text.
+        final measure = TextPainter(
+          text: TextSpan(text: 'Machine', style: style),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+          maxLines: 1,
+        )..layout();
+        final labelWidth = math.max(72 * scale, measure.width + 12);
+        measure.dispose();
+        final labelText = Text(label, style: style);
+        final valueText = Text(value, style: DesktopChrome.text(size: 12));
+        return constraints.maxWidth < 260 * scale
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [labelText, const SizedBox(height: 2), valueText],
+              )
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(width: labelWidth, child: labelText),
+                  Expanded(child: valueText),
+                ],
+              );
+      },
+    ),
+  );
+
+  /// The preview's lines: the first is the title, `''` is a blank row, and a `(label, value)`
+  /// pair is a labelled row — [_kDetailLabelColumns] terminal columns of label.
+  Widget _details(List<Object> lines, {bool controls = false}) {
+    if (DesktopChrome.of(context)) {
+      return ListView(
+        controller: _scroll,
+        padding: const EdgeInsets.all(18),
+        children: [
+          for (var i = 0; i < lines.length; i++)
+            switch (lines[i]) {
+              '' => const SizedBox(height: 12),
+              (final String label, final String value) => _desktopDetail(
+                label,
+                value,
+              ),
+              final line => Padding(
+                padding: EdgeInsets.only(bottom: i == 0 ? 5 : 3),
+                child: Text(
+                  '$line',
+                  style: DesktopChrome.text(
+                    size: i == 0 ? 15 : 12,
+                    medium: i == 0,
+                    color: i == 0
+                        ? DesktopChrome.foreground
+                        : DesktopChrome.muted,
+                  ),
+                ),
+              ),
+            },
+        ],
+      );
+    }
     final cell = terminalCellSizeOf(context);
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
       terminalThemeStore.value,
     );
+    final muted = terminalContentStyle(color: theme.muted);
     return ListView(
       controller: _scroll,
       padding: EdgeInsets.symmetric(
@@ -1147,23 +1616,77 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       ),
       children: [
         for (var i = 0; i < lines.length; i++)
-          if (lines[i].isEmpty)
-            SizedBox(height: cell.height)
-          else
-            Text(
-              lines[i],
-              style: terminalContentStyle(
-                color: i == 0
-                    ? theme.foreground
-                    : theme.foreground.withValues(alpha: .54),
-              ),
+          switch (lines[i]) {
+            '' => SizedBox(height: cell.height),
+            (final String label, final String value) => Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: cell.width * _kDetailLabelColumns,
+                  child: Text(label, style: muted),
+                ),
+                Expanded(
+                  child: Text(
+                    value,
+                    style: terminalContentStyle(color: theme.foreground),
+                  ),
+                ),
+              ],
             ),
+            final line => Text(
+              '$line',
+              style: i == 0
+                  ? terminalContentStyle(color: theme.foreground)
+                  : muted,
+            ),
+          },
         if (controls) ...[SizedBox(height: cell.height), _actionButtons()],
       ],
     );
   }
 
   Widget _typeHints() {
+    if (DesktopChrome.of(context)) {
+      return ListView(
+        controller: _scroll,
+        padding: const EdgeInsets.all(18),
+        children: [
+          Text(
+            'Find your next task',
+            style: DesktopChrome.text(size: 15, medium: true),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Search harnesses, or type a prefix to choose a category.',
+            style: DesktopChrome.text(size: 12, color: DesktopChrome.muted),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            key: const ValueKey('swarm-search-type-hints'),
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final (prefix, label) in [
+                ('@', 'Machines'),
+                ('#', 'Projects'),
+                (':', 'Models'),
+                ('*', 'Store'),
+                ('>', 'Commands'),
+              ])
+                DesktopPill(
+                  key: ValueKey('swarm-search-scope:$prefix'),
+                  label: '$prefix  $label',
+                  compact: true,
+                  onPressed: () {
+                    widget.search.setQuery('$prefix ');
+                    widget.onRefocus();
+                  },
+                ),
+            ],
+          ),
+        ],
+      );
+    }
     final cell = terminalCellSizeOf(context);
     final theme = terminalThemeFor(
       grid.AppTheme.palette.value,
@@ -1194,7 +1717,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                   widget.onRefocus();
                 },
                 style: TextButton.styleFrom(
-                  foregroundColor: theme.foreground.withValues(alpha: .54),
+                  foregroundColor: theme.muted,
                   textStyle: terminalContentStyle(),
                   padding: EdgeInsets.zero,
                   minimumSize: Size.zero,
@@ -1232,110 +1755,31 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
             terminal: true,
           );
         }
-        final cell = terminalCellSizeOf(context);
+        final desktop = DesktopChrome.of(context);
+        final cell = desktop ? const Size(9, 12) : terminalCellSizeOf(context);
         final theme = terminalThemeFor(
           grid.AppTheme.palette.value,
           terminalThemeStore.value,
         );
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.search.isModelMode &&
-                widget.search.models?.manager.error != null)
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  cell.width * 2,
-                  cell.height,
-                  cell.width * 2,
-                  0,
-                ),
-                child: Text(
-                  'Local models · ${widget.search.models!.manager.error}',
-                  key: const ValueKey('local-model-inventory-notice'),
-                  style: terminalContentStyle(color: theme.yellow),
-                ),
+        final actions = [
+          if (desktop || !_isManagement)
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                cell.width * 2,
+                cell.height,
+                cell.width * 2,
+                0,
               ),
-            if (_pending.contains(row?.id))
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  cell.width * 2,
-                  cell.height,
-                  cell.width * 2,
-                  0,
-                ),
-                child: Text(
-                  'Working…',
-                  style: terminalContentStyle(
-                    color: theme.foreground.withValues(alpha: .54),
-                  ),
-                ),
-              ),
-            if (_errors[row?.id] case final error?)
-              Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: cell.width * 2,
-                  vertical: cell.height,
-                ),
-                child: Text(
-                  error,
-                  style: terminalContentStyle(color: theme.yellow),
-                ),
-              ),
-            Expanded(
-              child: _editingApi
-                  ? ApiPickerForm(
-                      key: _apiFormKey,
-                      controller: widget.search.models!.manager.apis,
-                      connectionId: _apiConnectionId,
-                      removing: _apiRemoving,
-                      onClose: _closeApiForm,
-                      onFocusChanged: widget.search.setManaging,
-                      onSwitchPane: _switchPane,
-                    )
-                  : _editingMachine
-                  ? MachinePickerForm(
-                      key: _formKey,
-                      app: app,
-                      kind: _machineForm!,
-                      machineId: row?.machineId,
-                      onClose: _closeMachineForm,
-                      onFocusChanged: widget.search.setManaging,
-                      onSwitchPane: _switchPane,
-                    )
-                  : widget.search.showsTypeHints
-                  ? _typeHints()
-                  : row?.isCreate == true
-                  ? _details([
-                      ...widget.search.createDescription.split('\n'),
-                    ], controls: _machineSetup)
-                  : widget.search.isStoreMode
-                  ? _details([
-                      if (row?.storeId case final id?) ...[
-                        widget.search.storeEntries[id]?.name ?? '',
-                        widget.search.storeEntries[id]?.category ?? '',
-                        '',
-                        widget.search.storeEntries[id]?.description ?? '',
-                        if (widget.search.storeEntries[id]?.author
-                            case final author?)
-                          'By $author',
-                      ] else
-                        'No matching store entries',
-                    ])
-                  : row?.isMachine == true
-                  ? _machinePreview()
-                  : widget.search.isModelMode
-                  ? _modelPreview()
-                  : SwarmSearchPreview(
-                      key: const ValueKey('swarm-search-preview'),
-                      search: widget.search,
-                      terminal: true,
-                    ),
+              child: _actionButtons(),
             ),
-            if (row != null &&
-                !widget.search.showsTypeHints &&
-                !_editingMachine &&
-                !_editingApi) ...[
-              if (!_isManagement)
+          if (KeyHints.visibleOf(context)) _controlHints(),
+        ];
+        return LayoutBuilder(
+          builder: (context, constraints) => Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.search.isModelMode &&
+                  widget.search.models?.manager.error != null)
                 Padding(
                   padding: EdgeInsets.fromLTRB(
                     cell.width * 2,
@@ -1343,11 +1787,123 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                     cell.width * 2,
                     0,
                   ),
-                  child: _actionButtons(),
+                  child: Text(
+                    'Local models · ${widget.search.models!.manager.error}',
+                    key: const ValueKey('local-model-inventory-notice'),
+                    style: desktop
+                        ? DesktopChrome.text(
+                            size: 12,
+                            color: Theme.of(context).colorScheme.error,
+                          )
+                        : terminalContentStyle(color: theme.yellow),
+                  ),
                 ),
-              _controlHints(),
+              if (_pending.contains(row?.id) && (!desktop || _session == null))
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    cell.width * 2,
+                    cell.height,
+                    cell.width * 2,
+                    0,
+                  ),
+                  child: Text(
+                    'Working…',
+                    style: desktop
+                        ? DesktopChrome.text(
+                            size: 12,
+                            color: DesktopChrome.muted,
+                          )
+                        : terminalContentStyle(color: theme.muted),
+                  ),
+                ),
+              if (_errors[row?.id] case final error?)
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: cell.width * 2,
+                    vertical: cell.height,
+                  ),
+                  child: Text(
+                    error,
+                    style: desktop
+                        ? DesktopChrome.text(
+                            size: 12,
+                            color: Theme.of(context).colorScheme.error,
+                          )
+                        : terminalContentStyle(color: theme.yellow),
+                  ),
+                ),
+              Expanded(
+                child: _editingApi
+                    ? ApiPickerForm(
+                        key: _apiFormKey,
+                        controller: widget.search.models!.manager.apis,
+                        connectionId: _apiConnectionId,
+                        removing: _apiRemoving,
+                        onClose: _closeApiForm,
+                        onFocusChanged: widget.search.setManaging,
+                        onSwitchPane: _switchPane,
+                      )
+                    : _editingMachine
+                    ? MachinePickerForm(
+                        key: _formKey,
+                        app: app,
+                        kind: _machineForm!,
+                        machineId: row?.machineId,
+                        onClose: _closeMachineForm,
+                        onFocusChanged: widget.search.setManaging,
+                        onSwitchPane: _switchPane,
+                      )
+                    : widget.search.showsTypeHints
+                    ? _typeHints()
+                    : row?.isCreate == true
+                    ? _details([
+                        ...widget.search.createDescription.split('\n'),
+                      ], controls: _machineSetup)
+                    : widget.search.isStoreMode
+                    ? _details([
+                        if (row?.storeId case final id?) ...[
+                          widget.search.storeEntries[id]?.name ?? '',
+                          widget.search.storeEntries[id]?.category ?? '',
+                          '',
+                          widget.search.storeEntries[id]?.description ?? '',
+                          if (widget.search.storeEntries[id]?.author
+                              case final author?)
+                            'By $author',
+                        ] else
+                          'No matching store entries',
+                      ])
+                    : row?.isMachine == true
+                    ? _machinePreview()
+                    : widget.search.isModelMode
+                    ? _modelPreview()
+                    : SwarmSearchPreview(
+                        key: const ValueKey('swarm-search-preview'),
+                        search: widget.search,
+                        terminal: true,
+                      ),
+              ),
+              if (row != null &&
+                  !widget.search.showsTypeHints &&
+                  !_editingMachine &&
+                  !_editingApi) ...[
+                if (desktop)
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: math.min(140, constraints.maxHeight * .55),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: actions,
+                      ),
+                    ),
+                  )
+                else
+                  ...actions,
+              ],
             ],
-          ],
+          ),
         );
       },
     );

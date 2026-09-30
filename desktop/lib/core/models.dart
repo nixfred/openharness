@@ -1,7 +1,7 @@
 /// Data models mirroring the backend/web types.
 library;
 
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart' show immutable, listEquals;
 
 import 'runtime_model_name.dart';
 import 'agent_git_context.dart';
@@ -233,7 +233,7 @@ class ForkedFrom {
     final name = raw['name'];
     return ForkedFrom(
       agentId: agentId,
-      name: name is String && name.isNotEmpty ? name : 'an agent',
+      name: name is String && name.isNotEmpty ? name : 'a harness',
     );
   }
 }
@@ -306,6 +306,9 @@ class Agent {
   /// of [gridModel], which determines subscription versus local-model routing.
   final String? modelName;
 
+  /// Effort reported with [modelName], never inferred from a model default.
+  final String? modelEffort;
+
   /// The grid model this agent is CURRENTLY running on, or null for its own vendor login.
   ///
   /// Read by the daemon off the live process on every discovery, never bookkept — so it is the
@@ -317,6 +320,10 @@ class Agent {
   /// the daemon when it built the launch and carried on every frame, so it is right after a
   /// reconnect or a restart without anything being replayed.
   final GridWebSearch? gridWebSearch;
+
+  /// Where [gridModel] is served — the endpoint the engine was handed (a grid's relay, or a saved
+  /// API such as `https://openrouter.ai/api`). Null with no [gridModel], or from an older daemon.
+  final String? gridBaseUrl;
 
   /// How the daemon's picture has the grid this agent's model is on (`grid.state`), or null when
   /// it did not say — an agent on its own login, or an older daemon. Asleep or waking is what puts
@@ -430,8 +437,10 @@ class Agent {
     this.engineIconHint,
     this.codexHome,
     this.modelName,
+    this.modelEffort,
     this.gridModel,
     this.gridWebSearch,
+    this.gridBaseUrl,
     this.gridState,
     this.gridNote,
     this.parentAgentId,
@@ -549,22 +558,25 @@ class Agent {
     final usage = j['tokenUsage'];
     final total = usage is Map ? usage['totalTokens'] : null;
     final validTokens = total is int && total >= 0 && total <= 9007199254740991;
+    final model = runtimeModelDetails(
+      j['selectedModel'],
+      agentId: j['id'] as String,
+      engine: _safeEngine(j['engine']),
+    );
     return Agent(
       id: j['id'] as String,
       sessionId: _safeLabel(j['sessionId']),
-      name: j['name'] as String? ?? 'agent',
+      name: j['name'] as String? ?? 'harness',
       title: _safeLabel(j['title']),
       engine: _safeEngine(j['engine']),
       engineDisplayName: _safeLabel(j['engineDisplayName']),
       engineIconHint: _safeLabel(j['engineIconHint']),
       codexHome: j['engine'] == 'codex' ? _safeCodexHome(j['codexHome']) : null,
-      modelName: runtimeModelName(
-        j['selectedModel'],
-        agentId: j['id'] as String,
-        engine: _safeEngine(j['engine']),
-      ),
+      modelName: model?.name,
+      modelEffort: model?.effort,
       gridModel: _safeLabel(grid?['model']),
       gridWebSearch: GridWebSearch.fromWire(grid?['webSearch']),
+      gridBaseUrl: _safeUrl(grid?['baseUrl']),
       gridState: GridSectionState.parse(grid?['state']),
       gridNote: GridNote.fromWire(grid?['note']),
       parentAgentId: _safeLabel(j['parentAgentId'] ?? j['parentId']),
@@ -626,8 +638,10 @@ class Agent {
     engineIconHint: engineIconHint,
     codexHome: codexHome,
     modelName: modelName,
+    modelEffort: modelEffort,
     gridModel: gridModel,
     gridWebSearch: gridWebSearch,
+    gridBaseUrl: gridBaseUrl,
     gridState: gridState,
     gridNote: gridNote,
     parentAgentId: parentAgentId,
@@ -716,6 +730,14 @@ class Agent {
     return raw;
   }
 
+  static String? _safeUrl(Object? raw) {
+    if (raw is! String || raw.isEmpty || raw.length > 2048) return null;
+    final uri = Uri.tryParse(raw);
+    return uri != null && (uri.scheme == 'https' || uri.scheme == 'http')
+        ? raw
+        : null;
+  }
+
   static String? _safeLabel(Object? raw) {
     if (raw is! String || raw.isEmpty) return null;
     return raw.length <= 80 ? raw : raw.substring(0, 80);
@@ -748,6 +770,17 @@ class AgentPhase {
   final String name;
   final AgentPhaseState state;
   final String? artifact;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AgentPhase &&
+      id == other.id &&
+      name == other.name &&
+      state == other.state &&
+      artifact == other.artifact;
+
+  @override
+  int get hashCode => Object.hash(id, name, state, artifact);
 
   static AgentPhase? fromJson(Object? raw) {
     if (raw is! Map) return null;
@@ -854,11 +887,19 @@ class AgentVerdict {
       other.errors == errors &&
       other.warnings == warnings &&
       other.artifact == artifact &&
+      listEquals(other.phases, phases) &&
       other.updatedAt == updatedAt;
 
   @override
-  int get hashCode =>
-      Object.hash(ready, summary, errors, warnings, artifact, updatedAt);
+  int get hashCode => Object.hash(
+    ready,
+    summary,
+    errors,
+    warnings,
+    artifact,
+    Object.hashAll(phases),
+    updatedAt,
+  );
 }
 
 /// What the daemon answered when asked where a typed task belongs (⌘B).

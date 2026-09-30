@@ -132,8 +132,9 @@ class _FindModelsState extends State<FindModels> {
             ];
             if (section.models.isEmpty && needle.isEmpty) {
               final empty = modelSheetEmptySentence(answer, section);
-              if (empty != null)
+              if (empty != null) {
                 rows.add(note('$where: ${empty.toLowerCase()}'));
+              }
             }
             if (shown.isNotEmpty) rows.add(FindHeader(where));
             for (final model in shown) {

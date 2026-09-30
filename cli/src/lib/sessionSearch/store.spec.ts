@@ -79,6 +79,23 @@ describe('makeSnippet', () => {
 })
 
 describe('SessionSearchStore', () => {
+  it('reviews only timestamped person turns within the window, without tool data or session-time fallbacks', () => {
+    const store = open()
+    store.writeSession(session('recent', 'Layout discussion', NOW), 0, [
+      turn(0, 'old words', 'old answer', '', NOW - DAY - 1),
+      turn(1, 'viewer on the left', 'understood', 'secret tool data', NOW - DAY),
+      turn(2, '', 'continuation only', '', NOW - 10),
+      turn(3, 'unknown date', '', '', null),
+      turn(4, 'current words', '', '', NOW),
+      turn(5, 'future words', '', '', NOW + 1),
+    ])
+    const result = store.recentConversations(NOW - DAY, NOW)
+    expect(result.rows.map(r => r.turn)).toEqual([4, 1])
+    expect(result.rows[1]).toMatchObject({ ask: 'viewer on the left', answer: 'understood', tools: '', title: 'Layout discussion' })
+    expect(store.recentConversations(NOW - DAY, NOW, 1)).toMatchObject({ more: true, rows: [{ turn: 4 }] })
+    expect(store.recentConversations(NaN, NOW).rows).toEqual([])
+  })
+
   it('finds a session by a word from any turn, as a prefix, with its own snippet', () => {
     const store = open()
     store.writeSession(session('dial', 'Deploy firmware', NOW - DAY), 0, [

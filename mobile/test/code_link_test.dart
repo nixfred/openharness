@@ -11,6 +11,8 @@ import 'package:harness_mobile/e2ee/primitives.dart';
 import 'package:harness_mobile/viewer/code_link.dart';
 import 'package:harness_mobile/viewer/password_link.dart';
 
+import 'viewer/fake_relay_socket.dart';
+
 String _hex(List<int> bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
@@ -193,5 +195,282 @@ void main() {
     expect(result, isA<PasswordLinkFailed>());
     expect((result as PasswordLinkFailed).code, 'CODE_MISMATCH');
     expect(machine.pinned, isNull);
+  });
+
+  group('over the relay socket', () {
+    late E2eeIdentity phone;
+    setUpAll(() async => phone = await E2eeIdentity.generate());
+
+    Future<PasswordLinkResult> link(
+      FakeRelaySocket socket, {
+      Duration timeout = const Duration(seconds: 10),
+    }) => linkWithCode(
+      machineId: 'machine-1',
+      code: 'K7QM4XPT9D2W',
+      label: 'iPhone',
+      identity: phone,
+      accessToken: 'tok',
+      wsBaseUrl: 'wss://relay.invalid',
+      autonomousEnv: 'prod',
+      socket: socket.factory,
+      timeout: timeout,
+    );
+
+    /// The machine above, behind a relay socket.
+    _Machine behind(FakeRelaySocket socket, {String code = 'K7QM4XPT9D2W'}) {
+      final machine = _Machine('machine-1', code, phone);
+      machine.frames.stream.listen((frame) {
+        if (frame != null) {
+          socket.emit(
+            frame['type'] as String,
+            frame['payload'] as Map<String, Object?>,
+          );
+        }
+      });
+      socket.onFrame = (frame) => unawaited(
+        machine.receive(
+          frame['type'] as String,
+          Map<String, Object>.from(frame['payload'] as Map),
+        ),
+      );
+      return machine;
+    }
+
+    test('pairs, on the socket it dialled with the session', () async {
+      final socket = FakeRelaySocket();
+      final machine = behind(socket);
+      final result = await link(socket);
+      expect(result, isA<PasswordLinked>());
+      expect(machine.pinned, phone.pub);
+      expect(
+        socket.dialled.toString(),
+        'wss://relay.invalid/api/web-ws?autonomousEnv=prod',
+      );
+      expect(socket.protocols, ['tok']);
+      expect(socket.closedByPhone, isTrue);
+      final intent = socket.sent.firstWhere(
+        (f) => f['type'] == 'e2e_pair_intent',
+      );
+      expect(intent['payload']['label'], 'iPhone');
+      expect(intent['payload']['role'], 'web');
+    });
+
+    test('a dial that fails is a connection error', () async {
+      final socket = FakeRelaySocket(
+        ready: Future<void>.error(StateError('x')),
+      );
+      expect(
+        ((await link(socket)) as PasswordLinkFailed).code,
+        'CONNECTION_ERROR',
+      );
+    });
+
+    // ⚠️ The timeout used to start only once the socket had opened, so a network that swallowed
+    // the dial held "Pairing…" for the OS's own TCP timeout rather than this one.
+    test('a dial that never opens times out', () async {
+      final socket = FakeRelaySocket(ready: Completer<void>().future);
+      final result =
+          await link(
+            socket,
+            timeout: const Duration(milliseconds: 200),
+          ).timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => const PasswordLinkFailed('HUNG'),
+          );
+      expect((result as PasswordLinkFailed).code, 'TIMEOUT');
+    });
+
+    test('a desktop that never answers the intent times out', () async {
+      final socket = FakeRelaySocket();
+      socket.onFrame = (frame) {
+        if (frame['type'] == 'machine_select') {
+          socket.emit('connected', {'machineId': 'machine-1'});
+        }
+      };
+      final result = await link(
+        socket,
+        timeout: const Duration(milliseconds: 300),
+      );
+      expect((result as PasswordLinkFailed).code, 'TIMEOUT');
+    });
+
+    test('a relay that hangs up is CONNECTION_CLOSED', () async {
+      final socket = FakeRelaySocket();
+      socket.onFrame = (frame) => unawaited(socket.hangUp(1006));
+      expect(
+        ((await link(socket)) as PasswordLinkFailed).code,
+        'CONNECTION_CLOSED',
+      );
+    });
+  });
+
+  group('one frame at a time', () {
+    late E2eeIdentity phone;
+    setUpAll(() async => phone = await E2eeIdentity.generate());
+
+    CodeLinkRun run(List<(String, Map<String, Object>)> sent) => CodeLinkRun(
+      machineId: 'machine-1',
+      code: 'K7QM4XPT9D2W',
+      label: 'iPhone',
+      identity: phone,
+      send: (type, payload) => sent.add((type, payload)),
+      pairId: Uint8List(16),
+    );
+
+    Map<String, dynamic> frame(String type, Map<String, Object?> payload) => {
+      'type': type,
+      'payload': payload,
+    };
+
+    final pairId = b64e(Uint8List(16));
+
+    Future<CodeLinkRun> selected(
+      List<(String, Map<String, Object>)> sent,
+    ) async {
+      final link = run(sent);
+      expect(
+        await link.step(frame('connected', {'machineId': 'machine-1'})),
+        isNull,
+      );
+      return link;
+    }
+
+    test('before the select is acked, only its answer counts', () async {
+      final link = run([]);
+      expect(await link.step(frame('connected', {'userId': 'u'})), isNull);
+      expect(
+        await link.step(frame('e2e_pake', {'pairId': pairId, 'round': 5})),
+        isNull,
+        reason: 'no pairing round is taken before the machine is selected',
+      );
+      expect(
+        await link.step({'type': 'connected', 'payload': 'not a map'}),
+        isNull,
+      );
+      expect(
+        await link.step(
+          frame('node_status', {'machineId': 'machine-1', 'online': true}),
+        ),
+        isNull,
+      );
+      final refused = await link.step(
+        frame('machine_select_error', {'machineId': 'machine-1'}),
+      );
+      expect((refused as PasswordLinkFailed).code, 'SELECT_FAILED');
+    });
+
+    test('the intent refused, with its reason or ours', () async {
+      final sent = <(String, Map<String, Object>)>[];
+      final link = await selected(sent);
+      final requestId = sent.single.$2['requestId']!;
+      expect(
+        await link.step(
+          frame('e2e_pair_intent_result', {
+            'requestId': 'not-ours',
+            'error': 'X',
+          }),
+        ),
+        isNull,
+      );
+      expect(
+        ((await link.step(
+          frame('e2e_pair_intent_result', {
+            'requestId': requestId,
+            'error': 'PAIRING_BUSY',
+          }),
+        )) as PasswordLinkFailed).code,
+        'PAIRING_BUSY',
+      );
+      expect(
+        ((await (await selected([]))
+                .step(frame('e2e_pair_intent_result', {'requestId': 'x'}))) ??
+            'still waiting'),
+        'still waiting',
+        reason: 'another client\'s answer is not this one\'s',
+      );
+    });
+
+    test('an intent accepted waits for the desktop', () async {
+      final sent = <(String, Map<String, Object>)>[];
+      final link = await selected(sent);
+      expect(
+        await link.step(
+          frame('e2e_pair_intent_result', {
+            'requestId': sent.single.$2['requestId'],
+            'accepted': true,
+          }),
+        ),
+        isNull,
+      );
+      final refused = await (await selected(sent)).step(
+        frame('e2e_pair_intent_result', {
+          'requestId': sent.last.$2['requestId'],
+        }),
+      );
+      expect((refused as PasswordLinkFailed).code, 'PAIR_REFUSED');
+    });
+
+    test('a round with an error ends it with that error', () async {
+      final link = await selected([]);
+      final failed = await link.step(
+        frame('e2e_pake', {'pairId': pairId, 'error': 'EXPIRED'}),
+      );
+      expect((failed as PasswordLinkFailed).code, 'EXPIRED');
+    });
+
+    test(
+      'rounds for another pairing, or of no known number, are not this one\'s',
+      () async {
+        final link = await selected([]);
+        expect(
+          await link.step(frame('e2e_pake', {'pairId': 'other', 'round': 1})),
+          isNull,
+        );
+        expect(
+          await link.step(frame('e2e_pake', {'pairId': pairId, 'round': 9})),
+          isNull,
+        );
+      },
+    );
+
+    test('round 3 before round 1 is a protocol error', () async {
+      final link = await selected([]);
+      final failed = await link.step(
+        frame('e2e_pake', {
+          'pairId': pairId,
+          'round': 3,
+          'mac': b64e(Uint8List(32)),
+          'enc': b64e(Uint8List(32)),
+        }),
+      );
+      expect((failed as PasswordLinkFailed).code, 'PROTOCOL_ERROR');
+    });
+
+    test('round 5 with ok but no proven identity pins nothing', () async {
+      final link = await selected([]);
+      final failed = await link.step(
+        frame('e2e_pake', {'pairId': pairId, 'round': 5, 'ok': true}),
+      );
+      expect((failed as PasswordLinkFailed).code, 'PAIR_FAILED');
+    });
+
+    test('garbage in a round is a protocol error, not a crash', () async {
+      final link = run([]);
+      final result = await link
+          .drive(
+            Stream.fromIterable([
+              null,
+              frame('connected', {'machineId': 'machine-1'}),
+              // The identity point: a share the CPace must refuse outright.
+              frame('e2e_pake', {
+                'pairId': pairId,
+                'round': 1,
+                'ya': b64e(Uint8List(32)),
+              }),
+            ]),
+          )
+          .timeout(const Duration(seconds: 5));
+      expect((result as PasswordLinkFailed).code, 'PROTOCOL_ERROR');
+    });
   });
 }

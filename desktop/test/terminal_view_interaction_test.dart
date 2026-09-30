@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +9,93 @@ import 'package:xterm/xterm.dart';
 import 'package:xterm/src/ui/custom_text_edit.dart';
 
 void main() {
+  testWidgets(
+    'native accessibility can insert text once into a writable terminal',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      final terminal = Terminal(maxLines: 20)..resize(80, 4);
+      final output = <String>[];
+      terminal.onOutput = output.add;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 800,
+            height: 200,
+            child: TerminalView(terminal, autofocus: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      final input = find.bySemanticsLabel('Terminal input');
+      expect(input, findsOneWidget);
+      final node = tester.getSemantics(input);
+      expect(
+        node.getSemanticsData().hasAction(SemanticsAction.setText),
+        isTrue,
+      );
+      tester
+          .renderObject(input)
+          .owner!
+          .semanticsOwner!
+          .performAction(node.id, SemanticsAction.setText, 'Dictated text');
+      await tester.pump();
+      expect(output.join(), 'Dictated text');
+      // The platform echo and subsequent typing must not repeat the dictated phrase.
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'Dictated text',
+          selection: TextSelection.collapsed(offset: 13),
+        ),
+      );
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'Dictated text!',
+          selection: TextSelection.collapsed(offset: 14),
+        ),
+      );
+      await tester.pump();
+      expect(output.join(), 'Dictated text!');
+      await tester.pumpWidget(const SizedBox());
+      semantics.dispose();
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.macOS,
+      TargetPlatform.linux,
+    }),
+  );
+
+  testWidgets(
+    'an observed terminal exposes no accessibility editing action',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      final terminal = Terminal(maxLines: 20)..resize(80, 4);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 800,
+            height: 200,
+            child: TerminalView(terminal, readOnly: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.bySemanticsLabel('Terminal input'), findsNothing);
+      final node = tester.getSemantics(
+        find.bySemanticsLabel('Terminal output'),
+      );
+      expect(
+        node.getSemanticsData().hasAction(SemanticsAction.setText),
+        isFalse,
+      );
+      await tester.pumpWidget(const SizedBox());
+      semantics.dispose();
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.macOS,
+      TargetPlatform.linux,
+    }),
+  );
+
   test('does not turn an xterm keyboard command into text styling', () {
     final terminal = Terminal(maxLines: 20, reflowEnabled: false)
       ..resize(80, 4);

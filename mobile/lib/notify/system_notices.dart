@@ -82,7 +82,14 @@ class LocalSystemNotices implements SystemNotices {
     ),
   };
 
-  Future<void> _init() => _ready ??= _start();
+  /// Started once and shared — but only a start that WORKED is kept. A failed
+  /// one kept here would fail every notice after it, instantly, for the rest of
+  /// the launch; forgetting it lets the next notice try again.
+  Future<void> _init() =>
+      _ready ??= _start().catchError((Object error, StackTrace stack) {
+        _ready = null;
+        Error.throwWithStackTrace(error, stack);
+      });
 
   Future<void> _start() async {
     await _plugin.initialize(

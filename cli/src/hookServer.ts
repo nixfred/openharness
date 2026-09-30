@@ -32,8 +32,7 @@ import { isTrustedLocal, listenLocalSocket, type LocalSocketServer } from './lib
  *
  * Caller ancestry — the hook's process descends from the engine we registered — is the strong one and
  * always wins. It is not always available: Cursor posts its hooks from outside the pane's process tree,
- * on tmux and on Herdr alike, so requiring ancestry rejected every hook that engine ever sent and no
- * session bound at all.
+ * so requiring ancestry rejected every hook that engine ever sent and no session bound at all.
  *
  * Only Cursor may use the weaker runtime evidence: the hook named a pane carrying exactly one Cursor
  * agent, and the caller already proved it can read the 0600 hook credential. Other engines must match
@@ -58,6 +57,8 @@ export interface PairOutcome {
 }
 
 export interface HookServerHandlers {
+  /** Context for a verified process-owned agent, only on its real user turn. */
+  onPromptContext?: (agentId: string) => string | null
   onCommandBar?: Pick<CommandBarService, 'status' | 'decide'>
   onAutonomousDeviceRequest?: (method: string, target: string, body?: unknown) => Promise<{ status: number; body: unknown }>
 
@@ -85,6 +86,7 @@ export interface HookServerHandlers {
   /** A turn is now running (Command Code's PreToolUse — its only live turn-open signal). Idempotent:
    *  it fires once per tool call, and every call after the first in a turn must be a no-op. */
   onTurnStart?: (body: { sessionId: string }) => void
+  onPromptSubmitted?: (agentId: string, prompt: string) => void
   onToolStart?: (body: {
     sessionId: string
     toolUseId: string
@@ -121,6 +123,13 @@ export interface HookServerHandlers {
   onClearRemotePassword?: () => PairOutcome
   /** `harness remote-password status` — whether one is set, and its fingerprint. */
   onRemotePasswordStatus?: () => PairOutcome
+  /** `harness link connect` — the machine this one just linked pinned it back, so trust that machine
+   *  here too (the mutual half of the link). Goes through the daemon: it holds paired.json in memory. */
+  onTrustLinkedPeer?: (peer: { pub: string; machineId: string; label: string }) => PairOutcome
+  /** `harness group list|sync|remove` — the trust group this machine belongs to (groupSyncer.ts). */
+  onGroupList?: () => PairOutcome
+  onGroupSync?: () => PairOutcome
+  onGroupRemove?: (selector: string) => PairOutcome
   /** Local dashboard status snapshot (GET /api/status). */
   onStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>
   /** Recent adapter log tail (GET /api/logs). */
@@ -145,6 +154,14 @@ export interface HookServerHandlers {
   /** POST /api/desk/ops — the window's tab edits, applied on the backend (its routes/desk.ts); a
    *  local write, so CSRF-guarded like a rename. */
   onDeskOps?: (body: unknown) => Promise<PairOutcome>
+  /** The account's Experimental switches, proxied with the daemon's own identity. */
+  onExperimentalRead?: () => Promise<PairOutcome>
+  onExperimentalWrite?: (body: unknown) => Promise<PairOutcome>
+  /** GET /api/zoo — the account's daemons and eggs (daemons/README.md); proxied like the desk. */
+  onZooRead?: () => Promise<PairOutcome>
+  /** POST /api/zoo/ops — habits, hatches, pair and nickname, applied on the backend (its routes/zoo.ts),
+   *  which alone draws; a local write, so CSRF-guarded like the desk's ops. */
+  onZooOps?: (body: unknown) => Promise<PairOutcome>
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
    *  ungated like the machine list, writes (PUT/DELETE) CSRF-guarded like a rename. See storeProxy.ts. */
   onStore?: StoreHandler
@@ -156,7 +173,7 @@ const MAX_HOOK_BODY_BYTES = 256 * 1024
 const HOOK_BODY_FIELDS = new Set([
   'engine', 'launcherId', 'sessionId', 'transcriptPath', 'cwd', 'source', 'tmuxPane', 'title', 'model',
   'cliVersion', 'runtimeHints', 'callerPid', 'hookEvent', 'pluginVersion', 'reason', 'status', 'toolUseId',
-  'toolName', 'input',
+  'toolName', 'input', 'prompt',
 ])
 
 function optionalBoundedString(value: unknown, max: number): boolean {
@@ -172,6 +189,7 @@ function optionalBoundedJson(value: unknown, max: number): boolean {
 function validHookBody(value: unknown): value is BoundHookBody {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const body = value as Record<string, unknown>
+  if (body.prompt !== undefined && (typeof body.prompt !== 'string' || Buffer.byteLength(body.prompt) > 128 * 1024)) return false
   if (Object.keys(body).some((field) => !HOOK_BODY_FIELDS.has(field))) return false
   if (body.engine !== undefined && (typeof body.engine !== 'string' || !ENGINES.includes(body.engine as AgentEngine))) return false
   if (!optionalBoundedString(body.launcherId, 200)
@@ -201,6 +219,9 @@ function validHookBody(value: unknown): value is BoundHookBody {
         if (Object.keys(hint).some((field) => field !== 'backend' && field !== 'paneId')
           || typeof hint.paneId !== 'string' || !/^%\d+$/.test(hint.paneId)) return false
       } else if (hint.backend === 'herdr') {
+        // A hook script installed by an earlier build still sends these from inside a Herdr pane. The
+        // backend is retired and `normalizedRuntimeHints` drops the hint, but the rest of the body is
+        // still good evidence, so the shape stays accepted rather than failing the whole request.
         if (Object.keys(hint).some((field) => !['backend', 'paneId', 'sessionName', 'socketPath'].includes(field))
           || !optionalBoundedString(hint.paneId, 200) || !hint.paneId
           || !optionalBoundedString(hint.sessionName, 64)
@@ -232,16 +253,6 @@ function normalizedRuntimeHints(body: RegisterInput): HookTerminalHint[] {
   if (Array.isArray(body.runtimeHints) && body.runtimeHints.length <= 4) {
     for (const hint of body.runtimeHints) {
       if (hint?.backend === 'tmux' && /^%\d+$/.test(hint.paneId)) hints.push({ backend: 'tmux', paneId: hint.paneId })
-      if (hint?.backend === 'herdr'
-        && typeof hint.paneId === 'string' && hint.paneId.length <= 200
-        && (hint.sessionName === undefined || (typeof hint.sessionName === 'string' && hint.sessionName.length <= 64))
-        && (hint.socketPath === undefined || (typeof hint.socketPath === 'string' && hint.socketPath.length <= 4_096))) {
-        hints.push({
-          backend: 'herdr', paneId: hint.paneId,
-          ...(hint.sessionName ? { sessionName: hint.sessionName } : {}),
-          ...(hint.socketPath ? { socketPath: hint.socketPath } : {}),
-        })
-      }
     }
   }
   if (body.tmuxPane && /^%\d+$/.test(body.tmuxPane)
@@ -252,6 +263,7 @@ function normalizedRuntimeHints(body: RegisterInput): HookTerminalHint[] {
 }
 
 type BoundHookBody = RegisterInput & {
+  prompt?: string
   sessionId?: string
   reason?: string
   status?: string
@@ -385,6 +397,8 @@ async function awaitHermesKind(body: RegisterInput, handlers: HookServerHandlers
 export interface HookServerOptions {
   /** Also serve on this Unix socket (see lib/localSocket.ts). Null or absent: TCP only. */
   socketPath?: string | null
+  /** A private socket identifies this user's daemon even when another OS user holds the TCP port. */
+  allowPortFallback?: boolean
 }
 
 export function startHookServer(
@@ -518,7 +532,7 @@ export function startHookServer(
       // whose SessionStart the adapter missed still shows up on its first prompt).
       if (req.method === 'POST' && url === '/api/hook/session-start') {
         if (!hookOk) { json(401, { error: 'UNAUTHORIZED' }); return }
-        let body: RegisterInput
+        let body: BoundHookBody
         try {
           const parsed = JSON.parse(await readBody(req)) as unknown
           if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
@@ -577,6 +591,9 @@ export function startHookServer(
           void awaitHermesKind(body, handlers)
           return
         }
+        if (body.hookEvent === 'UserPromptSubmit') {
+          handlers.onPromptSubmitted?.(processAgent.agentId, body.prompt ?? '')
+        }
         let result = registry.register(body)
         if (!result && body.transcriptPath && !existsSync(body.transcriptPath)) {
           // The engine announced the session BEFORE writing its transcript. Measured on claude: the hook
@@ -595,7 +612,9 @@ export function startHookServer(
         }
         console.log(`[hooks] ${sid(result.entry.sessionId)} ${body.hookEvent ?? 'session-start'} · engine=${result.entry.engine} · isNew=${result.isNew}`)
         handlers.onRegistered(result.entry, { isNew: result.isNew, evicted: result.evicted, rebound: result.rebound, orphaned: result.orphaned, hookEvent: body.hookEvent })
-        json(200, { ok: true })
+        const context = body.hookEvent === 'UserPromptSubmit' && (engine === 'claude' || engine === 'codex')
+          ? handlers.onPromptContext?.(result.entry.agentId) : null
+        json(200, { ok: true, ...(context ? { additionalContext: context } : {}) })
         return
       }
 
@@ -716,6 +735,40 @@ export function startHookServer(
         const out = handlers.onClearRemotePassword(); json(out.status, out.body); return
       }
 
+      // `harness link connect` → trust the machine just linked back, on the daemon's live E2EE state.
+      if (req.method === 'POST' && url === '/api/link/trust-peer') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onTrustLinkedPeer) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { pub?: unknown; machineId?: unknown; label?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        const isKey = typeof body.pub === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(body.pub) // 32-byte Ed25519, base64
+        if (!isKey || typeof body.machineId !== 'string' || !/^[a-f0-9]{32}$/.test(body.machineId)) { json(400, { error: 'BAD_PEER' }); return }
+        const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : body.machineId
+        const out = handlers.onTrustLinkedPeer({ pub: body.pub as string, machineId: body.machineId, label })
+        json(out.status, out.body); return
+      }
+
+      // `harness group list` → the trust group's members. Read-only (keys and labels, no secrets).
+      if (req.method === 'GET' && url === '/api/group') {
+        if (!handlers.onGroupList) { json(503, { error: 'UNAVAILABLE' }); return }
+        const out = handlers.onGroupList(); json(out.status, out.body); return
+      }
+      // `harness group sync` → compare rosters with every reachable member now.
+      if (req.method === 'POST' && url === '/api/group/sync') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onGroupSync) { json(503, { error: 'UNAVAILABLE' }); return }
+        const out = handlers.onGroupSync(); json(out.status, out.body); return
+      }
+      // `harness group remove <id|#|fp>` / `harness link unlink` → drop a member everywhere.
+      if (req.method === 'POST' && url === '/api/group/remove') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onGroupRemove) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { selector?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        if (typeof body.selector !== 'string' || !body.selector.trim()) { json(400, { error: 'MISSING_SELECTOR' }); return }
+        const out = handlers.onGroupRemove(body.selector.trim()); json(out.status, out.body); return
+      }
+
       // `harness remote-password status` → whether one is set, and its fingerprint. Read-only, same
       // gating tier as /api/pairs.
       if (req.method === 'GET' && url === '/api/remote-password/status') {
@@ -746,6 +799,31 @@ export function startHookServer(
         let body: unknown
         try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
         await proxied(() => handlers.onDeskOps!(body)); return
+      }
+      if (req.method === 'GET' && url === '/api/experimental-settings') {
+        if (!handlers.onExperimentalRead) { json(503, { error: 'UNAVAILABLE' }); return }
+        await proxied(handlers.onExperimentalRead); return
+      }
+      if (req.method === 'PATCH' && url === '/api/experimental-settings') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onExperimentalWrite) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
+        await proxied(() => handlers.onExperimentalWrite!(body)); return
+      }
+      if (req.method === 'GET' && url === '/api/zoo') {
+        if (!handlers.onZooRead) { json(503, { error: 'UNAVAILABLE' }); return }
+        await proxied(handlers.onZooRead); return
+      }
+      if (req.method === 'POST' && url === '/api/zoo/ops') {
+        // Any local process that sets the header can send an op here, `zoo.autonomy` and `zoo.consent`
+        // included: the account's dial is only a REQUEST to each daemon, which acts above `suggest` only
+        // after the person confirms it at a window (pair/gate.ts, daemons/BRAIN.md "Security").
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onZooOps) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
+        await proxied(() => handlers.onZooOps!(body)); return
       }
       if (req.method === 'GET' && url === '/api/auth/me') {
         const me = handlers.onAuthMe
@@ -822,36 +900,49 @@ export function startHookServer(
   const server = http.createServer(handle)
 
   return new Promise((resolve, reject) => {
-    server.once('error', (err: NodeJS.ErrnoException) => {
-      // FIXED port — no OS-assigned fallback. A free-port fallback made the daemon land on an
-      // unpredictable port, so a leftover/zombie couldn't be found by `lsof :<port>`. On a clash we
-      // fail loudly with the exact port instead (the CLI turns this into a clear "already running?").
+    let fellBack = false
+    const failed = (err: NodeJS.ErrnoException): void => {
+      if (err.code === 'EADDRINUSE' && !fellBack && options.allowPortFallback && options.socketPath) {
+        fellBack = true
+        console.log(`[hooks] control port ${port} unavailable; assigning a separate port for this user`)
+        server.once('error', failed)
+        server.listen(0, '127.0.0.1')
+        return
+      }
       if (err.code === 'EADDRINUSE') {
         console.error(`[hooks] 127.0.0.1:${port} is already in use — another adapter is probably running.`)
-        console.error(`        Stop it:  harness stop      or find it:  lsof -ti :${port} | xargs kill`)
+        console.error('        Use a different PORT; no other user\'s daemon was stopped.')
       } else {
         console.error('[hooks] listen failed:', err)
       }
       reject(err)
-    })
-    server.listen(port, '127.0.0.1', () => {
+    }
+    server.once('error', failed)
+    server.once('listening', () => {
       const actual = (server.address() as AddressInfo).port
       hosts = loopbackHosts(actual)
       console.log(`[hooks] listening on 127.0.0.1:${actual} (SessionStart/SessionEnd callbacks)`)
       const socketPath = options.socketPath
       if (!socketPath) { resolve({ server, port: actual, localSocket: null }); return }
-      // After the port, never before: holding it is what makes a socket file already there stale.
-      // A socket that cannot be opened costs the app its fast path, not the daemon its start.
+      // The private socket is mandatory when opting into multi-user startup. A duplicate daemon
+      // must not survive on a random port while another one owns this user's socket.
       listenLocalSocket(handle, socketPath).then(
         (localSocket) => {
           console.log(`[hooks] listening on ${socketPath}`)
           resolve({ server, port: actual, localSocket })
         },
         (error: unknown) => {
+          if (options.allowPortFallback) {
+            server.closeAllConnections()
+            server.close()
+            reject(error)
+            return
+          }
           console.warn(`[hooks] local socket unavailable (${socketPath}): ${error instanceof Error ? error.message : error}`)
           resolve({ server, port: actual, localSocket: null })
         },
       )
     })
+    server.listen(port, '127.0.0.1')
   })
 }

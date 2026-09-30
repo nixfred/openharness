@@ -20,6 +20,9 @@ class StatusLine extends StatelessWidget {
     this.segmentOffset = 0,
     this.workspaceBar = false,
     this.emphasized = false,
+    this.middleEllipsis = false,
+    this.surfaceBackground,
+    this.monochromeColor,
   });
   final StatusLineParts parts;
   final bool color;
@@ -30,6 +33,15 @@ class StatusLine extends StatelessWidget {
   final int segmentOffset;
   final bool workspaceBar;
   final bool emphasized;
+  final bool middleEllipsis;
+
+  /// Set only when the status is displayed outside its terminal surface.
+  final Color? surfaceBackground;
+
+  /// Secondary context keeps the chosen wording, fields, and status face, but
+  /// uses one ink without colored segment backgrounds. The focused workspace
+  /// footer does not set this and retains its full customized appearance.
+  final Color? monochromeColor;
 
   @override
   Widget build(BuildContext context) {
@@ -42,27 +54,45 @@ class StatusLine extends StatelessWidget {
           grid.AppTheme.palette.value,
           terminalThemeStore.value,
         );
+        final foreground =
+            monochromeColor ??
+            (surfaceBackground == null
+                ? theme.foreground
+                : statusLineInkOnSurface(theme.foreground, surfaceBackground!));
         final style = workspaceBar
-            ? workspaceBarTextStyle(
-                color: theme.foreground,
-                emphasized: emphasized,
-              )
-            : terminalContentStyle(color: theme.foreground);
-        final segments = statusLinePaintSegments(
+            ? workspaceBarTextStyle(color: foreground, emphasized: emphasized)
+            : terminalContentStyle(color: foreground);
+        final resolvedSegments = statusLinePaintSegments(
           parts,
           theme,
           color: color,
           segmentOffset: segmentOffset,
+          surfaceBackground: surfaceBackground,
         );
+        final segments = monochromeColor == null
+            ? resolvedSegments
+            : [
+                for (final (index, segment) in resolvedSegments.indexed)
+                  StatusLinePaintSegment(
+                    '${parts.style.segmented && index > 0 ? '  ' : ''}'
+                    '${segment.text}',
+                    monochromeColor!,
+                    null,
+                    branchSymbol: segment.branchSymbol,
+                  ),
+              ];
         final cell = workspaceBar
             ? workspaceBarCellSizeOf(context)
             : terminalCellSizeOf(context);
         final scaler = MediaQuery.textScalerOf(context);
-        if (!parts.style.segmented) {
-          final text = Text.rich(
+        double measure(String text) => workspaceBar
+            ? workspaceBarTextSizeOf(context, text).width
+            : _measure(text, style, scaler);
+        if (!parts.style.segmented || monochromeColor != null) {
+          Widget line(List<StatusLinePaintSegment> visible) => Text.rich(
             TextSpan(
               children: [
-                for (final segment in segments) ...[
+                for (final segment in visible) ...[
                   if (segment.branchSymbol)
                     WidgetSpan(
                       alignment: PlaceholderAlignment.middle,
@@ -87,7 +117,7 @@ class StatusLine extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             textAlign: textAlign,
           );
-          return workspaceBar
+          Widget body(List<StatusLinePaintSegment> visible) => workspaceBar
               ? SizedBox(
                   width:
                       workspaceBarTextSizeOf(
@@ -97,9 +127,21 @@ class StatusLine extends StatelessWidget {
                       segments.where((s) => s.branchSymbol).length *
                           cell.width *
                           2,
-                  child: text,
+                  child: line(visible),
                 )
-              : text;
+              : line(visible);
+          return middleEllipsis
+              ? LayoutBuilder(
+                  builder: (context, constraints) => body(
+                    _shortenStatusSegments(
+                      segments,
+                      constraints.maxWidth,
+                      cell.width,
+                      measure,
+                    ),
+                  ),
+                )
+              : body(segments);
         }
         return Semantics(
           label: parts.text,
@@ -110,7 +152,13 @@ class StatusLine extends StatelessWidget {
               if (constraints.maxWidth < segments.length * cell.width * 4) {
                 return ExcludeSemantics(
                   child: Text(
-                    parts.text,
+                    middleEllipsis
+                        ? _middleEllipsis(
+                            parts.text,
+                            constraints.maxWidth,
+                            measure,
+                          )
+                        : parts.text,
                     style: style,
                     maxLines: 1,
                     softWrap: false,
@@ -148,6 +196,7 @@ class StatusLine extends StatelessWidget {
                     nextBackground,
                     parts.style,
                     segmentOffset,
+                    middleEllipsis,
                   ),
                 ),
               );
@@ -157,6 +206,61 @@ class StatusLine extends StatelessWidget {
       },
     );
   }
+}
+
+String _middleEllipsis(
+  String text,
+  double width,
+  double Function(String) measure,
+) {
+  if (measure(text) <= width + .01) return text;
+  final characters = text.characters.toList();
+  String cut(int keep) =>
+      '${characters.take((keep + 1) ~/ 2).join()}…'
+      '${characters.skip(characters.length - keep ~/ 2).join()}';
+  var low = 0, high = math.max(0, characters.length - 1);
+  while (low < high) {
+    final mid = (low + high + 1) ~/ 2;
+    if (measure(cut(mid)) <= width) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return cut(low);
+}
+
+List<StatusLinePaintSegment> _shortenStatusSegments(
+  List<StatusLinePaintSegment> segments,
+  double width,
+  double cell,
+  double Function(String) measure,
+) {
+  if (segments.isEmpty) return segments;
+  final widths = [for (final segment in segments) measure(segment.text)];
+  var longest = 0;
+  for (var i = 1; i < widths.length; i++) {
+    if (widths[i] > widths[longest]) longest = i;
+  }
+  final available = math.max(
+    0.0,
+    width -
+        widths.fold(0.0, (a, b) => a + b) +
+        widths[longest] -
+        segments.where((s) => s.branchSymbol).length * cell * 2,
+  );
+  return [
+    for (var i = 0; i < segments.length; i++)
+      if (i == longest)
+        StatusLinePaintSegment(
+          _middleEllipsis(segments[i].text, available, measure),
+          segments[i].foreground,
+          segments[i].background,
+          branchSymbol: segments[i].branchSymbol,
+        )
+      else
+        segments[i],
+  ];
 }
 
 double _measure(String text, TextStyle style, TextScaler scaler) {
@@ -199,6 +303,7 @@ class _StatusSegmentsPainter extends CustomPainter {
     this.nextBackground,
     this.format,
     this.segmentOffset,
+    this.middleEllipsis,
   );
   final List<StatusLinePaintSegment> segments;
   final List<double> widths;
@@ -208,6 +313,7 @@ class _StatusSegmentsPainter extends CustomPainter {
   final Color? nextBackground;
   final StatusLineStyle format;
   final int segmentOffset;
+  final bool middleEllipsis;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -278,16 +384,35 @@ class _StatusSegmentsPainter extends CustomPainter {
           segment.foreground,
         );
       }
+      final textWidth = math.max(0.0, fitted[i] - symbolWidth);
+      final text = middleEllipsis
+          ? _middleEllipsis(
+              segment.text,
+              textWidth,
+              (text) => math.max(
+                _measure(
+                  text,
+                  style.copyWith(fontWeight: FontWeight.normal),
+                  scaler,
+                ),
+                _measure(
+                  text,
+                  style.copyWith(fontWeight: FontWeight.bold),
+                  scaler,
+                ),
+              ),
+            )
+          : segment.text;
       final painter = TextPainter(
         text: TextSpan(
-          text: segment.text,
+          text: text,
           style: style.copyWith(color: segment.foreground),
         ),
         textDirection: TextDirection.ltr,
         textScaler: scaler,
         maxLines: 1,
         ellipsis: '…',
-      )..layout(maxWidth: math.max(0, fitted[i] - symbolWidth));
+      )..layout(maxWidth: textWidth);
       painter.paint(
         canvas,
         Offset(x + inset + symbolWidth, (cell.height - painter.height) / 2),
@@ -307,7 +432,8 @@ class _StatusSegmentsPainter extends CustomPainter {
       scaler != oldDelegate.scaler ||
       nextBackground != oldDelegate.nextBackground ||
       format != oldDelegate.format ||
-      segmentOffset != oldDelegate.segmentOffset;
+      segmentOffset != oldDelegate.segmentOffset ||
+      middleEllipsis != oldDelegate.middleEllipsis;
 }
 
 class _BranchSymbolPainter extends CustomPainter {

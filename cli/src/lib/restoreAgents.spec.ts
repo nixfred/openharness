@@ -210,14 +210,14 @@ describe('restoreAgents — which agents get a pane back', () => {
     expect(h.calls).toEqual([])
   })
 
-  it('skips herdr-only rows and failed launches, saying why', async () => {
+  it('skips rows with no tmux pane and failed launches, saying why', async () => {
     const h = harness([
-      row({ agentId: 'herdr', runtimes: [{ backend: 'herdr', sessionName: 's', paneId: 'p' } as unknown as TerminalRuntimeRef] }),
+      row({ agentId: 'paneless', runtimes: [{ backend: 'unknown', sessionName: 's', paneId: 'p' } as unknown as TerminalRuntimeRef] }),
       row({ agentId: 'broken', launch: { state: 'failed', error: 'START_TIMEOUT' } }),
     ])
     const summary = await restoreAgents(h.deps)
     expect(summary.restored).toEqual([])
-    expect(summary.skipped.map((s) => s.agentId)).toEqual(['herdr', 'broken'])
+    expect(summary.skipped.map((s) => s.agentId)).toEqual(['paneless', 'broken'])
     expect(h.paneCreates).toBe(0)
   })
 

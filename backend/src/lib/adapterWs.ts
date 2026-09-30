@@ -35,6 +35,7 @@ import { machineBillingAllowsDataPlane } from './billingState.js'
 import { normalizeComputerId } from './deviceAuth.js'
 import { authenticateAccessToken, SsoAuthError } from './ssoAuth.js'
 import { relayAccountPushes } from './adapterAccountPushes.js'
+import { DAEMONS } from '../config/env.js'
 import { parseAutonomousEnvironment } from './autonomousEnvironment.js'
 import { machineService } from '../services/MachineService.js'
 import { AppError } from '../errors/index.js'
@@ -209,7 +210,7 @@ async function attachAdapter(ws: WebSocket, machineId: string, userId: string, c
   send({ t: 'connected', machineId })
   // What changed for the ACCOUNT on some worker (its tabs, its machine list): this computer's app
   // re-reads through its daemon rather than polling for it. See adapterAccountPushes.ts.
-  const accountPushesUnsub = await relayAccountPushes(userId, send)
+  const accountPushesUnsub = await relayAccountPushes(userId, send, { zoo: DAEMONS.on })
 
   // Last desktop-app state THIS socket asserted. Socket-scoped on purpose: a new adapter connection
   // starts with no claim and must re-assert, so a fresh value can never renew a stale one.

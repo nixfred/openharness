@@ -183,7 +183,7 @@ it('keeps readable archives discoverable beside corrupt, unsupported and mismatc
 
 it('persists a standalone shell and a runtime without the legacy tmux alias', async () => {
   const { saved, store } = await fixture()
-  store.save({ ...saved, engine: 'terminal', sessionId: '', tmuxPane: '', runtimes: [{ backend: 'herdr', endpointId: 'fixture', paneId: '1' } as any], primaryRuntimeKey: ['herdr', 'fixture', '1'].join('\0'), codexHome: null })
+  store.save({ ...saved, engine: 'terminal', sessionId: '', tmuxPane: '', runtimes: [{ backend: 'unknown', endpointId: 'fixture', paneId: '1' } as any], primaryRuntimeKey: ['unknown', 'fixture', '1'].join('\0'), codexHome: null })
   const disk = JSON.parse(readFileSync(join(directory, 'stopped-agents', `${saved.agentId}.json`), 'utf8'))
   expect(disk.session).not.toHaveProperty('tmuxPane')
   expect(disk.session.sessionId).toBe('')

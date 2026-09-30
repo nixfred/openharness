@@ -9,6 +9,18 @@ function fixture(rows: unknown = [row()]) {
   return { run, read: createPullRequestReader(run), branch: (b: string) => { branch = b } }
 }
 describe('worktree PR status', () => {
+  it('keeps GitHub lifecycle dates separate from lookup time and discards malformed dates', async () => {
+    const run = vi.fn(async () => JSON.stringify(row({ state: 'closed',
+      created_at: '2026-09-20T10:00:00Z', updated_at: '2026-09-26T11:00:00Z',
+      merged_at: '2026-09-24T12:00:00Z', closed_at: 'not a timestamp' })))
+    const read = createPullRequestUrlReader(run, () => Date.parse('2026-09-28T12:00:00Z'))
+    const result = await read('https://github.com/acme/repo/pull/12')
+    expect(result).toMatchObject({ state: 'Merged', createdAt: '2026-09-20T10:00:00.000Z',
+      updatedAt: '2026-09-26T11:00:00.000Z', mergedAt: '2026-09-24T12:00:00.000Z',
+      checkedAt: '2026-09-28T12:00:00.000Z' })
+    expect(result).not.toHaveProperty('closedAt')
+    expect(run.mock.calls[0]).toBeDefined()
+  })
   it('retains the original GitHub check time when serving cached history', async () => {
     let now = Date.parse('2026-09-27T13:00:00Z')
     const run = vi.fn(async () => JSON.stringify(row()))
@@ -58,9 +70,12 @@ describe('worktree PR status', () => {
   it('coalesces lookups and invalidates when the checked-out branch changes', async () => {
     const f = fixture()
     await Promise.all([f.read('/worktree'), f.read('/worktree')])
-    expect(f.run.mock.calls.filter(([cmd, args]) => cmd === 'gh' && args.at(-1)?.includes('/pulls?'))).toHaveLength(1)
+    const queries = () => f.run.mock.calls.filter(([cmd, args]) => cmd === 'gh' && args.at(-1)?.includes('/pulls?'))
+      .map(([, args]) => new URLSearchParams(args.at(-1)!.split('?')[1]))
+    expect(queries().map(q => q.get('state')).sort()).toEqual(['closed', 'open'])
     f.branch('another')
     await f.read('/worktree')
+    expect(queries().filter(q => q.get('head') === 'acme:another').map(q => q.get('state')).sort()).toEqual(['closed', 'open'])
     expect(f.run.mock.calls.some(([cmd, args]) => cmd === 'gh' && args.at(-1)?.includes('head=acme%3Aanother'))).toBe(true)
   })
   it('uses canonical repository identity after an origin rename', async () => {

@@ -12,6 +12,8 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/semantics.dart'
+    show CustomSemanticsAction, SemanticsService;
 import 'package:xterm/xterm.dart' show Terminal, TerminalKey, TerminalStyle;
 
 import 'package:harness_mobile/logging/app_log.dart';
@@ -36,6 +38,8 @@ import 'package:harness_mobile/widgets/terminal_panel.dart';
 import 'agent_model_sections.dart';
 import 'agent_model_sheet.dart';
 import 'agents_page.dart' show openNewAgent;
+import 'daemon_chip.dart';
+import 'daemon_scope.dart';
 import 'delete_agent.dart';
 import 'held_height.dart';
 import 'phone_sheet.dart';
@@ -43,8 +47,8 @@ import 'phone_status.dart';
 import 'settings_page.dart';
 import 'session_work_page.dart';
 import 'terminal_action_column.dart';
+import 'team_page.dart';
 import 'terminal_chrome_scroll.dart';
-import 'terminal_header.dart';
 import 'terminal_input_dock.dart';
 import 'terminal_search.dart';
 import 'tty.dart';
@@ -197,19 +201,10 @@ typedef _PageFacts = ({
   AgentLoadStatus? agentLoadStatus,
   bool machinePresent,
   PhoneMachineStatus? machineStatus,
-  bool redialling,
   bool imagePaste,
   String? machineName,
+  String? asking,
 });
-
-/// What a page has asked for back — see [_TerminalPageState._reclaiming].
-enum _Reclaim {
-  /// The keyboard, off another app that holds the terminal or is driving it.
-  control,
-
-  /// A dead stream, reopened.
-  reconnect,
-}
 
 class _TerminalPageState extends State<TerminalPage>
     with WidgetsBindingObserver, TickerProviderStateMixin {
@@ -453,39 +448,6 @@ class _TerminalPageState extends State<TerminalPage>
   /// compares the next tick against.
   _PageFacts? _facts;
 
-  /// What THIS page has asked for back and not yet heard about: the keyboard off another app, or a
-  /// dead stream reopened. Null while it has asked for nothing.
-  ///
-  /// A take holds the banner up through the `opening` that answers it, so the banner can say so —
-  /// rather than blinking out and back as the status moves. A reconnect raises no banner: the
-  /// header draws it as the wait it is, the way it draws Attaching — see [phoneSessionSummary]'s
-  /// `reconnecting`.
-  ///
-  /// ⚠️ **Two kinds, because they read differently.** Both are the same call, and this used to be
-  /// one flag: pressing Reconnect raised a banner saying "Taking control…" over a stream nobody
-  /// else held.
-  ///
-  /// Taken back by [_onNotifier] once that open lands, and by [_takeControl] itself for a request
-  /// the notifier declined without ever changing a status.
-  _Reclaim? _reclaiming;
-
-  /// The header's status as of its last build, for the mark on the actions sheet.
-  ///
-  /// The sheet is a route of its own, so this page's `setState` never reaches it: the mark there
-  /// listens to this instead, and shows the dot the header is showing for as long as the sheet is
-  /// up — a reconnect that starts under it included — rather than the moment it opened.
-  ///
-  /// ⚠️ Moved AFTER the frame, never during the build that works it out: the sheet listening to it
-  /// would otherwise be marked dirty in the middle of this page's build. See
-  /// [_publishActionsStatus].
-  final ValueNotifier<PhoneSummary> _actionsStatus = ValueNotifier((
-    label: '',
-    tone: PhoneTone.quiet,
-  ));
-
-  /// The status the end of this frame hands to [_actionsStatus]; null while none is waiting.
-  PhoneSummary? _nextActionsStatus;
-
   /// The skeleton's one identity across the two places the body draws it.
   ///
   /// ⚠️ **Two places, one skeleton.** It stands in for the panel while there is no session, and
@@ -563,6 +525,21 @@ class _TerminalPageState extends State<TerminalPage>
     if (!mounted) return;
     final view = _questionWatcher?.view;
     final open = view != null && view.answerable;
+    _tellDaemon(open ? view : null);
+    // VoiceOver hears it too, once per question: the keys appearing beside the mic and the
+    // terminal repainting say nothing to someone who cannot see them.
+    if (open && view.question != _questionAnnounced) {
+      _questionAnnounced = view.question;
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          View.of(context),
+          'Asking: ${view.question}',
+          Directionality.of(context),
+        ),
+      );
+    } else if (!open) {
+      _questionAnnounced = null;
+    }
     setState(() {
       // Cleared as the dialog goes, so the NEXT question raises the keyboard
       // again even if it words itself identically.
@@ -571,6 +548,34 @@ class _TerminalPageState extends State<TerminalPage>
     if (_questionWatcher?.queued == null) _queueRaisedFor = null;
     _raiseForQuestion();
   }
+
+  /// The daemon on this phone, cached so a page going can take its report back
+  /// (a disposed page cannot look its scope up).
+  DaemonHostState? _daemon;
+
+  /// Tell the daemon a question is open on this page, or that it went. The
+  /// machine's own question frame never reaches a phone on the relay, so a
+  /// dialog read off the screen is how the daemon learns a harness needs you.
+  void _tellDaemon(QuestionPaneView? view) {
+    final host = _daemon ??= DaemonScope.maybeOf(context);
+    if (host == null) return;
+    final agent = widget.notifier
+        .stateOf(widget.machineId)
+        ?.agents
+        .where((a) => a.id == widget.agentId)
+        .firstOrNull;
+    host.noteQuestion(
+      this,
+      machineId: widget.machineId,
+      agentId: widget.agentId,
+      key: view?.fingerprint,
+      who: agent?.displayName ?? 'a harness',
+      question: view?.question ?? '',
+    );
+  }
+
+  /// The question VoiceOver was last told about, so a repaint of the same dialog is not said twice.
+  String? _questionAnnounced;
 
   /// Raise the keyboard for the question on the pane, if it has not had its
   /// one raise yet — see [_questionRaisedFor] and [_queueRaisedFor].
@@ -685,16 +690,13 @@ class _TerminalPageState extends State<TerminalPage>
       agentLoadStatus: machine?.agentLoadStatus,
       machinePresent: machine != null,
       machineStatus: machine == null ? null : phoneMachineStatusOf(machine),
-      // Only while the stream is dead — the one state it changes how the
-      // header reads. A live page has no reason to rebuild each time the agent
-      // list refreshes underneath it.
-      redialling:
-          machine != null &&
-          (session?.status == TerminalSessionStatus.error ||
-              session?.status == TerminalSessionStatus.closed) &&
-          phoneMachineRedialling(machine),
       imagePaste: machine?.terminalImagePasteAvailable ?? false,
       machineName: machine?.machine.displayName,
+      // ⚠️ The title's `api-fix asking` is drawn from here too. Left out, a harness elsewhere
+      // that stopped to ask moved no fact this page compared, so the word never appeared — the
+      // one signal the title carries about the rest of the fleet, missing until something
+      // unrelated happened to rebuild the page.
+      asking: _askingElsewhere(),
     );
   }
 
@@ -720,19 +722,7 @@ class _TerminalPageState extends State<TerminalPage>
       _acceptedInput = accepts;
       if (accepts) _raiseForQuestion();
     }
-    // ⚠️ Checked BEFORE the equality bail below, not after. A take that ends where it began —
-    // `takenOver` again, because the other app answered first — moves no fact this page reads, so
-    // the bail would keep the band saying "Taking control…" over a page that had already been
-    // told no. See [_takeControl].
-    final settled =
-        _reclaiming != null &&
-        facts.status != TerminalSessionStatus.opening &&
-        facts.status != null;
-    if (settled) _reclaiming = null;
-    if (facts == _facts) {
-      if (settled) setState(() {});
-      return;
-    }
+    if (facts == _facts) return;
     setState(() => _facts = facts);
   }
 
@@ -782,34 +772,19 @@ class _TerminalPageState extends State<TerminalPage>
     _barMessage.dispose();
     _scrollback.dispose();
     widget.notifier.removeListener(_onNotifier);
+    _daemon?.noteQuestion(
+      this,
+      machineId: widget.machineId,
+      agentId: widget.agentId,
+    );
     _questionWatcher?.removeListener(_onQuestionPane);
     _questionWatcher?.dispose();
     _cancelSettle();
     _searchHoldTimer?.cancel();
     _chrome.dispose();
     _searchOpen.dispose();
-    // A sheet still open over a page that is going keeps the last dot it was given; its listener
-    // comes off when it closes, which a disposed notifier allows.
-    _actionsStatus.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
-  }
-
-  /// Hands [status] to the actions sheet's mark once this frame is done — see [_actionsStatus].
-  ///
-  /// The last build of a frame is the one handed over, and nothing is scheduled while the status
-  /// stands still.
-  void _publishActionsStatus(PhoneSummary status) {
-    final waiting = _nextActionsStatus != null;
-    if (!waiting && status == _actionsStatus.value) return;
-    _nextActionsStatus = status;
-    if (waiting) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final next = _nextActionsStatus;
-      _nextActionsStatus = null;
-      if (!mounted || next == null) return;
-      _actionsStatus.value = next;
-    });
   }
 
   /// Harnesses other than this one that are asking something — the title's `api-fix asking`,
@@ -828,29 +803,24 @@ class _TerminalPageState extends State<TerminalPage>
   }
 
   /// In the sample, the one thing to try next — `refactor-db needs you →` — following what has
-  /// been done: go to the harness that is asking, answer it, start one of your own. No counter:
-  /// the dot beside it glides the way the swipe goes. Null outside the sample, and once the sample
-  /// is done.
-  ({String text, int glide})? _sampleGuide() {
+  /// been done: go to the harness that is asking, answer it, start one of your own. Null outside the sample and once the sample is done.
+  String? _sampleGuide() {
     final sample = SampleMode.maybeOf(context);
     if (sample == null || sample.endCardSeen) return null;
-    final (step, text, glide) = switch (null) {
+    final (step, text) = switch (null) {
       _ when widget.agentId.startsWith('sample-new-') => (
         4,
         '✓ yours is running',
-        0,
       ),
       _ when _questionWatcher?.view != null => (
         2,
         'say “yes”, or tap an answer',
-        0,
       ),
       _ when _askingElsewhere() != null => (
         1,
         '${_askingElsewhere()!.replaceFirst(' asking', '')} needs you →',
-        1,
       ),
-      _ => (3, '← start one of your own', -1),
+      _ => (3, '← start one of your own'),
     };
     if (step == 4) _scheduleEndCard(sample);
     // A step done: a tick you can feel, once.
@@ -858,7 +828,7 @@ class _TerminalPageState extends State<TerminalPage>
       HapticFeedback.mediumImpact();
     }
     _guideStep = step;
-    return (text: text, glide: glide);
+    return text;
   }
 
   int? _guideStep;
@@ -959,26 +929,34 @@ class _TerminalPageState extends State<TerminalPage>
   double get _clearAboveMic =>
       _questionWatcher?.view != null ? _statusBottom + 22 : _windowBottomInset;
 
-  /// The line above the mic, highest first: what a take is doing, a two-second message (`✓ 1
-  /// yes`, or an error in red), a question with no keys to offer, the sample's next step. Null
-  /// when there is nothing to say.
+  /// The line above the mic, highest first: a two-second message (`✓ 1 yes`, or an error in red),
+  /// what a take is doing, a question with no keys to offer, the sample's next step. Null when
+  /// there is nothing to say.
+  ///
+  /// ⚠️ **The two-second message outranks the take.** The take's line was first, and a take the
+  /// question refused — `✗ no match — tap an answer` — never showed its reason: the refusal also
+  /// leaves the take's generic "Not sent — this terminal isn't taking input" standing, which
+  /// covered the one line that said what to do, and blamed the terminal instead.
   Widget? _statusLine() {
     final tty = Tty.of(context);
-    if (voiceStatus(widget.voice, tty) case final said?) {
-      return _StatusLine(text: said.text, color: said.color);
-    }
     if (_barMessage.value case final message?) {
       return _StatusLine(
         text: message.text,
         color: message.error ? tty.red : tty.green,
       );
     }
+    if (voiceStatus(widget.voice, tty) case final said?) {
+      return _StatusLine(text: said.text, color: said.color);
+    }
     final view = _questionWatcher?.view;
     if (view != null && _answerKeys(view) == null) {
       return _StatusLine(text: 'answer on screen', color: tty.yellow);
     }
+    // Not while reading back through the history: the line sat on the rows being read, halving
+    // one ("FAIL src/auth/…"). It is back the moment the reader is at the end again.
+    if (_scrollback.value != null) return null;
     if (_sampleGuide() case final guide?) {
-      return _StatusLine(text: guide.text, glide: guide.glide, dot: true);
+      return _StatusLine(text: guide, dot: true);
     }
     return null;
   }
@@ -1025,10 +1003,11 @@ class _TerminalPageState extends State<TerminalPage>
   /// that question, as its answer or not at all. Nothing is echoed when it lands: the words appear
   /// in the prompt, and a tap is felt. Only what went wrong is said (see [_flash]).
   Future<bool> _deliverVoice(String text) async {
+    final origin = widget.notifier.activeSwarmId;
     final session = await _sessionForInput();
     if (session == null) return false;
     if (_questionWatcher?.view != null) return _answerByVoice(session, text);
-    final sent = await session.sendComposerText(text);
+    final sent = await session.sendComposerText(text, tabId: origin);
     // After the send is acknowledged, never before: a tap felt first would be a promise.
     if (sent && mounted) HapticFeedback.lightImpact();
     return sent;
@@ -1056,7 +1035,8 @@ class _TerminalPageState extends State<TerminalPage>
   /// A voice take while the agent's question is open: it answers the question or it is not sent.
   Future<bool> _answerByVoice(TerminalSession session, String text) async {
     final view = _questionWatcher?.view;
-    if (view == null) return session.sendComposerText(text);
+    final origin = widget.notifier.activeSwarmId;
+    if (view == null) return session.sendComposerText(text, tabId: origin);
     if (!view.answerable || view.multi) {
       _flash('✗ answer on screen', error: true);
       return false;
@@ -1072,7 +1052,7 @@ class _TerminalPageState extends State<TerminalPage>
     if (match.rest case final rest?) {
       Timer(const Duration(milliseconds: 900), () {
         if (!mounted || _questionWatcher?.view != null) return;
-        unawaited(session.sendComposerText(rest));
+        unawaited(session.sendComposerText(rest, tabId: origin));
       });
     }
     return true;
@@ -1091,14 +1071,18 @@ class _TerminalPageState extends State<TerminalPage>
       false;
 
   /// A window name the way tmux shortens one: the first dozen characters.
-  static String _windowName(String name) =>
-      name.length <= 12 ? name : name.substring(0, 12);
+  ///
+  /// ⚠️ Characters as a person counts them, not UTF-16 units: cut by `substring`, a name with an
+  /// emoji near the twelfth unit kept half a surrogate pair, and the text engine throws on a string
+  /// like that — the title, and the page under it, went with it.
+  static String _windowName(String name) {
+    final characters = name.characters;
+    return characters.length <= 12 ? name : characters.take(12).toString();
+  }
 
-  /// Where the reader is while scrolled up in the history — see [_CopyModePosition].
+  /// Where the reader is while scrolled up in the history, or null at the end — what holds the
+  /// terminal still under a reader ([_AnchoredTerminal.reading]).
   final _scrollback = ValueNotifier<({int above, int total})?>(null);
-
-  /// Bumped by the position's tap to take the terminal back to the end.
-  int _jumpToEnd = 0;
 
   /// How far left a drag has gone, for the swipe that opens a new agent.
   double _swipedLeft = 0;
@@ -1162,6 +1146,19 @@ class _TerminalPageState extends State<TerminalPage>
     _closeSearch();
   }
 
+  /// What VoiceOver reads for the terminal: its last few lines with anything on them, oldest first
+  /// — where the agent says what it did and what it wants. Empty before the first frame lands.
+  static String _lastLinesForVoiceOver(Terminal? terminal, {int count = 6}) {
+    if (terminal == null) return '';
+    final buffer = terminal.buffer;
+    final lines = <String>[];
+    for (var y = buffer.height - 1; y >= 0 && lines.length < count; y--) {
+      final text = buffer.lines[y].getText().trim();
+      if (text.isNotEmpty) lines.add(text);
+    }
+    return lines.reversed.join('\n');
+  }
+
   /// A new agent, on the machine of the one on screen — the form slides in from the right, the way
   /// a swipe left asks for.
   ///
@@ -1178,23 +1175,15 @@ class _TerminalPageState extends State<TerminalPage>
     if (mounted) setState(() {});
   }
 
-  /// Brings the search sheet up over the terminal, reading the account's tabs
-  /// with its field not yet focused — see [TerminalSearchOverlay].
+  /// Brings Find up over the terminal with its search field focused.
   ///
-  /// ⚠️ **The terminal is held from THIS frame, though no keyboard is coming
-  /// yet.** The sheet's field raises one the moment it is tapped, and by then
-  /// the terminal must already be ignoring it — see [_heldForSearch] for what
-  /// it does with that keyboard otherwise.
+  /// Hold the terminal before Find takes the keyboard — see [_heldForSearch].
   void _openSearch({bool animate = true}) {
     if (_searching) return;
     _keyboardBeforeSearch = _keyboardIsUp;
     _keyboardUpAtSearch = _keyboardUp;
     _searchHoldTimer?.cancel();
-    // ⚠️ **Whatever holds the keys lets go of them.** The sheet opens with its
-    // field NOT focused, so nothing takes focus from the terminal the way the
-    // search once did by focusing itself — and a terminal on a hardware
-    // keyboard keeps its focus with no inset to show for it, so it would go on
-    // typing into the shell from under the dimming.
+    // Release even a hardware keyboard before the search field mounts.
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _searching = true;
@@ -1682,15 +1671,6 @@ class _TerminalPageState extends State<TerminalPage>
         machine.agentLoadStatus == AgentLoadStatus.loaded;
     // Captured while the agent is still listed, for the sentence above.
     if (agent != null) _cachedAgentName = agent.displayName;
-    // A dead stream already on its way back: its machine is redialling, or this page has just
-    // asked for it. The header draws that as the wait it is — spinner on the mark, sweep along the
-    // rule — rather than as Disconnected beside a button. See [phoneSessionSummary].
-    //
-    // Never for an agent that is gone: nothing will reopen its stream, however the socket is doing.
-    final reconnecting =
-        !agentGone &&
-        (_reclaiming == _Reclaim.reconnect ||
-            (machine != null && phoneMachineRedialling(machine)));
     // Read-only either way — the terminal was never this pane's (a watcher) or was taken from it.
     // `_AgentGone` owns the page when the agent itself is missing, so this stays out of its way.
     final blocked =
@@ -1708,18 +1688,6 @@ class _TerminalPageState extends State<TerminalPage>
     final keyHints = agentGone || blocked || !(session?.acceptsInput ?? false)
         ? const <KeyHint>[]
         : _questionWatcher?.hints ?? const <KeyHint>[];
-    final takerName = phoneTakerName(
-      session,
-      (id) => widget.notifier.stateOf(id)?.machine.displayName,
-    );
-    final headerStatus = phoneSessionSummary(
-      session,
-      takerName: takerName,
-      reconnecting: reconnecting,
-    );
-    // The actions sheet draws the same dot beside the agent's name, and is not rebuilt by this
-    // page — see [_actionsStatus].
-    _publishActionsStatus(headerStatus);
     // Read this page's own buffer for a dialog, and raise the keyboard when one
     // appears. Must run on every build: the session arrives a frame or two
     // after the page, and the engine with the agent.
@@ -1782,6 +1750,27 @@ class _TerminalPageState extends State<TerminalPage>
           // and takes no hits; it only stops the Stack from inheriting a height
           // that belongs to something being deliberately held still.
           const SizedBox.expand(),
+          // ⚠️ **VoiceOver's way in, and the only one.** xterm draws the terminal without a
+          // single semantics node, and VoiceOver keeps one-finger swipes for itself — so without
+          // this, a VoiceOver user could neither hear what the agent last said nor reach Find or a
+          // new harness, which the sideways swipes are the only way to. One node under everything,
+          // painting nothing and taking no touches: the agent's name, the last lines on its screen,
+          // and the two swipes as actions (VoiceOver's rotor, "Actions").
+          Positioned.fill(
+            child: Semantics(
+              container: true,
+              label: '${agent?.displayName ?? widget.agentId}, terminal',
+              value: _lastLinesForVoiceOver(session?.terminal),
+              customSemanticsActions: widget.sideSwipes
+                  ? {
+                      const CustomSemanticsAction(label: 'Find'): _openSearch,
+                      const CustomSemanticsAction(label: 'New harness'): () =>
+                          unawaited(_newAgentHere()),
+                    }
+                  : null,
+              child: const SizedBox.expand(),
+            ),
+          ),
           MediaQuery.removePadding(
             context: context,
             removeBottom: true,
@@ -1869,115 +1858,122 @@ class _TerminalPageState extends State<TerminalPage>
                                         // listening for its notifications as they
                                         // bubble past is what survives that, and costs
                                         // the panel no knowledge of the page's chrome.
-                                        child:
-                                            NotificationListener<
-                                              ScrollNotification
-                                            >(
-                                              // A scroll on a terminal held elsewhere takes it,
-                                              // as a tap does: no button to find first.
-                                              onNotification: (notification) {
-                                                if (blocked &&
-                                                    notification
-                                                        is ScrollStartNotification &&
-                                                    notification.dragDetails !=
-                                                        null) {
-                                                  unawaited(_takeControl());
-                                                }
-                                                return _chrome.onNotification(
-                                                  notification,
-                                                );
-                                              },
-                                              child: agentGone
-                                                  ? _AgentGone(
-                                                      name: _cachedAgentName,
-                                                      onPickAnother:
-                                                          _pickAnotherAgent,
-                                                    )
-                                                  : pane == null ||
-                                                        session == null
-                                                  ? _Attaching(
-                                                      key: _skeletonKey,
-                                                    )
-                                                  : TerminalPanel(
-                                                      key: ValueKey(pane.id),
-                                                      notifier: widget.notifier,
-                                                      session: session,
-                                                      // Only the page on screen takes the keyboard — see
-                                                      // [TerminalPage.isActive]. `visible` is the same answer for the
-                                                      // panel's other half: a page parked beside this one releases
-                                                      // focus, stops rendering and stops resizing its remote shell.
-                                                      //
-                                                      // Whether it also HOLDS one that is already
-                                                      // up is a separate question, and the pager asks
-                                                      // it on every swipe — see [_shouldFocus].
-                                                      focused: _shouldFocus,
-                                                      // Asks again when `focused` did
-                                                      // not move — coming back from
-                                                      // another app. See
-                                                      // [didChangeAppLifecycleState].
-                                                      focusRequest:
-                                                          _focusRequest,
-                                                      visible: widget.isActive,
-                                                      // Hold the remote resize while the keyboard
-                                                      // slides. Separate from `visible` because this
-                                                      // must NOT release focus — the animation being
-                                                      // waited on is the one that focus started.
-                                                      //
-                                                      // The keyboard is the only thing left that
-                                                      // moves this pane's height: the header slides
-                                                      // OVER the terminal rather than out of its
-                                                      // column — see [_SlideAway].
-                                                      //
-                                                      // ⚠️ Held for as long as search is open, too:
-                                                      // its keyboard is typing a query over a faded
-                                                      // terminal, and resizing the agent's shell for
-                                                      // it redrew the whole TUI on the way in and
-                                                      // again on the way out.
-                                                      settling:
-                                                          _keyboardSettling ||
-                                                          _heldForSearch,
-                                                      // ⚠️ The tap is taken in the panel, not by a
-                                                      // `Listener` over it. xterm's own `_onTapDown`
-                                                      // calls `requestKeyboard()`, so anything that
-                                                      // merely ALSO reacted to the tap would raise
-                                                      // the keyboard before the words said were typed
-                                                      // into the prompt — and a re-armed claim on top
-                                                      // of it was measured asking Android twice per
-                                                      // tap, which answers a show mid-animation by
-                                                      // cancelling and restarting it. Null while the
-                                                      // keyboard is up or coming, so the tap is
-                                                      // xterm's and the keyboard stays.
-                                                      //
-                                                      // ⚠️ A tap on a pane that cannot take input
-                                                      // takes the TERMINAL first, not the
-                                                      // keyboard: raising one over a read-only
-                                                      // pane offers a prompt that silently
-                                                      // swallows every letter.
-                                                      onInputTap: blocked
-                                                          ? () => unawaited(
-                                                              _takeControl(),
-                                                            )
-                                                          : _shouldFocus
-                                                          ? null
-                                                          : () => unawaited(
-                                                              _raiseKeyboard(
-                                                                session,
-                                                              ),
-                                                            ),
-                                                      onLineTap: _onLineTap,
-                                                      showHeader: false,
-                                                      // tmux's copy-mode position while
-                                                      // reading back — see [_CopyModePosition].
-                                                      scrollback: _scrollback,
-                                                      jumpToEndRequest:
-                                                          _jumpToEnd,
-                                                      // No composer, and so no grip above it: the
-                                                      // page hands the pane its full height and the
-                                                      // software keyboard drives the terminal
-                                                      // directly. The mic's send is what kept the
-                                                      // composer's batched turn.
-                                                    ),
-                                            ),
+                                        child: NotificationListener<ScrollNotification>(
+                                          // A scroll on a terminal held elsewhere takes it,
+                                          // as a tap does: no button to find first.
+                                          onNotification: (notification) {
+                                            if (blocked &&
+                                                notification
+                                                    is ScrollStartNotification &&
+                                                notification.dragDetails !=
+                                                    null) {
+                                              unawaited(_takeControl());
+                                            }
+                                            return _chrome.onNotification(
+                                              notification,
+                                            );
+                                          },
+                                          child: agentGone
+                                              ? _AgentGone(
+                                                  name: _cachedAgentName,
+                                                  onPickAnother:
+                                                      _pickAnotherAgent,
+                                                )
+                                              : pane == null || session == null
+                                              ? _Attaching(key: _skeletonKey)
+                                              : TerminalPanel(
+                                                  tabId: widget
+                                                      .notifier
+                                                      .activeSwarmId,
+                                                  key: ValueKey(pane.id),
+                                                  notifier: widget.notifier,
+                                                  session: session,
+                                                  // Only the page on screen takes the keyboard — see
+                                                  // [TerminalPage.isActive]. `visible` is the same answer for the
+                                                  // panel's other half: a page parked beside this one releases
+                                                  // focus, stops rendering and stops resizing its remote shell.
+                                                  //
+                                                  // Whether it also HOLDS one that is already
+                                                  // up is a separate question, and the pager asks
+                                                  // it on every swipe — see [_shouldFocus].
+                                                  focused: _shouldFocus,
+                                                  // Asks again when `focused` did
+                                                  // not move — coming back from
+                                                  // another app. See
+                                                  // [didChangeAppLifecycleState].
+                                                  focusRequest: _focusRequest,
+                                                  visible: widget.isActive,
+                                                  // Hold the remote resize while the keyboard
+                                                  // slides. Separate from `visible` because this
+                                                  // must NOT release focus — the animation being
+                                                  // waited on is the one that focus started.
+                                                  //
+                                                  // The keyboard is the only thing left that
+                                                  // moves this pane's height: the header slides
+                                                  // OVER the terminal rather than out of its
+                                                  // column — see [_SlideAway].
+                                                  //
+                                                  // ⚠️ Held for as long as search is open, too:
+                                                  // its keyboard is typing a query over a faded
+                                                  // terminal, and resizing the agent's shell for
+                                                  // it redrew the whole TUI on the way in and
+                                                  // again on the way out.
+                                                  settling:
+                                                      _keyboardSettling ||
+                                                      _heldForSearch,
+                                                  // ⚠️ The tap is taken in the panel, not by a
+                                                  // `Listener` over it. xterm's own `_onTapDown`
+                                                  // calls `requestKeyboard()`, so anything that
+                                                  // merely ALSO reacted to the tap would raise
+                                                  // the keyboard before the words said were typed
+                                                  // into the prompt — and a re-armed claim on top
+                                                  // of it was measured asking Android twice per
+                                                  // tap, which answers a show mid-animation by
+                                                  // cancelling and restarting it. Null while the
+                                                  // keyboard is up or coming, so the tap is
+                                                  // xterm's and the keyboard stays.
+                                                  //
+                                                  // ⚠️ A tap on a pane that cannot take input
+                                                  // takes the TERMINAL first, not the
+                                                  // keyboard: raising one over a read-only
+                                                  // pane offers a prompt that silently
+                                                  // swallows every letter.
+                                                  //
+                                                  // ⚠️ **A stream that died is one of those
+                                                  // panes.** Held to [blocked] alone, a tap on
+                                                  // a closed or failed stream raised the
+                                                  // keyboard over it — keys dimmed, letters
+                                                  // dropped — and nothing on the page offered
+                                                  // the reconnect instead. The take reopens it.
+                                                  onInputTap:
+                                                      blocked ||
+                                                          session.status ==
+                                                              TerminalSessionStatus
+                                                                  .closed ||
+                                                          session.status ==
+                                                              TerminalSessionStatus
+                                                                  .error
+                                                      ? () => unawaited(
+                                                          _takeControl(),
+                                                        )
+                                                      : _shouldFocus
+                                                      ? null
+                                                      : () => unawaited(
+                                                          _raiseKeyboard(
+                                                            session,
+                                                          ),
+                                                        ),
+                                                  onLineTap: _onLineTap,
+                                                  // Where the reader is in the history —
+                                                  // what holds the view still under them.
+                                                  scrollback: _scrollback,
+                                                  // No composer, and so no grip above it: the
+                                                  // page hands the pane its full height and the
+                                                  // software keyboard drives the terminal
+                                                  // directly. The mic's send is what kept the
+                                                  // composer's batched turn.
+                                                ),
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -2095,6 +2091,7 @@ class _TerminalPageState extends State<TerminalPage>
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             TerminalTitle(
+                              sample: SampleMode.maybeOf(context) != null,
                               name:
                                   agent?.displayName ?? _cachedAgentName ?? '',
                               place: _placeOf(agent, machine),
@@ -2107,13 +2104,18 @@ class _TerminalPageState extends State<TerminalPage>
                                   : _askingElsewhere(),
                               onHold: _openLastHarness,
                               onFind: _openSearch,
+                              // The paired daemon at the title's right end: its
+                              // sprite, a tap from its sheet. Nothing outside the
+                              // signed-in shell (the sample). See `daemon_chip.dart`.
+                              daemon: const DaemonChip(
+                                margin: EdgeInsets.only(left: 12),
+                              ),
                               onTap: () {
                                 if (agent == null) return;
                                 _showActions(
                                   machineName:
                                       machine?.machine.displayName ?? '',
                                   agent: agent,
-                                  status: headerStatus,
                                 );
                               },
                             ),
@@ -2123,27 +2125,9 @@ class _TerminalPageState extends State<TerminalPage>
                         ),
                       ),
                     ),
-                    // tmux's copy-mode position, top right, while reading back
-                    // through the history: `[42/1380]`. One tap is back at the end.
-                    Positioned(
-                      // The pane's own row 0, flush right, as tmux draws it.
-                      top: 0,
-                      right: 0,
-                      child: ValueListenableBuilder<({int above, int total})?>(
-                        valueListenable: _scrollback,
-                        builder: (context, position, _) =>
-                            position == null || _ownsInput
-                            ? const SizedBox.shrink()
-                            : _CopyModePosition(
-                                above: position.above,
-                                total: position.total,
-                                onTap: () {
-                                  _scrollback.value = null;
-                                  setState(() => _jumpToEnd++);
-                                },
-                              ),
-                      ),
-                    ),
+                    // ⚠️ No `[42/1380]` at the top right while reading back, by the owner's
+                    // call (2026-09-27): "we don't need the scrolling indicator". The history
+                    // scrolls like any list; scrolling down is the way back to the stream.
                     // The line above the mic: what is going on, in a few words — see [_statusLine].
                     if (!_ownsInput)
                       Positioned(
@@ -2155,6 +2139,7 @@ class _TerminalPageState extends State<TerminalPage>
                             listenable: Listenable.merge([
                               widget.voice,
                               _barMessage,
+                              _scrollback,
                             ]),
                             builder: (context, _) =>
                                 _statusLine() ?? const SizedBox.shrink(),
@@ -2202,8 +2187,6 @@ class _TerminalPageState extends State<TerminalPage>
                           child: TerminalActionColumn(
                             voice: widget.voice,
                             session: session,
-                            onSearch: _openSearch,
-                            unread: widget.notifier.agentNotices.unread,
                             working: _agentWorking,
                           ),
                         ),
@@ -2341,14 +2324,7 @@ class _TerminalPageState extends State<TerminalPage>
     });
   }
 
-  void _showActions({
-    required String machineName,
-    required Agent agent,
-    required PhoneSummary status,
-  }) {
-    // Set here, where no build is running, so the sheet opens on the dot the header shows now
-    // rather than on whatever the last frame handed over. See [_actionsStatus].
-    _actionsStatus.value = status;
+  void _showActions({required String machineName, required Agent agent}) {
     final agentName = agent.displayName;
     showPhoneSheet(
       context,
@@ -2359,28 +2335,6 @@ class _TerminalPageState extends State<TerminalPage>
       ].join(),
       titleBranch:
           agent.gitContext?.branchLabel ?? agent.displayProject?.shownBranch,
-      // The agent, then where it runs — the machine, then the folder with its parent beside the
-      // branch — each behind its icon. The header has no room for the path.
-      titleParts: [agentName],
-      // The engine mark carrying the header's own dot: the sheet's anchor, and the same picture of
-      // this agent the header draws above it. The ring is the sheet's ground, which the dot is
-      // notched out of.
-      titleLeading: ValueListenableBuilder<PhoneSummary>(
-        valueListenable: _actionsStatus,
-        builder: (context, status, _) {
-          AppTheme.watch(context);
-          return BadgedEngineMark(
-            agent: agent,
-            status: status,
-            ring: AppPalette.panelBg,
-            size: 40,
-          );
-        },
-      ),
-      titleDetail: AgentPlaceLines(
-        machineName: machineName,
-        project: agent.displayProject,
-      ),
       // Three cards: what acts on THIS agent, the screens the app itself has, and — alone at the
       // end — the one act that cannot be undone. No caption over the first: the name above it
       // already says which harness its rows act on, which is also why they no longer repeat
@@ -2395,6 +2349,21 @@ class _TerminalPageState extends State<TerminalPage>
         // the computers are a row in Settings.
         PhoneSheetSection(
           actions: [
+            PhoneSheetAction(
+              icon: LucideIcons.users300,
+              label: 'Swarm conversation',
+              chevron: true,
+              onTap: () => Navigator.of(context).push(
+                phoneRoute(
+                  (_) => TeamPage(
+                    notifier: widget.notifier,
+                    machineId: widget.machineId,
+                    tabId: widget.notifier.activeDeskTabId,
+                    agentId: widget.agentId,
+                  ),
+                ),
+              ),
+            ),
             // In the sample: the way back out, where a person looks for "what else can I do".
             if (SampleMode.maybeOf(context) case final sample?)
               PhoneSheetAction(
@@ -2545,7 +2514,7 @@ class _TerminalPageState extends State<TerminalPage>
   /// share the route.
   PhoneSheetAction _stopAction(Agent agent) => PhoneSheetAction(
     icon: LucideIcons.trash2300,
-    // The least used thing here: small and faint at the foot, not a red row (it still confirms).
+    // The least used thing here: small at the foot, not a full red row (it still confirms).
     label: 'Stop this harness…',
     destructive: true,
     quiet: true,
@@ -2560,39 +2529,14 @@ class _TerminalPageState extends State<TerminalPage>
     ),
   );
 
-  /// Asks for the terminal this pane is only watching, or reopens the stream it lost — the band's
-  /// button, and the header's.
+  /// Asks for the terminal this pane is only watching, or reopens the stream it lost — a tap or a
+  /// scroll on a terminal held elsewhere.
   ///
-  /// Which of the two it is comes from the stream as it stands, not from the button: somebody else
-  /// holding or driving it makes this a take, and a dead one a reconnect. [_reclaiming] carries
-  /// that through the `opening` this starts, so a take reads as one action answering rather than
-  /// a band that vanished and came back, and a reconnect reads as the header's wait from the
-  /// moment it is pressed. `selectAgent` declines quietly when the pane cannot be attached at all
-  /// (its machine went offline meanwhile, the agent was withdrawn), and that leaves the status
-  /// where it was — so the flag is taken back here too, rather than left armed over a page
-  /// nothing is going to answer for.
-  Future<void> _takeControl() async {
-    final notifier = widget.notifier;
-    final before = notifier
-        .paneOfAgent(widget.machineId, widget.agentId)
-        ?.session;
-    final kind =
-        before != null &&
-            (before.watching ||
-                before.status == TerminalSessionStatus.takenOver)
-        ? _Reclaim.control
-        : _Reclaim.reconnect;
-    if (_reclaiming != kind) setState(() => _reclaiming = kind);
-    await notifier.selectAgent(widget.machineId, widget.agentId);
-    if (!mounted) return;
-    final session = notifier
-        .paneOfAgent(widget.machineId, widget.agentId)
-        ?.session;
-    if (_reclaiming != null &&
-        session?.status != TerminalSessionStatus.opening) {
-      setState(() => _reclaiming = null);
-    }
-  }
+  /// `selectAgent` works out which of the two it is from the stream as it stands, and declines
+  /// quietly when the pane cannot be attached at all (its machine went offline meanwhile, the
+  /// agent was withdrawn).
+  Future<void> _takeControl() =>
+      widget.notifier.selectAgent(widget.machineId, widget.agentId);
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
@@ -2778,7 +2722,12 @@ class _AttachingState extends State<_Attaching> with TickerProviderStateMixin {
   /// Whether the sweep and the breath are running. False with the page parked
   /// beside the one on screen, or with animations turned off — see
   /// [didChangeDependencies] for what is drawn then.
-  bool _animating = false;
+  ///
+  /// ⚠️ **Null until the first [didChangeDependencies], not false.** Starting
+  /// on false, a skeleton BUILT still — Reduce Motion on, or a page built parked
+  /// — found nothing changed, skipped the jump to the sweep's end, and drew bare
+  /// ground for the whole wait.
+  bool? _animating;
 
   @override
   void didChangeDependencies() {
@@ -2843,7 +2792,7 @@ class _AttachingState extends State<_Attaching> with TickerProviderStateMixin {
     final lineHeight = fontSize * style.height;
     // Resolved exactly as [TerminalPanel] resolves it for the view underneath,
     // so the skeleton's ground and the terminal's are the same colour.
-    final ground = terminalThemeFor(
+    final ground = terminalScreenThemeFor(
       AppTheme.palette.value,
       terminalThemeStore.value,
     ).background;
@@ -3242,90 +3191,6 @@ class _SkeletonTurn {
   final double? meta;
 }
 
-/// The longest agent name the header will print before it cuts.
-///
-/// An agent's name is usually a filename, and the header row has to hold three
-/// controls beside it. Left to the width alone, a long name pushed right up
-/// against `+` with no gap; cutting by COUNT keeps a fixed, predictable stretch
-/// of chrome whatever the name and whatever the screen.
-const int _titleMaxChars = 20;
-
-/// The name as the header prints it: cut to [_titleMaxChars] with an ellipsis
-/// when it is longer.
-///
-/// ⚠️ Counts runes, not code units. `String.length` counts UTF-16 units, so an
-/// emoji or a decomposed Vietnamese vowel costs two and a name cuts early —
-/// short of the 20 the design asks for, and at a different point per name.
-///
-/// ⚠️ The header's own width ellipsis stays as well. This one bounds the
-/// string; that one still catches a 20-character name on a narrow screen, and
-/// neither makes the other redundant.
-///
-/// ⚠️ **Nothing calls it** — [TerminalHeader] ellipses the name on width alone,
-/// beside the machine. Kept because a count cut may be wanted there again, and
-/// this is the rune-correct one it would want.
-// ignore: unused_element
-String _clipTitle(String name) {
-  final runes = name.runes.toList();
-  if (runes.length <= _titleMaxChars) return name;
-  // Trailing space before the ellipsis reads as a typo, so it goes.
-  return '${String.fromCharCodes(runes.take(_titleMaxChars)).trimRight()}…';
-}
-
-/// One of the header's trailing controls, padded so the three sit evenly.
-///
-/// ⚠️ The padding is what makes the row look right, and the reason is that
-/// [AppIconButton] is a fixed 24px box for every glyph size. A 22px glyph fills
-/// that box to its edges while a 20px one floats inside it, so equal gaps
-/// BETWEEN the boxes read as unequal gaps between the marks. Giving every
-/// action the same glyph size and the same padding puts the marks on an even
-/// pitch.
-///
-/// ⚠️ It does NOT widen the tap target. [AppIconButton] takes its tap on a
-/// 24px `GestureDetector` with no `HitTestBehavior.opaque`, so the padding is
-/// dead space either side and the three stay 24px each — under the 44 iOS asks
-/// for. Fixing that belongs in the shared button, where every screen's header
-/// would get it, not in a wrapper one page defines.
-
-/// tmux's copy-mode position — `[42/1380]` on tmux's yellow, top right — while the reader is up in
-/// the history: 42 lines above the end, of 1380. The view holds still as output arrives, and the
-/// first number counts it. One tap is back at the end, following the stream.
-class _CopyModePosition extends StatelessWidget {
-  const _CopyModePosition({
-    required this.above,
-    required this.total,
-    required this.onTap,
-  });
-
-  final int above;
-  final int total;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final tty = Tty.of(context);
-    return Semantics(
-      button: true,
-      label: '$above lines above the end. Back to the latest output',
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Padding(
-          // A full touch target around a one-line tag.
-          padding: const EdgeInsets.all(8),
-          child: ColoredBox(
-            color: tty.yellow,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: TtyText('[$above/$total]', color: tty.theme.black),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// Slides the title off the top as [progress] runs 0 → 1, fading it as it goes.
 class _SlideAway extends StatelessWidget {
   const _SlideAway({required this.progress, required this.child});
@@ -3621,139 +3486,52 @@ class _AnchoredTerminalState extends State<_AnchoredTerminal> {
   );
 }
 
-/// The line above the mic: a few words on what is going on, centred, over a band that fades the
-/// output out above it. The sample's guide wears a 6pt green [dot] that glides 24pt the way the
-/// swipe goes ([glide] 1 right, -1 left) every 2.4s; 0 holds it still.
-class _StatusLine extends StatefulWidget {
-  const _StatusLine({
-    required this.text,
-    this.color,
-    this.glide = 0,
-    this.dot = false,
-  });
+/// The line above the mic, on the terminal gutter with an opaque ground.
+/// Its fixed yellow dot uses the same asking colour as Find.
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.text, this.color, this.dot = false});
 
   final String text;
-
-  /// The words' colour; faint when null.
   final Color? color;
-  final int glide;
   final bool dot;
-
-  /// How far the band reaches below its words' foot.
   static const double below = 6;
-
-  @override
-  State<_StatusLine> createState() => _StatusLineState();
-}
-
-class _StatusLineState extends State<_StatusLine>
-    with SingleTickerProviderStateMixin {
-  late final _clock = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 2400),
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _sync();
-  }
-
-  @override
-  void didUpdateWidget(_StatusLine old) {
-    super.didUpdateWidget(old);
-    if (old.glide != widget.glide) _sync();
-  }
-
-  void _sync() {
-    if (widget.glide == 0 ||
-        MediaQuery.maybeDisableAnimationsOf(context) == true) {
-      _clock
-        ..stop()
-        ..value = 0;
-    } else if (!_clock.isAnimating) {
-      unawaited(_clock.repeat());
-    }
-  }
-
-  @override
-  void dispose() {
-    _clock.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
     final tty = Tty.of(context);
-    final dot = Container(
-      width: 6,
-      height: 6,
-      decoration: BoxDecoration(color: tty.green, shape: BoxShape.circle),
-    );
-    // A band the width of the screen, the output fading out above it as it does under the title —
-    // a pill only as wide as its words cut the rows behind it in half.
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [tty.ground.withValues(alpha: 0), tty.ground, tty.ground],
-          stops: const [0, 0.4, 1],
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Tty.origin,
-          14,
-          Tty.origin,
-          _StatusLine.below,
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (widget.dot) ...[
-              SizedBox(
-                width: 30,
-                height: 6,
-                child: AnimatedBuilder(
-                  animation: _clock,
-                  builder: (context, child) {
-                    // A glide over the first 60% of each beat, easing in and out, then a rest.
-                    final t = Curves.easeInOut.transform(
-                      (_clock.value / 0.6).clamp(0.0, 1.0),
-                    );
-                    final from = widget.glide < 0 ? 24.0 : 0.0;
-                    final x = widget.glide == 0
-                        ? 12.0
-                        : from + widget.glide * 24 * t;
-                    final fade = widget.glide == 0 ? 1.0 : 1 - (t * t);
-                    return Stack(
-                      children: [
-                        Positioned(
-                          left: x,
-                          top: 0,
-                          child: Opacity(opacity: fade, child: child),
-                        ),
-                      ],
-                    );
-                  },
-                  child: dot,
+    return Semantics(
+      liveRegion: true,
+      child: ColoredBox(
+        color: tty.ground,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Tty.origin, 8, Tty.origin, below),
+          child: Row(
+            children: [
+              if (dot) ...[
+                Container(
+                  key: const ValueKey('sample-guide-dot'),
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: tty.yellow,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: tty.style(
+                    size: TtySize.meta,
+                    color: color ?? tty.text,
+                  ),
                 ),
               ),
-              const SizedBox(width: 8),
             ],
-            Flexible(
-              child: Text(
-                widget.text,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: tty.style(
-                  size: TtySize.meta,
-                  color: widget.color ?? tty.faint,
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -3798,33 +3576,52 @@ class _SampleEndCard extends StatelessWidget {
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Spacer(),
-              TtyText('That’s Harness.', size: 26, weight: FontWeight.w600),
-              const SizedBox(height: 20),
-              tick('watched a harness work'),
-              tick('answered its question'),
-              tick('started $started'),
-              const SizedBox(height: 6),
-              TtyText('3 passed', size: TtySize.meta, color: tty.green),
-              const SizedBox(height: 24),
-              Text(
-                'Now do it on your own code. The real ones run on your '
-                'computer; this phone is the remote.',
-                style: tty.style(size: TtySize.row),
-              ),
-              const Spacer(),
-              TtyPrimaryButton(label: 'Set up my computer', onPressed: onSetUp),
-              const SizedBox(height: 4),
-              Center(
-                child: TtyTextButton(
-                  label: 'Keep playing',
-                  onPressed: onKeepPlaying,
+          // ⚠️ **Scrolls when it does not fit.** Centred by its spacers on a screen with room, but
+          // a small phone at a large text size has less room than the card has words — as a
+          // fixed column it overflowed, and the one button that leads anywhere went off the foot.
+          child: LayoutBuilder(
+            builder: (context, box) => SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: box.maxHeight),
+                child: IntrinsicHeight(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Spacer(),
+                      TtyText(
+                        'That’s Harness.',
+                        size: 26,
+                        weight: FontWeight.w600,
+                      ),
+                      const SizedBox(height: 20),
+                      tick('watched a harness work'),
+                      tick('answered its question'),
+                      tick('started $started'),
+                      const SizedBox(height: 6),
+                      TtyText('3 passed', size: TtySize.meta, color: tty.green),
+                      const SizedBox(height: 24),
+                      Text(
+                        'Now do it on your own code. The real ones run on your '
+                        'computer; this phone is the remote.',
+                        style: tty.style(size: TtySize.row),
+                      ),
+                      const Spacer(),
+                      TtyPrimaryButton(
+                        label: 'Set up my computer',
+                        onPressed: onSetUp,
+                      ),
+                      const SizedBox(height: 4),
+                      Center(
+                        child: TtyTextButton(
+                          label: 'Keep playing',
+                          onPressed: onKeepPlaying,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ),

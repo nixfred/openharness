@@ -38,7 +38,15 @@ export interface PairedClient {
   label: string       // UA-derived, for display
   pairedAt: number
   role: PairRole      // old records without this field are treated as web
+  /** Set for a peer that joined over the remote password (or was learned from a trust-group sync): the
+   *  joining machine's id when `kind` is 'machine', absent for a viewer app. Absent on older records. */
+  machineId?: string
+  kind?: PeerKind
 }
+
+/** What a password-linked peer is: another harness machine (which also serves, so it can be dialed back)
+ *  or a viewer app (mobile / viewer desktop — dial-out only). */
+export type PeerKind = 'machine' | 'viewer'
 function writeSecure(file: string, data: unknown): void {
   mkdirSync(DIR, { recursive: true, mode: 0o700 })
   writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 })
@@ -104,8 +112,16 @@ export class E2eeStore {
     return this.paired.get(identityPubB64)?.label ?? null
   }
 
-  addPaired(identityPubB64: string, label: string, at: number, role: PairRole = 'web'): void {
-    this.paired.set(identityPubB64, { identityPub: identityPubB64, label, pairedAt: at, role })
+  pairedPeer(identityPubB64: string): PairedClient | null {
+    return this.paired.get(identityPubB64) ?? null
+  }
+
+  addPaired(identityPubB64: string, label: string, at: number, role: PairRole = 'web', peer?: { machineId?: string; kind?: PeerKind }): void {
+    this.paired.set(identityPubB64, {
+      identityPub: identityPubB64, label, pairedAt: at, role,
+      ...(peer?.machineId ? { machineId: peer.machineId } : {}),
+      ...(peer?.kind ? { kind: peer.kind } : {}),
+    })
     writeSecure(PAIRED_FILE, [...this.paired.values()])
   }
 

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/state/app_state.dart';
 
+import '../../demo/sample_mode.dart' show SampleMode;
 import '../agent_index.dart';
 import '../agents_page.dart' show openNewAgent;
 import '../phone_status.dart';
@@ -44,12 +45,12 @@ class _PickUpPageState extends State<PickUpPage> {
     super.dispose();
   }
 
-  /// `12 sessions on MacBook Pro`, or `on 2 computers`.
+  /// `12 harnesses on MacBook Pro`, or `on 2 computers` — the app's word for one, not "session".
   String _where() {
     final entries = visibleAgents(agentIndex(widget.notifier));
     final computers = {for (final entry in entries) entry.machineName};
     final sessions =
-        '${entries.length} ${entries.length == 1 ? 'session' : 'sessions'}';
+        '${entries.length} ${entries.length == 1 ? 'harness' : 'harnesses'}';
     return computers.length == 1
         ? '$sessions on ${computers.single}'
         : '$sessions on ${computers.length} computers';
@@ -99,7 +100,9 @@ class _PickUpPageState extends State<PickUpPage> {
                 ),
                 child: Text(
                   // Broken by hand: at 28pt it wraps with "off" alone on the second line.
-                  'Pick up where\nyou left off',
+                  SampleMode.maybeOf(context) != null
+                      ? 'Try a sample\nharness'
+                      : 'Pick up where\nyou left off',
                   key: const ValueKey('pick-up-title'),
                   style: tty
                       .style(size: TtySize.display, weight: FontWeight.w600)
@@ -119,7 +122,6 @@ class _PickUpPageState extends State<PickUpPage> {
                 child: PhoneSearchResults(
                   notifier: widget.notifier,
                   controller: _search,
-                  fzf: true,
                   onNewHarness: _newHarness,
                 ),
               ),

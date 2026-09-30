@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../core/models.dart';
 import '../core/harness_catalog.dart';
@@ -257,14 +257,14 @@ class _StoreHarnessActionsState extends State<StoreHarnessActions> {
                             ),
                             focusNode: i == 0 ? _firstChoiceFocus : null,
                             metrics: AppMenuRowMetrics.roomy,
-                            icon: LucideIcons.history300,
+                            icon: AppIcons.history,
                             label: targets[i].title,
                             detail: targets[i].detail,
                             trailing: targets[i].machine.nodeOnline == false
                                 ? Tooltip(
                                     message: 'Machine offline',
                                     child: Icon(
-                                      LucideIcons.cloudOff300,
+                                      AppIcons.cloudOff,
                                       size: 14,
                                       color: grid.AppPalette.textFaint,
                                     ),
@@ -325,7 +325,7 @@ class _StoreHarnessActionsState extends State<StoreHarnessActions> {
                             if (multiple) ...[
                               const SizedBox(width: 6),
                               Icon(
-                                LucideIcons.chevronDown300,
+                                AppIcons.chevronDown,
                                 key: ValueKey(
                                   'store-resume-chevron:${widget.harnessId}',
                                 ),

@@ -103,7 +103,7 @@ export async function waitForResumedAgent(saved: RegisteredSession, deps: Resume
     if (row.sessionId !== saved.sessionId || row.engine !== saved.engine) return resumeChanged
     if (row.launch?.state === 'failed') return { ok: false, error: row.launch.error, detail: row.launch.detail }
     if (!pane || pane.dead || pane.engineExit != null) {
-      return { ok: false, error: 'RESUME_FAILED', detail: 'The agent exited before confirming the saved conversation. Its terminal output and conversation have been retained.' }
+      return { ok: false, error: 'RESUME_FAILED', detail: 'The harness exited before confirming the saved conversation. Its terminal output and conversation have been retained.' }
     }
     // ONE proof, for every engine: this row's own engine process, running in this row's own pane,
     // which the checks above have just confirmed is alive. `deps.process()` resolves the engine
@@ -120,7 +120,7 @@ export async function waitForResumedAgent(saved: RegisteredSession, deps: Resume
     // the person could type in — with `active` cleared and the desk refusing to open it, the cost of
     // the strict rule was never the resume, it was the harness. A resume that reopened the WRONG
     // conversation is still caught, by `registry.register`'s mismatch guard, when the hook arrives.
-    if (process) return { ok: true, session: row, resumed: resumesConversation(saved.engine, saved.sessionId) }
+    if (process) return { ok: true, session: { ...row, processIdentity: process }, resumed: resumesConversation(saved.engine, saved.sessionId) }
     await deps.sleep(250)
   }
   return resumeUnconfirmed

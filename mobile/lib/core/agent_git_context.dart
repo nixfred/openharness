@@ -83,7 +83,7 @@ class AgentGitContext {
     'multiple' => 'The operation used more than one workspace.',
     'uncertain' => 'The current work location could not be confirmed.',
     'unavailable' => 'The observed workspace is no longer readable.',
-    _ => 'Session workspace; no other work location has been observed.',
+    _ => 'Harness workspace; no other work location has been observed.',
   };
 
   AgentProject? displayProject(AgentProject? launch) {

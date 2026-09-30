@@ -59,7 +59,7 @@ Widget signOutHost(
   );
 }
 
-AppNotifier signOutApp(SignOutFixture cli, {bool local = false}) =>
+GuestTestApp signOutApp(SignOutFixture cli, {bool local = false}) =>
     GuestTestApp(
       config: AppConfig.dev,
       configStore: null,
@@ -114,8 +114,21 @@ void main() {
       addTearDown(app.dispose);
       await app.logout();
       expect(cli.attempts, isEmpty);
-      expect(app.status, AppStatus.authenticated);
-      expect(app.isGuest, isTrue);
+      expect(app.daemonGates, 0);
+      expect(app.status, AppStatus.unauthenticated);
+    },
+  );
+
+  test(
+    'expiry of a development fixture never starts the real daemon',
+    () async {
+      final app = signOutApp(SignOutFixture(), local: true);
+      addTearDown(app.dispose);
+      app.expireSessionForTest('Fixture expired.');
+      await Future<void>.delayed(Duration.zero);
+      expect(app.daemonGates, 0);
+      expect(app.status, AppStatus.unauthenticated);
+      expect(app.sessionExpired, isTrue);
     },
   );
 

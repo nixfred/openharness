@@ -563,8 +563,8 @@ void main() {
     await settle();
     expect(
       box.worktree,
-      true,
-      reason: 'Each Git project starts with Worktree on.',
+      false,
+      reason: 'Returning to a project restores its last worktree choice.',
     );
     expect(box.branchRef, 'refs/heads/main');
   });

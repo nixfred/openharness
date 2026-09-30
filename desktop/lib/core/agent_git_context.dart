@@ -42,9 +42,29 @@ typedef AgentWorkPr = ({
   DateTime at,
   String? state,
   DateTime? checkedAt,
+  DateTime? createdAt,
+  DateTime? updatedAt,
+  DateTime? mergedAt,
+  DateTime? closedAt,
   String? title,
   String? headBranch,
   String? baseBranch,
+  String? headRepository,
+});
+
+DateTime? pullRequestTime(AgentWorkPr pr) => switch (pr.state) {
+  'Merged' => pr.mergedAt,
+  'Closed' => pr.closedAt,
+  'Open' || 'Draft' => pr.updatedAt ?? pr.createdAt,
+  _ => null,
+};
+
+typedef AgentBranchRow = ({
+  String branch,
+  String? repository,
+  String repositoryKey,
+  bool checkedOut,
+  List<AgentWorkPr> pullRequests,
 });
 
 /// Display evidence from the owning machine. It never changes launch/resume cwd.
@@ -52,7 +72,11 @@ class AgentGitContext {
   const AgentGitContext({
     required this.state,
     this.current,
+    this.checkouts,
+    this.recentWork,
+    this.recentWorkAt,
     this.observedAt,
+    this.activityUncertain = false,
     this.locations = const [],
     this.branches = const [],
     this.pullRequests = const [],
@@ -62,7 +86,11 @@ class AgentGitContext {
   });
   final String state;
   final AgentProject? current;
+  final List<AgentProject>? checkouts;
+  final AgentProject? recentWork;
+  final DateTime? recentWorkAt;
   final DateTime? observedAt;
+  final bool activityUncertain;
   final List<AgentWorkLocation> locations;
   final List<AgentWorkBranch> branches;
   final List<AgentWorkPr> pullRequests;
@@ -70,24 +98,75 @@ class AgentGitContext {
   final String? epoch;
   final int revision;
 
-  String? get branchLabel => switch (state) {
-    'multiple' => 'Multiple workspaces',
-    'uncertain' => 'Work location unknown',
-    'unavailable' => 'Workspace unavailable',
-    _ =>
-      current?.shownBranch ?? (current?.detached == true ? 'Detached' : null),
-  };
+  List<AgentProject> get checkedOut => checkouts ?? [?current];
+  AgentProject? get focusedProject => recentWork ?? current;
+  bool isRecentBranch(AgentBranchRow row) =>
+      recentWork != null &&
+      row.branch == recentWork!.shownBranch &&
+      row.repositoryKey ==
+          (recentWork!.remote ?? recentWork!.root ?? recentWork!.cwd);
 
-  String get explanation => switch (state) {
-    'observed' => 'Most recently observed work',
-    'multiple' => 'The operation used more than one workspace.',
-    'uncertain' => 'The current work location could not be confirmed.',
-    'unavailable' => 'The observed workspace is no longer readable.',
-    _ => 'Session workspace; no other work location has been observed.',
-  };
+  /// Repository + branch is the visible identity. Paths only disambiguate local
+  /// repositories without a remote; temporary folder names never become labels.
+  List<AgentBranchRow> get branchRows {
+    final rows = <(String, String), AgentBranchRow>{};
+    void add(String branch, String? repository, String local, bool checkedOut) {
+      final key = (repository ?? local, branch);
+      final previous = rows[key];
+      rows[key] = (
+        branch: branch,
+        repository: repository,
+        repositoryKey: key.$1,
+        checkedOut: checkedOut || previous?.checkedOut == true,
+        pullRequests: previous?.pullRequests ?? <AgentWorkPr>[],
+      );
+    }
+
+    for (final project in checkedOut) {
+      if (project.shownBranch case final branch?) {
+        add(branch, project.remote, project.root ?? project.cwd, true);
+      }
+    }
+    for (final branch in branches) {
+      add(branch.branch, branch.remote, branch.cwd, false);
+    }
+    for (final pr in pullRequests) {
+      final branch = pr.headBranch;
+      if (branch == null) continue;
+      final repository =
+          'github.com/${pr.headRepository ?? pr.url.pathSegments.take(2).join('/')}'
+              .toLowerCase();
+      add(branch, repository, pr.cwd ?? '', false);
+      rows[(repository, branch)]!.pullRequests.add(pr);
+    }
+    return rows.values.toList();
+  }
+
+  String? get branchLabel {
+    final checked = branchRows.where((row) => row.checkedOut).toList();
+    if (recentWork?.shownBranch case final branch?) {
+      return checked.length > 1 ? '$branch +${checked.length - 1}' : branch;
+    }
+    if (checked.length > 1) return '${checked.length} branches';
+    if (checked.length == 1) return checked.single.branch;
+    if (current?.detached == true) return 'Detached';
+    if (branchRows.isNotEmpty || state == 'multiple' || state == 'uncertain') {
+      return 'Branches';
+    }
+    return state == 'unavailable' ? 'Git unavailable' : null;
+  }
+
+  String get explanation => recentWork != null
+      ? 'Branch in the most recent confirmed work location${recentWorkAt == null ? '.' : ' · ${localWorkTime(recentWorkAt!)}'}'
+      : switch (state) {
+          'multiple' => 'Branches checked out for this harness.',
+          'uncertain' || 'unavailable' =>
+            'Git is unavailable. Showing saved branches and pull requests.',
+          _ => 'Branch checked out for this harness.',
+        };
 
   AgentProject? displayProject(AgentProject? launch) {
-    if (current != null) return current;
+    if (focusedProject != null) return focusedProject;
     if (launch == null) return null;
     // Keep useful repository context without presenting the launch branch as current work.
     return AgentProject(
@@ -100,7 +179,7 @@ class AgentGitContext {
   }
 
   Map<String, Object?>? get requestIdentity {
-    final project = current;
+    final project = focusedProject;
     if (project == null || project.shownBranch == null) return null;
     return {
       'cwd': project.cwd,
@@ -114,7 +193,11 @@ class AgentGitContext {
       other is AgentGitContext &&
       state == other.state &&
       current == other.current &&
+      listEquals(checkouts, other.checkouts) &&
+      recentWork == other.recentWork &&
+      recentWorkAt == other.recentWorkAt &&
       observedAt == other.observedAt &&
+      activityUncertain == other.activityUncertain &&
       truncated == other.truncated &&
       epoch == other.epoch &&
       revision == other.revision &&
@@ -125,7 +208,11 @@ class AgentGitContext {
   int get hashCode => Object.hash(
     state,
     current,
+    checkouts == null ? null : Object.hashAll(checkouts!),
+    recentWork,
+    recentWorkAt,
     observedAt,
+    activityUncertain,
     truncated,
     epoch,
     revision,
@@ -209,19 +296,46 @@ class AgentGitContext {
         at: at,
         state: state,
         checkedAt: date(row['checkedAt']),
+        createdAt: state != null ? date(result['createdAt']) : null,
+        updatedAt: state != null ? date(result['updatedAt']) : null,
+        mergedAt: state != null ? date(result['mergedAt']) : null,
+        closedAt: state != null ? date(result['closedAt']) : null,
         title: result is Map ? label(result['title'], 512) : null,
         headBranch: result is Map ? label(result['headBranch'], 256) : null,
         baseBranch: result is Map ? label(result['baseBranch'], 256) : null,
+        headRepository: result is Map
+            ? label(result['headRepository'], 512)
+            : null,
       ));
       if (prs.length == 128) break;
     }
     final version = raw['version'];
+    final checkouts = raw['checkouts'] is List
+        ? List<AgentProject>.unmodifiable(
+            rows(raw['checkouts'])
+                .map(AgentProject.fromJson)
+                .whereType<AgentProject>(),
+          )
+        : null;
+    final recent = raw['recentWork'];
+    final recentProject = recent is Map
+        ? AgentProject.fromJson(recent['project'])
+        : null;
+    final recentAt = recent is Map ? date(recent['at']) : null;
+    final verifiedRecent =
+        recentProject?.shownBranch != null &&
+        recentAt != null &&
+        (checkouts?.any((project) => project == recentProject) ?? false);
     return AgentGitContext(
       state: raw['state'] as String,
       current: const ['workspace', 'observed'].contains(raw['state'])
           ? AgentProject.fromJson(raw['current'])
           : null,
+      checkouts: checkouts,
+      recentWork: verifiedRecent ? recentProject : null,
+      recentWorkAt: verifiedRecent ? recentAt : null,
       observedAt: date(raw['observedAt']),
+      activityUncertain: raw['activityUncertain'] == true,
       locations: List.unmodifiable(locations),
       branches: List.unmodifiable(branches),
       pullRequests: List.unmodifiable(prs),

@@ -14,7 +14,7 @@ vi.mock('ws', async () => {
   }
   return { WebSocket: FakeWebSocket }
 })
-vi.mock('../lib/wsLiveness.js', () => ({ watchSocketLiveness: () => ({ stop: state.stop }) }))
+vi.mock('../lib/wsLiveness.js', () => ({ BACKEND_IDLE_DEADLINE_MS: 75_000, watchSocketLiveness: () => ({ stop: state.stop }) }))
 import { HarnessShareRelay, SharingEndedError } from './relay.js'
 import { SHARE_REQUEST_TYPES, SHARE_RESULT_TYPES } from './protocol.js'
 describe('recipient relay', () => {

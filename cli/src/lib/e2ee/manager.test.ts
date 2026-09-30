@@ -38,6 +38,7 @@ beforeEach(() => {
 
 /** A minimal web peer that runs the CPace responder + session handshake against the manager. */
 class WebPeer {
+  constructor(readonly role: 'web' | 'device' = 'web') {}
   identity = C.newIdentity()
   session?: { c2s: Uint8Array; s2c: Uint8Array; groupKey: Uint8Array; epoch: string; myEph: import('./core.js').Ephemeral }
   adapterPub?: Uint8Array
@@ -45,7 +46,7 @@ class WebPeer {
 
   intent(pairId: Uint8Array): Frame {
     this.pr = { code: '', pairId, pairIdB64: C.b64e(pairId) }
-    return { type: 'e2e_pair_intent', payload: { requestId: 'r1', pairId: this.pr.pairIdB64, label: 'Chrome · macOS' } }
+    return { type: 'e2e_pair_intent', payload: { requestId: 'r1', pairId: this.pr.pairIdB64, label: 'Chrome · macOS', role: this.role } }
   }
   setCode(code: string): void { if (this.pr) this.pr.code = code }
 
@@ -53,7 +54,7 @@ class WebPeer {
   onPake(frame: Frame): Frame | null {
     const p = frame.payload as Record<string, unknown>
     const pr = this.pr!
-    const ci = C.pairContext(AGENT)
+    const ci = C.pairContext(AGENT, this.role)
     const round = Number(p.round)
     if (round === 1) {
       const g = C.cpaceGenerator(pr.code, pr.pairId, ci)
@@ -111,6 +112,8 @@ class WebPeer {
 class PwPeer {
   identity = C.newIdentity()
   peerPub?: Uint8Array
+  /** What this joiner calls itself in its sealed identity; unset is a joiner that predates the field. */
+  label?: string
   private pr?: { sid: Uint8Array; sidB64: string; stretched: Uint8Array; y?: bigint; Ya?: Uint8Array; isk?: Uint8Array; th?: Uint8Array }
 
   async intent(password: string): Promise<Frame> {
@@ -146,7 +149,8 @@ class PwPeer {
       if (!C.pairBindVerify(C.b64d(adId.id), pr.th!, C.b64d(adId.sig))) throw new Error('adapter bind sig failed')
       this.peerPub = C.b64d(adId.id) // pin
 
-      const sealed = C.aeadSeal(C.pairKey(pr.isk!, ci), 4, C.utf8('e2e-id'), C.utf8(JSON.stringify({ id: C.b64e(this.identity.pub), sig: C.b64e(C.pairBindSig(this.identity.priv, pr.th!)) })))
+      const claim = { id: C.b64e(this.identity.pub), sig: C.b64e(C.pairBindSig(this.identity.priv, pr.th!)), ...(this.label !== undefined ? { label: this.label } : {}) }
+      const sealed = C.aeadSeal(C.pairKey(pr.isk!, ci), 4, C.utf8('e2e-id'), C.utf8(JSON.stringify(claim)))
       return { type: 'e2e_pw_pake', payload: { sid: pr.sidB64, round: 4, enc: C.b64e(sealed) } }
     }
     return null // round 5 (ok/error) — nothing to send
@@ -168,8 +172,8 @@ function machine(extra: Partial<ConstructorParameters<typeof makeManager>[0]> = 
 }
 
 /** Drive a full pairing + session for one connection; returns the established web peer. */
-async function fullPair(h: ReturnType<typeof machine>, conn: string): Promise<WebPeer> {
-  const web = new WebPeer()
+async function fullPair(h: ReturnType<typeof machine>, conn: string, role: 'web' | 'device' = 'web'): Promise<WebPeer> {
+  const web = new WebPeer(role)
   h.mgr.handleFrame(conn, web.intent(C.newPairId()))
   const code = C.newPairCode(); web.setCode(code)
   const pairP = h.mgr.onPair(code)
@@ -182,6 +186,57 @@ async function fullPair(h: ReturnType<typeof machine>, conn: string): Promise<We
 }
 
 describe('E2eeManager pairing', () => {
+  it('a trusted browser pairs a phone and receives an encrypted result', async () => {
+    const h = machine()
+    const browser = await fullPair(h, 'browser')
+    const phone = new WebPeer()
+    const code = 'ABCDEFGHJKMNPQRS'
+    h.mgr.handleFrame('phone', phone.intent(C.newPairId()))
+    phone.setCode(code)
+    const pairing = h.mgr.pairPhoneFromTrustedWeb('browser', { requestId: 'phone-link', code })
+    h.mgr.handleFrame('phone', phone.onPake(h.lastFor('phone', 'e2e_pake')!)!)
+    h.mgr.handleFrame('phone', phone.onPake(h.lastFor('phone', 'e2e_pake')!)!)
+    await pairing
+    const answer = h.lastFor('browser', 'phone_pair_result')!
+    expect(C.isWrapped(answer.payload)).toBe(true)
+    const opened = C.unwrapPayload(browser.session!.s2c,
+      (answer.payload as import('./core.js').WrappedPayload).__e2e, 'phone_pair_result', undefined)
+    expect(opened).toMatchObject({ requestId: 'phone-link', ok: true, label: 'Chrome · macOS' })
+    h.mgr.handleFrame('phone', phone.hello())
+    phone.onWelcome(h.lastFor('phone', 'e2e_welcome')!, phone.adapterPub!)
+    expect(h.mgr.hasSession('phone')).toBe(true)
+  })
+
+  it('unpaired visitors and hardware devices cannot authorize a phone', async () => {
+    const h = machine()
+    await fullPair(h, 'device', 'device')
+    const phone = new WebPeer()
+    h.mgr.handleFrame('phone', phone.intent(C.newPairId()))
+    const before = h.sent.length
+    for (const conn of ['anonymous', 'device']) {
+      await h.mgr.pairPhoneFromTrustedWeb(conn, { requestId: 'r', code: 'ABCDEFGHJKMNPQRS' })
+    }
+    expect(h.sent).toHaveLength(before)
+    expect(h.mgr.hasSession('phone')).toBe(false)
+    h.mgr.dropSession('phone')
+  })
+
+  it('phone authorization does not arm hardware intents or accept malformed codes', async () => {
+    const h = machine()
+    const browser = await fullPair(h, 'browser')
+    const read = () => C.unwrapPayload(browser.session!.s2c,
+      (h.lastFor('browser', 'phone_pair_result')!.payload as import('./core.js').WrappedPayload).__e2e, 'phone_pair_result', undefined)
+    await h.mgr.pairPhoneFromTrustedWeb('browser', { code: 'short' })
+    expect(read()).toMatchObject({ error: 'BAD_CODE' })
+    await h.mgr.pairPhoneFromTrustedWeb('browser', { code: 'ABCDEFGHJKMNPQRS' })
+    expect(read()).toMatchObject({ error: 'NO_INTENT' })
+    h.mgr.handleFrame('device', new WebPeer('device').intent(C.newPairId()))
+    await h.mgr.pairPhoneFromTrustedWeb('browser', { code: 'ABCDEFGHJKMNPQRS' })
+    expect(read()).toMatchObject({ error: 'NO_INTENT' })
+    expect(h.lastFor('device', 'e2e_pake')).toBeUndefined()
+    h.mgr.dropSession('device')
+  })
+
   it('pairs nobody from an e2e_setup_claim — browser setup links were removed with the web client', () => {
     const { mgr, sent } = machine()
     const web = new WebPeer()
@@ -402,6 +457,24 @@ describe('E2eeManager persistent remote-password pairing', () => {
     const paired = mgr.listPaired()
     expect(paired.length).toBe(1)
     expect(paired[0]).toMatchObject({ fingerprint: C.fingerprint(joiner.identity.pub), label: 'harness link', role: 'web' })
+  })
+
+  it('a joiner that names itself is listed by that name — one clean line of it', async () => {
+    const { mgr, takeLast } = machine()
+    await mgr.setRemotePassword(PASSWORD)
+    for (const [conn, label, shown] of [
+      ['pw-a', "Dee's iPhone", "Dee's iPhone"],
+      ['pw-b', '  two\nlines\u0007 ', 'two lines'],
+      ['pw-c', 'x'.repeat(90), 'x'.repeat(60)],
+      ['pw-d', '   ', 'harness link'],
+    ] as const) {
+      const joiner = new PwPeer()
+      joiner.label = label
+      mgr.handleFrame(conn, await joiner.intent(PASSWORD))
+      mgr.handleFrame(conn, joiner.onPake(takeLast('e2e_pw_pake'))!)
+      mgr.handleFrame(conn, joiner.onPake(takeLast('e2e_pw_pake'))!)
+      expect(mgr.listPaired().find((p) => p.fingerprint === C.fingerprint(joiner.identity.pub))?.label).toBe(shown)
+    }
   })
 
   it('a wrong password fails the confirmation MAC at round 2 and pins nobody', async () => {

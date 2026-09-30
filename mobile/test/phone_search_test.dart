@@ -2,19 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:harness_mobile/auth/auth_session.dart';
 import 'package:harness_mobile/core/config.dart';
 import 'package:harness_mobile/core/models.dart';
 import 'package:harness_mobile/phone/agent_index.dart';
-import 'package:harness_mobile/phone/compact_age.dart';
+import 'package:harness_mobile/phone/agents_list_page.dart';
 import 'package:harness_mobile/phone/phone_destination.dart';
 import 'package:harness_mobile/phone/phone_search_catalog.dart';
-import 'package:harness_mobile/phone/phone_search_commands.dart';
 import 'package:harness_mobile/phone/phone_search_controller.dart';
-import 'package:harness_mobile/phone/phone_search_field.dart';
 import 'package:harness_mobile/phone/phone_search_groups.dart';
-import 'package:harness_mobile/phone/phone_search_page.dart';
 import 'package:harness_mobile/phone/phone_search_rank.dart';
 import 'package:harness_mobile/phone/phone_search_results.dart';
 import 'package:harness_mobile/phone/resume_agent.dart';
@@ -376,6 +372,20 @@ List<PhoneDestination> _rank(
   previews: app.sessionPreviews,
 );
 
+/// Find as the terminal puts it up — the phone's one search — all the way open.
+Widget _findOver(AppNotifier app, {VoidCallback? onClose}) => MaterialApp(
+  home: Scaffold(
+    body: TerminalSearchOverlay(
+      notifier: app,
+      animation: const AlwaysStoppedAnimation(1),
+      onClose: onClose ?? () {},
+    ),
+  ),
+);
+
+/// A Find row's name, or any other line Find draws as rich text.
+Finder _row(String text) => find.text(text, findRichText: true);
+
 void main() {
   group('Agent.fromJson', () {
     test('reads the title and when the conversation last moved', () {
@@ -460,7 +470,10 @@ void main() {
     });
     expect(order(), ['talked', 'idle']);
     final talked = agentIndex(app).firstWhere((e) => e.agent.id == 'talked');
-    expect(compactAge(talked.lastActiveAt!, DateTime.now()), 'now');
+    expect(
+      DateTime.now().difference(talked.lastActiveAt!),
+      lessThan(const Duration(minutes: 1)),
+    );
   });
 
   group('search', () {
@@ -616,72 +629,64 @@ void main() {
     });
   });
 
-  test('compactAge', () {
-    final now = DateTime(2026, 9, 17, 12);
-    String ago(Duration age) => compactAge(now.subtract(age), now);
-    expect(ago(const Duration(seconds: 20)), 'now');
-    expect(ago(const Duration(minutes: 4)), '4m');
-    expect(ago(const Duration(hours: 2, minutes: 59)), '2h');
-    expect(ago(const Duration(days: 3)), '3d');
-    expect(ago(const Duration(days: 15)), '2w');
-    expect(ago(const Duration(days: 400)), '1y');
-    expect(compactAge(now.add(const Duration(minutes: 5)), now), 'now');
-  });
+  // ── Find's modes ──────────────────────────────────────────────────────────────────────────────
+  //
+  // Driven through Find (`TerminalSearchOverlay`), the phone's one search. They were first
+  // written against a pushed search page that nothing opened any more, and went with it; the
+  // modes, the order and the scoping they check are the controller's and the results', which
+  // Find runs.
 
-  testWidgets('before a word: the hint names every mode the box has', (
-    tester,
-  ) async {
-    final app = _app([
-      _machine('box', [
-        _agent('3188', title: 'Fix login redirect', minutesAgo: 4),
-        _agent('2312', cwd: '/srv/node', minutesAgo: 30),
-        _agent('9999', minutesAgo: 90),
-      ]),
-    ]);
-    addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
-    await tester.pump();
+  testWidgets(
+    'before a word: the hint names the box, and the freshest harness leads',
+    (tester) async {
+      final app = _app([
+        _machine('box', [
+          _agent('3188', title: 'Fix login redirect', minutesAgo: 4),
+          _agent('2312', cwd: '/srv/node', minutesAgo: 30),
+          _agent('9999', minutesAgo: 90),
+        ]),
+      ]);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(_findOver(app));
+      await tester.pump();
 
-    // The one line that teaches `>`, `#`, `@` and `?` exist at all. It used to
-    // read "Search agents", and so nothing on the phone ever mentioned them.
-    expect(find.text(kPhoneSearchHint), findsOneWidget);
-    // One flat list: no Recent heading, no folder headings.
-    expect(find.text('RECENT'), findsNothing);
-    // ⚠️ The identity line is DRAWN as segments, not written as one string —
-    // this is the difference the desktop's picker has and the phone's did not.
-    // `Codex · work · box` as a single run of text is exactly what it must not
-    // be any more.
-    expect(find.text('Codex · work · box'), findsNothing);
-    expect(find.text('Codex'), findsNWidgets(3));
-    // The project as the desktop names it ([AgentProject.label]): with no checkout root reported,
-    // the daemon's own name for it, whatever the folder is called.
-    expect(find.text('work'), findsNWidgets(3));
-    expect(find.text('box'), findsNWidgets(3));
-    // ⚠️ Agents only in a plain query — the desktop lists no machine or project
-    // row either until `@` or `#` asks for one. A `Machine · …` line here would
-    // be the phone inventing a row the desktop has never had.
-    expect(find.textContaining('Machine · '), findsNothing);
-    expect(find.textContaining('Project · '), findsNothing);
-    // Each segment carries the desktop's own glyph.
-    expect(find.byIcon(LucideIcons.monitor300), findsNWidgets(3));
-    expect(find.byIcon(LucideIcons.folder300), findsNWidgets(3));
-    // And no age on the trailing edge: the desktop's rows end in nothing.
-    expect(find.text('4m'), findsNothing);
-    expect(find.text('30m'), findsNothing);
+      // The empty box says what it searches.
+      expect(find.text(kPhoneSearchHint), findsOneWidget);
+      // One flat list: nothing is asking, so no `needs you` heading, and no folder headings.
+      expect(find.text('needs you'), findsNothing);
+      // ⚠️ Agents only in a plain query — the desktop lists no machine or project
+      // row either until `@` or `#` asks for one. A `Machine · …` line here would
+      // be the phone inventing a row the desktop has never had.
+      expect(
+        find.textContaining('Machine · ', findRichText: true),
+        findsNothing,
+      );
+      expect(
+        find.textContaining('Project · ', findRichText: true),
+        findsNothing,
+      );
+      // Each row says where it works, `machine:project` — the project as the desktop names it
+      // ([AgentProject.label]): with no checkout root reported, the daemon's own name for it,
+      // whatever the folder is called.
+      expect(
+        find.textContaining('box:work', findRichText: true),
+        findsNWidgets(3),
+      );
 
-    double top(String name) => tester.getTopLeft(find.text(name)).dy;
-    // Nothing has been reached for yet, so the freshest conversation leads —
-    // NOT the alphabet, which is what the desktop falls back to only because
-    // its own visit history has already placed everything by then.
-    expect(top('work · 3188'), lessThan(top('work · 2312')));
-    expect(top('work · 2312'), lessThan(top('work · 9999')));
+      double top(String name) => tester.getTopLeft(_row(name)).dy;
+      // Nothing has been reached for yet, so the freshest conversation leads —
+      // NOT the alphabet, which is what the desktop falls back to only because
+      // its own visit history has already placed everything by then.
+      expect(top('work · 3188'), lessThan(top('work · 2312')));
+      expect(top('work · 2312'), lessThan(top('work · 9999')));
 
-    await tester.enterText(find.byType(TextField), 'login');
-    await tester.pump();
-    // `login` is in the agent's own title, which ranks like its name.
-    expect(find.text('work · 3188'), findsOneWidget);
-    expect(find.text('work · 2312'), findsNothing);
-  });
+      await tester.enterText(find.byType(TextField), 'login');
+      await tester.pump();
+      // `login` is in the agent's own title, which ranks like its name.
+      expect(_row('work · 3188'), findsOneWidget);
+      expect(_row('work · 2312'), findsNothing);
+    },
+  );
 
   testWidgets('the modes: ? lists them, and each one takes you there', (
     tester,
@@ -690,22 +695,25 @@ void main() {
       _machine('box', [_agent('3188', minutesAgo: 4)]),
     ]);
     addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pumpWidget(_findOver(app));
     await tester.pump();
 
     await tester.enterText(find.byType(TextField), '?');
     await tester.pump();
-    expect(find.text('>  Commands'), findsOneWidget);
-    expect(find.text('#  Projects'), findsOneWidget);
-    expect(find.text('@  Machines'), findsOneWidget);
+    expect(_row('>  Commands'), findsOneWidget);
+    expect(_row('#  Projects'), findsOneWidget);
+    expect(_row('@  Machines'), findsOneWidget);
 
     // A `?` row rewrites the query in place rather than opening anything.
-    await tester.tap(find.text('@  Machines'));
+    await tester.tap(_row('@  Machines'));
     await tester.pump();
-    expect(find.text('Machines'), findsOneWidget);
-    expect(find.text('box'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text.trim(),
+      '@',
+    );
+    expect(_row('box'), findsOneWidget);
     // And the agent rows are gone: `@` lists machines, not their contents.
-    expect(find.text('work · 3188'), findsNothing);
+    expect(_row('work · 3188'), findsNothing);
   });
 
   testWidgets('choosing a machine narrows the search to its agents', (
@@ -716,25 +724,30 @@ void main() {
       _machine('lab', [_agent('7777', minutesAgo: 9)]),
     ]);
     addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    var closed = 0;
+    await tester.pumpWidget(_findOver(app, onClose: () => closed++));
     await tester.pump();
 
     await tester.enterText(find.byType(TextField), '@box');
     await tester.pump();
-    await tester.tap(find.text('box'));
+    await tester.tap(_row('box'));
     await tester.pump();
 
-    // Scoped: its own harnesses, and the bar says which machine they are in.
-    expect(find.text('Harnesses · box'), findsOneWidget);
-    expect(find.text('work · 3188'), findsOneWidget);
-    expect(find.text('work · 7777'), findsNothing);
+    // Scoped: its own harnesses, and the box says which machine they are in.
+    expect(find.text('Search in box'), findsOneWidget);
+    expect(_row('work · 3188'), findsOneWidget);
+    expect(_row('work · 7777'), findsNothing);
 
-    // Back leaves the machine before it leaves the screen, and puts the query
-    // that chose it back in the field.
-    await tester.tap(find.bySemanticsLabel('Back'));
-    await tester.pumpAndSettle();
-    expect(find.byType(PhoneSearchPage), findsOneWidget);
-    expect(find.text('Harnesses · box'), findsNothing);
+    // Back leaves the machine before it leaves Find, and puts the query that
+    // chose it back in the field.
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(closed, 0);
+    expect(find.text('Search in box'), findsNothing);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '@box',
+    );
   });
 
   testWidgets('# lists projects, and a machine row says what it holds', (
@@ -747,17 +760,17 @@ void main() {
       ]),
     ]);
     addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pumpWidget(_findOver(app));
     await tester.pump();
 
     await tester.enterText(find.byType(TextField), '#');
     await tester.pump();
-    expect(find.text('work'), findsOneWidget);
-    expect(find.text('Project · 2 harnesses'), findsOneWidget);
+    expect(_row('work'), findsOneWidget);
+    expect(_row('Project · 2 harnesses'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField), '@');
     await tester.pump();
-    expect(find.text('Machine · 2 harnesses'), findsOneWidget);
+    expect(_row('Machine · 2 harnesses'), findsOneWidget);
   });
 
   testWidgets('> runs a command by name', (tester) async {
@@ -765,33 +778,22 @@ void main() {
       _machine('box', [_agent('3188', minutesAgo: 4)]),
     ]);
     addTearDown(app.dispose);
-    var ran = 0;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: PhoneSearchPage(
-          notifier: app,
-          commands: () => [
-            PhoneCommand(
-              id: 'test.thing',
-              title: 'Do the thing',
-              detail: 'A command, by name',
-              run: () => ran++,
-            ),
-          ],
-        ),
-      ),
-    );
+    var closed = 0;
+    await tester.pumpWidget(_findOver(app, onClose: () => closed++));
     await tester.pump();
 
-    await tester.enterText(find.byType(TextField), '> thing');
+    await tester.enterText(find.byType(TextField), '> all harnesses');
     await tester.pump();
-    expect(find.text('Do the thing'), findsOneWidget);
+    expect(_row('All harnesses'), findsOneWidget);
     // An agent is not a command: `>` searches one list only.
-    expect(find.text('work · 3188'), findsNothing);
+    expect(_row('work · 3188'), findsNothing);
 
-    await tester.tap(find.text('Do the thing'));
+    // Running it puts Find away and opens what it names.
+    await tester.tap(_row('All harnesses'));
     await tester.pump();
-    expect(ran, 1);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(closed, 1);
+    expect(find.byType(AgentsListPage), findsOneWidget);
   });
 
   group('stopped work', () {
@@ -907,18 +909,18 @@ void main() {
         ]),
       ], conn: conn);
       addTearDown(app.dispose);
-      await tester.pumpWidget(
-        MaterialApp(home: PhoneSearchPage(notifier: app)),
-      );
+      await tester.pumpWidget(_findOver(app));
       await tester.pump();
 
-      await tester.tap(find.text('Paused'));
+      await tester.tap(_row('work · saved'));
       await tester.pump();
 
-      // Taps wait for the resume, but the live agent still HAS its terminal — `No terminal` over it
-      // was a claim about the agent that the in-flight resume had nothing to do with.
+      // Taps wait for the resume, but the live agent still HAS its terminal — `exited` over it
+      // would be a claim about the agent that the in-flight resume had nothing to do with.
       expect(conn.resumed, ['saved']);
-      expect(find.text('No terminal'), findsNothing);
+      expect(find.text('resuming'), findsOneWidget);
+      expect(find.text('exited'), findsNothing);
+      expect(find.text('idle'), findsOneWidget);
       // The list's own notify debounce, so no timer outlives the test.
       await tester.pump(const Duration(milliseconds: 100));
     });
@@ -933,14 +935,12 @@ void main() {
         ]),
       ]);
       addTearDown(app.dispose);
-      await tester.pumpWidget(
-        MaterialApp(home: PhoneSearchPage(notifier: app)),
-      );
+      await tester.pumpWidget(_findOver(app));
       await tester.pump();
 
-      // The desktop's word for it. `Paused` would promise a resume the machine can only refuse.
-      expect(find.text('Resume unavailable'), findsOneWidget);
-      expect(find.text('Paused'), findsNothing);
+      // `paused` would promise a resume the machine can only refuse.
+      expect(find.text('stopped'), findsOneWidget);
+      expect(find.text('paused'), findsNothing);
       final blank = _agentRows(app)
           .firstWhere((row) => row.entry!.agent.id == 'blank');
       expect(blank.entry!.isOpenable, isFalse);
@@ -962,15 +962,13 @@ void main() {
         ]),
       ]);
       addTearDown(app.dispose);
-      await tester.pumpWidget(
-        MaterialApp(home: PhoneSearchPage(notifier: app)),
-      );
+      await tester.pumpWidget(_findOver(app));
       await tester.pump();
 
       // The desktop's `canPauseAndResume`: a current daemon resumes every engine, some as a new
-      // conversation, so the row is Paused work a tap brings back.
-      expect(find.text('Paused'), findsOneWidget);
-      expect(find.text('Resume unavailable'), findsNothing);
+      // conversation, so the row is paused work a tap brings back.
+      expect(find.text('paused'), findsOneWidget);
+      expect(find.text('stopped'), findsNothing);
       expect(_agentRows(app).single.entry!.isOpenable, isTrue);
       await tester.pump(const Duration(milliseconds: 100));
     });
@@ -983,15 +981,13 @@ void main() {
         ]),
       ]);
       addTearDown(app.dispose);
-      await tester.pumpWidget(
-        MaterialApp(home: PhoneSearchPage(notifier: app)),
-      );
+      await tester.pumpWidget(_findOver(app));
       await tester.pump();
 
-      // `Stopped` says a tap will bring it back; `No terminal` said a tap would
-      // do nothing. The two must not be confused for each other.
-      expect(find.text('Paused'), findsOneWidget);
-      expect(find.text('No terminal'), findsNothing);
+      // `paused` says a tap will bring it back; `exited` would say a tap does
+      // nothing. The two must not be confused for each other.
+      expect(find.text('paused'), findsOneWidget);
+      expect(find.text('exited'), findsNothing);
     });
   });
 
@@ -1207,7 +1203,7 @@ void main() {
     final app = _app([box, lab], connFor: (machineId) => conns[machineId]!);
     addTearDown(app.dispose);
 
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pumpWidget(_findOver(app));
     await tester.pump(const Duration(milliseconds: 100));
 
     // Opening the search asked BOTH — the whole point. Before this it asked
@@ -1216,8 +1212,8 @@ void main() {
     expect(asked, containsAll(<String>['box', 'lab']));
     // Its list is in, but the account's stale word for it still hides it.
     expect(lab.agents.map((agent) => agent.id), ['unseen']);
-    expect(find.text('work · known'), findsOneWidget);
-    expect(find.text('work · unseen'), findsNothing);
+    expect(_row('work · known'), findsOneWidget);
+    expect(_row('work · unseen'), findsNothing);
 
     // What a successful dial does to that stale word: `_onConnectionStatus`
     // routes a connect through `_applyNodeStatus(machine, true)`. There is no
@@ -1226,12 +1222,12 @@ void main() {
     app.notifyListeners();
     await tester.pump();
 
-    expect(find.text('work · unseen'), findsOneWidget);
+    expect(_row('work · unseen'), findsOneWidget);
     // And it arrives at the END, not on top: the row somebody was already
     // reaching for does not move to make room for it.
     expect(
-      tester.getTopLeft(find.text('work · known')).dy,
-      lessThan(tester.getTopLeft(find.text('work · unseen')).dy),
+      tester.getTopLeft(_row('work · known')).dy,
+      lessThan(tester.getTopLeft(_row('work · unseen')).dy),
     );
   });
 
@@ -1243,9 +1239,9 @@ void main() {
     ]);
     final app = _app([machine]);
     addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
+    await tester.pumpWidget(_findOver(app));
     await tester.pump();
-    double top(String name) => tester.getTopLeft(find.text(name)).dy;
+    double top(String name) => tester.getTopLeft(_row(name)).dy;
     final was = top('work · 9999');
     expect(top('work · 3188'), lessThan(top('work · 2312')));
 
@@ -1317,11 +1313,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: PhoneSearchResults(
-              notifier: app,
-              controller: search,
-              fzf: true,
-            ),
+            body: PhoneSearchResults(notifier: app, controller: search),
           ),
         ),
       );
@@ -1355,11 +1347,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: PhoneSearchResults(
-              notifier: app,
-              controller: search,
-              fzf: true,
-            ),
+            body: PhoneSearchResults(notifier: app, controller: search),
           ),
         ),
       );
@@ -1408,11 +1396,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: PhoneSearchResults(
-              notifier: app,
-              controller: search,
-              fzf: true,
-            ),
+            body: PhoneSearchResults(notifier: app, controller: search),
           ),
         ),
       );
@@ -1437,37 +1421,34 @@ void main() {
     },
   );
 
-  testWidgets('opening search warms content; the matching line is quoted', (
-    tester,
-  ) async {
-    final conn = _RecentConn({
-      '3188': ['which llama.cpp build is running?'],
-    });
-    final app = _app([
-      _machine('box', [
-        _agent('3188', minutesAgo: 4),
-        _agent('2312', minutesAgo: 30),
-      ]),
-    ], conn: conn);
-    addTearDown(app.dispose);
-    await tester.pumpWidget(MaterialApp(home: PhoneSearchPage(notifier: app)));
-    // The store publishes on an 80 ms beat, as on the desktop.
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(conn.asked, ['3188', '2312']);
+  testWidgets(
+    'opening search warms content, and what was asked finds a harness',
+    (tester) async {
+      final conn = _RecentConn({
+        '3188': ['which llama.cpp build is running?'],
+      });
+      final app = _app([
+        _machine('box', [
+          _agent('3188', minutesAgo: 4),
+          _agent('2312', minutesAgo: 30),
+        ]),
+      ], conn: conn);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(_findOver(app));
+      // The store publishes on an 80 ms beat, as on the desktop.
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(conn.asked, ['3188', '2312']);
 
-    await tester.enterText(find.byType(TextField), 'llama');
-    await tester.pump();
-    expect(find.text('work · 3188'), findsOneWidget);
-    expect(find.text('work · 2312'), findsNothing);
-    expect(
-      find.text('which llama.cpp build is running?', findRichText: true),
-      findsOneWidget,
-    );
-  });
+      // What was asked of 3188 is what finds it: neither name says `llama`.
+      await tester.enterText(find.byType(TextField), 'llama');
+      await tester.pump();
+      expect(_row('work · 3188'), findsOneWidget);
+      expect(_row('work · 2312'), findsNothing);
+    },
+  );
 
   group('the query field lets the keyboard compose', () {
     final fields = <String, Widget Function(AppNotifier)>{
-      'search page': (app) => PhoneSearchPage(notifier: app),
       'terminal search': (app) => Scaffold(
         body: TerminalSearchOverlay(
           notifier: app,
@@ -1546,7 +1527,6 @@ void main() {
     await tester.pump();
     // The field at the top, and no Cancel: a swipe or Back is the way out.
     expect(find.byType(TtyField), findsOneWidget);
-    expect(find.byType(SheetSearchField), findsNothing);
 
     Future<void> search() async {
       await tester.tap(find.byType(TextField));
@@ -1571,31 +1551,5 @@ void main() {
     );
     await back();
     expect(closed, 1);
-  });
-  testWidgets('one bar: no Cancel beside it, and its chevron closes search', (
-    tester,
-  ) async {
-    final app = _app([
-      _machine('box', [_agent('3188', minutesAgo: 4)]),
-    ]);
-    addTearDown(app.dispose);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => openPhoneSearch(context, app),
-            child: const Text('Open search'),
-          ),
-        ),
-      ),
-    );
-    await tester.tap(find.text('Open search'));
-    await tester.pumpAndSettle();
-    expect(find.byType(PhoneSearchPage), findsOneWidget);
-    expect(find.text('Cancel'), findsNothing);
-
-    await tester.tap(find.bySemanticsLabel('Back'));
-    await tester.pumpAndSettle();
-    expect(find.byType(PhoneSearchPage), findsNothing);
   });
 }

@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
-import 'package:harness_mobile/main.dart' as app;
+import 'package:harness_mobile/demo/main_sample.dart' show SampleApp;
 import 'package:harness_mobile/phone/voice_mic_face.dart';
 
 /// Every state of the phone app, in the real app on a simulator, over the offline sample — a
-/// screenshot each, for review. Signed out on a clean install, so nothing reaches a real account.
+/// screenshot each, for review. Starts the standalone sample directly: no saved account is loaded.
 ///
 ///     flutter drive -d <simulator> --driver=test_driver/journey_driver.dart \
 ///       --target=integration_test/tour_test.dart
@@ -51,10 +51,8 @@ void main() {
       await wait(1000);
     }
 
-    await app.main();
-    await waitFor(find.text('Is Harness on your computer?'));
-    // The sample, behind a long press on the wordmark: kept for these screenshots.
-    await tester.longPress(find.byKey(const ValueKey('welcome-wordmark')));
+    await tester.pumpWidget(const SampleApp());
+    await waitFor(find.text('fix-login', findRichText: true));
     await wait(3000);
     // It opens on the sessions to pick up, as a new phone does.
     await shot('pick-up');
@@ -127,10 +125,6 @@ void main() {
     // New.
     await swipeLeft();
     await shot('new');
-    if (await tapIf(find.text('options'))) {
-      await wait(600);
-      await shot('new-options');
-    }
     if (await tapIf(find.text('project'))) {
       await wait(900);
       await shot('chooser-project');
@@ -152,6 +146,12 @@ void main() {
     if (await tapIf(find.text('Settings'))) {
       await wait(1200);
       await shot('settings');
+      await tester.scrollUntilVisible(
+        find.text('How Harness works'),
+        250,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await shot('settings-help');
       if (await tapIf(find.text('How Harness works'))) {
         await wait(1000);
         await shot('how-it-works');

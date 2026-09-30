@@ -151,7 +151,7 @@ void main() {
 
     keymap.apply('{"bindings":[{"keys":"cmd+p","command":null}]}');
     await tester.pump();
-    expect(find.text('Manage all your agents'), findsOneWidget);
+    expect(find.text('Manage all your harnesses'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('welcome-harnesses.list')));
     expect(commands, ['harnesses.list', 'harnesses.list']);
     expect(tester.takeException(), isNull);
@@ -171,7 +171,10 @@ void main() {
       final contrast =
           (hintInk.computeLuminance() + .05) /
           (grid.AppPalette.swarmField.computeLuminance() + .05);
-      expect(contrast, greaterThanOrEqualTo(4.5));
+      expect(
+        contrast >= 1 ? contrast : 1 / contrast,
+        greaterThanOrEqualTo(4.5),
+      );
       for (final command in [
         'agent.new',
         'harnesses.list',

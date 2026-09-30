@@ -8,6 +8,61 @@ import 'package:harness/core/config.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'account experiment writes include identity and the local proxy header',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final seen = <(String, String, String?, String)>[];
+      final snapshot = {
+        'accountId': 'account-a',
+        'revision': 1,
+        'features': {'focus_bar_creature': false, 'share_button': true},
+      };
+      final subscription = server.listen((request) async {
+        seen.add((
+          request.method,
+          request.uri.path,
+          request.headers.value('x-adapter-local'),
+          await utf8.decoder.bind(request).join(),
+        ));
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode({'success': true, 'data': snapshot}));
+        await request.response.close();
+      });
+      try {
+        final api = ApiClient(
+          config: AppConfig(
+            apiBaseUrl: 'http://unused.invalid',
+            localCliBaseUrl: 'http://127.0.0.1:${server.port}',
+          ),
+          session: AuthSession(),
+        );
+        expect(await api.experimentalSettings(), snapshot);
+        expect(
+          await api.setExperimentalSetting('account-a', 'share_button', true),
+          snapshot,
+        );
+        expect(seen, [
+          ('GET', '/api/experimental-settings', null, ''),
+          (
+            'PATCH',
+            '/api/experimental-settings',
+            '1',
+            jsonEncode({
+              'accountId': 'account-a',
+              'feature': 'share_button',
+              'enabled': true,
+            }),
+          ),
+        ]);
+      } finally {
+        await subscription.cancel();
+        await server.close(force: true);
+      }
+    },
+  );
+
   test('machine request hits the local CLI proxy, not the backend, with no credential', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final paths = <String>[];

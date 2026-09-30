@@ -8,6 +8,10 @@ guard let directory = ProcessInfo.processInfo.environment["HARNESS_NATIVE_STATUS
   fatalError("Set HARNESS_NATIVE_STATUS_CAPTURE_DIR to the synthetic Dart fixture directory")
 }
 let root = URL(fileURLWithPath: directory)
+SwarmContextButton.statusIcons = SwarmHistoryIcons(assetURL: { asset in
+  guard let path = ProcessInfo.processInfo.environment["HARNESS_TITLEBAR_ASSETS"] else { return nil }
+  return URL(fileURLWithPath: path).appendingPathComponent(String(asset.dropFirst("assets/".count)))
+})
 let catalog = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("catalog.json"))) as! [[String: String]]
 let width = 1100, rowHeight = 64, height = catalog.count * rowHeight
 let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width * 2, pixelsHigh: height * 2,
@@ -21,6 +25,9 @@ NSRect(x: 0, y: 0, width: width, height: height).fill()
 
 func drawTree(_ view: NSView) {
   guard !view.isHidden else { return }
+  NSGraphicsContext.saveGraphicsState()
+  defer { NSGraphicsContext.restoreGraphicsState() }
+  view.bounds.clip()
   view.draw(view.bounds)
   for child in view.subviews {
     NSGraphicsContext.saveGraphicsState()

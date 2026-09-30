@@ -145,23 +145,28 @@ try {
     const inventory = await rpc('agents_list', { includeStopped: true })
     assert(inventory.agents.some((a: any) => a.id === old.agentId && a.status === 'stopped'))
     const openSaved = async (creationId: string) => {
-      let settled = false, submitted = false
+      let settled = false, submitted = false, historyVisible = false
       const hookCount = hooks.length
+      const nativeHookSeen = () => hooks.some(h => h.engine === engine && h.sessionId === sessionId)
+      const needHook = !nativeHookSeen()
       const opening = rpc('agent_resume', { agentId: old.agentId, creationId }).finally(() => { settled = true })
       const deadline = Date.now() + 45000
-      while (!settled && Date.now() < deadline) {
+      // Readiness now uses the live process and can precede the first TUI paint or startup hook.
+      // Verify those independently; finishing the RPC must not stop this fixture from driving
+      // Codex's deferred hook through its loopback-only synthetic turn.
+      while ((!settled || !historyVisible || (needHook && !nativeHookSeen())) && Date.now() < deadline) {
         const row = registry.byAgent(old.agentId)
         if (row) {
           await tmux('resize-window', '-t', row.tmuxPane, '-x', '140', '-y', '45')
           const screen = await tmux('capture-pane', '-p', '-S', '-500', '-t', row.tmuxPane)
+          historyVisible ||= screen.includes(marker)
           writeFileSync(join(root, `${engine}-screen.txt`), screen)
           if (/Hooks need review/.test(screen)) await tmux('send-keys', '-t', row.tmuxPane, 'Down', 'Enter')
           if (/trust this folder|trust the files|Yes, I trust|confirm.*API key/i.test(screen)) await tmux('send-keys', '-t', row.tmuxPane, 'Enter')
           // Codex 0.154 defers SessionStart until the next submitted turn. First prove
           // that opening alone restored visible history, then simulate user input so
           // the real hook can confirm the receipt. Production never submits a prompt.
-          if (engine === 'codex' && row.launch?.state === 'starting' && !submitted && hooks.length === hookCount && screen.includes(marker) && /Ask Codex/.test(screen)) {
-            assert.equal(row.launch?.state, 'starting')
+          if (engine === 'codex' && needHook && !submitted && hooks.length === hookCount && screen.includes(marker) && /Ask Codex/.test(screen)) {
             submitted = true
             log('Codex history is visible before input; verifying its deferred native hook')
             await tmux('send-keys', '-t', row.tmuxPane, '-l', 'Fixture verification only. Do not use tools.')
@@ -172,6 +177,8 @@ try {
         await new Promise(r => setTimeout(r, 250))
       }
       assert(settled, `${engine} did not confirm: ${readFileSync(join(root, `${engine}-screen.txt`), 'utf8')}`)
+      assert(historyVisible, `${engine} did not render the saved conversation`)
+      assert(!needHook || nativeHookSeen(), `${engine} did not send its native SessionStart`)
       return opening
     }
     const creationId = randomUUID()

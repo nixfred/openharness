@@ -68,7 +68,7 @@ function callArgument(source: string, call: string): { body: string; at: number 
 }
 
 /** Every call whose dependencies run DURING start-up, before `runForeground` has finished its body. */
-const STARTUP_CALLS = ['await repairClaudeCwd({', 'await restoreAgents({', 'startSelfUpdater({']
+const STARTUP_CALLS = ['await repairClaudeCwd({', 'await restoreAgents({', 'startSelfUpdater({', 'startTuiUpdater({']
 
 /** What the prologue is allowed to do before the updater is running: nothing that can throw. */
 const PROLOGUE_CALLS = new Set([
@@ -96,6 +96,7 @@ describe('cli.ts start-up order', () => {
     const updater = source.indexOf('startSelfUpdater({')
     expect(updater, 'cli.ts still starts the self-updater').toBeGreaterThan(-1)
     for (const risky of [
+      'startTuiUpdater(',          // optional hn download must never precede CLI recovery
       'requireTmuxAvailable(',      // throws outright when tmux is missing
       'await startHookServer(',     // EADDRINUSE on a fixed port with no fallback
       'installSessionHooks(',       // 13 vendor settings files, any of which can be unreadable

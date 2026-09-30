@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/widgets/take_over_dialog.dart';
 
 void main() {
@@ -8,11 +9,26 @@ void main() {
     required String engine,
     required bool busy,
     String? pick,
+    Brightness brightness = Brightness.dark,
+    double scale = 1,
+    Size size = const Size(800, 600),
   }) async {
     TakeOver? chosen;
     var answered = false;
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = size;
+    addTearDown(tester.view.reset);
+    final oldBrightness = grid.AppTheme.brightness.value;
+    grid.AppTheme.brightness.value = brightness;
+    addTearDown(() => grid.AppTheme.brightness.value = oldBrightness);
     await tester.pumpWidget(
       MaterialApp(
+        theme: grid.buildAppTheme(brightness: brightness),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(scale)),
+          child: child!,
+        ),
         home: Builder(
           builder: (context) => TextButton(
             onPressed: () async {
@@ -83,4 +99,35 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Move to Harness'), findsNothing);
   });
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'takeover keeps its safe default and visible choices in a short ${brightness.name} window',
+      (tester) async {
+        await ask(
+          tester,
+          engine: 'codex',
+          busy: true,
+          brightness: brightness,
+          scale: 1.7,
+          size: const Size(440, 360),
+        );
+        final wait = find.byKey(const Key('take-over-wait'));
+        expect(
+          tester.widget<FilledButton>(wait).focusNode!.hasPrimaryFocus,
+          isTrue,
+        );
+        expect(wait.hitTestable(), findsOneWidget);
+        expect(
+          find.byKey(const Key('take-over-now')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(find.text('Cancel').hitTestable(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.text('Move to Harness'), findsNothing);
+      },
+    );
+  }
 }

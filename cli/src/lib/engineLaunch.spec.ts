@@ -466,6 +466,15 @@ describe('a first prompt on launch', () => {
     expect(buildEngineCommandArgv('codex', { firstPrompt: PROMPT })).toEqual([engineBin('codex'), PROMPT])
   })
 
+  it('hands hermes the text as the first turn of an interactive chat, after a resume', () => {
+    // `hermes chat -q` on a TTY seeds the session and keeps the TUI open (measured on a live pane).
+    expect(buildEngineCommandArgv('hermes', { firstPrompt: PROMPT }))
+      .toEqual([engineBin('hermes'), 'chat', '-q', PROMPT])
+    // Global flags stay ahead of the subcommand, where hermes's parser reads them.
+    expect(buildEngineCommandArgv('hermes', { resumeSessionId: 'abc', firstPrompt: PROMPT }))
+      .toEqual([engineBin('hermes'), '--resume', 'abc', 'chat', '-q', PROMPT])
+  })
+
   it('puts the text LAST, after every flag, so a positional is never read as an option value', () => {
     expect(buildEngineCommandArgv('claude', { firstPrompt: PROMPT, bypassPermission: true, extraArgs: ['--allowedTools=WebSearch'] }))
       .toEqual([engineBin('claude'), '--permission-mode', 'auto', '--allowedTools=WebSearch', PROMPT])
@@ -1021,7 +1030,7 @@ if [ "$1" = prefix ]; then exit 0; fi
     )
 
     expect(result).toMatchObject({ code: 0, ranEngine: true })
-    expect(result.stdout).toContain('enabling Harness managed Node.js/npm')
+    expect(result.stdout).toContain('installing for this user')
   })
 
   it('does not add the npm bootstrap to non-npm installers', () => {

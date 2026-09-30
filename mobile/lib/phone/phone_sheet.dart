@@ -33,7 +33,8 @@ class PhoneSheetAction {
   final IconData icon;
   final String label;
 
-  /// Drawn small and faint, at the foot — the action least used, kept out of the way (Stop).
+  /// Drawn small at the foot — the action least used, kept out of the way (Stop). Faint, or red
+  /// when [destructive].
   final bool quiet;
 
   /// Run AFTER the sheet has closed — see [showPhoneSheet], which pops first and then calls this.
@@ -100,19 +101,12 @@ class PhoneSheetSection {
 /// [actions] is the first card, with no caption. Each of [sections] is a card after it — under its
 /// caption, or a gap below the card before when it has none. An empty section is left out.
 ///
-/// [titleLeading] is drawn left of the title — the engine mark, on an agent's sheet — and
-/// [titleDetail] under [titleParts]: machine, folder and branch.
-///
 /// The page behind stands on the app's sheet veil, dimmed and blurred — see [_PhoneSheetRoute].
 Future<void> showPhoneSheet(
   BuildContext context, {
   required String title,
   List<PhoneSheetAction> actions = const [],
   List<PhoneSheetSection> sections = const [],
-  PhoneSheetAction? titleAction,
-  List<String>? titleParts,
-  Widget? titleDetail,
-  Widget? titleLeading,
   String? titleBranch,
 }) {
   assert(debugCheckHasMediaQuery(context));
@@ -295,7 +289,13 @@ class _TmuxMenuState extends State<_TmuxMenu> {
         minHeight: 44,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: Tty.origin),
-          child: TtyText(action.label, color: tty.faint, size: TtySize.meta),
+          // Small either way; red when it ends something, because faint grey at the foot of a
+          // menu is how a disabled row looks, and this one is live.
+          child: TtyText(
+            action.label,
+            color: action.destructive ? tty.red : tty.faint,
+            size: TtySize.meta,
+          ),
         ),
       );
     }

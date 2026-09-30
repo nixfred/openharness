@@ -183,7 +183,8 @@ export async function agentFrame(
 ): Promise<AgentFrame> {
   const home = agentProject(s.cwd)
   const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
-    const value = await sessionGitContext(await home, tokenUsage?.work)
+    const saved = await sessionGitHistory.get(s)
+    const value = await sessionGitContext(await home, tokenUsage?.work, undefined, saved)
     value.history = await sessionGitHistory.observe(s, value)
     return value
   })

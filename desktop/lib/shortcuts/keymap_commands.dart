@@ -19,6 +19,7 @@ class HarnessCommand {
     this.context = KeymapContext.workspace,
     this.repeatable = false,
     this.hidden = false,
+    this.daemon = false,
   });
   final String id, label;
   final ShortcutGroup group;
@@ -28,26 +29,9 @@ class HarnessCommand {
   /// Workspace defaults come from the live shortcut table. A command cannot
   /// quietly propose different keys from the ones the user already uses.
   List<String> get keys {
-    if (!kIsWeb &&
-        id == 'navigation.commands' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+shift+p'];
-    }
-    if (!kIsWeb &&
-        id == 'harnesses.list' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+p'];
-    }
-    if (!kIsWeb &&
-        id == 'models.list' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      return const ['ctrl+i', 'cmd+i'];
-    }
-    if (!kIsWeb &&
-        id == 'picker.complete' &&
-        defaultTargetPlatform == TargetPlatform.linux) {
-      // Ctrl-I opens Models on Linux, including from another picker scope.
-      return const ['tab'];
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      final linux = linuxAltCommandKeys[id];
+      if (linux != null) return linux;
     }
     return action == null
         ? extraKeys.map(platformWorkspaceBinding).toList(growable: false)
@@ -61,7 +45,21 @@ class HarnessCommand {
 
   /// Review commands still use the shared keymap, but stay out of normal help.
   final bool hidden;
+
+  /// One of the daemon's (daemons/README.md): it exists only while this
+  /// window has daemons ([daemonCommandsActive]).
+  final bool daemon;
 }
+
+/// Whether the daemon's commands exist in this window: only while daemons are
+/// on (daemons/README.md, "Off switches"). Off, they are not bound at all:
+/// their keys (⌘⌥T) reach the pane as they did before daemons existed, and
+/// they are in no list, no help and no native keymap. The workspace sets it.
+final daemonCommandsActive = ValueNotifier<bool>(false);
+
+/// Whether [id] is a command this window has now.
+bool harnessCommandActive(String id) =>
+    harnessCommandById[id]?.daemon != true || daemonCommandsActive.value;
 
 final _workspaceKeysByPlatform =
     <TargetPlatform, Map<ShortcutAction, List<String>>>{};
@@ -102,6 +100,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.navigate,
     action: ShortcutAction.newSwarm,
     nativeAction: 'new',
+    keywords: ['tab'],
   ),
   const HarnessCommand(
     'swarm.close',
@@ -109,6 +108,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.navigate,
     action: ShortcutAction.closeSwarm,
     nativeAction: 'closeActive',
+    keywords: ['tab'],
   ),
   // The live table binds no chord to it any more (⌘⇧T is New Terminal), so
   // `keys` comes back empty: a palette and menu command a person may give a
@@ -119,6 +119,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.navigate,
     action: ShortcutAction.reopenClosedSwarm,
     nativeAction: 'reopen',
+    keywords: ['tab'],
   ),
   const HarnessCommand(
     'swarm.next',
@@ -126,6 +127,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.navigate,
     action: ShortcutAction.nextSwarm,
     nativeAction: 'next',
+    keywords: ['tab'],
     repeatable: true,
   ),
   const HarnessCommand(
@@ -134,6 +136,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.navigate,
     action: ShortcutAction.previousSwarm,
     nativeAction: 'previous',
+    keywords: ['tab'],
     repeatable: true,
   ),
   const HarnessCommand(
@@ -142,6 +145,7 @@ final harnessCommands = <HarnessCommand>[
     ShortcutGroup.actions,
     action: ShortcutAction.renameSwarm,
     nativeAction: 'renameActive',
+    keywords: ['tab'],
   ),
   const HarnessCommand(
     'navigation.back',
@@ -178,6 +182,7 @@ final harnessCommands = <HarnessCommand>[
       'swarm.select_$i',
       'Select tab $i',
       ShortcutGroup.navigate,
+      keywords: const ['tab'],
       extraKeys: ['cmd+$i'],
     ),
   for (var i = 1; i <= 9; i++)
@@ -342,7 +347,7 @@ final harnessCommands = <HarnessCommand>[
   const HarnessCommand('agent.rename', 'Rename Harness', ShortcutGroup.actions),
   const HarnessCommand(
     'agent.work',
-    'Inspect session work',
+    'Branches and pull requests',
     ShortcutGroup.actions,
     keywords: [
       'branch',
@@ -359,6 +364,8 @@ final harnessCommands = <HarnessCommand>[
     'agent.share',
     'Share Harness',
     ShortcutGroup.actions,
+    action: ShortcutAction.shareAgent,
+    keywords: ['link', 'public', 'private', 'invite', 'collaborate'],
     nativeAction: 'shareAgent',
   ),
   const HarnessCommand(
@@ -458,7 +465,7 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'machines.refresh',
-    'Refresh machines and agents',
+    'Refresh machines and harnesses',
     ShortcutGroup.actions,
     action: ShortcutAction.reload,
     nativeAction: 'reload',
@@ -476,6 +483,23 @@ final harnessCommands = <HarnessCommand>[
     action: ShortcutAction.orchestrate,
   ),
   const HarnessCommand(
+    'team.open',
+    'Tab conversation: view this tab’s collaboration',
+    ShortcutGroup.actions,
+    action: ShortcutAction.team,
+    keywords: [
+      'communicate',
+      'collaborate',
+      'message',
+      'question',
+      'reply',
+      'inbox',
+      'tab',
+      'swarm',
+      'channel',
+    ],
+  ),
+  const HarnessCommand(
     'app.customize',
     'Customize Harness',
     ShortcutGroup.actions,
@@ -488,6 +512,24 @@ final harnessCommands = <HarnessCommand>[
     extraKeys: ['cmd+s'],
     keywords: ['install', 'browse harnesses', 'packages', 'extensions'],
     nativeAction: 'store',
+  ),
+  const HarnessCommand(
+    'app.daemon',
+    'Daemon',
+    ShortcutGroup.actions,
+    keywords: ['hatch', 'egg', 'zoo', 'pair', 'nap', 'buddy', 'companion'],
+    nativeAction: 'daemon',
+    daemon: true,
+  ),
+  // ⌘⌥Space is macOS's Finder search; ⌘⌥ plus y, n, s or g answers the
+  // daemon's line. T for talk.
+  const HarnessCommand(
+    'app.daemon_talk',
+    'Talk to daemon',
+    ShortcutGroup.actions,
+    extraKeys: ['cmd+alt+t'],
+    keywords: ['ask', 'pair', 'daemon', 'chat', 'autonomy', 'lessons'],
+    daemon: true,
   ),
   const HarnessCommand(
     'app.settings',
@@ -680,7 +722,7 @@ final harnessCommands = <HarnessCommand>[
     ),
   const HarnessCommand(
     'picker.add_here',
-    'Add the selected agent',
+    'Start or add the selected harness',
     ShortcutGroup.actions,
     extraKeys: ['cmd+enter'],
     context: KeymapContext.picker,
@@ -717,14 +759,14 @@ final harnessCommands = <HarnessCommand>[
   for (final (name, key, label) in [
     ('agent', null, 'Choose the new agent'),
     ('project', null, 'Choose the new agent’s project'),
-    ('task', null, 'Edit the new agent’s first task'),
-    ('options', null, 'Edit the new agent’s advanced options'),
+    ('task', null, 'Edit the new agent’s first message'),
+    ('options', null, 'Choose the new agent’s model'),
     // Project is a text filter. Keep these command identities available for
     // explicit user remaps, without taking ordinary letters from the editor.
     ('project_new', null, 'Name a new project'),
     ('project_existing', null, 'Open an existing project'),
     ('project_repository', null, 'Clone a GitHub repository'),
-    ('project_machine', null, 'Choose the new agent’s machine'),
+    ('project_machine', null, 'Choose the new harness’s machine'),
     ('project_browse', 'ctrl+o', 'Browse folders on the selected machine'),
   ])
     HarnessCommand(
@@ -797,10 +839,10 @@ ResolvedKeymap get harnessDefaultKeymap =>
     );
 
 List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
-  if (stroke.control) kIsWeb ? 'Ctrl' : '⌃',
-  if (stroke.alt) kIsWeb ? 'Alt' : '⌥',
-  if (stroke.shift) kIsWeb ? 'Shift' : '⇧',
-  if (stroke.command) kIsWeb ? 'Cmd' : '⌘',
+  if (stroke.control) controlKeyLabel,
+  if (stroke.alt) altKeyLabel,
+  if (stroke.shift) shiftKeyLabel,
+  if (stroke.command) commandKeyLabel,
   const {
         'left': '←',
         'right': '→',
@@ -829,6 +871,6 @@ List<String> describeKeyStrokeKeys(KeyStroke stroke) => [
       stroke.key.toUpperCase(),
 ];
 String describeKeyStroke(KeyStroke stroke) =>
-    describeKeyStrokeKeys(stroke).join(kIsWeb ? '+' : '');
+    describeKeyStrokeKeys(stroke).join(chordKeySeparator);
 String describeKeyBinding(KeyBinding binding) =>
     binding.keys.map(describeKeyStroke).join(' ');

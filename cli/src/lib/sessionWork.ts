@@ -1,13 +1,14 @@
 /** Minimal, replayable work-location evidence. No Git, I/O, shell execution or raw output storage. */
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, resolve } from 'node:path'
-import { literalToolCall } from './literalToolCall.js'
+import { literalToolCall, literalToolCalls, type ToolOutputSlot } from './literalToolCall.js'
 
 export type WorkLocation = { cwd: string; at: string }
 export type WorkPullRequest = { url: string; cwd: string | null; at: string }
-type Operation = { paths: string[]; at: string; order: number; createsPr: boolean }
+type Operation = { paths: string[]; at: string; order: number; createsPr: boolean;
+  children?: Array<{ operation: Operation; output?: ToolOutputSlot }> }
 export type SessionWorkLedger = {
-  context: string | null; sequence: number; latest: number;
+  context: string | null; sequence: number; latest: number; currentOrder: number; failedOrder: number;
   current: WorkLocation[]; locations: WorkLocation[]; pullRequests: WorkPullRequest[];
   pending: Record<string, Operation>; running: Record<string, Operation>; completed: string[];
   uncertain: boolean; truncated: boolean;
@@ -24,7 +25,7 @@ export const validWorkPath = (v: unknown): v is string =>
 export const validPullRequestUrl = (v: unknown): v is string => typeof v === 'string'
   && /^https:\/\/github\.com\/[\w-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(v)
   && new URL(v).href === v && Number.isSafeInteger(Number(v.split('/').at(-1)))
-export const emptySessionWork = (): SessionWorkLedger => ({ context: null, sequence: 0, latest: 0,
+export const emptySessionWork = (): SessionWorkLedger => ({ context: null, sequence: 0, latest: 0, currentOrder: 0, failedOrder: 0,
   current: [], locations: [], pullRequests: [], pending: {}, running: {}, completed: [], uncertain: false, truncated: false })
 
 export function validSessionWork(value: unknown): value is SessionWorkLedger {
@@ -32,14 +33,21 @@ export function validSessionWork(value: unknown): value is SessionWorkLedger {
   const locations = (v: unknown) => Array.isArray(v) && v.length <= LIMIT
     && v.every(x => validWorkPath(x?.cwd) && stamp(x?.at))
   const integer = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+  const operation = (op: Operation, depth = 0): boolean => depth <= 4
+    && Array.isArray(op?.paths) && op.paths.length <= LIMIT && op.paths.every(validWorkPath)
+    && integer(op.order) && op.order <= Number(r?.sequence) && stamp(op.at) && typeof op.createsPr === 'boolean'
+    && (op.children === undefined || Array.isArray(op.children) && op.children.length <= 32
+      && op.children.every(child => operation(child?.operation, depth + 1) && (child.output === undefined
+        || integer(child.output.block) && child.output.block < 32
+        && (child.output.index === undefined || integer(child.output.index) && child.output.index < 32)
+        && (child.output.settled === undefined || typeof child.output.settled === 'boolean'))))
   return !!r && (r.context === null || validWorkPath(r.context)) && integer(r.sequence) && integer(r.latest)
-    && Number(r.latest) <= Number(r.sequence) && locations(r.current) && locations(r.locations)
+    && Number(r.latest) <= Number(r.sequence) && integer(r.currentOrder) && Number(r.currentOrder) <= Number(r.sequence)
+    && integer(r.failedOrder) && Number(r.failedOrder) <= Number(r.sequence) && locations(r.current) && locations(r.locations)
     && Array.isArray(r.pullRequests) && r.pullRequests.length <= LIMIT && r.pullRequests.every(p =>
       validPullRequestUrl(p?.url) && (p.cwd === null || validWorkPath(p.cwd)) && stamp(p?.at))
     && [r.pending, r.running].every(operations => !!object(operations) && Object.keys(operations as object).length <= LIMIT
-    && Object.entries(operations as Record<string, Operation>).every(([id, op]) => /^[a-f0-9]{64}$/.test(id)
-      && Array.isArray(op?.paths) && op.paths.length <= LIMIT && op.paths.every(validWorkPath)
-      && integer(op.order) && op.order <= Number(r.sequence) && stamp(op.at) && typeof op.createsPr === 'boolean'))
+    && Object.entries(operations as Record<string, Operation>).every(([id, op]) => /^[a-f0-9]{64}$/.test(id) && operation(op)))
     && Array.isArray(r.completed) && r.completed.length <= RECEIPTS && r.completed.every(id => /^[a-f0-9]{64}$/.test(id))
     && typeof r.uncertain === 'boolean' && typeof r.truncated === 'boolean'
 }
@@ -182,28 +190,48 @@ function operation(name: string, raw: unknown, cwd: string | null): { paths: str
   return ['exec', 'apply_patch'].includes(tool) ? null : undefined
 }
 
-function begin(state: SessionWorkLedger, id: unknown, name: unknown, input: unknown, cwd: string | null, at: string): void {
-  if (typeof id !== 'string' || typeof name !== 'string') return
-  const key = hash(id)
-  if (state.pending[key] || state.completed.includes(key)) return
+function prepare(state: SessionWorkLedger, name: string, input: unknown, cwd: string | null, at: string,
+  order?: number): Operation | null {
   const [tool, raw] = unwrap(name.replace(/^functions\./, ''), parse(input))
   const args = object(raw)
   const continuation = tool === 'write_stdin' && (typeof args?.session_id === 'number' || typeof args?.session_id === 'string')
     ? hash(`process:${args.session_id}`) : tool === 'wait' && typeof args?.cell_id === 'string' ? hash(`cell:${args.cell_id}`) : null
   if (continuation && state.running[continuation]) {
-    if (Object.keys(state.pending).length >= LIMIT) { state.uncertain = true; state.truncated = true; return }
     const running = state.running[continuation]
     delete state.running[continuation]
     // Input could change an interactive shell's directory. Only passive waits confirm an operation.
-    state.pending[key] = args?.terminate === true || typeof args?.chars === 'string' && args.chars.length > 0
-      ? { ...running, paths: [], createsPr: false } : running
-    return
+    return args?.terminate === true || typeof args?.chars === 'string' && args.chars.length > 0
+      ? { at: running.at, order: running.order, paths: [], createsPr: false } : running
   }
   const found = continuation ? null : operation(name, input, cwd)
-  if (found === undefined) return
-  const order = ++state.sequence
+  if (found === undefined) return null
+  return { paths: found?.paths ?? [], createsPr: found?.createsPr ?? false, order: order ?? ++state.sequence, at }
+}
+
+function begin(state: SessionWorkLedger, id: unknown, name: unknown, input: unknown, cwd: string | null, at: string): void {
+  if (typeof id !== 'string' || typeof name !== 'string') return
+  const key = hash(id)
+  if (state.pending[key] || state.completed.includes(key)) return
   if (Object.keys(state.pending).length >= LIMIT) { state.uncertain = true; state.truncated = true; return }
-  state.pending[key] = { paths: found?.paths ?? [], createsPr: found?.createsPr ?? false, order, at }
+  const raw = parse(input)
+  const calls = name.replace(/^functions\./, '') === 'exec' && typeof raw === 'string' ? literalToolCalls(raw) : null
+  if (calls) {
+    const orders = new Map<number, number>()
+    const children: NonNullable<Operation['children']> = []
+    for (const call of calls) {
+      const order = orders.get(call.group) ?? state.sequence + 1
+      const op = prepare(state, call.name, call.input, cwd, at, order)
+      if (op) {
+        state.sequence = Math.max(state.sequence, order)
+        orders.set(call.group, order)
+        children.push({ operation: op, ...(call.output ? { output: call.output } : {}) })
+      }
+    }
+    if (children.length) state.pending[key] = { paths: [], at, order: state.sequence, createsPr: false, children }
+  } else {
+    const op = prepare(state, name, input, cwd, at)
+    if (op) state.pending[key] = op
+  }
 }
 
 function outputText(raw: unknown): string {
@@ -220,7 +248,42 @@ function finish(state: SessionWorkLedger, id: unknown, raw: unknown, failed: boo
   delete state.pending[key]
   state.completed.push(key)
   if (state.completed.length > RECEIPTS) { state.completed.shift(); state.truncated = true }
+  finishOperation(state, op, raw, failed, receipt)
+}
+
+/** Codex stores each text(...) output as a separate input_text block. Joining those JSON objects
+ * destroys their boundaries and loses yielded process ids, exit codes and PR creation receipts. */
+function outputBlocks(raw: unknown): unknown[] {
+  const blocks = Array.isArray(raw) ? raw.map(row => object(row)?.text).filter((row): row is string => typeof row === 'string')
+    : [typeof raw === 'string' ? raw : JSON.stringify(raw) ?? '']
+  return blocks.map(text => text.replace(/^Script completed[\s\S]*?\nOutput:\n/, '').trim())
+    .filter(text => text && !/^Script running with cell ID/.test(text)).map(parse)
+}
+
+function finishOperation(state: SessionWorkLedger, op: Operation, raw: unknown, failed: boolean, receipt?: unknown): void {
   let text = outputText(raw)
+  if (op.children) {
+    const blocks = outputBlocks(raw)
+    const cell = /Script running with cell ID ([\w-]+)/.exec(text)?.[1]
+    const remaining: NonNullable<Operation['children']> = []
+    for (const child of op.children) {
+      const slot = child.output
+      if (cell && slot && slot.block >= blocks.length) {
+        remaining.push({ ...child, output: { ...slot, block: slot.block - blocks.length } }); continue
+      }
+      let value = slot ? blocks[slot.block] : undefined
+      const row = object(value)
+      const invalid = !slot || value === undefined || slot.index !== undefined && row?.i !== slot.index
+        || slot.settled && row?.status !== 'fulfilled'
+      if (slot?.settled) value = row?.value
+      finishOperation(state, child.operation, value, failed || !!invalid)
+    }
+    if (cell && remaining.length) {
+      if (Object.keys(state.running).length < LIMIT) state.running[hash(`cell:${cell}`)] = { ...op, children: remaining }
+      else { state.uncertain = true; state.truncated = true }
+    }
+    return
+  }
   const wrapper = /^Script completed[\s\S]*?\nOutput:\n([\s\S]*)$/.exec(text)
   if (wrapper) text = wrapper[1]
   const result = object(parse(text)) ?? object(raw)
@@ -240,11 +303,16 @@ function finish(state: SessionWorkLedger, id: unknown, raw: unknown, failed: boo
     if (Object.keys(state.running).length < LIMIT) state.running[running] = op
     else state.truncated = true
   }
-  if (op.order >= state.latest) {
-    state.latest = op.order
-    state.current = unsuccessful ? [] : op.paths.map(cwd => ({ cwd, at: op.at }))
-    state.uncertain = unsuccessful || !op.paths.length
+  state.latest = Math.max(state.latest, op.order)
+  if ((!running && unsuccessful) || !op.paths.length) state.failedOrder = Math.max(state.failedOrder, op.order)
+  if (!unsuccessful && op.paths.length && op.order >= state.currentOrder) {
+    // Keep the last successful location through failures, pending work and unsupported scripts.
+    // Calls in one parallel group share an order, so several worktrees stay explicitly multiple.
+    const previous = op.order === state.currentOrder ? state.current : []
+    state.currentOrder = op.order
+    state.current = [...previous, ...op.paths.filter(cwd => !previous.some(row => row.cwd === cwd)).map(cwd => ({ cwd, at: op.at }))].slice(0, LIMIT)
   }
+  state.uncertain = state.currentOrder < state.latest || state.failedOrder === state.latest
   if (unsuccessful) return
   for (const cwd of op.paths) {
     const old = state.locations.find(p => p.cwd === cwd)

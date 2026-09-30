@@ -33,7 +33,7 @@ void main() {
       tester.widget<NewHarnessForm>(find.byType(NewHarnessForm)).controller;
 
   testWidgets(
-    'canceled edits and tasks do not replace successful launch defaults',
+    'dismissed edits resume and explicit agent/project choices become defaults',
     (tester) async {
       final app = createApp();
       seedMixedAgents(app);
@@ -55,9 +55,11 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump();
       await chord(tester, LogicalKeyboardKey.keyN);
-      expect(box(tester).task, '');
-      expect(box(tester).engine, 'codex');
-      expect(box(tester).project.folder, '/work/openharness');
+      expect(box(tester).task, 'Review this project');
+      expect(box(tester).engine, 'opencode');
+      expect(box(tester).project.folder, '/work/selected-before-task');
+      expect(app.agentPreference.value, 'opencode');
+      expect(app.projectHistory.selected('m'), '/work/selected-before-task');
       expect(app.panes, hasLength(1));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
@@ -89,20 +91,11 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    controller.move(
-      controller.options.indexWhere(
-            (row) => row.id == NewHarnessController.browseId,
-          ) -
-          controller.cursor,
-    );
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
     FocusManager.instance.primaryFocus?.unfocus();
     picker.answer.complete(null);
     await tester.pumpAndSettle();
+    expect(picker.opened, 1);
+    expect(controller.field, NewHarnessField.projectMenu);
     expect(FocusManager.instance.primaryFocus?.debugLabel, 'new-harness-query');
     await typeHarnessQuery(tester, 'robotics');
     expect(controller.query, 'robotics');
@@ -137,17 +130,6 @@ void main() {
           ) -
           controller.cursor,
     );
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    controller.move(
-      controller.options.indexWhere(
-            (row) => row.id == NewHarnessController.browseId,
-          ) -
-          controller.cursor,
-    );
-    await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
     expect(picker.opened, 1);
@@ -189,17 +171,6 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    controller.move(
-      controller.options.indexWhere(
-            (row) => row.id == NewHarnessController.browseId,
-          ) -
-          controller.cursor,
-    );
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
     await tester.pump();
     expect(find.text('Choose a folder'), findsOneWidget);
     expect(
@@ -221,7 +192,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('changing source panes never changes fresh launch defaults', (
+  testWidgets('each source pane retains its own draft and launch defaults', (
     tester,
   ) async {
     final app = createApp();
@@ -251,7 +222,13 @@ void main() {
     app.focusPane(first.id);
     await tester.pump();
     await chord(tester, LogicalKeyboardKey.keyN);
-    expect(box(tester).project.folder, '/work/openharness');
+    expect(box(tester).project.folder, '/work/first-draft');
+    expect(app.projectHistory.selected('m'), '/work/openharness');
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    app.focusPane(other.id);
+    await tester.pump();
+    await chord(tester, LogicalKeyboardKey.keyN);
+    expect(box(tester).project.folder, '/work/second-draft');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });

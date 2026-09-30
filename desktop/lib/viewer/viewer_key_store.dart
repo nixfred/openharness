@@ -62,6 +62,7 @@ class ViewerKeyStore {
 
   static const _seedKey = 'viewer_e2ee_identity_seed';
   static const _peersKey = 'viewer_e2ee_machine_peers';
+  static const _groupKey = 'viewer_e2ee_group';
 
   /// Minted on first use and kept: every linked machine has pinned it.
   Future<E2eeIdentity> identity() => _identity ??= _loadOrMintIdentity();
@@ -122,6 +123,21 @@ class ViewerKeyStore {
         await _write(remaining);
         return true;
       });
+
+  /// The trust group as this device last knew it (`group_sync.dart`), as stored JSON; null when
+  /// there is none yet or it cannot be read.
+  Future<Object?> groupRoster() async {
+    final raw = await _storage.read(_groupKey);
+    if (raw == null) return null;
+    try {
+      return jsonDecode(raw);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Future<void> writeGroupRoster(Map<String, Object> roster) =>
+      _storage.write(_groupKey, jsonEncode(roster));
 
   Future<void> _write(List<MachinePeer> peers) => _storage.write(
     _peersKey,

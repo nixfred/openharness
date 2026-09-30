@@ -17,8 +17,7 @@ const String kCliLogBase = 'cli';
 ///
 /// Called once from `main()`. Nothing else calls it, which is what keeps the
 /// suite honest: both sinks default to their no-op, so `flutter test` cannot
-/// write into a real Harness home no matter which code path it exercises — the
-/// same rule analytics follows.
+/// write into a real Harness home no matter which code path it exercises.
 ///
 /// Deliberately not `async`: the first lines this app writes are the ones about
 /// starting up, and awaiting a directory probe here would lose them.

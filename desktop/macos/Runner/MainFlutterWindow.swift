@@ -36,12 +36,12 @@ class MainFlutterWindow: NSWindow {
     installClipboardImageChannel(messenger: flutterViewController.engine.binaryMessenger)
     notifications = HarnessNotifications(messenger: flutterViewController.engine.binaryMessenger)
 
-    // Harness Desktop is dark-only. Flutter's own theme does not reach AppKit —
-    // every native surface (the standard About panel, the menu bar, the
-    // window's title bar and its traffic lights, any AppKit sheet) follows
-    // `NSApp.appearance`, not `MaterialApp.theme` — so it is pinned here once
-    // rather than left to whatever the Mac's own Appearance setting is, which
-    // would otherwise paint a dark app with a light About panel and title bar.
+    // Flutter's own theme does not reach AppKit — every native surface (the
+    // standard About panel, the menu bar, the window's title bar and its
+    // traffic lights, any AppKit sheet) follows `NSApp.appearance`, not
+    // `MaterialApp.theme`. Dark until Dart's first palette arrives (the saved
+    // one, sent before the first frame); `SwarmTabStrip.updatePalette` then
+    // follows the palette's own brightness rather than the Mac's setting.
     NSApp.appearance = NSAppearance(named: .darkAqua)
 
     installAppMenuItems()
@@ -253,7 +253,7 @@ class MainFlutterWindow: NSWindow {
     }
     // Every other row in this menu carries a glyph, so one without reads as
     // unfinished — the gutter stays but nothing sits in it.
-    item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+    item.image = HarnessControlSymbols.image(symbol, description: title)
     return item
   }
 

@@ -168,17 +168,19 @@ class PaneLayoutStore {
   ///
   /// [dropOthers] is the sign-out: a guest has no machine to attach a remote
   /// tile to, and a tile waiting forever reads as broken, not as signed out.
-  Future<void> rekeyMachine({
+  /// Returns false when the rewritten layout could not be saved. Callers must
+  /// retain the old machine identity and retry before restoring account content.
+  Future<bool> rekeyMachine({
     required String from,
     required String to,
     bool dropOthers = false,
   }) async {
     await flushSwarms();
     final saved = await loadSwarms();
-    if (saved == null) return;
+    if (saved == null) return true;
     var changed = false;
     final swarms = saved['swarms'];
-    if (swarms is! List) return;
+    if (swarms is! List) return true;
     for (final raw in swarms) {
       if (raw is! Map || raw['panes'] is! List) continue;
       final kept = <Object?>[];
@@ -196,12 +198,12 @@ class PaneLayoutStore {
       }
       raw['panes'] = kept;
     }
-    if (!changed) return;
+    if (!changed) return true;
     try {
       await _storage.write('swarm_layout_v1', jsonEncode(saved));
+      return true;
     } catch (_) {
-      // The desk comes back under the old ids at the next launch, where the
-      // remembered id (above) gets another chance at it.
+      return false;
     }
   }
 

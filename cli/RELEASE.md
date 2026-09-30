@@ -56,9 +56,11 @@ A failed build stops the release; nothing is uploaded and no version is consumed
 ## The `curl | bash` installer
 
 `cli/scripts/install.sh` is what `curl -fsSL https://cdn.autonomous.ai/harness/cli/install.sh | bash`
-runs: it installs the managed Node runtime and the CLI bundle from the same manifests the release
-publishes to. It is a static file, versioned by nothing, and does **not** ship with a release — publish
-it on its own whenever it changes:
+runs: it installs the managed Node runtime, CLI bundle and hn from their published manifests.
+After verifying a production CLI release, `release.yml` publishes this installer from the same
+commit and checks that the CDN serves the exact source bytes. Releases to a scratch manifest leave
+the production installer alone. The installer is a static, unversioned file; a maintainer can also
+publish an installer-only correction:
 
 ```bash
 make upload-cli-install-sh          # cli/scripts/install.sh -> harness/cli/install.sh in the bucket
@@ -124,6 +126,29 @@ The bucket must be public-read — that is bucket policy, not something the scri
 **There is no undo.** A bad release is rolled back by publishing a *higher* version containing the
 older code — never by deleting the new one, which just leaves every daemon pointed at a 404. Disable
 self-update on one machine with `ADAPTER_UPDATE_DISABLE=true`.
+
+## hn updates
+
+The installed daemon checks the separate `harness/tui/metadata.json` manifest on startup and
+on the same update schedule. An installed hn moves only to a newer published version, after
+checksum, size and executable-version checks. Replacing the binary is atomic; open clients
+keep running and the next launch uses the update. Failures retry without blocking CLI updates.
+`harness update` also checks hn even if the CLI is already current.
+
+An hn release still uses `release-tui.yml`; publishing a CLI does not rebuild or republish hn.
+The CLI updater discovers whichever hn release is latest, so an hn-only release reaches
+existing installations too. `ADAPTER_UPDATE_DISABLE=true` covers both automatic updaters.
+Checkout/local CLI builds, `HARNESS_TUI_BIN` overrides, symlinked managed binaries and hn development
+version labels are left alone. A missing managed binary is repaired on the next update check when
+the managed `hn` launcher is present; otherwise first use or the installer downloads it.
+
+Older manual/development `hn` commands can bypass this managed binary. `harness update` diagnoses
+these installations, including a different `hn` earlier on PATH. `harness tui --install` or
+`harness update --force` verifies the latest download, backs up a recognized old Harness launcher
+under `~/.local/bin/.hn-backup-*/hn`, and replaces it with a launcher that follows `harness tui`.
+An unrelated command is preserved; use `harness tui` or correct PATH in that case. Explicit
+`HARNESS_TUI_BIN` overrides remain in effect until unset. The installer never writes through
+an existing `hn` symlink.
 
 ## Rolling out safely
 

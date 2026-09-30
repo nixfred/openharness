@@ -1,3 +1,4 @@
+import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
@@ -118,7 +119,7 @@ class LoginScreen extends StatelessWidget {
                                     iconSize: 18,
                                     visualDensity: VisualDensity.compact,
                                     color: grid.AppPalette.textSecondary,
-                                    icon: const Icon(Icons.close),
+                                    icon: const Icon(AppIcons.close),
                                     onPressed: onClose,
                                   ),
                                 ),
@@ -379,7 +380,7 @@ class _ActionState extends State<_Action> {
             autofocus: true,
             onPressed: signingOutFailed ? notifier.logout : notifier.login,
             icon: Icon(
-              signingOutFailed ? Icons.logout : Icons.login,
+              signingOutFailed ? AppIcons.logOut : AppIcons.logIn,
               size: grid.AppControl.iconSize,
             ),
             label: Text(signingOutFailed ? 'Retry sign out' : 'Sign in'),
@@ -451,7 +452,7 @@ class _ActionState extends State<_Action> {
                   onPressed: notifier.openingLoginBrowser
                       ? null
                       : notifier.openLoginBrowser,
-                  icon: const Icon(Icons.open_in_new, size: 16),
+                  icon: const Icon(AppIcons.externalLink, size: 16),
                   label: Text(
                     notifier.openingLoginBrowser
                         ? 'Opening browser…'
@@ -461,7 +462,7 @@ class _ActionState extends State<_Action> {
                 TextButton.icon(
                   onPressed: _copying ? null : _copyLink,
                   icon: Icon(
-                    _copiedUrl == url ? Icons.check : Icons.content_copy,
+                    _copiedUrl == url ? AppIcons.check : AppIcons.copy,
                     size: 16,
                   ),
                   label: Semantics(
@@ -525,7 +526,7 @@ class _ErrorTile extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.error_outline, size: 16, color: danger),
+              Icon(AppIcons.circleAlert, size: 16, color: danger),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -574,7 +575,7 @@ class _Seal extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.lock_outline, size: 13, color: grid.AppPalette.teal),
+            Icon(AppIcons.lock, size: 14, color: grid.AppPalette.teal),
             const SizedBox(width: 8),
             Text(
               'End-to-end encrypted',

@@ -515,6 +515,41 @@ void main() {
     expect(fixture.connection.requests('agent_create'), isEmpty);
   });
 
+  test('a suggested project is named after its first task, and names the agent too (#94)', () async {
+    final fixture = _Fixture();
+    fixture.connection.replies['fs_list_dir'] = (payload) => {
+      'path': payload['path'] ?? '/home/test',
+      'entries': [
+        if (payload['path'] == '/home/test/harnesses')
+          {'name': 'robot-noi-chuyen-voi-gemini', 'isDir': true},
+      ],
+    };
+    final box = fixture.box(folder: null, autoProject: true);
+    await _settle();
+    expect(box.project.name, startsWith('codex-'), reason: 'no task yet');
+
+    box.focusField(NewHarnessField.task);
+    box.setQuery('Robot nói chuyện với Gemini\nthen a speaker board');
+    await _settle();
+    // Accents folded, the first line only, and a taken folder numbered.
+    expect(box.project.name, 'robot-noi-chuyen-voi-gemini-2');
+    expect(box.project.generated!.isGenerated, isTrue);
+
+    await box.create();
+    final create = fixture.connection.requests('agent_create').single;
+    expect(create['name'], 'Robot nói chuyện với Gemini');
+    expect(create['projectName'], 'robot-noi-chuyen-voi-gemini-2');
+  });
+
+  test('a clock-named project leaves the agent for the machine to name', () async {
+    final fixture = _Fixture();
+    final box = fixture.box(folder: null, autoProject: true);
+    await _settle();
+    await box.create();
+    final create = fixture.connection.requests('agent_create').single;
+    expect(create.containsKey('name'), isFalse);
+  });
+
   test('profile discovery includes observed agent paths and link failures preserve selection', () async {
     final fixture = _Fixture();
     fixture.app.machineStates['m']!.agents = [

@@ -222,6 +222,8 @@ mkdir -p "$APPDIR/usr/bin"
 cp -a "$BUNDLE_DIR/." "$APPDIR/usr/bin/"
 ln -s usr/bin/harness "$APPDIR/AppRun"
 cp "$BUNDLE_DIR/harness.png" "$APPDIR/harness.png"
+# StartupWMClass is the window's app id (APPLICATION_ID, linux/CMakeLists.txt): how a dock matches the
+# running window to this entry instead of drawing it with a generic icon.
 cat > "$APPDIR/harness.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -231,6 +233,7 @@ Exec=harness
 Icon=harness
 Categories=Development;
 Terminal=false
+StartupWMClass=com.autonomous.harness
 EOF
 
 APPIMAGE_ARCH="$([ "$RELEASE_ARCH" = "arm64" ] && echo aarch64 || echo x86_64)"

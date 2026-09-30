@@ -4,7 +4,7 @@ import { isAbsolute, basename, dirname, join } from 'node:path'
 import { isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import { binaryOnPath, resolveBinaryOnPath } from './binaryOnPath.js'
 import { engineBin } from './engineBin.js'
-import type { EngineInstallRecipe } from './engineInstall.js'
+import { engineInstallPaths, npmEnginePrefix, type EngineInstallRecipe } from './engineInstall.js'
 import { GRID_NO_UPDATE_CHECK_VAR, gridBinaryPath } from './gridExec.js'
 import { managedNodePath } from './nodeRuntime.js'
 import { RAISE_OPEN_FILES_SH } from './openFiles.js'
@@ -98,7 +98,10 @@ export const FIRST_PROMPT_ARGS: Readonly<Record<AgentEngine, readonly string[] |
   // No documented first-prompt argument for an interactive launch. Not guessed.
   cursor: null,
   pi: null,
-  hermes: null,
+  // `hermes chat --help`: "-q, --query QUERY  Query to run. On a real TTY the prompt seeds an
+  // interactive session (first turn)". Measured on a live pane: the prompt is answered and the TUI
+  // stays open for the next turn, which is also what lets a fork of a Hermes agent hand off.
+  hermes: ['chat', '-q'],
   commandcode: null,
   devin: null,
   muse: null,
@@ -646,13 +649,6 @@ export function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 
-function installedPathCandidates(recipe: EngineInstallRecipe): string[] {
-  return [
-    ...(recipe.executable.homeRelativePaths ?? []).map((path) => join(homedir(), path)),
-    ...(recipe.executable.absolutePaths ?? []),
-  ]
-}
-
 /**
  * Make npm recipes work on machines where Harness owns Node instead of installing it system-wide.
  *
@@ -662,31 +658,22 @@ function installedPathCandidates(recipe: EngineInstallRecipe): string[] {
  * otherwise prepend the managed runtime's bin directory for this pane only. This is portable across
  * macOS and Linux and avoids an interactive/root package-manager install in an agent launch.
  */
-function npmRuntimePrelude(recipe: EngineInstallRecipe, runtimeNode: string, required: boolean): string {
+function npmRuntimePrelude(recipe: EngineInstallRecipe, runtimeNode: string): string {
   if (!recipe.executable.npmGlobal) return ''
   const bins = [...new Set([dirname(runtimeNode), dirname(process.execPath)])]
     .map(shellSingleQuote)
     .join(' ')
   return [
-    'if ! command -v npm >/dev/null 2>&1; then',
+    'if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then',
     `  for harness_node_bin in ${bins}; do`,
     '    if [ -x "$harness_node_bin/node" ] && [ -x "$harness_node_bin/npm" ]; then',
     '      PATH="$harness_node_bin${PATH:+:$PATH}"',
     '      export PATH',
     '      hash -r 2>/dev/null || true',
-    ...(required ? [
-      `      printf '%s\\n' 'harness: npm is missing from PATH — enabling Harness managed Node.js/npm'`,
-    ] : []),
     '      break',
     '    fi',
     '  done',
     'fi',
-    ...(required ? [
-      'if ! command -v npm >/dev/null 2>&1; then',
-      `  printf '%s\\n' 'harness: npm is unavailable and the managed Node.js/npm runtime could not be used.'`,
-      '  exit 1',
-      'fi',
-    ] : []),
   ].join('\n')
 }
 
@@ -727,7 +714,12 @@ export function gridPanePrelude(binary: string): string {
 function installIfMissingThenExecScript(recipe: EngineInstallRecipe, runtimeNode: string): string {
   const install = recipe.command
   const names = recipe.executable.names.map(shellSingleQuote).join(' ')
-  const paths = installedPathCandidates(recipe).map(shellSingleQuote).join(' ')
+  const paths = engineInstallPaths(recipe).map(shellSingleQuote).join(' ')
+  // Scope both npm env spellings to the installer subprocess. Do not rewrite .npmrc or install
+  // into a different OS user's shared prefix, and do not tie the engine to a versioned Node folder.
+  const installCommand = recipe.executable.npmGlobal
+    ? `(export npm_config_prefix=${shellSingleQuote(npmEnginePrefix())} NPM_CONFIG_PREFIX=${shellSingleQuote(npmEnginePrefix())}; eval ${shellSingleQuote(install)})`
+    : `eval ${shellSingleQuote(install)}`
   const candidates = [names, paths].filter(Boolean).join(' ')
   const tryCandidates = candidates
     ? `for candidate in ${candidates}; do try_engine "$candidate" "$@" || true; done`
@@ -755,12 +747,21 @@ function installIfMissingThenExecScript(recipe: EngineInstallRecipe, runtimeNode
     '  shift',
     '  harness_engine "$resolved" "$@"',
     '}',
+    // A previously installed npm launcher also needs Node. Resolve the runtime before executing
+    // it, not just before installing it; fresh users often have no system node on PATH.
+    npmRuntimePrelude(recipe, runtimeNode),
     'try_engine "$1" "$@" || true',
     tryCandidates,
-    npmRuntimePrelude(recipe, runtimeNode, true),
     tryNpmGlobal,
+    ...(recipe.executable.npmGlobal ? [
+      'if ! command -v npm >/dev/null 2>&1; then',
+      `  printf '%s\\n' 'harness: npm is unavailable and the managed Node.js/npm runtime could not be used.'`,
+      '  exit 1',
+      'fi',
+    ] : []),
     `printf '%s\\n' 'harness: engine is missing — installing it in this terminal' 'harness: $ ${install.replace(/'/g, "'\\''")}' ''`,
-    `if eval ${JSON.stringify(install)}; then`,
+    ...(recipe.executable.npmGlobal ? [`printf '%s\\n' ${shellSingleQuote(`harness: installing for this user in ${npmEnginePrefix()}`)}`] : []),
+    `if ${installCommand}; then`,
     '  hash -r 2>/dev/null || true',
     '  try_engine "$1" "$@" || true',
     `  ${tryCandidates}`,
@@ -775,10 +776,10 @@ function installIfMissingThenExecScript(recipe: EngineInstallRecipe, runtimeNode
 
 function availabilityScript(recipe: EngineInstallRecipe | undefined): string {
   const names = recipe?.executable.names.map(shellSingleQuote).join(' ') ?? ''
-  const paths = recipe ? installedPathCandidates(recipe).map(shellSingleQuote).join(' ') : ''
+  const paths = recipe ? engineInstallPaths(recipe).map(shellSingleQuote).join(' ') : ''
   const candidates = [names, paths].filter(Boolean).join(' ')
   return [
-    ...(recipe ? [npmRuntimePrelude(recipe, managedNodePath(), false)] : []),
+    ...(recipe ? [npmRuntimePrelude(recipe, managedNodePath())] : []),
     `for candidate in "$@" ${candidates}; do`,
     '  case "$candidate" in',
     '    */*) resolved="$candidate" ;;',
@@ -810,7 +811,7 @@ export async function commandAvailableInInteractiveShell(
   const interactive = interactiveEngineShell(shell)
   if (!interactive) {
     return binaryOnPath(command)
-      || (recipe ? installedPathCandidates(recipe).some((candidate) => binaryOnPath(candidate)) : false)
+      || (recipe ? engineInstallPaths(recipe).some((candidate) => binaryOnPath(candidate)) : false)
   }
   return await new Promise((resolve) => {
     execFile(

@@ -45,7 +45,7 @@ void main() {
     await tester.tap(find.text('Try a sample'));
     await settle(tester, const Duration(seconds: 2));
     // It opens on its sessions to pick from, as a new phone does: the working one is picked.
-    expect(find.byKey(const ValueKey('pick-up-title')), findsOneWidget);
+    expect(find.text('Try a sample\nharness'), findsOneWidget);
     await tester.tap(find.text('fix-login', findRichText: true).first);
     await settle(tester, const Duration(seconds: 2));
     return tester.widget<PhoneShell>(find.byType(PhoneShell)).notifier;
@@ -93,7 +93,16 @@ void main() {
       reason: 'the terminal shows the session so far',
     );
     expect(notifier.agentIsProcessing(_studio, 'sample-fix-login'), isTrue);
+    expect(find.text('Sample'), findsOneWidget);
+    final dot = find.byKey(const ValueKey('sample-guide-dot'));
+    final dotBefore = tester.getRect(dot);
+    expect(dotBefore.left, 12);
     await settle(tester, const Duration(seconds: 6));
+    expect(
+      tester.getRect(dot),
+      dotBefore,
+      reason: 'attention cue must not drift',
+    );
     expect(
       screenOf(notifier, 'sample-fix-login'),
       contains('ensureSession'),
@@ -127,7 +136,7 @@ void main() {
     }
     expect(
       notifier.questionFor(_studio, 'sample-refactor-db')?.prompt,
-      'Do you want to proceed?',
+      startsWith('Approve Bash command: '),
     );
     await closeDown(tester);
   });
@@ -146,7 +155,9 @@ void main() {
 
     final screen = screenOf(notifier, 'sample-docs-site', 'sample-laptop');
     expect(screen, contains('> add a search box'));
-    expect(screen, contains('⏺ On it — add a search box'));
+    // Says what it is on, in its own words — never the request said back.
+    expect(screen, contains('⏺ Building'));
+    expect(screen, isNot(contains('On it — add a search box')));
     expect(screen, contains('Update(src/components/Header.astro)'));
     expect(screen, contains('Done —'));
     await closeDown(tester);
@@ -163,7 +174,8 @@ void main() {
 
     final screen = screenOf(notifier, 'sample-mobile-ui', 'sample-laptop');
     expect(screen, contains('› run the tests and fix whatever fails'));
-    expect(screen, contains('• On it — run the tests and fix whatever fails'));
+    expect(screen, contains('• Running the tests first.'));
+    expect(screen, isNot(contains('On it — run the tests')));
     expect(screen, contains('Ran flutter test'));
     await closeDown(tester);
   });
@@ -255,7 +267,8 @@ void main() {
     await settle(tester, const Duration(seconds: 6));
     final screen = screenOf(notifier, id);
     expect(screen, contains('› add rate limiting to the login route'));
-    expect(screen, contains('• On it — add rate limiting to the login route'));
+    expect(screen, contains('• Building'));
+    expect(screen, isNot(contains('On it — add rate limiting')));
     await closeDown(tester);
   });
 
@@ -302,7 +315,7 @@ void main() {
     await tester.tap(find.text('Settings'));
     await settle(tester, const Duration(seconds: 1));
     expect(find.text('Sign out'), findsNothing);
-    await tester.tap(find.text('Leave sample'));
+    await tester.tap(find.text('Leave the sample'));
     await settle(tester, const Duration(seconds: 2));
 
     expect(find.byType(PhoneShell), findsNothing);

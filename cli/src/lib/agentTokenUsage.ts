@@ -16,7 +16,7 @@ type Target = Pick<RegisteredSession, 'engine' | 'sessionId' | 'transcriptPath' 
 type Buckets = [number, number, number, number]
 type CodexTotals = [number, number, number, number]
 type Checkpoint = {
-  version: 3; key: string; offset: number; size: number; mtime: number; inode: string;
+  version: 4; key: string; offset: number; size: number; mtime: number; inode: string;
   boundary: string; total: number; observed: boolean; updatedAt: string | null;
   claude: Record<string, Buckets>; codex: CodexTotals | null; seen: Record<string, true>;
   output: OutputLedger;
@@ -50,7 +50,7 @@ function targetSnapshot(s: Target): Target {
     codexHome: s.codexHome, cwd: s.cwd, registeredAt: s.registeredAt, forkedFrom: s.forkedFrom ? { ...s.forkedFrom } : null }
 }
 function empty(key: string): Checkpoint {
-  return { version: 3, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0,
+  return { version: 4, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0,
     observed: false, updatedAt: null, claude: {}, codex: null, seen: {}, output: emptyOutputLedger(),
     work: emptySessionWork(), sourceSession: null }
 }
@@ -223,7 +223,22 @@ export class AgentTokenUsageCache {
       const file = join(this.directory, `${key}.json`)
       if ((await stat(file)).size > MAX_CACHE_BYTES) return empty(key)
       const raw = JSON.parse(await readFile(file, 'utf8')) as Checkpoint
-      if (raw.version === 3 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
+      const version: number = raw.version
+      if (version === 3 && raw.key === key) {
+        const work = { ...raw.work, currentOrder: 0, failedOrder: 0 }
+        if (validSessionWork(work)) {
+          // Receipts may already have been compacted out of the transcript. Replay the available
+          // bytes with the new parser while retaining only validated minimal history from v3.
+          const next = empty(key)
+          next.work.locations = work.locations
+          next.work.pullRequests = work.pullRequests
+          next.work.truncated = work.truncated
+          next.work.uncertain = work.locations.length > 0
+          return next
+        }
+      }
+      // Replay old transcripts once: v3 skipped ordinary batched code-mode receipts, including PRs.
+      if (raw.version === 4 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
         && typeof raw.observed === 'boolean'
         && (raw.updatedAt === null || typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt)))
         && Number.isSafeInteger(raw.size) && raw.size >= 0 && Number.isFinite(raw.mtime)

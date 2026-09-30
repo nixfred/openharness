@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 
 const authDir = await mkdtemp(`${tmpdir()}/harness-auth-session-`)
@@ -11,6 +11,7 @@ const {
   AuthSessionManager,
   clearAuthSession,
   readAuthSession,
+  releaseHeldAuthLock,
   writeAuthSession,
 } = await import('./authSession.js')
 
@@ -49,6 +50,27 @@ describe('AuthSessionManager', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(readAuthSession()).toMatchObject({ accessToken: 'new-access', refreshToken: 'refresh-2' })
     await expect(readFile(AUTH_SESSION_FILE, 'utf8')).resolves.toContain('new-access')
+  })
+
+  // `process.exit` skips `finally`: a daemon that exited mid-refresh left the lock for the next
+  // `harness auth status` to wait out (30s), which is how long the desktop app waits for it.
+  it('drops the refresh lock when the process exits while holding it, and only then', async () => {
+    const lock = `${authDir}/session.lock`
+    writeAuthSession(baseSession())
+    let answer!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockReturnValue(new Promise<Response>((resolve) => { answer = resolve })))
+    const refreshing = new AuthSessionManager('https://api.example.test').accessToken()
+    await vi.waitFor(() => stat(lock))
+    releaseHeldAuthLock() // what the `exit` handler runs
+    await expect(stat(lock)).rejects.toThrow()
+    answer(new Response(JSON.stringify({ success: true, data: { token: 'new-access', expiresIn: 3600 } })))
+    await expect(refreshing).resolves.toBe('new-access')
+
+    // Another process's lock is not ours to remove.
+    await writeFile(lock, '')
+    releaseHeldAuthLock()
+    await expect(stat(lock)).resolves.toBeTruthy()
+    await rm(lock, { force: true })
   })
 
   it('uses the newer persisted access token rather than refreshing a stale 401 again', async () => {

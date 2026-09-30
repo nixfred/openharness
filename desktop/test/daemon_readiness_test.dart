@@ -45,6 +45,7 @@ class _ScriptedDiscovery extends LocalCliDiscovery {
     void Function(LocalCliEndpoint endpoint)? onReady,
     void Function(LocalCliEndpoint endpoint)? onSnapshot,
     void Function(bool online)? onBackendOnline,
+    Future<void> Function(int pid)? checkOwner,
   }) {
     superviseCalls++;
     this.onReady = onReady;
