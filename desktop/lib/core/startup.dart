@@ -1,3 +1,4 @@
+import '../nixfred/brand_prefs.dart';
 import '../shared/theme/appearance_prefs_store.dart';
 import '../stats/harness_stats.dart';
 import '../terminal/terminal_font_store.dart';
@@ -46,5 +47,7 @@ Future<void> loadPersistedSettings({
     (alertSounds ?? alertSoundStore).load(),
     (screenAlerts ?? screenAlertStore).load(),
     (desktopNotifications ?? desktopNotificationStore).load(),
+    // nixfred: before the first frame, so the splash knows which logo to draw.
+    brandPrefsStore.load(),
   ]);
 }

@@ -5,6 +5,30 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## nixfred desktop motion and branding on nixfred/main b82e4135, 2026-09-29 (branch nixfred/heavy-anim-app)
+
+- Pane attention frame, one motion per state: working sweeps an accent comet around the border,
+  waiting breathes yellow, permission and failed pulse red with a scan band inside the border
+  (failed opens with a double flash), done draws its border once in green. 280 ms colour
+  cross-fades between states. Idle and offline paint nothing and schedule no frames.
+- Spend arc around the pane header's engine mark (accent, amber from 80 percent, red at the cap
+  with one pulse). While an agent waits on you, the mark becomes your avatar inside the ring.
+- Fleet overview (command bar "Fleet overview", Ctrl+Shift+G): hub, machine hexagons, agent rings
+  in their state colours; orbit only while work runs, packets out for work and back for questions.
+- Cold-launch boot splash, 1.5 s, skippable by click or key, still under reduced motion.
+- Settings, Appearance: boot logo picker (Omarchy read at runtime from /usr/share/omarchy, Harness,
+  Custom SVG or PNG up to 2 MB, None) and avatar picker (generic, initials, ~/.face, custom image).
+  Nothing of Omarchy's and no personal asset is bundled. Keys documented in nixfred/DESIGN.md.
+- Reduced motion from the platform or HARNESS_REDUCED_MOTION=1; loops stop when the window is
+  unfocused or nothing is live; RepaintBoundary around every painter.
+- Verified: flutter analyze has no issues outside vendored third_party/xterm (13 there, pre-existing);
+  flutter test 3832 pass, 0 fail (baseline on this worktree 3806 pass, 0 fail); flutter build linux
+  --release succeeds; screenshots taken from running release builds. Gallery CPU (release, 30 s,
+  sampled before the branding pass): all idle 0.00 percent, states cycling 9.63 percent of one core,
+  reduced motion 0.40 percent. Not verified: focus-loss pausing on the real Linux embedder, the pane
+  states inside the production app with a live daemon, and dispatch or clip-drop flow lines (the
+  attention frame does not carry them).
+
 ## nixfred 0.1.3 synced to upstream 56651674, 2026-09-27
 
 - Merged upstream through #399 (engine store paths, Hermes hook timing, session branches). Upstream

@@ -27,20 +27,24 @@ void main() {
     expect(attentionFromWire('mystery'), AgentAttention.idle);
   });
 
-  testWidgets('AttentionGlow paints a border only while the agent needs a person', (tester) async {
+  testWidgets('AttentionGlow paints a steady 2 px frame under reduced motion, nothing when idle', (tester) async {
     final s = AttentionState();
     await tester.pumpWidget(MaterialApp(
       home: Center(child: AttentionGlow(attention: s, agentId: 'a', reducedMotion: true, child: const SizedBox(width: 100, height: 60))),
     ));
-    expect(find.byType(DecoratedBox), findsNothing);
+    AttentionBorderPainter? painter() => tester
+        .widgetList<CustomPaint>(find.byType(CustomPaint))
+        .map((w) => w.foregroundPainter)
+        .whereType<AttentionBorderPainter>()
+        .firstOrNull;
+    expect(painter(), isNull);
     s.apply(frame('permission'));
     await tester.pump();
-    final box = tester.widget<DecoratedBox>(find.byType(DecoratedBox));
-    final deco = box.decoration as BoxDecoration;
-    expect((deco.border as Border).top.width, 2);
+    expect(painter()!.reduced, isTrue);
+    expect(AttentionBorderPainter.width, 2);
     expect(tester.getSize(find.byType(SizedBox)), const Size(100, 60));
-    s.apply(frame('done'));
+    s.apply(frame('idle'));
     await tester.pump();
-    expect(find.byType(DecoratedBox), findsNothing);
+    expect(painter(), isNull);
   });
 }

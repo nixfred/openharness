@@ -1,4 +1,5 @@
 import 'app_shell.dart';
+import 'nixfred/fleet_overview.dart';
 import 'screens/swarm_screen.dart';
 
 /// Harness for desktop and web: a swarm of terminal panes in one
@@ -6,4 +7,7 @@ import 'screens/swarm_screen.dart';
 /// is [startHarness]. `../mobile` mounts a phone shell into its own vendored
 /// copy of that function rather than depending on this package.
 Future<void> main() =>
-    startHarness(authenticatedScreen: (app) => SwarmScreen(notifier: app));
+    startHarness(
+      authenticatedScreen: (app) =>
+          FleetOverviewHost(app: app, child: SwarmScreen(notifier: app)),
+    );

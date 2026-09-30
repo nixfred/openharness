@@ -1,21 +1,52 @@
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
+import '../nixfred/neon.dart';
 import '../state/attention_state.dart';
 
-/// A 2 px border and a soft outer glow in the state colour, only while the agent needs a person
-/// (waiting, permission, failed). Everything else draws nothing, so a quiet desk stays quiet. The
-/// child is never resized: the glow is painted outside it (DESIGN.md: glow means "needs Fred next").
+/// What a pane's frame does for one attention state. Each motion answers one question:
+/// sweep "is it still working?", breathe "is it waiting on me?", alarm "is something blocked or
+/// broken?", fill "did it just finish?". Idle and offline draw nothing, so a quiet desk stays quiet.
+enum AttentionMotion { sweep, breathe, alarm, fill, none }
+
+/// nixfred: the pane's attention frame, painted over the child and never resizing it (Law 17).
+///
+/// - working: a short accent gradient runs around the border, 2.4 s a lap.
+/// - waiting: the border and an outer glow breathe in yellow.
+/// - permission / failed: a red pulse with a bright scan band that travels down the two side
+///   edges. The band lives in the border, never over the terminal's text (DESIGN.md). Failed opens
+///   with the device's double flash.
+/// - done: the border draws itself once around the pane in green, then holds still.
+/// - Colour changes between states cross-fade over 280 ms instead of snapping.
+///
+/// Loops stop while the window is unfocused or reduced motion is on (then every state is a steady
+/// border). The painter sits in its own layer, so the terminal repainting never repaints the frame
+/// and a frame tick never repaints the terminal. [AttentionState] rows are value-equal, so the
+/// once-a-second frame that changes nothing rebuilds nothing here.
 class AttentionGlow extends StatefulWidget {
   const AttentionGlow({super.key, required this.attention, required this.agentId, required this.child, this.reducedMotion = false});
 
   final AttentionState attention;
   final String agentId;
   final Widget child;
+
+  /// Forces reduced motion on; the platform setting and HARNESS_REDUCED_MOTION also turn it on.
   final bool reducedMotion;
 
+  static AttentionMotion motionFor(AgentAttention s) => switch (s) {
+        AgentAttention.working => AttentionMotion.sweep,
+        AgentAttention.waiting => AttentionMotion.breathe,
+        AgentAttention.permission || AgentAttention.failed => AttentionMotion.alarm,
+        AgentAttention.done => AttentionMotion.fill,
+        AgentAttention.idle || AgentAttention.offline => AttentionMotion.none,
+      };
+
+  /// Kept for callers of the first version (the bar legend, tests).
   static Color colorFor(AgentAttention s, ColorScheme scheme) => switch (s) {
         AgentAttention.permission || AgentAttention.failed => scheme.error,
-        AgentAttention.waiting => const Color(0xFFEAB308),
+        AgentAttention.waiting => Neon.fallbackYellow,
         _ => Colors.transparent,
       };
 
@@ -23,64 +54,249 @@ class AttentionGlow extends StatefulWidget {
   State<AttentionGlow> createState() => _AttentionGlowState();
 }
 
-class _AttentionGlowState extends State<AttentionGlow> with SingleTickerProviderStateMixin {
-  late final AnimationController _breath = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200));
+class _AttentionGlowState extends State<AttentionGlow> with TickerProviderStateMixin {
+  // One loop clock for sweep, breathe and alarm; one one-shot clock for the done fill and the
+  // failed double flash; one for the colour cross-fade. All three sit idle unless a state needs them.
+  late final AnimationController _loop = AnimationController(vsync: this, duration: const Duration(milliseconds: 2400));
+  late final AnimationController _once = AnimationController(vsync: this, duration: const Duration(milliseconds: 900), value: 1);
+  late final AnimationController _fade = AnimationController(vsync: this, duration: const Duration(milliseconds: 280), value: 1);
+  late final Listenable _tick = Listenable.merge([_loop, _once, _fade]);
+
+  AttentionRow? _row;
+  Color _from = Colors.transparent, _to = Colors.transparent;
+  bool _reduced = false;
 
   @override
   void initState() {
     super.initState();
-    widget.attention.addListener(_sync);
-    _sync();
+    _row = widget.attention.of(widget.agentId);
+    widget.attention.addListener(_onFrame);
+    WindowFocus.instance.addListener(_syncLoop);
+    // Once a fade out of the last state ends, drop the painter layer altogether.
+    _fade.addStatusListener((s) {
+      if (s == AnimationStatus.completed && mounted) setState(() {});
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduced = widget.reducedMotion || Motion.reducedOf(context);
+    _to = _colorOf(_row);
+    if (_fade.value == 1) _from = _to;
+    _syncLoop();
   }
 
   @override
   void didUpdateWidget(AttentionGlow old) {
     super.didUpdateWidget(old);
     if (!identical(old.attention, widget.attention)) {
-      old.attention.removeListener(_sync);
-      widget.attention.addListener(_sync);
+      old.attention.removeListener(_onFrame);
+      widget.attention.addListener(_onFrame);
     }
-    _sync();
+    _reduced = widget.reducedMotion || Motion.reducedOf(context);
+    if (old.agentId != widget.agentId || !identical(old.attention, widget.attention)) _onFrame();
+    _syncLoop();
   }
 
-  void _sync() {
-    final row = widget.attention.of(widget.agentId);
-    final breathe = !widget.reducedMotion && row != null && (row.state == AgentAttention.waiting || row.state == AgentAttention.permission);
-    if (breathe && !_breath.isAnimating) {
-      _breath.repeat(reverse: true);
-    } else if (!breathe && _breath.isAnimating) {
-      _breath.stop();
-      _breath.value = 1;
+  Color _colorOf(AttentionRow? r) =>
+      r == null || AttentionGlow.motionFor(r.state) == AttentionMotion.none ? Colors.transparent : Neon.current().of(r.state);
+
+  void _onFrame() {
+    final next = widget.attention.of(widget.agentId);
+    if (next == _row) return; // value-equal: nothing changed, nothing repaints
+    final prev = _row?.state;
+    _row = next;
+    if (next?.state != prev) {
+      // Cross-fade from whatever colour is on screen now.
+      _from = Color.lerp(_from, _to, _fade.value) ?? _to;
+      _to = _colorOf(next);
+      if (_reduced) {
+        _fade.value = 1;
+      } else {
+        _fade.forward(from: 0);
+      }
+      final s = next?.state;
+      if (!_reduced && (s == AgentAttention.done || s == AgentAttention.failed)) {
+        _once.duration = Duration(milliseconds: s == AgentAttention.done ? 900 : 520);
+        _once.forward(from: 0);
+      } else {
+        _once.value = 1;
+      }
     }
+    _syncLoop();
     if (mounted) setState(() {});
+  }
+
+  void _syncLoop() {
+    final motion = _row == null ? AttentionMotion.none : AttentionGlow.motionFor(_row!.state);
+    final loops = motion == AttentionMotion.sweep || motion == AttentionMotion.breathe || motion == AttentionMotion.alarm;
+    final run = loops && !_reduced && WindowFocus.instance.value;
+    if (run && !_loop.isAnimating) {
+      _loop.duration = Duration(milliseconds: switch (motion) { AttentionMotion.sweep => 2400, AttentionMotion.alarm => 1100, _ => 2200 });
+      _loop.repeat();
+    } else if (!run && _loop.isAnimating) {
+      _loop.stop();
+    }
   }
 
   @override
   void dispose() {
-    widget.attention.removeListener(_sync);
-    _breath.dispose();
+    widget.attention.removeListener(_onFrame);
+    WindowFocus.instance.removeListener(_syncLoop);
+    _loop.dispose();
+    _once.dispose();
+    _fade.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final row = widget.attention.of(widget.agentId);
-    if (row == null || !row.needsYou) return widget.child;
-    final color = AttentionGlow.colorFor(row.state, Theme.of(context).colorScheme);
-    return AnimatedBuilder(
-      animation: _breath,
-      child: widget.child,
-      builder: (context, child) {
-        final t = widget.reducedMotion || !_breath.isAnimating ? 1.0 : 0.55 + 0.45 * _breath.value;
-        return DecoratedBox(
-          position: DecorationPosition.foreground,
-          decoration: BoxDecoration(
-            border: Border.all(color: color.withValues(alpha: 0.9 * t), width: 2),
-            boxShadow: [BoxShadow(color: color.withValues(alpha: 0.35 * t), blurRadius: 14, spreadRadius: 1)],
+    final row = _row;
+    final motion = row == null ? AttentionMotion.none : AttentionGlow.motionFor(row.state);
+    final child = RepaintBoundary(child: widget.child);
+    if (motion == AttentionMotion.none && _fade.value == 1) return child;
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _tick,
+        child: child,
+        builder: (context, child) => CustomPaint(
+          foregroundPainter: AttentionBorderPainter(
+            motion: motion,
+            color: Color.lerp(_from, _to, Curves.easeOut.transform(_fade.value)) ?? _to,
+            phase: _loop.value,
+            progress: _once.value,
+            failed: row?.state == AgentAttention.failed,
+            reduced: _reduced,
           ),
           child: child,
-        );
-      },
+        ),
+      ),
     );
   }
+}
+
+/// Paints one pane's attention frame. Value-equal, so an unchanged frame is never repainted.
+class AttentionBorderPainter extends CustomPainter {
+  const AttentionBorderPainter({required this.motion, required this.color, required this.phase, required this.progress, this.failed = false, this.reduced = false});
+
+  final AttentionMotion motion;
+  final Color color;
+
+  /// 0..1 around the loop clock.
+  final double phase;
+
+  /// 0..1 through a one-shot (done fill, failed flash); 1 when none is running.
+  final double progress;
+  final bool failed;
+  final bool reduced;
+
+  static const double width = 2;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (color.a == 0) return;
+    final rect = (Offset.zero & size).deflate(width / 2);
+    final stroke = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width;
+    if (reduced) {
+      if (motion == AttentionMotion.none) return;
+      canvas.drawRect(rect, stroke..color = color.withValues(alpha: motion == AttentionMotion.sweep ? 0.5 : 0.9));
+      return;
+    }
+    switch (motion) {
+      case AttentionMotion.none:
+        // Only reached while the colour fades out of a previous state.
+        canvas.drawRect(rect, stroke..color = color.withValues(alpha: 0.6));
+      case AttentionMotion.sweep:
+        _sweep(canvas, rect, stroke);
+      case AttentionMotion.breathe:
+        final t = 0.5 - 0.5 * math.cos(phase * 2 * math.pi);
+        _glow(canvas, rect, 0.18 + 0.30 * t, 8 + 10 * t);
+        canvas.drawRect(rect, stroke..color = color.withValues(alpha: 0.55 + 0.4 * t));
+      case AttentionMotion.alarm:
+        _alarm(canvas, rect, stroke);
+      case AttentionMotion.fill:
+        _fill(canvas, rect, stroke);
+    }
+  }
+
+  void _glow(Canvas canvas, Rect rect, double alpha, double blur) {
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4
+        ..color = color.withValues(alpha: alpha)
+        ..maskFilter = MaskFilter.blur(BlurStyle.outer, blur),
+    );
+  }
+
+  void _sweep(Canvas canvas, Rect rect, Paint stroke) {
+    // A dim steady frame so the pane reads as "live", and a bright comet running around it.
+    canvas.drawRect(rect, Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = color.withValues(alpha: 0.22));
+    final a = phase * 2 * math.pi;
+    final shader = SweepGradient(
+      center: Alignment.center,
+      transform: GradientRotation(a),
+      colors: [color.withValues(alpha: 0), color.withValues(alpha: 0), color.withValues(alpha: 0.35), color, color.withValues(alpha: 0)],
+      stops: const [0, 0.72, 0.9, 0.985, 1],
+    ).createShader(rect);
+    canvas.drawRect(rect, stroke..shader = shader);
+  }
+
+  void _alarm(Canvas canvas, Rect rect, Paint stroke) {
+    // Failed opens with two quick flashes, then settles into the pulse (DESIGN.md, device failed screen).
+    if (failed && progress < 1) {
+      final on = (progress * 4).floor().isEven;
+      canvas.drawRect(rect, stroke..color = color.withValues(alpha: on ? 1 : 0.15));
+      if (on) _glow(canvas, rect, 0.6, 18);
+      return;
+    }
+    final t = math.pow(0.5 - 0.5 * math.cos(phase * 2 * math.pi), 2).toDouble();
+    _glow(canvas, rect, 0.25 + 0.4 * t, 10 + 8 * t);
+    canvas.drawRect(rect, Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width
+      ..color = color.withValues(alpha: 0.7 + 0.3 * t));
+    // The scan band: a bright 48 px segment sliding down both side edges, inside the border only.
+    final y = rect.top + (rect.height + 96) * phase - 48;
+    final band = Rect.fromLTRB(rect.left - 2, y - 48, rect.right + 2, y + 48);
+    final shader = ui.Gradient.linear(band.topCenter, band.bottomCenter, [color.withValues(alpha: 0), Colors.white.withValues(alpha: 0.9), color.withValues(alpha: 0)], const [0, 0.5, 1]);
+    final edge = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width + 1
+      ..shader = shader;
+    canvas.save();
+    canvas.clipRect(band);
+    canvas.drawLine(rect.topLeft, rect.bottomLeft, edge);
+    canvas.drawLine(rect.topRight, rect.bottomRight, edge);
+    canvas.restore();
+  }
+
+  void _fill(Canvas canvas, Rect rect, Paint stroke) {
+    final p = Curves.easeInOutCubic.transform(progress.clamp(0.0, 1.0));
+    // Drawn clockwise from the top-left corner, like the device's done ring filling.
+    final path = Path()..addRect(rect);
+    final metric = path.computeMetrics().first;
+    canvas.drawPath(metric.extractPath(0, metric.length * p), stroke..color = color);
+    if (p < 1) {
+      final head = metric.getTangentForOffset(metric.length * p)?.position;
+      if (head != null) canvas.drawCircle(head, 3.5, Paint()..color = Colors.white.withValues(alpha: 0.9)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    } else {
+      // Settled: a quieter green frame that says "finished, not yet looked at".
+      canvas.drawRect(rect, Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = color.withValues(alpha: 0.35));
+    }
+  }
+
+  @override
+  bool shouldRepaint(AttentionBorderPainter old) =>
+      old.motion != motion || old.color != color || old.phase != phase || old.progress != progress || old.failed != failed || old.reduced != reduced;
 }
