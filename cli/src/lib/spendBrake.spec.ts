@@ -27,7 +27,7 @@ describe('ledger', () => {
 })
 
 describe('decideSpend', () => {
-  const caps = { ...DEFAULT_CAPS, perAgentUsd: 10, perDayUsd: 20 }
+  const caps = { ...DEFAULT_CAPS, enabled: true, perAgentUsd: 10, perDayUsd: 20 }
   it('runs, warns at 80 percent, pauses at the cap, naming the tightest cap', () => {
     let l = recordUsage(emptyLedger(MORNING), { agentId: 'a', model: 'sonnet', input: 1_000_000, output: 100_000, now: MORNING }) // $4.50
     expect(decideSpend(caps, l, 'a').action).toBe('run')

@@ -44,7 +44,7 @@ export interface SpendCaps {
   warnAt: number
 }
 
-export const DEFAULT_CAPS: SpendCaps = { version: 1, enabled: true, perAgentUsd: 25, perAgentTokens: null, perDayUsd: 100, perDayTokens: null, warnAt: 0.8 }
+export const DEFAULT_CAPS: SpendCaps = { version: 1, enabled: false, perAgentUsd: null, perAgentTokens: null, perDayUsd: null, perDayTokens: null, warnAt: 0.8 }
 
 export interface AgentSpend { agentId: string; model: string | null; input: number; output: number; usd: number; updatedAt: number }
 

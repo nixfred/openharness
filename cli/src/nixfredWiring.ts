@@ -531,7 +531,9 @@ export class Nixfred {
   }
 
   spendSet(patch: Partial<SpendCaps>): SpendCaps {
-    const next = { ...this.caps, ...patch, version: 1 as const }
+    // Setting a cap is asking for the brake: the default is off (subscription users pay no list price).
+    const setsCap = ['perAgentUsd', 'perAgentTokens', 'perDayUsd', 'perDayTokens'].some((k) => typeof (patch as Record<string, unknown>)[k] === 'number')
+    const next = { ...this.caps, ...(setsCap && patch.enabled === undefined ? { enabled: true } : {}), ...patch, version: 1 as const }
     const parsed = parseCaps(next)
     if (!parsed.ok) throw new Error(parsed.problems.join('; '))
     this.caps = parsed.caps
