@@ -3754,6 +3754,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(env.PORT, {
     onCommandBar: commandBarService,
     onAttention: () => nixfred.attentionPayload(),
+    onSubscriptions: () => nixfred.subs.collect(),
     onStopAll: (except) => nixfred.stopAll(except),
     onAdopt: (pane, engine) => nixfred.adopt(pane, engine),
     onNixfred: (action, args) => nixfred.command(action, args),
@@ -6759,6 +6760,14 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
       }
       break
     }
+    case 'subs': {
+      // harness subs [--json] [--force]  |  harness subs set <claude|codex|grok|kimi> <on|off>
+      if (args[0] === 'set') {
+        if (!args[1] || !['on', 'off'].includes(args[2] ?? '')) { console.error('Usage: harness subs set <claude|codex|grok|kimi> <on|off>'); process.exit(1) }
+        action = 'subs-set'; body = { id: args[1], enabled: args[2] }
+      } else body = { force: flags.includes('--force') }
+      break
+    }
     case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
     default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
@@ -6783,6 +6792,10 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
     }
     console.log(`${r.hostname}: ${r.summary.count} ${r.summary.state}`)
     for (const a of r.agents) console.log(`  ${a.glyph} ${a.name.padEnd(28)} ${a.engine.padEnd(10)} ${a.label}${a.detail ? `  ${a.detail}` : ''}`)
+    return
+  }
+  if ((action === 'subs' || action === 'subs-set') && result && typeof result === 'object' && Array.isArray((result as { lines?: unknown }).lines)) {
+    for (const line of (result as { lines: string[] }).lines) console.log(line)
     return
   }
   if (action === 'hermes-health' && result && typeof result === 'object' && Array.isArray((result as { lines?: unknown }).lines)) {
@@ -7678,7 +7691,7 @@ switch (cmd) {
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
   case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
-  case 'dispatch': case 'dispatches': case 'clip':
+  case 'dispatch': case 'dispatches': case 'clip': case 'subs':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

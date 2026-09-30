@@ -1,3 +1,4 @@
+import '../nixfred/subscriptions/subscriptions_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -188,6 +189,9 @@ class _SettingsBody extends StatelessWidget {
       SettingsSection.account => AccountSection(notifier: notifier),
       SettingsSection.profiles => ProfilesSection(notifier: notifier),
       SettingsSection.usage => const UsageSection(),
+      SettingsSection.subscriptions => SubscriptionsSection(
+        source: DaemonSubscriptionsSource(notifier.config.localCliBaseUrl),
+      ),
       SettingsSection.customize => throw StateError(
         'Customization opens over the workspace.',
       ),

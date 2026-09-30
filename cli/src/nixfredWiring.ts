@@ -33,6 +33,8 @@ import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfre
 import { CiWatcher, parsePrChecks } from './nixfred/ciWatch.js'
 import { DISPATCH_RESULT_TYPE, createRemoteAgentBackend, jobPrompt, type DispatchResult, type JobSpec, type MachineLink, type WireFrame } from './nixfred/remoteOrchestratorBackend.js'
 import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
+import { describeSubscriptions, SubscriptionsService, type ProviderId } from './nixfred/subscriptions/index.js'
+import { nodeSubscriptionsDeps } from './nixfred/subscriptions/nodeDeps.js'
 import { listHermesHomes } from './engines/hermes/home.js'
 
 export interface NixfredSessionLike {
@@ -157,6 +159,9 @@ export class Nixfred {
   private branchTimer: NodeJS.Timeout | null = null
   readonly ci: CiWatcher
   private ciTimer: NodeJS.Timeout | null = null
+  /** Subscription meters (ported from Burn Bar): weekly used, banked, reset, next plan to use. */
+  readonly subs: SubscriptionsService
+  private subsTimer: NodeJS.Timeout | null = null
   private relayLink: ((machineId: string) => Promise<RelayLink>) | null = null
   private readonly dispatches = new Map<string, DispatchRecord>()
 
@@ -301,6 +306,26 @@ export class Nixfred {
       this.ciTimer = setInterval(() => { void this.pollCi() }, Number(process.env.HARNESS_CI_WATCH_MS) || 5 * 60_000)
       this.ciTimer.unref()
     }
+    // Subscription meters: one pass a minute (each network provider is asked at most every 4 min),
+    // pushed as a local `subscriptions` frame; HARNESS_SUBS_WATCH=0 turns the loop off.
+    this.subs = new SubscriptionsService(nodeSubscriptionsDeps(this.dataDir))
+    if (process.env.HARNESS_SUBS_WATCH !== '0' && !process.env.VITEST) {
+      this.subsTimer = setInterval(() => { void this.pollSubscriptions() }, Number(process.env.HARNESS_SUBS_MS) || 60_000)
+      this.subsTimer.unref()
+      setTimeout(() => { void this.pollSubscriptions() }, 2_000).unref()
+    }
+  }
+
+  /** Collect every enabled subscription and push it to local windows. Never throws. */
+  async pollSubscriptions(force = false): Promise<unknown> {
+    try {
+      const payload = await this.subs.collect(force)
+      this.deps.sendLocal({ type: 'subscriptions', payload: payload as unknown as Record<string, unknown> })
+      return payload
+    } catch (e) {
+      console.log(`[subs] collect failed: ${e instanceof Error ? e.message : String(e)}`)
+      return null
+    }
   }
 
   /** One pass of the CI watcher over every active agent that sits on a branch with a PR. */
@@ -390,7 +415,7 @@ export class Nixfred {
       const spend = spent ? { usd: Number(spent.usd.toFixed(2)), tokens: spent.input + spent.output, fraction: cap ? Math.min(1.5, spent.usd / cap) : null } : null
       return { ...row, lane: lanes.find((l) => { try { return new RegExp(l.agent, 'i').test(row.name) } catch { return false } })?.name ?? null, spend }
     })
-    return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents, alerts: this.collisions.recent() }
+    return { machineId: this.deps.machineId(), hostname: this.deps.machineName(), at: this.now(), summary: summarizeAttention(agents), agents, alerts: this.collisions.recent(), subscriptions: this.subs?.compact() ?? null }
   }
 
   private onAttentionChange(agentId: string, state: AttentionState, previous: AttentionState | null, detail: string): void {
@@ -604,6 +629,14 @@ export class Nixfred {
       }
       case 'clip-receive': return this.clipReceive({ text: typeof args.text === 'string' ? args.text : undefined, file: args.file && typeof args.file === 'object' ? args.file as { name: string; base64: string } : undefined, from: 'local' })
       case 'hermes-health': { const r = await hermesHealth(this.hermesDeps()); return { ...r, lines: describeHermesHealth(r) } }
+      case 'subs': { const r = await this.subs.collect(args.force === true || args.force === 'true'); return { ...r, lines: describeSubscriptions(r) } }
+      case 'subs-set': {
+        const on = args.enabled === true || args.enabled === 'on' || args.enabled === 'true'
+        await this.subs.setEnabled(str('id') as ProviderId, on)
+        await this.pollSubscriptions(true)
+        const r = await this.subs.collect()
+        return { ...r, lines: describeSubscriptions(r) }
+      }
       case 'hermes-doctor-done': return stampHermesDoctor(this.hermesDeps())
       case 'capabilities': return { ...(await this.capabilities(0)), line: describeCapabilities(await this.capabilities()) }
       case 'placement': return this.placement(args as PlacementRequest)
