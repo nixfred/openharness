@@ -14,6 +14,12 @@ Panel {
   // The shared Panel IPC gives `open`, `close` and `toggle` on nixfred.harness-pulse for the fleet popup.
   manageIpc: true
 
+  // The bar (Omarchy's or menubar-overload) draws tooltips itself and only for a target whose
+  // tooltipHovered is true; a tooltip drawn inside the widget is clipped to the bar's height.
+  property bool tooltipHovered: false
+  function hoverTip(text) { tooltipHovered = true; if (bar && bar.showTooltip) bar.showTooltip(root, text) }
+  function unhoverTip() { tooltipHovered = false; if (bar && bar.hideTooltip) bar.hideTooltip(root) }
+
   readonly property int refreshIntervalSec: {
     var v = Number(setting("refreshIntervalSec", 1))
     return isFinite(v) ? Math.max(1, Math.min(30, Math.round(v))) : 1
@@ -197,11 +203,8 @@ Panel {
           if (mouse.button === Qt.RightButton || Date.now() - pressedAt < 400) root.toggle()
         }
         onCanceled: { holdAnim.stop(); statusGlyph.hold = 0 }
-        PanelToolTip {
-          visible: parent.containsMouse && !parent.pressed
-          delay: 500
-          text: root.lastStop !== "" ? root.lastStop : "Click: fleet · Hold 2 s: stop all"
-        }
+        onEntered: root.hoverTip(root.lastStop !== "" ? root.lastStop : "Click: fleet · Hold 2 s: stop all")
+        onExited: root.unhoverTip()
       }
     }
     Process {
@@ -238,15 +241,12 @@ Panel {
       MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        PanelToolTip {
-          visible: parent.containsMouse
-          delay: 300
-          text: {
+        onEntered: root.hoverTip((function () {
             var lines = []
             for (var i = 0; i < root.alerts.length && i < 6; i++) lines.push(root.alerts[i].kind + ": " + root.alerts[i].detail)
             return lines.slice(0, 1).join("").slice(0, 60)
-          }
-        }
+          })())
+        onExited: root.unhoverTip()
       }
     }
     Item { width: collisionBadge.visible ? 4 : 0; height: 1 }
@@ -315,11 +315,8 @@ Panel {
           acceptedButtons: Qt.LeftButton | Qt.RightButton
           // Left and right: the fleet popup (the Harness app is optional; Orca users never open it).
           onClicked: root.toggle()
-          PanelToolTip {
-            visible: parent.containsMouse
-            delay: 300
-            text: root.summaryBar ? root.fleetSummary : (agent.name || "agent") + " · " + (agent.label || agent.state) + (agent.since ? " " + Model.ago(agent.since, root.nowMs) : "")
-          }
+          onEntered: root.hoverTip(root.summaryBar ? root.fleetSummary : (agent.name || "agent") + " · " + (agent.label || agent.state) + (agent.since ? " " + Model.ago(agent.since, root.nowMs) : ""))
+          onExited: root.unhoverTip()
         }
       }
     }
@@ -331,11 +328,8 @@ Panel {
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton
     onClicked: root.toggle()
-    PanelToolTip {
-      visible: parent.containsMouse
-      delay: 300
-      text: root.fleetSummary
-    }
+    onEntered: root.hoverTip(root.fleetSummary)
+    onExited: root.unhoverTip()
   }
 
   // ---- Fleet popup: right-click the widget (or `toggle` over IPC). ----
