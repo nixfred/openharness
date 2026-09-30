@@ -78,18 +78,16 @@ Panel {
   readonly property int workingCount: agents.filter(function (a) { return a.state === "working" }).length
   readonly property string countText: needsYou > 0 ? String(needsYou) : String(agents.length)
   readonly property int countWidth: summaryBar && agents.length > 0 ? countText.length * Math.max(7, ringSize * 0.5) + 6 : 0
+  // One short line: bar tooltips render inside the bar's window, so a second line is clipped.
   readonly property string fleetSummary: {
-    if (!daemonUp) return lastError || "Harness daemon not running"
+    if (!daemonUp) return "Harness daemon not running"
     if (agents.length === 0) return "Harness: no agents"
-    var parts = []
+    var parts = [agents.length + " agent" + (agents.length === 1 ? "" : "s")]
     if (needsYou > 0) parts.push(needsYou + " waiting on you")
     if (workingCount > 0) parts.push(workingCount + " working")
-    var rest = agents.length - needsYou - workingCount
-    if (rest > 0) parts.push(rest + " idle or done")
-    var top = agents[0]
-    return "Harness · " + agents.length + " agent" + (agents.length === 1 ? "" : "s") + "\n" + parts.join(" · ") +
-      (needsYou > 0 && top ? "\n\u25B8 " + top.name + (top.detail ? ": " + top.detail : "") : "") + "\nClick for the fleet view"
+    return "Harness · " + parts.join(" · ")
   }
+
   implicitWidth: statusGlyph.width + 4 + (collisionBadge.visible ? collisionBadge.width + 4 : 0) + (summaryBar ? slotWidth + countWidth : Math.max(1, Math.min(maxAgents, agents.length)) * slotWidth)
   implicitHeight: ringSize + 4
 
@@ -202,7 +200,7 @@ Panel {
         PanelToolTip {
           visible: parent.containsMouse && !parent.pressed
           delay: 500
-          text: root.lastStop !== "" ? root.lastStop : "Click: fleet view · Hold 2 s: stop every agent on " + (root.hostname || "this machine")
+          text: root.lastStop !== "" ? root.lastStop : "Click: fleet · Hold 2 s: stop all"
         }
       }
     }
@@ -246,7 +244,7 @@ Panel {
           text: {
             var lines = []
             for (var i = 0; i < root.alerts.length && i < 6; i++) lines.push(root.alerts[i].kind + ": " + root.alerts[i].detail)
-            return lines.join("\n")
+            return lines.slice(0, 1).join("").slice(0, 60)
           }
         }
       }
@@ -320,12 +318,7 @@ Panel {
           PanelToolTip {
             visible: parent.containsMouse
             delay: 300
-            text: root.summaryBar ? root.fleetSummary : (agent.name || "agent") + "  " + (agent.engine || "") +
-            (root.showMachine && agent.machine ? "  @" + agent.machine : "") +
-            (agent.lane ? "  [" + agent.lane + "]" : "") +
-            "\n" + (agent.label || agent.state) + (agent.since ? "  " + Model.ago(agent.since, root.nowMs) : "") +
-            (agent.spend && agent.spend.usd ? "\nspend $" + agent.spend.usd.toFixed(2) + (agent.spend.fraction !== null ? "  " + Math.round(agent.spend.fraction * 100) + "% of cap" : "") : "") +
-            (agent.detail ? "\n" + agent.detail : "")
+            text: root.summaryBar ? root.fleetSummary : (agent.name || "agent") + " · " + (agent.label || agent.state) + (agent.since ? " " + Model.ago(agent.since, root.nowMs) : "")
           }
         }
       }
