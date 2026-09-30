@@ -532,6 +532,28 @@ bool ht_box(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t fill
     return true;
 }
 
+bool ht_ring(ht_scene_t *s, int cx, int cy, int inner, int outer, int start, int sweep, uint16_t color)
+{
+    if (s->count >= HT_RUNS || outer <= 0 || inner < 0 || inner >= outer || sweep <= 0) return false;
+    ht_run_t *r = &s->runs[s->count++];
+    memset(r, 0, sizeof *r);
+    // Not text; the compositor reads every run's font, so it carries one it never draws (as ht_box).
+    r->x = (int16_t)cx; r->y = (int16_t)cy; r->font = &ht_mono_16; r->fg = r->bg = color;
+    r->ring.inner = (uint16_t)inner; r->ring.outer = (uint16_t)outer;
+    r->ring.start = (uint16_t)(((start % HT_TURN) + HT_TURN) % HT_TURN);
+    r->ring.sweep = (uint16_t)(sweep > HT_TURN ? HT_TURN : sweep);
+    return true;
+}
+bool ht_mask(ht_scene_t *s, int x, int y, int w, int h, const uint8_t *alpha, uint16_t color)
+{
+    if (s->count >= HT_RUNS || !alpha || w <= 0 || h <= 0) return false;
+    ht_run_t *r = &s->runs[s->count++];
+    memset(r, 0, sizeof *r);
+    r->x = (int16_t)x; r->y = (int16_t)y; r->w = (int16_t)w; r->font = &ht_mono_16; r->fg = r->bg = color;
+    r->sprite = (ht_sprite_t){.alpha = alpha, .width = (uint16_t)w, .height = (uint16_t)h};
+    return true;
+}
+
 static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom)
 {
     if (!text || !*text) return;
@@ -630,10 +652,54 @@ int ht_wrap(ht_scene_t *s, int x, int y, int w, int lines, int skip, const ht_fo
     }
     return row;
 }
+// ── nixfred rings ────────────────────────────────────────────────────────────────────────────────────
+// sin over one quarter turn in 64 steps, Q14; everything else is symmetry and linear interpolation.
+static const int16_t quarter_sin[65] = {
+    0,402,804,1205,1606,2006,2404,2801,3196,3590,3981,4370,4756,5139,5520,5897,6270,6639,7005,7366,7723,
+    8076,8423,8765,9102,9434,9760,10080,10394,10702,11003,11297,11585,11866,12140,12406,12665,12916,13160,
+    13395,13623,13842,14053,14256,14449,14635,14811,14978,15137,15286,15426,15557,15679,15791,15893,15986,
+    16069,16143,16207,16261,16305,16340,16364,16379,16384};
+static int turn_sin(int t)   // t in 1/4096 turn, result Q14
+{
+    t &= HT_TURN - 1;
+    int q = t / 1024, u = t % 1024;
+    if (q & 1) u = 1024 - u;
+    int i = u / 16, f = u % 16;
+    int v = i < 64 ? quarter_sin[i] + (quarter_sin[i + 1] - quarter_sin[i]) * f / 16 : quarter_sin[64];
+    return q >= 2 ? -v : v;
+}
+static int turn_cos(int t) { return turn_sin(t + 1024); }
+// Clockwise from 12 o'clock, in 1/4096 turn, for a vector with y pointing DOWN. The classic
+// atan(t) ~ pi/4 t + 0.273 t (1 - t) on the octant, about 0.2 degrees at worst: invisible on a rim.
+static int turn_of(int dx, int dy)
+{
+    int ux = dx, uy = -dy, ax = ux < 0 ? -ux : ux, ay = uy < 0 ? -uy : uy;
+    if (!ax && !ay) return 0;
+    int base;
+    if (ax <= ay) { int64_t t = (int64_t)ax * 4096 / ay; base = (int)((512 * t + 178 * t * (4096 - t) / 4096) / 4096); }
+    else { int64_t t = (int64_t)ay * 4096 / ax; base = 1024 - (int)((512 * t + 178 * t * (4096 - t) / 4096) / 4096); }
+    if (ux >= 0) return uy >= 0 ? base : 2048 - base;
+    return uy < 0 ? 2048 + base : (4096 - base) & (HT_TURN - 1);
+}
+// The sector's box: its two end points on both radii, plus every cardinal point the sweep passes.
+static ht_rect_t ring_bounds(const ht_run_t *r)
+{
+    int cx = r->x, cy = r->y, ro = r->ring.outer, ri = r->ring.inner;
+    if (r->ring.sweep >= HT_TURN) return (ht_rect_t){cx - ro - 2, cy - ro - 2, 2 * ro + 5, 2 * ro + 5};
+    int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20);
+#define RING_PT(t, rad) do { int px_ = cx + ((rad) * turn_sin(t) >> 14), py_ = cy - ((rad) * turn_cos(t) >> 14); \
+        x0 = imin(x0, px_); x1 = imax(x1, px_); y0 = imin(y0, py_); y1 = imax(y1, py_); } while (0)
+    int a = r->ring.start, b = a + r->ring.sweep;
+    RING_PT(a, ro); RING_PT(b, ro); RING_PT(a, ri); RING_PT(b, ri);
+    for (int k = (a / 1024 + 1) * 1024; k < b; k += 1024) RING_PT(k, ro);
+#undef RING_PT
+    return (ht_rect_t){x0 - 3, y0 - 3, x1 - x0 + 7, y1 - y0 + 7};
+}
 ht_rect_t ht_run_bounds(const ht_run_t *r)
 {
     if (r->sprite.width) return (ht_rect_t){r->x,r->y,r->sprite.width,r->sprite.height};
     if (r->box.h) return (ht_rect_t){r->x, r->y, r->w, (int16_t)r->box.h};
+    if (r->ring.outer) return ring_bounds(r);
     if (r->arc) {
         const char *p = r->text; int count = 0;
         while (*p && count < HT_ARC_COLS) { ht_utf8_next(&p); count++; }
@@ -799,7 +865,7 @@ void ht_damage(const ht_scene_t *a, const ht_scene_t *b, ht_damage_t *d)
                 // Fixed-cell text only: a proportional run's glyphs move when one before them
                 // changes width, and a box has no cells. Both repaint their whole bounds instead.
                 if (!old->sprite.width && !next->sprite.width && !old->arc && !next->arc &&
-                    !old->box.h && !next->box.h && !ht_pfont(old->font) && !ht_pfont(next->font) &&
+                    !old->box.h && !next->box.h && !old->ring.outer && !next->ring.outer && !ht_pfont(old->font) && !ht_pfont(next->font) &&
                     old->x == next->x && old->y == next->y && old->w == next->w &&
                     old->font == next->font && old->fg == next->fg && old->bg == next->bg) {
                     const char *p = old->text, *q = next->text;
@@ -1170,7 +1236,23 @@ static uint16_t lv_mix24_16(uint16_t src, uint16_t dst, unsigned a);
 static void sprite_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
 {
     const ht_sprite_t *s=&r->sprite;
-    if(!s->pixels)return;
+    if(!s->pixels){
+        // A one-colour mask (ht_mask): the alpha IS the picture, drawn in the run's fg.
+        if(!s->alpha)return;
+        int l=imax(clip.x,r->x),rt=imin(clip.x+clip.w,r->x+s->width);
+        int t=imax(clip.y,r->y),b=imin(clip.y+clip.h,r->y+s->height);
+        uint16_t solid=panel16(r->fg);
+        for(int y=t;y<b;y++){
+            const uint8_t *al=s->alpha+(size_t)(y-r->y)*s->width+l-r->x;
+            uint16_t *dst=out+(y-clip.y)*clip.w+l-clip.x;
+            for(int x=l;x<rt;x++,al++,dst++){
+                unsigned a=*al;
+                if(!a)continue;
+                *dst=a==255?solid:panel16(mix(r->fg,panel16(*dst),a,255));
+            }
+        }
+        return;
+    }
     int left=imax(clip.x,r->x),right=imin(clip.x+clip.w,r->x+s->width);
     int top=imax(clip.y,r->y),bottom=imin(clip.y+clip.h,r->y+s->height);
     for(int y=top;y<bottom;y++){
@@ -1303,6 +1385,36 @@ static void box_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
         }
     }
 }
+/*
+ * A RING, analytically, in sixteenths of a pixel like box_raster: coverage is the pixel centre's distance
+ * against both radii, so the rim is antialiased inside and out. Each row visits only its two chords of the
+ * band (the hole is skipped with one isqrt), which keeps a full-face ring cheap enough for a boot frame.
+ */
+static void ring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
+{
+    ht_rect_t b = ring_bounds(r);
+    int cx = r->x, cy = r->y, ro = r->ring.outer * 16 + 8, ri = r->ring.inner ? r->ring.inner * 16 - 8 : 0;
+    int y1 = imax(clip.y, b.y), y2 = imin(clip.y + clip.h, b.y + b.h);
+    int bx1 = imax(clip.x, b.x), bx2 = imin(clip.x + clip.w, b.x + b.w);
+    bool whole = r->ring.sweep >= HT_TURN;
+    for (int y = y1; y < y2; y++) {
+        int dy = y * 16 + 8 - cy * 16;
+        if (dy >= ro || -dy >= ro) continue;
+        int span = (int)isqrt((uint32_t)(ro * ro - dy * dy)) / 16 + 1;
+        int hole = ri && dy < ri && -dy < ri ? (int)isqrt((uint32_t)(ri * ri - dy * dy)) / 16 - 1 : -1;
+        uint16_t *row = out + (y - clip.y) * clip.w - clip.x;
+        for (int x = imax(bx1, cx - span); x < imin(bx2, cx + span + 1); x++) {
+            if (hole > 0 && x > cx - hole && x < cx + hole) { x = cx + hole - 1; continue; }
+            int dx = x * 16 + 8 - cx * 16;
+            int d = (int)isqrt((uint32_t)(dx * dx + dy * dy));
+            int o = ro - d, in = ri ? d - ri : 16;
+            if (o <= 0 || in <= 0) continue;
+            unsigned cov = (unsigned)imin(16, imin(o, in));
+            if (!whole && (unsigned)((turn_of(dx, dy) - r->ring.start) & (HT_TURN - 1)) >= r->ring.sweep) continue;
+            row[x] = cov == 16 ? panel16(r->fg) : panel16(mix(r->fg, panel16(row[x]), cov, 16));
+        }
+    }
+}
 void ht_raster(const ht_scene_t *s, ht_rect_t clip, uint16_t *out)
 {
     fill(out, (size_t)clip.w * clip.h, panel16(s->background));
@@ -1314,6 +1426,7 @@ void ht_raster(const ht_scene_t *s, ht_rect_t clip, uint16_t *out)
             continue;
         if (r->sprite.width) { sprite_raster(r, clip, out); continue; }
         if (r->box.h) { box_raster(r, clip, out); continue; }
+        if (r->ring.outer) { ring_raster(r, clip, out); continue; }
         if (r->arc) { arc_raster(r, clip, out); continue; }
         if (ht_pfont(f)) { prop_raster(r, clip, out); continue; }
         int y1 = imax(clip.y, r->y), y2 = imin(clip.y + clip.h, r->y + f->height),

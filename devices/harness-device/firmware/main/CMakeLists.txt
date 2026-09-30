@@ -45,6 +45,8 @@ set(BOARD_SRCS
     "ui/habitat/touch_habitat.c"
     "ui/habitat/ui_habitat.c"
     "ui/habitat/terminal.c"
+    "ui/habitat/nixfred_art.c"
+    "ui/habitat/nixfred_logo.c"
     "ui/habitat/scroll.c"
     "ui/habitat/workspace.c"
     "ui/habitat/selection.c"

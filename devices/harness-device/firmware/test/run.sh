@@ -60,6 +60,12 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
 "$out/test_arc_pixels"
 
+# nixfred graphics: rings, arcs, the one-colour mask and the boot/question faces built from them.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_nixfred_ring" "$here/test_nixfred_ring.c" "$here/../main/ui/habitat/nixfred_art.c" \
+   "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
+"$out/test_nixfred_ring"
+
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main/ui/habitat" -o "$out/test_arc_storage" "$here/test_arc_storage.c" \
    "$here/reference79/terminal_ref.c" "$here/../main/ui/habitat/fonts.c"

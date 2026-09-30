@@ -34,6 +34,15 @@ describe('shouldOffer', () => {
   })
 })
 
+describe('nixfred firmware is never replaced by a published release', () => {
+  // The fork's own dial image (devices/harness-device/firmware/version.txt) carries a prerelease suffix.
+  // The dev-build rule above is what keeps a stock release, however much newer, from overwriting it.
+  it('does not offer any release to a dial running 0.0.86-nixfred.N', () => {
+    expect(shouldOffer('0.0.86-nixfred.1', '0.0.87')).toBe(false)
+    expect(shouldOffer('0.0.86-nixfred.1', '9.9.9')).toBe(false)
+  })
+})
+
 describe('FirmwareTransfer', () => {
   /** A transfer whose slices are collected instead of written to a port. */
   function make(size: number) {

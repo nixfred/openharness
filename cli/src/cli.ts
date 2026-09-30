@@ -44,7 +44,7 @@ import { DialLog } from './cable/dialLog.js'
 import { buildLogBundle, bundleFileName, redactSecretsInText } from './lib/logBundle.js'
 import { CableSession } from './cable/cableSession.js'
 import { CableFleet } from './cable/cableFleet.js'
-import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor } from './cable/cableHost.js'
+import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor, withPermissionFlag } from './cable/cableHost.js'
 import { ExternalCaptureGate, ExternalTerminalRouter, OrcaCli, applyOrcaWatchSwitch, attentionForExternalEvent, engineStillRunning, findEngineAncestor, findOrcaBin, notificationOpensDialog, parseExternalHook, readOrcaWatchConfig, type OrcaSwitch } from './nixfred/orcaWatch.js'
 import { terminalActivity } from './cable/terminalActivity.js'
 
@@ -2698,7 +2698,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
         type: 'commander_question',
         agentId: agentIdFor(sessionId),
         dbSessionId: sessionId,
-        payload: { requestId, questions: shaped, notification: agentNotifications.asked(sessionId, requestId) },
+        payload: { requestId, questions: withPermissionFlag(shaped, detail?.permission === true), notification: agentNotifications.asked(sessionId, requestId) },
       }
       backend.sendCommander(asked)
       // ...and to the window on this computer. `sendCommander` is `webEligible: false`, so until this
