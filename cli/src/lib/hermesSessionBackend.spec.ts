@@ -46,7 +46,7 @@ class FakeRegistry implements HostedRegistryLike {
     return true
   }
   remove(sessionId: string) { return this.rows.delete(sessionId) }
-  hostedList() { return [...this.rows.values()].filter((r) => r.hosted) }
+  hostedList(kind?: string) { return [...this.rows.values()].filter((r) => r.hosted && (!kind || r.hosted === kind)) }
 }
 
 const query = async (dbPath: string, sql: string, params: Array<string | number | null>) => {
@@ -140,6 +140,17 @@ d('HermesSessionBackend (sqlite3 CLI)', () => {
     const backend = new HermesSessionBackend({ registry: reg, listHomes: async () => [homeA], query, now: () => NOW })
     expect((await backend.poll()).registered).toEqual([])
     expect(reg.rows.get('20260927_100000_aaaaaa')?.agentId).toBe('pane-agent')
+  })
+
+  it('never retires or forgets a watch-mode external row, which is not in any Hermes store', async () => {
+    addSession(dbA, '20260927_100000_aaaaaa', 'cli', null, 'hello', nowSec - 60)
+    const reg = new FakeRegistry()
+    reg.rows.set('0f8fad5b-d9cb-469f-a165-70867728950e', { agentId: 'orca-agent', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e', active: true, hosted: 'external', hermesHome: null, title: null, cwd: null, source: 'external' })
+    const backend = new HermesSessionBackend({ registry: reg, listHomes: async () => [homeA], query, now: () => NOW })
+    const out = await backend.poll()
+    expect(out.retired).toEqual([])
+    expect(out.vanished).toEqual([])
+    expect(reg.rows.get('0f8fad5b-d9cb-469f-a165-70867728950e')?.active).toBe(true)
   })
 
   it('does not forget anything when a store cannot be read', async () => {

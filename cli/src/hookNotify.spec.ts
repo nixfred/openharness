@@ -1145,3 +1145,73 @@ describe('hook notify Command Code re-registration', () => {
     expect(requests.map((r) => r.url)).toEqual(['/api/hook/turn-stop'])
   })
 })
+
+describe('watch mode: sessions outside tmux (nixfred/orcaWatch.ts)', () => {
+  const SID = '0f8fad5b-d9cb-469f-a165-70867728950e'
+  const TERM = 'term_15fd9a21-2ea5-4e58-ab61-1d555010bb22'
+  const ORCA_ENV = {
+    ORCA_TERMINAL_HANDLE: TERM,
+    ORCA_WORKTREE_ID: 'repo-1::/home/u/proj',
+    ORCA_TAB_ID: 'tab-1',
+    ORCA_PANE_KEY: 'tab-1:leaf-1',
+    ORCA_AGENT_HOOK_TOKEN: 'must-never-leave-the-hook',
+  }
+  function watchDir(on: boolean | null): string {
+    const dir = mkdtempSync(join(tmpdir(), 'adapter-hook-watch-'))
+    tmpDirs.push(dir)
+    if (on !== null) writeFileSync(join(dir, 'orca-watch.json'), JSON.stringify({ enabled: on, answers: on }))
+    return dir
+  }
+
+  it('posts nothing for a session outside tmux while watch mode is off (the stock behaviour)', async () => {
+    const { port, requests } = await collect()
+    for (const dataDir of [watchDir(null), watchDir(false)]) {
+      await runHook({ port, dataDir, env: ORCA_ENV, input: { hook_event_name: 'SessionStart', session_id: SID, cwd: '/home/u/proj' } })
+    }
+    expect(requests).toEqual([])
+  })
+
+  it('reports an Orca session to /api/hook/external with its terminal ids and never the Orca token', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    const stdout = await runHook({ port, dataDir, env: ORCA_ENV, input: {
+      hook_event_name: 'UserPromptSubmit', session_id: SID, cwd: '/home/u/proj', transcript_path: '/home/u/.claude/projects/p/x.jsonl', prompt: 'ship it',
+    } })
+    expect(stdout).toBe('')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ url: '/api/hook/external', body: {
+      engine: 'claude', event: 'UserPromptSubmit', sessionId: SID, cwd: '/home/u/proj', prompt: 'ship it',
+      transcriptPath: '/home/u/.claude/projects/p/x.jsonl',
+      orca: { terminal: TERM, worktree: 'repo-1::/home/u/proj', tab: 'tab-1', pane: 'tab-1:leaf-1' },
+    } })
+    expect(typeof requests[0]!.body.callerPid).toBe('number')
+    expect(JSON.stringify(requests)).not.toContain('must-never-leave-the-hook')
+  })
+
+  it('forwards Notification type and message, and Codex its own CODEX_HOME', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    await runHook({ port, dataDir, env: ORCA_ENV, input: { hook_event_name: 'Notification', session_id: SID, notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' } })
+    await runHook({ port, dataDir, engine: 'codex', env: { ...ORCA_ENV, CODEX_HOME: '/home/u/.config/orca/codex-accounts/a/home' }, input: { hook_event_name: 'SessionStart', session_id: SID, cwd: '/home/u/proj' } })
+    expect(requests[0]?.body).toMatchObject({ event: 'Notification', notificationType: 'permission_prompt', message: 'Claude needs your permission to use Bash' })
+    expect(requests[1]?.body).toMatchObject({ engine: 'codex', event: 'SessionStart', codexHome: '/home/u/.config/orca/codex-accounts/a/home' })
+  })
+
+  it('works outside Orca too (no ids), and HARNESS_ORCA_WATCH=0 overrides the file', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    await runHook({ port, dataDir, env: { ORCA_TERMINAL_HANDLE: '' }, input: { hook_event_name: 'Stop', session_id: SID } })
+    await runHook({ port, dataDir, env: { ...ORCA_ENV, HARNESS_ORCA_WATCH: '0' }, input: { hook_event_name: 'Stop', session_id: SID } })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.body).toMatchObject({ event: 'Stop', sessionId: SID })
+    expect(requests[0]?.body.orca).toBeUndefined()
+  })
+
+  it('leaves a tmux session on the stock path, and a Notification there posts nothing', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    await runHook({ port, dataDir, tmuxPane: '%42', env: ORCA_ENV, input: { hook_event_name: 'Notification', session_id: SID, message: 'x' } })
+    await runHook({ port, dataDir, tmuxPane: '%42', env: ORCA_ENV, input: { hook_event_name: 'Stop', session_id: SID } })
+    expect(requests.map((r) => r.url)).toEqual(['/api/hook/turn-stop'])
+  })
+})

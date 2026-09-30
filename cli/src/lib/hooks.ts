@@ -41,7 +41,10 @@ const HOOK_SCRIPT =
 // Stop/StopFailure are the authoritative turn-close signals (Stop = normal finish incl. max_tokens/
 // refusal; StopFailure = turn ended on an API error, where Stop does NOT fire) — they close a turn even
 // when the JSONL-derived turn_ended is missed. Neither supports a matcher (silently ignored).
-const EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'StopFailure'] as const
+// Notification (nixfred watch mode, nixfred/orcaWatch.ts): says a permission or question dialog is open in
+// a session OUTSIDE tmux, where there is no pane to poll. notify.mjs exits at once for it in a tmux pane,
+// and posts nothing at all while watch mode is off.
+const EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'StopFailure', 'Notification'] as const
 
 interface CommandHook {
   type: string

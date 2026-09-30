@@ -1317,6 +1317,54 @@ async function fallbackRegister(input, engine, tmuxPane) {
   })
 }
 
+// ── nixfred watch mode (cli/src/nixfred/orcaWatch.ts) ─────────────────────────────────────────────
+// A Claude or Codex session outside tmux (an Orca terminal, any plain terminal) used to be dropped
+// right here. With watch mode on it is reported to the daemon as an external row instead. Off by
+// default: nothing is posted unless the daemon's orca-watch.json says enabled, or HARNESS_ORCA_WATCH=1.
+// From Orca only the terminal handle and the worktree/tab/pane ids are forwarded; Orca's own hook token
+// (ORCA_AGENT_HOOK_TOKEN) and everything else in the environment stay here.
+const EXTERNAL_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd', 'Notification'])
+
+function watchModeOn() {
+  const forced = process.env.HARNESS_ORCA_WATCH
+  if (forced === '0' || forced === 'false' || forced === 'off') return false
+  if (forced === '1' || forced === 'true' || forced === 'on') return true
+  try {
+    const raw = readFileSync(join(paths().dataDir, 'orca-watch.json'), 'utf8')
+    return raw.length < 4096 && JSON.parse(raw)?.enabled === true
+  } catch { return false }
+}
+
+function orcaIds() {
+  const handle = process.env.ORCA_TERMINAL_HANDLE
+  if (!handle || !/^term_[0-9a-f-]{8,64}$/i.test(handle)) return undefined
+  const id = (v) => (typeof v === 'string' && v && v.length <= 512 ? v : undefined)
+  return { terminal: handle, worktree: id(process.env.ORCA_WORKTREE_ID), tab: id(process.env.ORCA_TAB_ID), pane: id(process.env.ORCA_PANE_KEY) }
+}
+
+async function postExternal(port, engine, event, input) {
+  if (!EXTERNAL_EVENTS.has(event)) return
+  const sessionId = input.session_id || input.conversation_id
+  if (typeof sessionId !== 'string' || !sessionId) return
+  const clip = (v, n) => (typeof v === 'string' ? v.slice(0, n) : undefined)
+  await post(port, '/api/hook/external', {
+    engine,
+    event,
+    sessionId,
+    cwd: typeof input.cwd === 'string' ? input.cwd : undefined,
+    transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : undefined,
+    title: clip(input.session_title, 200),
+    model: modelName(input.model),
+    prompt: event === 'UserPromptSubmit' ? clip(input.prompt, 160) : undefined,
+    message: event === 'Notification' ? clip(input.message, 160) : undefined,
+    notificationType: event === 'Notification' ? clip(input.notification_type, 40) : undefined,
+    // Codex under Orca runs on a per-account CODEX_HOME; the rollout lives there, not in ~/.codex.
+    codexHome: engine === 'codex' && process.env.CODEX_HOME ? process.env.CODEX_HOME : undefined,
+    callerPid: process.ppid,
+    orca: orcaIds(),
+  })
+}
+
 async function fallbackSessionEnd(sessionId, reason, engine, tmuxPane) {
   // SessionEnd is not process-lifetime authority. If the daemon is down, its startup scan will reconcile
   // the actual tmux process; deleting the offline record here would hide a still-running CLI.
@@ -1336,7 +1384,16 @@ async function main() {
 
   const event = input.hook_event_name || input.hookEventName
   const tmuxPane = process.env.TMUX_PANE
-  if (!tmuxPane) return
+  if (!tmuxPane) {
+    if ((engine === 'claude' || engine === 'codex') && watchModeOn()) {
+      if (engine === 'claude' && isDevinSession(input, paths())) return
+      if (engine === 'codex' && isCodexSubagent(input, paths())) return
+      await postExternal(port, engine, event, input)
+    }
+    return
+  }
+  // Notification is installed for watch mode only; a tmux pane's dialogs are read off the pane itself.
+  if (event === 'Notification') return
   const mutationFields = { engine, ...terminalHookFields(tmuxPane) }
   if (engine === 'cursor' && input.is_background_agent === true) return
   if (engine === 'codex' && isCodexSubagent(input, paths())) return

@@ -45,6 +45,7 @@ import { buildLogBundle, bundleFileName, redactSecretsInText } from './lib/logBu
 import { CableSession } from './cable/cableSession.js'
 import { CableFleet } from './cable/cableFleet.js'
 import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor } from './cable/cableHost.js'
+import { ExternalCaptureGate, ExternalTerminalRouter, OrcaCli, applyOrcaWatchSwitch, attentionForExternalEvent, engineStillRunning, findEngineAncestor, findOrcaBin, notificationOpensDialog, parseExternalHook, readOrcaWatchConfig, type OrcaSwitch } from './nixfred/orcaWatch.js'
 import { terminalActivity } from './cable/terminalActivity.js'
 
 import { MachineListCache, machineListCachePath, withStaleMarker } from './device/machineList.js'
@@ -2626,12 +2627,26 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   }
   // AskUserQuestion bridge: mirrors the question to the device's question screen, and keys the device's
   // answer back into the CLI's own terminal dialog.
+  // nixfred watch mode (nixfred/orcaWatch.ts, docs/nixfred-orca.md). Sessions this daemon did not start
+  // become external rows; an answer to one of them is typed into its Orca terminal. Every pane-backed
+  // row goes straight through to the stock tmux functions below, unchanged. The router is handed ONLY
+  // to the answer controller and the question watcher, so nothing else can type into an Orca terminal.
+  let orcaWatch = readOrcaWatchConfig(env.ADAPTER_DATA_DIR)
+  const orcaCli = new OrcaCli({ bin: findOrcaBin() })
+  const externalTerminals = new ExternalTerminalRouter({
+    resolve: (id) => registry.resolve(id),
+    orca: orcaCli,
+    answersEnabled: () => orcaWatch.enabled && orcaWatch.answers,
+    gate: new ExternalCaptureGate({ idleCaptureMs: orcaWatch.idleCaptureMs }),
+    fallback: { capture: captureTerminal, sendText: submitTerminal, sendKey: keyTerminal, acquireControl: acquireTerminalControl },
+    audit: (entry) => {
+      console.log(`[orca] ${sid(entry.agentId)} answer ${entry.what} via ${entry.route} · ${entry.ok ? 'delivered' : 'NOT delivered'}`)
+      nixfred.auditAnswer(entry)
+    },
+  })
   const questions = new AskQuestionController({
     getSession: (id) => registry.resolve(id),
-    capture: captureTerminal,
-    sendText: submitTerminal,
-    sendKey: keyTerminal,
-    acquireControl: acquireTerminalControl,
+    ...externalTerminals.answerDeps,
   })
   // Command Code ENDS its turn in order to ask (its Stop hook fires, the dialog goes up, and the answer
   // opens a NEW turn). With the turn closed the device tile falls back to the PREVIOUS task's recap — so
@@ -2662,7 +2677,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const agentNotifications = new AgentNotifications()
   const questionWatcher = new QuestionWatcher({
     getSession: (id) => registry.resolve(id),
-    capture: captureTerminal,
+    capture: (target, lines) => externalTerminals.watcherCapture(target, lines),
     hasDevice: () => someoneCanAnswer(),
     isDriving: (sessionId) => questions.isDriving(sessionId),
     onQuestion: (sessionId, requestId, shaped, detail) => {
@@ -3889,6 +3904,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
   const nixfredSession = (s: RegisteredSession): NixfredSessionLike => ({
     agentId: s.agentId, sessionId: s.sessionId, engine: s.engine, active: s.active, tmuxPane: s.tmuxPane,
     cwd: s.cwd ?? undefined, transcriptPath: s.transcriptPath ?? undefined, model: (s as { model?: string | null }).model ?? null, name: projectDisplayName(s),
+    external: s.hosted === 'external',
   })
   const nixfred = new Nixfred({
     machineId: () => backend.machineId,
@@ -3902,14 +3918,119 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     sendToAgent: (agentId, text) => submitAgent(agentId, text),
   })
 
+  // ── nixfred watch mode: external rows from hooks (nixfred/orcaWatch.ts, docs/nixfred-orca.md) ─────────
+  // Attach and announce like the Hermes hosted rows above, NOT through handleRegistered: that path saves
+  // the row as a stopped agent, which would let the app later "resume" it into a pane of ours (a move).
+  const attachExternal = async (row: RegisteredSession, reset: boolean, hookEvent: string): Promise<void> => {
+    const firstTurn = !!row.transcriptPath && transcriptIsFirstTurn(row, await statBirthMs(row.transcriptPath), { rebound: false, now: Date.now() })
+    const attached = await attachSession(row, reset, false, firstTurn)
+    syncRecapPool()
+    announceSession(row)
+    if (reset) backend.send({ type: 'session_synced', payload: { sessionId: row.sessionId, agentId: row.agentId, title: projectDisplayName(row), createdAt: new Date(row.boundAt ?? Date.now()).toISOString() } })
+    console.log(`[orca] ${sid(row.agentId)} external ${row.engine} ${hookEvent} · attached=${attached} · orca=${row.external?.orca?.terminal ?? 'none'} · cwd=${row.cwd ?? '?'}`)
+  }
+  const endExternal = (row: RegisteredSession, why: string): void => {
+    if (!row.active) return
+    registry.setActive(row.agentId, false)
+    questionWatcher.stop(row.sessionId)
+    externalTerminals.gate.forget(row.sessionId)
+    nixfred.attention.offline(row.agentId)
+    syncRecapPool()
+    announceSession(row)
+    console.log(`[orca] ${sid(row.agentId)} external session ended · ${why}`)
+  }
+  const handleExternalHook = async (raw: unknown): Promise<Record<string, unknown>> => {
+    if (!orcaWatch.enabled) return { ignored: true, reason: 'watch_mode_off' }
+    const parsed = parseExternalHook(raw)
+    if (!parsed.ok) { console.log(`[orca] external hook ignored · ${parsed.reason}`); return { ignored: true, reason: parsed.reason } }
+    const e = parsed.event
+    if (isRecentlyDeleted(e.sessionId)) return { ignored: true, reason: 'deleted' }
+    const existing = registry.bySession(e.sessionId)
+    if (existing && existing.hosted !== 'external') return { ignored: true, reason: 'owned_by_this_daemon' }
+    if (e.event === 'SessionEnd') {
+      if (existing) endExternal(existing, 'SessionEnd hook')
+      return { ok: true, ended: !!existing }
+    }
+    const hadTranscript = existing?.transcriptPath ?? null
+    const out = registry.registerExternal({
+      engine: e.engine, sessionId: e.sessionId, cwd: e.cwd, title: e.title, transcriptPath: e.transcriptPath,
+      codexHome: e.codexHome, model: e.model, orca: e.orca,
+      proc: e.callerPid ? findEngineAncestor(e.callerPid, e.engine) : null,
+    })
+    if (!out) return { ignored: true, reason: 'not_registered' }
+    const row = registry.byAgent(out.agentId)
+    if (!row) return { ignored: true, reason: 'not_registered' }
+    if (out.isNew || out.reactivated || (!hadTranscript && row.transcriptPath)) await attachExternal(row, true, e.event)
+    else if (e.event === 'SessionStart') await attachExternal(row, true, e.event)
+    // A dialog is open: read the Orca screen fresh until it is answered or the turn moves on.
+    if (notificationOpensDialog(e)) { externalTerminals.gate.hint(row.sessionId); questionWatcher.start(row.sessionId) }
+    if (e.event === 'UserPromptSubmit' || e.event === 'Stop' || e.event === 'StopFailure') externalTerminals.gate.clear(row.sessionId)
+    if (e.event === 'UserPromptSubmit') questionWatcher.start(row.sessionId)
+    const attention = attentionForExternalEvent(e)
+    if (attention) nixfred.attention.set(row.agentId, attention.state, attention.detail)
+    return { ok: true, agentId: row.agentId, isNew: out.isNew }
+  }
+  // A session that simply exits (terminal closed, no SessionEnd) goes offline when its engine process
+  // is gone. Checked against the process start time, so a reused pid cannot keep a dead row alive.
+  const externalSweep = setInterval(() => {
+    for (const row of registry.hostedList('external')) {
+      const proc = row.external?.proc
+      if (row.active && proc && !engineStillRunning(proc)) endExternal(row, 'engine process exited')
+    }
+  }, 20_000)
+  externalSweep.unref?.()
+  const orcaStatus = (): Record<string, unknown> => ({
+    ...orcaWatch,
+    orcaCli: orcaCli.available,
+    rows: registry.hostedList('external').map((r) => ({
+      agentId: r.agentId, sessionId: r.sessionId, engine: r.engine, active: r.active, name: projectDisplayName(r), cwd: r.cwd,
+      orcaTerminal: r.external?.orca?.terminal ?? null, orcaWorktree: r.external?.orca?.worktree ?? null,
+      state: nixfred.attention.get(r.agentId)?.state ?? (r.active ? 'idle' : 'offline'),
+    })),
+  })
+  const orcaCommand = async (action: string, args: Record<string, unknown>): Promise<unknown> => {
+    if (action === 'orca-status') return orcaStatus()
+    if (action === 'orca-set') {
+      const change = String(args.change ?? '') as OrcaSwitch
+      if (!['on', 'off', 'answers-on', 'answers-off'].includes(change)) throw new Error('orca-set needs change=on|off|answers-on|answers-off')
+      orcaWatch = applyOrcaWatchSwitch(env.ADAPTER_DATA_DIR, change)
+      externalTerminals.gate.setIdleCaptureMs(orcaWatch.idleCaptureMs)
+      if (!orcaWatch.enabled) for (const row of registry.hostedList('external')) endExternal(row, 'watch mode switched off')
+      console.log(`[orca] watch mode ${orcaWatch.enabled ? 'ON' : 'OFF'} · answers ${orcaWatch.answers ? 'ON' : 'OFF'} (${orcaWatch.source})`)
+      return orcaStatus()
+    }
+    if (action === 'orca-answer') {
+      // An explicit answer typed at this computer: `harness orca answer <agent> <option>`. Same controller,
+      // same stale-dialog check, same audit line as an answer from the device or the app.
+      const target = String(args.agentId ?? '')
+      const row = registry.resolve(target)
+      if (!row) throw new Error(`no agent ${target}`)
+      const open = openQuestions.get(row.sessionId) as { payload?: { requestId?: string; questions?: Array<{ key: string; q: string; options: string[] }> } } | undefined
+      const requestId = open?.payload?.requestId
+      const q = open?.payload?.questions?.[0]
+      if (!requestId || !q) throw new Error('that agent has no open question right now')
+      // "2" means the second option; anything else is matched as the option's label (or free text).
+      const raw = String(args.answer ?? '').trim()
+      const picked = /^\d+$/.test(raw) && q.options[Number(raw) - 1] !== undefined ? q.options[Number(raw) - 1]! : raw
+      if (!picked) throw new Error(`answer with a number 1-${q.options.length} or an option label: ${q.options.join(' | ')}`)
+      showAwaitingAnswer(row.sessionId)
+      nixfred.attention.answered(row.agentId)
+      const result = await questions.answer({ agentId: row.agentId, sessionId: row.sessionId, requestId, answers: { [q.key]: picked } })
+      return { question: q.q, answer: picked, ...result }
+    }
+    return nixfred.command(action, args)
+  }
+  console.log(`[orca] watch mode ${orcaWatch.enabled ? 'ON' : 'OFF'} · answers ${orcaWatch.answers ? 'ON' : 'OFF'} (${orcaWatch.source}) · orca CLI ${orcaCli.available ? 'found' : 'not found'}`)
+
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(daemonPort(), {
+    onExternalHook: handleExternalHook,
     onPromptContext: (agentId) => companionPromptContext(agentId),
     onCommandBar: commandBarService,
     onAttention: () => nixfred.attentionPayload(),
     onSubscriptions: () => nixfred.subs.collect(),
     onStopAll: (except) => nixfred.stopAll(except),
     onAdopt: (pane, engine) => nixfred.adopt(pane, engine),
-    onNixfred: (action, args) => nixfred.command(action, args),
+    onNixfred: (action, args) => orcaCommand(action, args),
     onAutonomousDeviceRequest: async (method, target, body) => {
       if (!autonomousDeviceService) return { status: 503, body: { error: { code: 'UNAVAILABLE', message: 'Autonomous device service is starting' } } }
       return autonomousDeviceLocalRequest({
@@ -7443,6 +7564,16 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
       break
     }
     case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
+    case 'orca': {
+      // harness orca [status] | on | off | answers <on|off> | answer <agent> <number|label>
+      const sub = args[0] ?? 'status'
+      if (sub === 'status') action = 'orca-status'
+      else if (sub === 'on' || sub === 'off') { action = 'orca-set'; body = { change: sub } }
+      else if (sub === 'answers' && (args[1] === 'on' || args[1] === 'off')) { action = 'orca-set'; body = { change: `answers-${args[1]}` } }
+      else if (sub === 'answer' && args[1] && args[2]) { action = 'orca-answer'; body = { agentId: args[1], answer: args.slice(2).join(' ') } }
+      else { console.error('Usage: harness orca [status] | on | off | answers <on|off> | answer <agent-id> <number|label>'); process.exit(1) }
+      break
+    }
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
     default: action = args[0] ?? ''; body = {}; if (!action) { console.error('Usage: harness nixfred <action> [--key=value ...]'); process.exit(1) }
       for (const f of flags) { const m = /^--([a-zA-Z-]+)=(.*)$/.exec(f); if (m) body[m[1]!] = m[2] }
@@ -7451,6 +7582,20 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
   if (json) { console.log(JSON.stringify(reply, null, 2)); process.exit(res.ok ? 0 : 1) }
   if (!res.ok || reply.ok === false) { console.error(`✗ ${String(reply.error ?? res.statusText)}`); process.exit(1) }
   const result = reply.result as unknown
+  if ((action === 'orca-status' || action === 'orca-set') && result && typeof result === 'object') {
+    const r = result as { enabled: boolean; answers: boolean; source: string; idleCaptureMs: number; orcaCli: boolean; rows: Array<{ agentId: string; engine: string; active: boolean; name: string; state: string; orcaTerminal: string | null }> }
+    console.log(`watch mode: ${r.enabled ? 'on' : 'off'} · answers into Orca: ${r.answers ? 'on' : 'off'} · set by ${r.source} · orca CLI: ${r.orcaCli ? 'found' : 'NOT found'}`)
+    if (!r.enabled) console.log('  turn it on with: harness orca on   (off again: harness orca off, or HARNESS_ORCA_WATCH=0)')
+    for (const a of r.rows) console.log(`  ${a.active ? '●' : '○'} ${a.agentId.slice(0, 8)} ${a.name.padEnd(28)} ${a.engine.padEnd(7)} ${a.state.padEnd(10)} ${a.orcaTerminal ?? 'no Orca terminal (watch only)'}`)
+    if (r.enabled && !r.rows.length) console.log('  no external sessions yet: start or prompt a claude/codex session in an Orca terminal')
+    return
+  }
+  if (action === 'orca-answer' && result && typeof result === 'object') {
+    const r = result as { ok?: boolean; question?: string; answer?: string; error?: string; detail?: string }
+    if (r.ok === false) { console.error(`✗ ${r.detail ?? r.error ?? 'not delivered'}`); process.exit(1) }
+    console.log(`answered "${r.question}" with "${r.answer}"`)
+    return
+  }
   if (action === 'attention' && result && typeof result === 'object') {
     const r = result as { hostname: string; summary: { state: string; count: number }; agents: Array<{ glyph: string; name: string; engine: string; state: string; label: string; detail: string }> }
     if (flags.includes('--kanban')) {
@@ -8513,7 +8658,7 @@ switch (cmd) {
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
   case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
-  case 'dispatch': case 'dispatches': case 'clip': case 'subs':
+  case 'dispatch': case 'dispatches': case 'clip': case 'subs': case 'orca':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

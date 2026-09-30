@@ -25,7 +25,7 @@ export interface HostedRegistryLike {
   registerHosted(input: { engine: 'hermes'; sessionId: string; hermesHome: string; source: string; cwd?: string | null; title?: string | null }): { agentId: string; isNew: boolean } | null
   setActive(agentId: string, active: boolean): boolean
   remove(sessionId: string): boolean
-  hostedList(): Array<{ agentId: string; sessionId: string; active: boolean; hermesHome?: string | null }>
+  hostedList(kind?: 'hermes-store' | 'external'): Array<{ agentId: string; sessionId: string; active: boolean; hermesHome?: string | null }>
 }
 
 export interface HermesSessionBackendDeps {
@@ -142,7 +142,7 @@ export class HermesSessionBackend {
         const existing = this.deps.registry.bySession(s.sessionId)
         if (existing) {
           // A pane-backed row (hooked from tmux) owns its session; a dormant hosted row wakes up.
-          if (existing.hosted && !existing.active && this.deps.registry.setActive(existing.agentId, true)) this.deps.onNew?.(existing.agentId, s.sessionId)
+          if (existing.hosted === 'hermes-store' && !existing.active && this.deps.registry.setActive(existing.agentId, true)) this.deps.onNew?.(existing.agentId, s.sessionId)
           continue
         }
         const row = this.deps.registry.registerHosted({ engine: 'hermes', sessionId: s.sessionId, hermesHome: s.hermesHome, source: s.source, cwd: s.cwd, title: s.title })
@@ -153,7 +153,8 @@ export class HermesSessionBackend {
       }
       // Retire what went quiet; forget what is gone from every store.
       const storeIds = await this.allSessionIds(homes)
-      for (const hosted of this.deps.registry.hostedList()) {
+      // Only this backend's own rows: watch-mode external rows (nixfred/orcaWatch.ts) are hosted too.
+      for (const hosted of this.deps.registry.hostedList('hermes-store')) {
         if (seen.has(hosted.sessionId)) continue
         if (storeIds && !storeIds.has(hosted.sessionId)) {
           this.deps.registry.remove(hosted.sessionId)

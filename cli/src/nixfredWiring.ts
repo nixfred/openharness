@@ -47,6 +47,8 @@ export interface NixfredSessionLike {
   transcriptPath?: string
   model?: string | null
   name: string
+  /** nixfred watch mode: a session this daemon did not start. */
+  external?: boolean
 }
 
 export interface NixfredDeps {
@@ -397,6 +399,18 @@ export class Nixfred {
   /** Append to the audit journal with the machine and time filled in; never throws, never awaited. */
   private log(e: Omit<AuditEntry, 'at' | 'machine' | 'agentId'> & { agentId?: string }): void {
     void this.audit.append({ ...e, agentId: e.agentId ?? 'daemon', at: this.now(), machine: this.deps.machineName() }).catch(() => {})
+  }
+
+  /**
+   * Watch mode (nixfred/orcaWatch.ts): one journal line for every key or text an answer typed into a
+   * terminal this daemon does not own, delivered or not. `harness audit` shows them.
+   */
+  auditAnswer(e: { agentId: string; sessionId: string; route: string; what: string; value: string; ok: boolean; terminal?: string }): void {
+    this.log({
+      kind: 'answer', agentId: e.agentId, sessionId: e.sessionId, name: `answer via ${e.route}: ${e.what}`,
+      detail: `${JSON.stringify(e.value)}${e.terminal ? ` -> ${e.terminal}` : ''}${e.ok ? '' : ' (not delivered)'}`,
+      decision: e.ok ? 'allow' : 'deny',
+    })
   }
 
   // ── attention ───────────────────────────────────────────────────────────────────────────────────

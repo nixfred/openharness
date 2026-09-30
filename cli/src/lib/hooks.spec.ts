@@ -602,3 +602,20 @@ describe('Hermes hook allowlist', () => {
     expect(new Set(ours.map((a) => a.event)).size).toBe(ours.length)
   })
 })
+
+describe('Claude hook installation (watch mode Notification)', () => {
+  let home = ''
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'adapter-claude-hooks-')); vi.stubEnv('HOME', home) })
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }) })
+
+  it('installs Notification beside the lifecycle hooks and keeps a foreign Notification hook', async () => {
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: { Notification: [{ hooks: [{ type: 'command', command: 'my-own-notifier' }] }] } }))
+    const { installSessionHooks } = await loadHooks()
+    installSessionHooks(18599)
+    const out = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8')) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> }
+    expect(Object.keys(out.hooks).sort()).toEqual(['Notification', 'SessionEnd', 'SessionStart', 'Stop', 'StopFailure', 'UserPromptSubmit'])
+    expect(out.hooks.Notification.map((b) => b.hooks[0]!.command)).toEqual(['my-own-notifier', expect.stringContaining('notify.mjs')])
+    expect(out.hooks.Notification[1]!.hooks[0]!.command).toContain('--port 18599')
+  })
+})

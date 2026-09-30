@@ -103,6 +103,11 @@ export interface HookServerHandlers {
   onAdopt?: (pane: string, engine: string | null) => Promise<{ ok: boolean; detail: string }>
   /** POST /api/nixfred {action, ...args}: the local command surface for `harness nixfred`. */
   onNixfred?: (action: string, args: Record<string, unknown>) => Promise<unknown>
+  /**
+   * nixfred watch mode (nixfred/orcaWatch.ts): a hook from a Claude/Codex session OUTSIDE tmux. The body is
+   * untrusted beyond the hook credential; the handler validates it and says what it did.
+   */
+  onExternalHook?: (body: unknown) => Promise<Record<string, unknown>> | Record<string, unknown>
   onTurnStop?: (body: {
     sessionId: string
     status?: string
@@ -615,6 +620,19 @@ export function startHookServer(
         const context = body.hookEvent === 'UserPromptSubmit' && (engine === 'claude' || engine === 'codex')
           ? handlers.onPromptContext?.(result.entry.agentId) : null
         json(200, { ok: true, ...(context ? { additionalContext: context } : {}) })
+        return
+      }
+
+      // Watch mode: a session this daemon did not start (Orca terminal, plain terminal). Same credential
+      // as every other hook; no process binding, because there is no pane to bind to. The handler only
+      // ever registers a memory-only external row and moves its attention; it never acts on a process.
+      if (req.method === 'POST' && url === '/api/hook/external') {
+        if (!hookOk) { json(401, { error: 'UNAUTHORIZED' }); return }
+        let parsed: unknown
+        try { parsed = JSON.parse(await readBody(req)) as unknown } catch { json(400, { error: 'bad json' }); return }
+        if (!handlers.onExternalHook) { json(200, { ignored: true, reason: 'watch_mode_unavailable' }); return }
+        try { json(200, await handlers.onExternalHook(parsed)) }
+        catch (e) { json(500, { error: e instanceof Error ? e.message : 'INTERNAL' }) }
         return
       }
 

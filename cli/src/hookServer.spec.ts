@@ -612,3 +612,23 @@ describe('the daemon socket', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('watch mode: /api/hook/external', () => {
+  const body = { engine: 'claude', event: 'Stop', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }
+  it('needs the hook credential, then hands the body to the watch handler and returns its verdict', async () => {
+    const onExternalHook = vi.fn(async () => ({ ok: true, agentId: 'a1' }))
+    const { base, headers } = await start({ onExternalHook })
+    const anon = await fetch(`${base}/api/hook/external`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect(anon.status).toBe(401)
+    expect(onExternalHook).not.toHaveBeenCalled()
+    const res = await fetch(`${base}/api/hook/external`, { method: 'POST', headers, body: JSON.stringify(body) })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true, agentId: 'a1' })
+    expect(onExternalHook).toHaveBeenCalledExactlyOnceWith(body)
+  })
+  it('answers 200 ignored when watch mode is not wired, and 400 on bad json', async () => {
+    const { base, headers } = await start()
+    expect(await (await fetch(`${base}/api/hook/external`, { method: 'POST', headers, body: JSON.stringify(body) })).json()).toEqual({ ignored: true, reason: 'watch_mode_unavailable' })
+    expect((await fetch(`${base}/api/hook/external`, { method: 'POST', headers, body: '{' })).status).toBe(400)
+  })
+})

@@ -136,7 +136,14 @@ export interface RegisteredSession {
    * Bot Mode profiles, gateway sessions). In memory only: never written to registry.json, re-found
    * by its backend after every boot. `terminalAvailable` is false; it is still advertised.
    */
-  hosted?: 'hermes-store'
+  hosted?: 'hermes-store' | 'external'
+  /**
+   * nixfred watch mode (nixfred/orcaWatch.ts): a live Claude/Codex session this daemon did NOT start,
+   * registered from its hooks. Memory-only like every hosted row. `orca` is the Orca terminal the
+   * session runs in, when the hook saw one; it is the only place an answer may be typed. Never moved,
+   * never killed: the row has no runtime and no process identity to act on.
+   */
+  external?: { orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null; proc: { pid: number; start: string } | null } | null
   /**
    * The engine's OWN model this agent was on immediately before it moved to a grid.
    *
@@ -2003,9 +2010,83 @@ class Registry {
     return this.list().filter((entry) => this.terminalAvailableAgents.has(entry.agentId) || this.hostedAgents.has(entry.agentId))
   }
 
-  /** Every hosted (runtime-less, store-fed) row, active or dormant. */
-  hostedList(): RegisteredSession[] {
-    return this.list().filter((entry) => this.hostedAgents.has(entry.agentId))
+  /** Every hosted (runtime-less) row, active or dormant; `kind` narrows to one source. */
+  hostedList(kind?: 'hermes-store' | 'external'): RegisteredSession[] {
+    return this.list().filter((entry) => this.hostedAgents.has(entry.agentId) && (!kind || entry.hosted === kind))
+  }
+
+  /**
+   * Register (or refresh) a live session the daemon did not start, from its hooks: nixfred watch mode.
+   * Idempotent on the session id. A session a pane-backed or Hermes row already owns is left alone
+   * (null). The transcript is kept only when it lies under the engine's own home, the same rule every
+   * other row obeys, so a hook cannot point the watcher at an arbitrary file.
+   */
+  registerExternal(input: {
+    engine: 'claude' | 'codex'
+    sessionId: string
+    cwd: string | null
+    title: string | null
+    transcriptPath: string | null
+    codexHome?: string | null
+    model?: string | null
+    orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
+    proc: { pid: number; start: string } | null
+  }): { agentId: string; isNew: boolean; reactivated?: boolean } | null {
+    if (this.writeBlocked || !input.sessionId) return null
+    const transcript = input.transcriptPath && validTranscriptPath(input.engine, input.transcriptPath, input.codexHome ?? undefined)
+      ? input.transcriptPath : null
+    const existing = this.bySession(input.sessionId)
+    if (existing) {
+      if (existing.hosted !== 'external') return null
+      if (input.title) existing.title = titleDisplayName(input.title)
+      if (input.cwd) { existing.cwd = input.cwd; existing.projectDir = basename(input.cwd) || existing.projectDir }
+      if (transcript) existing.transcriptPath = transcript
+      if (input.model) existing.model = input.model
+      existing.external = { orca: input.orca ?? existing.external?.orca ?? null, proc: input.proc ?? existing.external?.proc ?? null }
+      existing.lastHookAt = Date.now()
+      const reactivated = !existing.active
+      if (reactivated) existing.active = true
+      return { agentId: existing.agentId, isNew: false, ...(reactivated ? { reactivated } : {}) }
+    }
+    const now = Date.now()
+    const entry: RegisteredSession = {
+      schemaVersion: 2,
+      active: true,
+      agentId: randomUUID(),
+      sessionId: input.sessionId,
+      boundAt: now,
+      engine: input.engine,
+      gateway: null,
+      grid: null,
+      gridLaunch: null,
+      gridWebSearch: null,
+      hosted: 'external',
+      external: { orca: input.orca, proc: input.proc },
+      defaultName: undefined,
+      transcriptPath: transcript,
+      projectDir: basename(input.cwd ?? '') || input.sessionId.slice(0, 8),
+      cwd: input.cwd,
+      runtimes: [],
+      primaryRuntimeKey: '',
+      tmuxPane: '',
+      source: 'external',
+      title: titleDisplayName(input.title ?? null),
+      model: input.model ?? null,
+      cliVersion: null,
+      codexHome: input.engine === 'codex' ? (input.codexHome ?? null) : null,
+      hermesHome: null,
+      dsh: null,
+      dshRuntime: null,
+      agent: null,
+      processIdentity: null,
+      registeredAt: now,
+      touchedAt: now,
+      lastHookAt: now,
+      lastTranscriptAt: now,
+    }
+    this.index(entry)
+    this.hostedAgents.add(entry.agentId)
+    return { agentId: entry.agentId, isNew: true }
   }
 
   /**
@@ -2179,6 +2260,12 @@ class Registry {
           const entry = previous.get(row.agentId) ?? row
           if (entry !== row) Object.assign(entry, row)
           this.index(entry)
+        }
+        // Hosted rows are never persisted, so the rebuild above cannot see them. Without this every
+        // save quietly dropped them from memory (Hermes store rows and watch-mode external rows alike)
+        // while hostedAgents still listed them.
+        for (const entry of previous.values()) {
+          if (entry.hosted && this.hostedAgents.has(entry.agentId) && !this.agents.has(entry.agentId)) this.index(entry)
         }
         this.persistedBaseline = new Map(serialized.map((row) => [rowId(row), rowFingerprint(row)]))
       })
