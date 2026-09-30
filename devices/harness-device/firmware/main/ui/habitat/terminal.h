@@ -125,6 +125,10 @@ typedef struct {
     // A ROUNDED BOX rather than text when `box.h` is set: w x h at x, y, corner radius, fill and an
     // optional 1 px border (border == fill for none), antialiased at the corners. ht_box() makes one.
     struct { uint16_t h, fill, border; uint8_t radius; } box;
+    // A RING (nixfred): an antialiased annulus, or an arc of one, centred on x, y, drawn in `fg` when
+    // `ring.outer` is set. Angles are in 1/4096 of a turn, 0 at 12 o'clock, clockwise; a sweep of 4096
+    // (or more) is the whole ring. ht_ring() makes one. Integer only, no tables beyond one quarter sine.
+    struct { uint16_t inner, outer, start, sweep; } ring;
 } ht_run_t;
 typedef struct {
     uint16_t background;
@@ -151,6 +155,11 @@ void ht_center(ht_scene_t *scene, int y, const ht_font_t *font, uint16_t fg, con
 bool ht_icon(ht_scene_t *scene, int x, int y, const ht_icon_t *icon);
 // A rounded box — the Focus skin's pills and cards. Colours are already mixed over what they sit on.
 bool ht_box(ht_scene_t *scene, int x, int y, int w, int h, int radius, uint16_t fill, uint16_t border);
+// A ring or arc (nixfred graphics): see ht_run_t.ring. `sweep` >= HT_TURN draws the whole annulus.
+enum { HT_TURN = 4096 };
+bool ht_ring(ht_scene_t *scene, int cx, int cy, int inner, int outer, int start, int sweep, uint16_t color);
+// A one-colour ALPHA MASK drawn in `color`: the sprite path with no pixel array (nixfred logo).
+bool ht_mask(ht_scene_t *scene, int x, int y, int w, int h, const uint8_t *alpha, uint16_t color);
 // PROPORTIONAL TEXT. The width `text` would take in `font` (mono: glyphs x width). A line of it that
 // fits `width` px, breaking after a word where it can (the cursor moves past the spaces it ends on).
 // And `text` fitted to `width`: whole if it fits, else as much as does and "…"; returns its width.

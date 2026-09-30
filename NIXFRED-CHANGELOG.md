@@ -5,6 +5,43 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware graphics, first slice, 2026-09-30 (branch nixfred/firmware-graphics)
+
+Sits on nixfred/main 7275f4fa. Firmware version `0.0.86-nixfred.1` (devices/harness-device/firmware/version.txt),
+built with ESP-IDF v5.5 (the version dependencies.lock pins, 5.5.0), 1,659,584 B against an 8 MB slot.
+
+- Renderer: two new run types in the habitat compositor (terminal.c), both integer only and allocation
+  free. `ht_ring` draws an antialiased ring or arc (1/4096 turn, clockwise from 12 o'clock) and reports
+  a tight sector box for damage, so a moving rim segment repaints its sector and not the face.
+  `ht_mask` draws a one-colour alpha mask through the sprite path.
+- Boot, loading and firmware-transfer face (`render_brand`): the Harness mark (generated from this
+  repository's docs/branding/app-logo/harness-logo-4.svg, 150 px) in the theme accent with a three-band
+  glow, the wordmark under it, and the rim: a scanner segment that laps once a second while it boots
+  or waits for the daemon (a stuck boot is a stopped line), or an arc filling with the transfer percent
+  plus the number when the daemon pushes firmware (`ui_ota_boot_pct` was a no-op before).
+- Question screens (question, choices, answer review): the waiting ring in yellow on the rim with a
+  soft inner glow and a badge at 12 o'clock holding a neutral person figure. A permission prompt turns
+  the ring red and adds a lock glyph beside the badge. The daemon now marks each item of a permission
+  dialog `permission: true` (`withPermissionFlag`, cli/src/cable/cableHost.ts); stock dials ignore it.
+- Hooks, not features: the cable protocol carries no logo, avatar or initials, so the logo is the
+  bundled Harness mark and the badge reads `s.avatar_initials` (empty today, neutral figure). No spend
+  data reaches the dial, so the spend arc is not in this slice. Nothing of Omarchy's and no face is
+  bundled.
+- Stock auto-offer: the daemon never offers a published release to a dial whose version is not plain
+  x.y.z (the upstream dev-build rule in fwPush.ts `shouldOffer`), so the `-nixfred.N` suffix keeps stock
+  from overwriting this image. A spec pins that for this version string.
+- Verified: firmware builds; new host test test/test_nixfred_ring.c (ring coverage, sweep direction,
+  wrap across 12 o'clock, partial redraw equals full redraw, mask) passes under UBSan; CLI specs for
+  cableHost and fwPush pass (62), tsc clean. Flashed to the dial on gus over USB (idf.py flash, NVS kept);
+  the daemon logged `dial 80:45:6B:35:06:CC on fw 0.0.86-nixfred.1 proto 3` and made no offer.
+  nixfred/firmware-graphics-host-render.png is a HOST render of the firmware's own drawing
+  calls (test_nixfred_ring with NIXFRED_SHOT_DIR), not a photo of the glass; the firmware has no
+  screen-capture path. Not verified: the physical screen by eye, a live permission prompt on the dial.
+- Known: test/run.sh stops at its first compile on this host (glibc hides `strnlen` under -std=c11);
+  pre-existing, not touched here. The new test compiles with `-D_DEFAULT_SOURCE`.
+- Recovery: the unchanged stock 0.0.86 build is kept on gus at ~/esp/recovery-stock-0.0.86
+  (`esptool write_flash @flash_args` from that folder, or `harness flash` for the published image).
+
 ## Watch mode: live Orca sessions on the app and the device, 2026-09-30 (branch nixfred/orca-sessions)
 
 Sits on nixfred/main 1a455d60 merged with upstream/main (385 commits). See docs/nixfred-orca.md.

@@ -37,6 +37,7 @@ static ht_gallery_t gallery;
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <assert.h>
+#include "nixfred_art.h"
 
 #define NOTICES 24
 #define QUESTION_MAX 4
@@ -169,6 +170,7 @@ typedef struct {
     question_item_t item[QUESTION_MAX];
     int count, index, choice, drag;
     bool valid, pending, supported, loading, uncertain;
+    bool permission;   // nixfred: any item carried `permission: true` (the red ring and the lock)
     char token[48], fetch[48], error[120], speech_error[96];
     uint32_t revision, deadline;
 } question_t;
@@ -239,6 +241,12 @@ static EXT_RAM_BSS_ATTR struct {
     uint8_t status_phase;
     int start_x, start_y, last_x, last_y;
     uint32_t touch_started;
+    // nixfred graphics: the boot scanner's step, the firmware transfer's percent (-1 when none), and the
+    // initials of the person a question waits on. No cable message carries initials or an avatar yet:
+    // this is the hook a host-supplied identity fills, and until then the badge draws a neutral figure.
+    uint8_t scan_step;
+    int8_t ota_pct;
+    char avatar_initials[4];
 } s;
 static QueueHandle_t actions;
 static _Atomic(TaskHandle_t) reload_waiter;
@@ -656,9 +664,21 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
 {
     ht_center(f, y, UI_FONT, c, t);
 }
+// The boot / loading / transfer face (nixfred/DESIGN.md): the glowing Harness mark, and the rim either
+// filling with the transfer's percent or carrying a scanner that moves once a second, so a stuck boot is
+// a stopped line rather than a static wordmark that looks the same alive or hung.
 static void render_brand(ht_scene_t *f)
 {
-    center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
+    nixfred_boot_face(f, ACCENT, FG, s.view == OTA ? s.ota_pct : -1, s.scan_step);
+}
+static bool brand_visible(void)
+{
+    return !display_is_asleep() && (s.view == OTA || (s.view == HOME && (!s.connected || s.loading)));
+}
+// Waiting (yellow) or permission (red, with the lock) around every question screen.
+static void question_chrome(ht_scene_t *f)
+{
+    nixfred_attention(f, s.q.permission, s.avatar_initials, color(HT_THEME_QUESTION), color(HT_THEME_FAILED), FG);
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
@@ -780,6 +800,10 @@ static void surface_tick(uint32_t now)
     }
     if (s.view == TABS && !display_is_asleep() && ht_tab_carousel_tick(&tab_carousel, now)) change();
     if (home_caption_tick(now)) change();
+    if (brand_visible() && !(s.view == OTA && s.ota_pct >= 0)) {
+        uint8_t step = (uint8_t)((now / (1000 / NIXFRED_SCAN_STEPS)) % NIXFRED_SCAN_STEPS);
+        if (step != s.scan_step) { s.scan_step = step; change(); }
+    }
     uint8_t phase = status_animated() ? ht_shimmer_phase(now * status_speed()) : 0;
     if (phase != s.status_phase) { s.status_phase = phase; change(); }
     bool main = s.view == HOME || s.view == AGENT;
@@ -1206,6 +1230,7 @@ static void question_text(ht_scene_t *f, const char *value)
 }
 static void render_question(ht_scene_t *f)
 {
+    question_chrome(f);
     heading(f, s.q.name[0] ? s.q.name : "Question");
     if (s.q.loading) {
         center(f, 214, "Reading the question...", DIM);
@@ -1245,6 +1270,7 @@ static void render_question(ht_scene_t *f)
 }
 static void render_choices(ht_scene_t *f)
 {
+    question_chrome(f);
     heading(f, s.q.name);
     question_item_t *q = &s.q.item[s.q.index];
     char label[64]; snprintf(label,sizeof label,"%s %d / %d",q->multi ? "choose any" : "choose one",s.q.choice+1,q->count);
@@ -1258,6 +1284,7 @@ static void render_choices(ht_scene_t *f)
 }
 static void render_answer_review(ht_scene_t *f)
 {
+    question_chrome(f);
     heading(f, s.q.name);
     if (s.q.error[0]) {
         ht_wrap(f,FACE_CX(336),166,336,5,0,UI_FONT,DIM,s.q.error);
@@ -2865,6 +2892,10 @@ uint32_t habitat_next_wake_ms(void)
     if (character.motion.next_ms && character.motion.next_ms < delay) delay = character.motion.next_ms;
     if (home_caption_rotates() && home_caption.next_ms && home_caption.next_ms < delay)
         delay = home_caption.next_ms;
+    if (brand_visible() && !(s.view == OTA && s.ota_pct >= 0)) {
+        uint32_t period = 1000 / NIXFRED_SCAN_STEPS, due = period - now % period;
+        if (due < delay) delay = due ? due : 1;
+    }
     if (status_animated()) {
         uint32_t due = status_wake_ms(now);
         if (due < delay) delay = due;
@@ -2981,6 +3012,7 @@ void ui_init(void)
     display_lock();
     memset(&s, 0, sizeof(s));
     s.active = -1;
+    s.ota_pct = -1;
     s.pressed = -1;
     s.brightness = (config_load_brightness() * 100 + 127) / 255;
     s.muted = config_load_muted();
@@ -3836,7 +3868,7 @@ void ui_notif_replace(const cable_notif_t *rows, int count)
 }
 static void question_load(const cJSON *questions)
 {
-    s.q.count=s.q.index=s.q.choice=0; s.q.supported=true; s.q.valid=false;
+    s.q.count=s.q.index=s.q.choice=0; s.q.supported=true; s.q.valid=false; s.q.permission=false;
     memset(s.q.item,0,sizeof s.q.item);
     const cJSON *item;
     cJSON_ArrayForEach(item,questions) {
@@ -3849,6 +3881,7 @@ static void question_load(const cJSON *questions)
         COPY(q->prompt,cJSON_IsString(prompt) ? prompt->valuestring : "");
         q->multi=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,"multi"));
         q->can_text=!q->multi && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,"canText"));
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,"permission"))) s.q.permission=true;
         if (!cJSON_IsString(key) || !q->key[0] || strlen(key->valuestring)>=sizeof q->key ||
             !cJSON_IsString(prompt) || !q->prompt[0] || strlen(prompt->valuestring)>=sizeof q->prompt ||
             !ht_can_display(q->prompt,UI_FONT,348,256)) s.q.supported=false;
@@ -4507,12 +4540,18 @@ void ui_ota_boot_show(const char *version)
     audio_client_abort();
     display_lock();
     voice_close();
+    s.ota_pct = 0;
     view(OTA);
     display_unlock();
 }
 void ui_ota_boot_pct(int percent)
 {
-    (void)percent; // Static wordmark; transfer progress stays in the host logs.
+    // The rim fills with it (render_brand). Only a whole-percent change repaints: this is called per chunk.
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    display_lock();
+    if (s.ota_pct != percent) { s.ota_pct = (int8_t)percent; change(); }
+    display_unlock();
 }
 bool ui_voice_is_recording(void) { return audio_client_recording(); }
 bool ui_voice_is_active(void) { return audio_client_active(); }

@@ -1,7 +1,7 @@
 // How the wheel's rows are composed: the local row, and the fleet's rows around it.
 import { describe, expect, it, vi } from 'vitest'
 
-import { DaemonCableHost, cableEventFor, type CableHostWiring } from './cableHost.js'
+import { DaemonCableHost, cableEventFor, cableQuestionFor, withPermissionFlag, type CableHostWiring } from './cableHost.js'
 import type { FleetMachine, MachineFleet } from './machineFleet.js'
 
 const AGENTS: Array<{ agentId: string; registeredAt: number; active: boolean; terminalAvailable: boolean; engine: string }> = []
@@ -748,5 +748,22 @@ describe('spoken question capability', () => {
     expect((await host.answerReviewed({ ...answer, agentId: 'spoken-remote' })).ok).toBe(false)
     expect(fleet.answer).not.toHaveBeenCalled(); expect(fleet.answerReviewed).not.toHaveBeenCalled()
     expect(answerReviewed).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('nixfred: a permission prompt reaches the dial marked', () => {
+  const shaped = [{ key: 'q0', q: 'Allow: git push?', options: ['Yes', 'No'], multi: false }]
+  it('adds permission: true to every item of a permission dialog, without touching the input', () => {
+    const marked = withPermissionFlag(shaped, true) as Array<Record<string, unknown>>
+    expect(marked[0].permission).toBe(true)
+    expect(marked[0].q).toBe('Allow: git push?')
+    expect((shaped[0] as Record<string, unknown>).permission).toBeUndefined()
+  })
+  it('leaves an ordinary question exactly as it was', () => {
+    expect(withPermissionFlag(shaped, false)).toBe(shaped)
+  })
+  it('survives the trip through cableQuestionFor', () => {
+    const q = cableQuestionFor({ type: 'commander_question', agentId: 'a', payload: { requestId: 'r', questions: withPermissionFlag(shaped, true) } })
+    expect((q?.questions as Array<Record<string, unknown>>)[0].permission).toBe(true)
   })
 })
