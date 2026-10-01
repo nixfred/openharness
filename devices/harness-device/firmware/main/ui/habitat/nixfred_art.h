@@ -134,5 +134,12 @@ typedef struct { char name[10]; uint16_t used; int16_t banked; uint16_t tone; } 
 void nixfred_plans_face(ht_scene_t *f, const nixfred_plan_t *plan, int n, int pick, uint16_t ink,
                         uint16_t dim);
 
+// ---- slice 4: hold anywhere for the session list ---------------------------------------------------------
+
+// Hold feedback: a dim track all the way round the rim and a thick accent arc filling clockwise from 12
+// o'clock as the finger stays down (`permille` 0..1000 of the hold). Always two runs, so each step of the
+// fill is a damage diff of the rim sector it grew into. Drawn last, over whatever face is showing.
+void nixfred_hold_rim(ht_scene_t *f, int permille, uint16_t accent);
+
 // One line centred on `cx`, cut to whole letters with ".." to fit `max_w` px.
 void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, const char *text, int max_w);

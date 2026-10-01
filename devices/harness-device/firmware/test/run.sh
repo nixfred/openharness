@@ -89,6 +89,17 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_nixfred_slice3"
 
+# nixfred slice 4: the hold feedback ring (hold anywhere for the session list).
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_nixfred_hold" "$here/test_nixfred_hold.c" "$here/../main/ui/habitat/nixfred_art.c" \
+   "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/character.c" \
+   "$here/../main/ui/habitat/illustrated.c" "$here/../main/ui/habitat/character_motion.c" \
+   "$here/../main/ui/habitat/character_layout.c" "$here/../main/ui/habitat/tux.c" "$here/../main/ui/habitat/focus.c" \
+   "$here/../main/ui/habitat/lvgl_fonts.c" "$here/../main/ui/habitat/lvgl_icons.c" "$here/../main/ui/habitat/octopus.c" \
+   "$here/../main/ui/habitat/octopus_font.c" "$here/../main/ui/habitat/ascii_clip.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_nixfred_hold"
+
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main/ui/habitat" -o "$out/test_arc_storage" "$here/test_arc_storage.c" \
    "$here/reference79/terminal_ref.c" "$here/../main/ui/habitat/fonts.c"

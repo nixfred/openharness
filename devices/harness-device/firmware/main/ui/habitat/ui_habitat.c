@@ -267,6 +267,7 @@ static EXT_RAM_BSS_ATTR struct {
     int nf_plan_pick;
     int nf_retries;                         // connection attempts since the link was last up
     uint32_t nf_view_at, nf_orbit, nf_orbit_at, nf_scan_at;
+    uint8_t nf_hold_step;                   // slice 4: how far the hold ring has filled, 0..19 (0: none)
     uint8_t nf_last_view, nf_was_ambient;
     uint32_t nf_card_at, nf_card_gone;      // card arrival; when its dismiss began (0: not dismissed)
     char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
@@ -566,6 +567,7 @@ static void input_cancel(void)
     s.coasting = false;
     ht_tab_carousel_cancel(&tab_carousel);
     s.voice_review_preview = false;
+    s.nf_hold_step = 0;
     if (s.touch_down) s.touch_cancelled = true;
     s.pressed = -1;
 }
@@ -937,9 +939,93 @@ static uint32_t status_wake_ms(uint32_t now)
     return (ht_shimmer_wake_ms(now * speed) + speed - 1) / speed;
 }
 static void dispatch(action_t a);   // the hold below acts at once; defined with the other actions
+// The session list: Focus's pane list (the AGENTS view), scrolled so the active agent is in sight.
+static void agents_open(void)
+{
+    view(AGENTS);
+    if (s.view != AGENTS) return;
+    int last = s.count > TAB_ROWS ? s.count - TAB_ROWS : 0;
+    s.offset = s.active - TAB_ROWS / 2;
+    if (s.offset > last) s.offset = last;
+    if (s.offset < 0) s.offset = 0;
+}
+/*
+ * nixfred slice 4: HOLD ANYWHERE FOR THE SESSION LIST.
+ *
+ * A still finger held NF_HOLD_MS opens the session list while it is still down; the rest of that contact
+ * is consumed, so lifting or sliding afterwards selects nothing. From NF_HOLD_SHOW_MS a ring fills on the
+ * rim so the hold is visibly registering; a tap (350 ms at most) shows at most a sliver of it.
+ *
+ * The existing long presses win where they live, so the hold is not armed:
+ *   - in VOICE (hold = stop into a draft review), DRAFT / DRAFT_OPTIONS (hold on Edit = options), FORM,
+ *     SELECTION and ANSWER_REVIEW (an answer or text being composed), OTA, and AGENTS (already there);
+ *   - on the home or agent face's footer controls (microphone, bell, tab pill, return, drop, the
+ *     workspace slider): they are pressed and released, and a slow press must still be a press. The
+ *     agent's name is the exception: its press opens this same list, so holding it simply gets there;
+ *   - on a creature skin's middle (A_PET), which keeps its own hold-for-tabs. On Focus, the only skin the
+ *     device build draws, the middle of the face is where this hold lives.
+ * A hold never dispatches what is under the finger: on a question or permission screen it leaves the
+ * question open and answered by nothing.
+ */
+enum { NF_HOLD_SHOW_MS = 200, NF_HOLD_MS = 650, NF_HOLD_STEPS = 20, NF_HOLD_FRAME_MS = 30 };
+static bool nf_hold_armed(void)
+{
+    if (!s.touch_down || s.touch_cancelled || !gesture.live || gesture.moved || gesture.guarded || s.touch_brake)
+        return false;
+    if (display_is_asleep() || brand_visible() || s.voice_open || form.id[0] || draft.page.active) return false;
+    switch (s.view) {
+    case AGENTS: case VOICE: case FORM: case DRAFT: case DRAFT_OPTIONS: case SELECTION: case ANSWER_REVIEW: case OTA:
+        return false;
+    default:
+        break;
+    }
+    bool surface = s.view == HOME || s.view == AGENT;
+    // The title (A_AGENTS) is a footer too, but it opens this same list: holding it gets there sooner.
+    if (surface && home_footer(pressed_action.kind) && pressed_action.kind != A_AGENTS) return false;
+    if (surface && pressed_action.kind == A_PET && character.id != HT_CHARACTER_FOCUS) return false;
+    return true;
+}
+// How far the hold has got, 0..1000; 0 until the ring shows, and whenever the hold is not armed.
+static int nf_hold_permille(uint32_t now)
+{
+    if (!nf_hold_armed()) return 0;
+    uint32_t t = now - s.touch_started;
+    if (t < NF_HOLD_SHOW_MS) return 0;
+    if (t >= NF_HOLD_MS) return 1000;
+    return (int)((t - NF_HOLD_SHOW_MS) * 1000 / (NF_HOLD_MS - NF_HOLD_SHOW_MS));
+}
+// Milliseconds until the hold needs the glass again (the ring's next frame or its end); 0: no hold.
+static uint32_t nf_hold_wait(uint32_t now)
+{
+    if (!nf_hold_armed()) return 0;
+    uint32_t t = now - s.touch_started;
+    if (t >= NF_HOLD_MS) return 1;
+    if (t < NF_HOLD_SHOW_MS) return NF_HOLD_SHOW_MS - t;
+    uint32_t left = NF_HOLD_MS - t;
+    return left < NF_HOLD_FRAME_MS ? left : NF_HOLD_FRAME_MS;
+}
+// Advance the ring; at the end of the hold open the session list. True when it opened.
+static bool nf_hold_tick(uint32_t now)
+{
+    int pm = nf_hold_permille(now);
+    if (pm >= 1000) {
+        ESP_LOGI("habitat", "hold: session list");
+        s.nf_hold_step = 0;
+        agents_open();
+        // view() consumed the contact; if it refused to move, consume it anyway so this fires once.
+        if (s.touch_down) s.touch_cancelled = true;
+        s.pressed = -1;
+        change();
+        return true;
+    }
+    uint8_t step = (uint8_t)(pm * NF_HOLD_STEPS / 1000);
+    if (step != s.nf_hold_step) { s.nf_hold_step = step; change(); }
+    return false;
+}
 static void surface_tick(uint32_t now)
 {
     notice_flush_reads(now);
+    if (nf_hold_tick(now)) return;
     if (companion_celebrating && (now-celebration_began>=2400 || s.view!=HOME || s.quiet || !follow_companion || display_is_asleep() || character_mood()==HT_CHARACTER_ATTENTION)) {
         companion_celebrating=false; select_companion(); change();
     }
@@ -2293,6 +2379,7 @@ bool habitat_scene_take(ht_scene_t *f)
         break;
     }
     nf_transition(f, ms(), s.view == HOME && nf_ambient_on(ms()));
+    if (s.nf_hold_step) nixfred_hold_rim(f, s.nf_hold_step * (1000 / NF_HOLD_STEPS), ACCENT);
     return true;
 }
 
@@ -2526,14 +2613,9 @@ static void dispatch(action_t a)
         if (visit.pending) { ht_visit_close(&visit); s.pending_focus[0] = 0; }
         view(HOME);
         break;
-    case A_AGENTS: {
-        view(AGENTS);
-        int last = s.count > TAB_ROWS ? s.count - TAB_ROWS : 0;
-        s.offset = s.active - TAB_ROWS / 2;
-        if (s.offset > last) s.offset = last;
-        if (s.offset < 0) s.offset = 0;
+    case A_AGENTS:
+        agents_open();
         break;
-    }
     case A_AGENT: {
         int i = find(a.id);
         if (i < 0)
@@ -3353,6 +3435,10 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t due = 650;
         uint32_t left = elapsed >= due ? 1 : due - elapsed;
         if (left < delay) delay = left;
+    }
+    {
+        uint32_t hold = nf_hold_wait(now);
+        if (hold && hold < delay) delay = hold;
     }
     uint32_t deadlines[] = {s.pet_pose ? s.pet_until : 0, s.nap ? s.nap_until : 0,
                             s.voice_retry_until};

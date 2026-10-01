@@ -594,3 +594,14 @@ void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t
 {
     text_centred(f, cx, y, font, ink, f->background, text, max_w);
 }
+
+void nixfred_hold_rim(ht_scene_t *f, int permille, uint16_t accent)
+{
+    if (permille < 0) permille = 0;
+    if (permille > 1000) permille = 1000;
+    // The track says "keep holding, this is how far it goes"; the fill is how far it has got.
+    ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, 0, HT_TURN, dim(accent, 30));
+    int sweep = permille * HT_TURN / 1000;
+    ht_ring(f, CX, CY, NIXFRED_RIM_IN - 6, NIXFRED_RIM_OUT, 0, sweep > 0 ? sweep : 1,
+            sweep > 0 ? accent : dim(accent, 30));
+}

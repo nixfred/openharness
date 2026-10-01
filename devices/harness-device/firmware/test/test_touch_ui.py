@@ -79,6 +79,7 @@ static struct {
     uint32_t nf_tick, nf_done_at, nf_fail_at, nf_msg_at; char nf_done_agent[ID_MAX]; uint8_t nf_msg_kind; int nf_stopped;
     int nf_plan_count; uint16_t nf_plan_used[NIXFRED_PLANS_MAX]; unsigned nf_plan_tone[NIXFRED_PLANS_MAX];
     int nf_retries; // slice 3: the connecting ring and the notification card
+    uint8_t nf_hold_step; // slice 4: the hold ring (ui_habitat.c's field, mirrored)
     uint32_t nf_card_at, nf_card_gone; char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
 } s;
 static bool nf_msg_keep;
@@ -222,7 +223,9 @@ code += function('settings_item') + function('settings_count') + function('hit_c
 code += function('find')
 # nixfred graphics: the slice-2 constants, then its helpers, ahead of the render functions that call them.
 code += source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[0] + '\n' + source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[1] + '\n'
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'brand_visible', 'heading', 'question_chrome', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'nf_palette', 'nf_state', 'nf_states', 'nf_home_live', 'nf_done_running', 'nf_period', 'nf2_period', 'nf_plan_color', 'nf_home_rim', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+# nixfred slice 4: the hold's timings, exactly as ui_habitat.c has them.
+code += [l for l in source.split('\n') if l.startswith('enum { NF_HOLD_SHOW_MS')][0] + '\n'
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'brand_visible', 'heading', 'question_chrome', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'nf_palette', 'nf_state', 'nf_states', 'nf_home_live', 'nf_done_running', 'nf_period', 'nf2_period', 'nf_plan_color', 'nf_home_rim', 'agents_open', 'nf_hold_armed', 'nf_hold_permille', 'nf_hold_wait', 'nf_hold_tick', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
@@ -1146,6 +1149,78 @@ static void tab_frame_checks(void) {
         previous=scene;
     }
     puts("tab frames: long/UTF-8 names, bounds, clipped movement and exact partial redraw PASS");
+    reset();
+}
+// nixfred slice 4: hold anywhere opens the session list (Focus's pane list, the AGENTS view).
+static void focus_setup(void) { workspace_setup(); ht_character_select(&character,HT_CHARACTER_FOCUS); scene_take(); }
+static void hold_at(int x, int y, uint32_t t0, uint32_t until) {
+    habitat_touch(true,x,y,t0);
+    for (uint32_t t=t0+4; t<=until; t+=4) habitat_touch(true,x,y,t);
+}
+static void question_setup(bool permission) {
+    reset(); ht_character_select(&character,HT_CHARACTER_FOCUS);
+    s.view=QUESTION; s.q.valid=s.q.supported=true; s.q.count=1; s.q.revision=1; s.q.permission=permission;
+    strcpy(s.q.agent,"a"); strcpy(s.q.token,"token-a"); strcpy(s.q.name,"Research helper");
+    strcpy(s.q.item[0].prompt,"Run the migration?"); s.q.item[0].count=2;
+    strcpy(s.q.item[0].options[0],"Yes"); strcpy(s.q.item[0].options[1],"No");
+    scene_take();
+}
+static void longpress_checks(void) {
+    // Focus home, the middle of the face: no ring for a tap's worth of time, then it fills, then the
+    // session list opens while the finger is still down, and the release does nothing more.
+    // On the harness's Focus layout: y 90..110 the tab pill, 130..230 the agent's name (A_AGENTS),
+    // 250..350 the middle (A_PET), 370 and below the microphone.
+    focus_setup(); hold_at(233,300,1000,1150); assert(s.view==HOME && !s.nf_hold_step);
+    hold_at(233,300,1152,1420); assert(s.view==HOME && s.nf_hold_step>0 && s.nf_hold_step<20);
+    hold_at(233,300,1424,1700); assert(s.view==AGENTS && s.touch_cancelled && !s.nf_hold_step);
+    habitat_touch(false,233,300,1750); scene_take();
+    assert(s.view==AGENTS && !starts && !tab_switches && !switches && !boops);
+    // Holding the agent's name gets to the same list; a tap on it still opens it as before.
+    focus_setup(); hold_at(233,180,1000,1700); assert(s.view==AGENTS && s.touch_cancelled);
+    habitat_touch(false,233,180,1750); assert(s.view==AGENTS);
+    focus_setup(); tap(1000,233,180); assert(s.view==AGENTS);
+    // The same from an agent's face, and from the inbox, the tab list, settings and machines.
+    const int views[]={AGENT,INBOX,TABS,SETTINGS,MACHINES};
+    for (unsigned i=0;i<sizeof views/sizeof *views;i++) {
+        focus_setup(); view((view_t)views[i]); scene_take();
+        hold_at(233,300,1000,1700); assert(s.view==AGENTS && !starts && !switches && !tab_switches);
+        habitat_touch(false,233,300,1750); assert(s.view==AGENTS);
+    }
+    // A drag is never a hold; a release before the end opens nothing and clears the ring.
+    focus_setup(); hold_at(233,300,1000,1300); habitat_touch(true,233,240,1310); hold_at(233,240,1314,1800);
+    assert(s.view!=AGENTS && !s.nf_hold_step); habitat_touch(false,233,240,1810);
+    focus_setup(); hold_at(233,300,1000,1500); assert(s.nf_hold_step);
+    habitat_touch(false,233,300,1504); scene_take(); assert(s.view==HOME && !s.nf_hold_step && !starts);
+    // The tab pill keeps its slow press: released on target it opens the tab list, never the sessions.
+    focus_setup(); hold_at(233,100,1000,1700); assert(s.view==HOME && !s.nf_hold_step);
+    habitat_touch(false,233,100,1750); assert(s.view==TABS);
+    // The existing long presses win where they live. The microphone footer still starts speech on a
+    // slow press (released on target), and never opens the session list under the finger.
+    focus_setup(); hold_at(233,420,1000,1700); assert(s.view==HOME && !s.nf_hold_step);
+    habitat_touch(false,233,420,1750); assert(starts==1 && s.view==VOICE);
+    // Holding in the voice screen is still "stop into a draft review", not the session list.
+    hold_at(233,300,3000,3700); assert(s.view==VOICE && !s.nf_hold_step);
+    habitat_touch(false,233,300,3750);
+    // A creature skin keeps its hold-for-tabs on the middle of the face.
+    workspace_setup(); hold_at(233,230,1000,1700); assert(s.view==TABS);
+    habitat_touch(false,233,230,1750);
+    // A question or a permission is NEVER answered by a hold, wherever the finger is, the answer
+    // button included; the session list opens and the question stays open for later.
+    for (int permission=0; permission<2; permission++) {
+        const int spots[][2]={{305,393},{233,320},{233,240},{160,393},{233,60}};
+        for (unsigned i=0;i<sizeof spots/sizeof *spots;i++) {
+            question_setup(permission); question_sends=0;
+            hold_at(spots[i][0],spots[i][1],1000,1700);
+            habitat_touch(true,spots[i][0]+3,spots[i][1]+3,1704);
+            habitat_touch(false,spots[i][0]+3,spots[i][1]+3,1760); scene_take();
+            assert(s.view==AGENTS && !question_sends && !s.q.pending && !s.q.item[0].selected && s.q.valid);
+        }
+    }
+    // The wake schedule asks for the ring's frames while it fills and for the moment it completes.
+    focus_setup(); habitat_touch(true,233,300,1000);
+    assert(nf_hold_wait(1000)==200 && nf_hold_wait(1300)>0 && nf_hold_wait(1300)<=30 && nf_hold_wait(1649)==1);
+    habitat_touch_cancel(); assert(!s.nf_hold_step && !nf_hold_wait(1300));
+    puts("long press: hold anywhere opens the session list; mic, voice, creature tabs and questions keep theirs PASS");
     reset();
 }
 int main(int argc, char **argv) {
@@ -2079,6 +2154,7 @@ int main(int argc, char **argv) {
     habitat_touch(true,233,220,2000); surface_tick(2700); assert(!s.voice_review_preview);
     habitat_touch(false,233,220,2800); assert(!stops && !reviews && recording);
     tap(3400,233,220); assert(stops==1 && !reviews);
+    longpress_checks();
     puts("touch UI: PASS (production contacts/renderers; voice start/finish/discard, target pinning, sensor cancellation, immediate scroll, swipes, round trips, congestion and holds)");
 }
 '''

@@ -5,6 +5,41 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware: hold anywhere for the session list, 2026-10-01 (branch nixfred/firmware-longpress)
+
+Sits on nixfred/main 1ad301b6. Firmware `0.0.86-nixfred.4`, ESP-IDF v5.5.0, 1,726,640 B against an 8 MB
+slot (79% free).
+
+- The session list is Focus's pane list (the AGENTS view), the list a tap on the agent's name opens.
+  A still finger held 650 ms now opens it from any screen, while the finger is still down; the rest of
+  that contact is consumed (lifting or sliding selects nothing). Movement past 12 px cancels the hold.
+- Feedback: from 200 ms a ring fills clockwise from 12 o'clock on the rim (dim track all the way round,
+  thick accent fill, `nixfred_hold_rim`, two runs, 20 steps at 30 ms frames). A tap (350 ms at most)
+  shows at most a sliver. Released early, the ring clears and nothing happens. The firmware has no
+  reduced-motion setting, so there is nothing to honour; the fill is progress, not decoration.
+- Where an existing long press lives, it wins (the hold is not armed there): the voice screen (hold =
+  stop into a draft review), a draft (hold on Edit = options), the form, the selection reader, the
+  answer review, the firmware transfer face, the boot/connecting face, and the home and agent faces'
+  footer controls (microphone, bell, tab pill, return, drop, workspace slider), whose slow press still
+  acts on release. The agent's name is armed: its press opens this same list. A creature skin keeps
+  its hold-for-tabs on the middle of the face (the device build only draws Focus).
+- Changed: on Focus, holding the middle of the home or agent face opened the workspace (tab) list;
+  it now opens the session list. The tab list is still one tap on the tab pill. A hold on a question,
+  permission, inbox, tab list, settings, machines, stop, models, message or plans screen did nothing
+  and now opens the session list. A hold never answers a question or permission: nothing under the
+  finger is dispatched, and the question stays open.
+- Not touched: the BOOT key (tap interrupts, hold 800 ms toggles the screen) and the PWR key.
+- Verified: full test/run.sh passes on gus with the slice 2 cc wrapper, with and without IDF_PATH.
+  test_touch_ui gains longpress_checks (Focus home, agent, inbox, tabs, settings, machines; title hold;
+  drag and early release; tab pill and microphone slow presses; voice hold; creature skin; ten
+  question and permission contacts that never send; the wake schedule) and runs under Tim and Tux.
+  New test_nixfred_hold.c: constant runs per step, partial redraw equals full, fill only as far as the
+  hold, inside the glass. test_voice_ui mirrors the new `nf_hold_step` field.
+  nixfred/firmware-graphics-4-host-render.png is a HOST render (25%, 60%, 95%, and over a permission
+  prompt), not a photo of the glass. Flashed over USB; the daemon logged `fw 0.0.86-nixfred.4`, no offer.
+- Not verified: the hold by a real finger on the glass, the ring by eye on the device, the hold on a
+  live question or permission prompt on the device.
+
 ## Device firmware graphics, third slice, 2026-09-30 (branch nixfred/firmware-graphics-3)
 
 Sits on nixfred/main 5e1a0b1e. Firmware `0.0.86-nixfred.3`, ESP-IDF v5.5.0, 1,727,120 B against an 8 MB
