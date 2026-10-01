@@ -5,6 +5,56 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware graphics, third slice, 2026-09-30 (branch nixfred/firmware-graphics-3)
+
+Sits on nixfred/main 5e1a0b1e. Firmware `0.0.86-nixfred.3`, ESP-IDF v5.5.0, 1,727,120 B against an 8 MB
+slot (79% free), DIRAM 45.21% used (+0.4 points). The outline masks (about 110 KB) live in PSRAM.
+
+- Ambient face: after 45 s untouched on the home face, with nobody waiting, no permission, no failure
+  and no unread notice, the dial rests. One particle per agent (up to 12) orbits a hub on three orbits
+  with a comet tail in its state colour; the orbit runs half a lap a minute at rest plus three quarters
+  per working agent (at most four). The time of day sits in the hub with "3/6 working" under it, plus a
+  scan band and two grain rings at 6 to 8 percent, never over the words. The whole face walks a 4 x 4 px
+  square 1 px a minute (burn-in). 8 fps, 4 fps once dimmed. Any touch wakes the normal face.
+- Dimming: after two quiet minutes the panel steps down to a third of its brightness (never under 8%),
+  on the way to the existing five-minute sleep. A touch restores it (display_habitat.c).
+- Connecting: a dotted ring inside the boot scanner lights one of 24 dots per connection attempt, with
+  "retry N" under the wordmark. Resets when the link comes up.
+- Pairing: device and machine pairing codes sit in a hexagon whose six edges pulse in turn from 12
+  o'clock until the daemon answers (the screen then leaves; there is no separate "snap solid" frame).
+- Machines (Focus): hexagon tiles, up to four a page, edge colour by state (green this computer, accent
+  ready, yellow needs-link, dim offline), a glow on the selected one, and for this computer a load arc
+  (amber from 80%, red from 95%) plus a thin VRAM arc (battery when there is no GPU) with the numbers.
+  Other machines draw no arcs: their capabilities do not reach this daemon.
+- Swarm: on the tabs screen, once the carousel rests on the selected tab, its name sits inside a parent
+  ring in the most urgent child's colour (glowing when someone waits) with its agents orbiting, each in
+  its own state; working children are open rings whose gap turns.
+- Notification card: another agent's finished turn slides up from the rim (green left edge, name, one
+  line of recap), holds 4.5 s and slides back. A swipe up dismisses it with a fading trail; a tap opens
+  the inbox. The active agent keeps slice 2's done motion instead.
+- Collision card: a new collision alert opens a card on the home face: both agents' rings side by side in
+  their states, a breathing red warning triangle, the detail under them, "<" back.
+- Lane tag: the active agent's policy lane letter (P, C, D, ...) in a small ring under the status line.
+- Transitions: every view change, and the ambient face coming or going, sweeps an arc around the rim in
+  320 ms (two runs that stay as invisible runs at rest, so its end is a damage diff, not a full repaint).
+- Plans face (new view NF_PLANS): tap either bottom corner of the home rim (where slice 2's plan arcs sit)
+  to open it. One big gauge arc per plan, used fill in its tone, the next plan glowing, a legend
+  ("CLAUDE 62% +8", banked signed) and "NEXT: KIMI". A tap anywhere goes back.
+- Host: `nixfred.fleet` (dialFleet in nixfredWiring.ts): local clock, one lane letter per agent, the
+  newest collision inside its hour, and this machine's load/battery/VRAM in permille. Sent on every
+  attention change, on a collision, and once a minute with the plans. `nixfred.subs` rows gain `name`
+  and `banked`. Stock firmware drops both as unknown frames.
+- Verified: firmware builds; full test/run.sh passes on gus with the same local cc wrapper as slice 2
+  (test_touch_ui, test_voice_ui, test_display_power harnesses extended); new test_nixfred_slice3.c
+  (every animation step keeps its run count and a partial redraw equals a full one; nothing outside the
+  glass; drift moves the face by exactly the drift). tsc clean; nixfredWiring and cable specs pass (414).
+  nixfred/firmware-graphics-3-host-render.png is a HOST render of the firmware's drawing calls with
+  generic names, not a photo of the glass.
+- Not verified: the glass by eye, a live collision, lane or fleet frame on the dial, the dim stage and
+  ambient timing on the device, the swipe-up dismiss with a real finger.
+- Known flake, not from this slice: "journals every watch-mode answer send" in nixfredWiring.spec.ts
+  failed once in four combined runs (two fire-and-forget journal appends, no attention change).
+
 ## Device firmware graphics, second slice, 2026-09-30 (branch nixfred/firmware-graphics-2)
 
 Sits on nixfred/main 609968b2. Firmware `0.0.86-nixfred.2`, ESP-IDF v5.5.0, 1,664,672 B against an 8 MB

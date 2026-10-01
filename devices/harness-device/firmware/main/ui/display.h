@@ -33,3 +33,7 @@ void display_set_power_cb(void (*cb)(bool on));
 // Reset the idle-off timer without a touch — ui_screens calls this while a voice turn is recording/
 // uploading/processing (voice uses the PWR key, not the touchscreen, so the screen must not auto-off).
 void display_bump_activity(void);
+// nixfred slice 3: how long since the last touch or wake (the same clock that puts the panel to sleep at
+// five minutes). The ambient face starts from it, and the panel dims to a third at NIXFRED_DIM_MS.
+uint32_t display_idle_ms(void);
+#define NIXFRED_DIM_MS 120000u

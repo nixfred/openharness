@@ -89,7 +89,8 @@ typedef enum {
     STOP,
     MODELS,
     MESSAGE,
-    OTA
+    OTA,
+    NF_PLANS   // nixfred slice 3: the subscription detail face
 } view_t;
 typedef enum {
     A_NONE,
@@ -127,7 +128,8 @@ typedef enum {
     A_SELECT_BEGIN, A_SELECT_FIND, A_SELECT_EXTEND, A_SELECT_SEND, A_RETURN, A_LATEST, A_VISIT_SEND,
     A_CARRY, A_CARRY_DROP, A_CARRY_SEND,
     A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
-    A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ
+    A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ,
+    A_NF_PLANS, A_NF_CARD   // nixfred slice 3: open the plans face; open the inbox from the card
 } action_kind_t;
 typedef struct {
     action_kind_t kind;
@@ -259,6 +261,19 @@ static EXT_RAM_BSS_ATTR struct {
     int nf_plan_count;
     uint16_t nf_plan_used[NIXFRED_PLANS_MAX];
     unsigned nf_plan_tone[NIXFRED_PLANS_MAX];
+    // nixfred graphics slice 3 (see the block above habitat_scene_take).
+    char nf_plan_name[NIXFRED_PLANS_MAX][10];
+    int16_t nf_plan_banked[NIXFRED_PLANS_MAX];
+    int nf_plan_pick;
+    int nf_retries;                         // connection attempts since the link was last up
+    uint32_t nf_view_at, nf_orbit, nf_orbit_at, nf_scan_at;
+    uint8_t nf_last_view, nf_was_ambient;
+    uint32_t nf_card_at, nf_card_gone;      // card arrival; when its dismiss began (0: not dismissed)
+    char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
+    int32_t nf_clock_s;                     // -1: the host never said
+    uint32_t nf_clock_at;
+    ui_nf_fleet_t nf_fleet;                 // lanes, this machine's capabilities, the collision alert
+    uint32_t nf_alert_seen;
 } s;
 static QueueHandle_t actions;
 static _Atomic(TaskHandle_t) reload_waiter;
@@ -684,6 +699,15 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
 static void render_brand(ht_scene_t *f)
 {
     nixfred_boot_face(f, ACCENT, FG, s.view == OTA ? s.ota_pct : -1, s.scan_step);
+    if (s.view != OTA && !s.connected && s.nf_retries > 0) {
+        // nixfred: one dot per connection attempt; past a lap, the count.
+        nixfred_connect_dots(f, s.nf_retries, ACCENT, color(0x262626));
+        if (s.nf_retries > 1) {
+            char line[16];
+            snprintf(line, sizeof line, "retry %d", s.nf_retries - 1);
+            ht_center(f, 352, &ht_mono_20, DIM, line);
+        }
+    }
 }
 static bool brand_visible(void)
 {
@@ -739,9 +763,17 @@ static bool nf_done_running(uint32_t now)
         now - s.nf_done_at < NF_DONE_CLOSE_MS + NF_DONE_SLIDE_MS;
 }
 // How often the glass needs a new frame right now, in ms; 0 when nothing nixfred draws is moving.
+static uint32_t nf3_period(uint32_t now);
+static uint32_t nf2_period(uint32_t now);
+// Slice 2's clock and slice 3's, whichever needs the glass sooner.
 static uint32_t nf_period(uint32_t now)
 {
     if (display_is_asleep()) return 0;
+    uint32_t a = nf2_period(now), b = nf3_period(now);
+    return !a ? b : !b ? a : a < b ? a : b;
+}
+static uint32_t nf2_period(uint32_t now)
+{
     if (s.view == MESSAGE && s.nf_msg_kind && now - s.nf_msg_at < NIXFRED_PANIC_MS + 40) return 30;
     if (s.view == VOICE) return 42;
     if (!nf_home_live()) return 0;
@@ -1910,6 +1942,250 @@ static struct {
     ui_settings_t values;
     uint32_t fields;
 } settings_pending;
+/*
+ * nixfred graphics slice 3 (nixfred/DESIGN.md, "Device"). Ambient face, connecting dots, pairing hexagon,
+ * machine tiles, the swarm's ring of rings, the notification card, the collision card, the lane tag,
+ * view transitions and the plans face. Drawn from what the dial holds plus the optional `nixfred.fleet`
+ * frame; with no such frame each falls back to what stock shows (no clock, no lanes, no alert, no arcs).
+ */
+enum { NF_AMBIENT_AFTER_MS = 45000, NF_AMBIENT_MS = 125, NF_CARD_IN_MS = 260, NF_CARD_HOLD_MS = 4500,
+       NF_CARD_OUT_MS = 260, NF_CARD_DISMISS_MS = 320, NF_CARD_Y = 268, NF_SWEEP_FRAME_MS = 30 };
+static bool nf_quiet_fleet(uint32_t now)
+{
+    for (int i = 0; i < s.count; i++)
+        if (nf_state(&s.agents[i], now) >= NIXFRED_WAITING) return false;
+    return true;
+}
+// Nothing needs anyone and nobody has touched the glass for a while: the home face rests.
+static bool nf_ambient_on(uint32_t now)
+{
+    return s.view == HOME && s.connected && !s.loading && !display_is_asleep() &&
+        character.id == HT_CHARACTER_FOCUS && display_idle_ms() >= NF_AMBIENT_AFTER_MS &&
+        !s.voice_open && !carry.active && !carry.pending && !notice_unread(NULL) && !nf_done_running(now) &&
+        !s.nf_card_at && nf_quiet_fleet(now);
+}
+static char nf_lane_of(const char *id)
+{
+    for (int i = 0; i < s.nf_fleet.lane_count; i++)
+        if (!strcmp(s.nf_fleet.lanes[i].id, id)) return s.nf_fleet.lanes[i].letter;
+    return 0;
+}
+// The card's place: its top edge, 466 (below the glass) when it is not showing. 0 dismissed-and-gone.
+static int nf_card_y(uint32_t now, int *trail)
+{
+    *trail = 0;
+    if (!s.nf_card_at) return HT_HEIGHT;
+    uint32_t t = now - s.nf_card_at;
+    if (s.nf_card_gone) {
+        uint32_t d = now - s.nf_card_gone;
+        if (d >= NF_CARD_DISMISS_MS) { s.nf_card_at = 0; return HT_HEIGHT; }
+        *trail = (int)(d * 1000 / NF_CARD_DISMISS_MS);
+        return NF_CARD_Y;
+    }
+    int travel = HT_HEIGHT - NF_CARD_Y;
+    if (t < NF_CARD_IN_MS) { int l = (int)(NF_CARD_IN_MS - t); return NF_CARD_Y + travel * l * l / (NF_CARD_IN_MS * NF_CARD_IN_MS); }
+    if (t < NF_CARD_IN_MS + NF_CARD_HOLD_MS) return NF_CARD_Y;
+    t -= NF_CARD_IN_MS + NF_CARD_HOLD_MS;
+    if (t < NF_CARD_OUT_MS) return NF_CARD_Y + travel * (int)(t * t) / (NF_CARD_OUT_MS * NF_CARD_OUT_MS);
+    s.nf_card_at = 0;
+    return HT_HEIGHT;
+}
+static bool nf_card_up(void) { return s.nf_card_at && !s.nf_card_gone; }
+// Put a hit before every other one: the first hit under a finger wins.
+static void nf_hit_first(hit_t h)
+{
+    if (s.hit_count >= (int)(sizeof s.hits / sizeof *s.hits)) s.hit_count--;
+    memmove(&s.hits[1], &s.hits[0], (size_t)s.hit_count * sizeof *s.hits);
+    s.hits[0] = h;
+    s.hit_count++;
+}
+static void nf_clock(char *out, size_t size, uint32_t now)
+{
+    out[0] = 0;
+    if (!s.nf_clock_at) return;
+    uint32_t t = ((uint32_t)s.nf_clock_s + (now - s.nf_clock_at) / 1000) % 86400;
+    snprintf(out, size, "%02u:%02u", (unsigned)(t / 3600), (unsigned)(t / 60 % 60));
+}
+static void nf_render_ambient(ht_scene_t *f, uint32_t now)
+{
+    uint8_t st[NIXFRED_AMBIENT_MAX];
+    int n = nf_states(st, NIXFRED_AMBIENT_MAX, now), working = 0;
+    for (int i = 0; i < n; i++) working += st[i] == NIXFRED_WORKING;
+    // The orbit's pace is the amount of work: half a lap a minute at rest, three quarters more per agent
+    // working, at most four laps a minute. Accumulated, so a change of pace never jumps the particles.
+    uint32_t dt = s.nf_orbit_at ? now - s.nf_orbit_at : 0;
+    if (dt > 1000) dt = 1000;
+    unsigned quarter_laps = 2 + 3 * (unsigned)working;
+    if (quarter_laps > 16) quarter_laps = 16;
+    s.nf_orbit += (uint32_t)((uint64_t)dt * HT_TURN * quarter_laps / (4 * 60000));
+    s.nf_orbit_at = now;
+    // Burn-in: the face walks a 4 x 4 px square, 1 px a minute.
+    unsigned k = (now / 60000) % 16;
+    int dx = k < 4 ? (int)k : k < 8 ? 4 : k < 12 ? (int)(12 - k) : 0;
+    int dy = k < 4 ? 0 : k < 8 ? (int)(k - 4) : k < 12 ? 4 : (int)(16 - k);
+    char clock[8], line[32];
+    nf_clock(clock, sizeof clock, now);
+    if (!n) snprintf(line, sizeof line, "no agents");
+    else if (working) snprintf(line, sizeof line, "%d/%d working", working, n);
+    else snprintf(line, sizeof line, n == 1 ? "1 agent" : "%d agents", n);
+    nixfred_palette_t p = nf_palette();
+    nixfred_ambient(f, st, n, (int)(s.nf_orbit % HT_TURN), (int)((now / 40) % (HT_HEIGHT - 12)), dx - 2, dy - 2,
+                    clock, line, &p);
+    s.hits[s.hit_count++] = (hit_t){{0, 0, HT_WIDTH, HT_HEIGHT}, A_PET, 0, true}; // a touch only wakes it
+}
+// What slice 3 adds over the home face: the lane tag, the plans' tap target and the notification card.
+static void nf_home_extras(ht_scene_t *f, uint32_t now)
+{
+    if (!s.connected || s.loading) return;
+    agent_t *a = active();
+    char lane = a ? nf_lane_of(a->id) : 0;
+    if (lane && character.id == HT_CHARACTER_FOCUS && !a->recap_ready && !carry.active) {
+        char l[2] = {lane, 0};
+        ht_ring(f, HT_WIDTH / 2, 302, 10, 12, 0, HT_TURN, DIM);   // under the status line, above the summary
+        ht_text(f, HT_WIDTH / 2 - ht_mono_16.width / 2, 302 - ht_mono_16.height / 2, ht_mono_16.width, &ht_mono_16,
+                FG, BG, l);
+    }
+    if (s.nf_plan_count > 0) {   // the plan arcs sit in the bottom corners of the rim; a tap opens them
+        nf_hit_first((hit_t){{30, 360, 108, 84}, A_NF_PLANS, 0, true});
+        nf_hit_first((hit_t){{328, 360, 108, 84}, A_NF_PLANS, 0, true});
+    }
+    int trail, y = nf_card_y(now, &trail);
+    if (y < HT_HEIGHT) {
+        nixfred_palette_t p = nf_palette();
+        nixfred_card(f, y, p.green, s.nf_card_name, s.nf_card_text, trail, FG, DIM);
+        if (nf_card_up()) nf_hit_first((hit_t){{NIXFRED_CARD_X, y, NIXFRED_CARD_W, NIXFRED_CARD_H}, A_NF_CARD, 0, true});
+    }
+}
+static void nf_render_machines(ht_scene_t *f)
+{
+    focus_title(f, "machines");
+    int count = s.machine_count - s.offset;
+    if (count <= 0) { focus_centred(f, 214, &ht_lv_geist_med_28.base, DIM, BG, "Nothing here yet."); }
+    if (count > 4) count = 4;
+    static const int at[4][4][2] = {
+        {{233, 200}}, {{150, 200}, {316, 200}}, {{150, 130}, {316, 130}, {233, 290}},
+        {{150, 130}, {316, 130}, {150, 290}, {316, 290}}};
+    nixfred_palette_t p = nf_palette();
+    for (int k = 0; k < count; k++) {
+        int i = s.offset + k, cx = at[count - 1][k][0], cy = at[count - 1][k][1];
+        const cable_machine_t *m = &s.machines[i];
+        bool ready = !strcmp(m->state, "ready") || m->local;
+        uint16_t edge = !strcmp(m->state, "offline") ? DIM : !strcmp(m->state, "needs-link") ? color(HT_THEME_QUESTION) :
+            m->local ? p.green : p.accent;
+        bool mine = s.nf_fleet.machine_id[0] ? !strcmp(s.nf_fleet.machine_id, m->id) : m->local;
+        int load = mine ? s.nf_fleet.load : -1, aux = mine ? (s.nf_fleet.vram >= 0 ? s.nf_fleet.vram : s.nf_fleet.battery) : -1;
+        bool selected = !strcmp(s.selected_machine, m->id);
+        nixfred_machine_tile(f, cx, cy, edge, selected, load, aux, &p);
+        nixfred_label(f, cx, cy + 68, &ht_lv_geist_reg_20.base, selected ? FG : DIM, m->name, 150);
+        if (load >= 0) {
+            char line[40];
+            if (aux >= 0) snprintf(line, sizeof line, "%d%% %s %d%%", (load + 5) / 10,
+                                   s.nf_fleet.vram >= 0 ? "vram" : "bat", (aux + 5) / 10);
+            else snprintf(line, sizeof line, "load %d%%", (load + 5) / 10);
+            nixfred_label(f, cx, cy - 8, &ht_mono_16, FG, line, 70);
+        }
+        s.hits[s.hit_count++] = (hit_t){{cx - 64, cy - 64, 128, 128}, A_MACHINE, i, s.connected && ready};
+    }
+    ht_text(f, 223, 400, 20, &ht_nav_32, DIM, BG, "\xe2\x86\x90");
+    s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_HOME, 0, true};
+}
+// The selected tab as a ring of rings around its name: the tab in the centre, its agents orbiting.
+static bool nf_swarm_visible(void)
+{
+    int current = ht_tab_carousel_index(&tab_carousel);
+    return character.id == HT_CHARACTER_FOCUS && s.view == TABS && current >= 0 && current < s.tab_count &&
+        !tab_carousel.touching && !tab_carousel.animating && !strcmp(s.tabs[current].id, s.selected_tab) && s.count > 0;
+}
+static void nf_swarm_overlay(ht_scene_t *f, uint32_t now)
+{
+    if (!nf_swarm_visible()) return;
+    uint8_t st[12];
+    int n = nf_states(st, 12, now), working = 0;
+    for (int i = 0; i < n; i++) working += st[i] == NIXFRED_WORKING;
+    nixfred_palette_t p = nf_palette();
+    nixfred_swarm(f, HT_WIDTH / 2, HT_HEIGHT / 2, 116, 160, st, n, working ? (now / NF_PHASE_MS) : 0, &p);
+}
+static void nf_render_plans(ht_scene_t *f)
+{
+    nixfred_plan_t plan[NIXFRED_PLANS_MAX];
+    int n = s.nf_plan_count;
+    for (int i = 0; i < n; i++) {
+        memcpy(plan[i].name, s.nf_plan_name[i][0] ? s.nf_plan_name[i] : "plan", sizeof plan[i].name);
+        plan[i].name[sizeof plan[i].name - 1] = 0;
+        plan[i].used = s.nf_plan_used[i];
+        plan[i].banked = s.nf_plan_banked[i];
+        plan[i].tone = color(nf_plan_color(s.nf_plan_tone[i]));
+    }
+    nixfred_plans_face(f, plan, n, s.nf_plan_pick - 1, FG, DIM);
+    s.hits[s.hit_count++] = (hit_t){{0, 0, HT_WIDTH, HT_HEIGHT}, A_HOME, 0, true}; // a tap anywhere goes back
+}
+// MESSAGE kinds 3 (pairing) and 4 (collision).
+static bool nf_render_message(ht_scene_t *f, uint32_t now)
+{
+    nixfred_palette_t p = nf_palette();
+    if (s.nf_msg_kind == 3) {
+        nixfred_pair_hex(f, HT_WIDTH / 2, 226, now / 150, false, ACCENT);
+        focus_centred(f, 64, &ht_lv_geist_reg_20.base, DIM, BG, s.title);
+        const ht_font_t *code = ht_measure(&ht_pixel_40, s.message) <= 210 ? &ht_pixel_40 : &ht_mono_20;
+        int w = ht_measure(code, s.message);
+        ht_text(f, (HT_WIDTH - w) / 2, 226 - code->height / 2, w > 0 ? w : 1, code, FG, BG, s.message);
+        return true;
+    }
+    if (s.nf_msg_kind == 4) {
+        int ia = find(s.nf_fleet.alert_a), ib = find(s.nf_fleet.alert_b);
+        uint8_t sa = ia >= 0 ? nf_state(&s.agents[ia], now) : NIXFRED_IDLE;
+        uint8_t sb = ib >= 0 ? nf_state(&s.agents[ib], now) : NIXFRED_IDLE;
+        nixfred_collision(f, s.nf_fleet.alert_an, sa, s.nf_fleet.alert_bn, sb, (now / NF_PHASE_MS) % NIXFRED_PHASES, &p);
+        ht_wrap(f, FACE_CX(320), 300, 320, 3, 0, UI_FONT, FG, s.nf_fleet.alert_detail);
+        control(f, 87, 67, 48, "<", A_HOME, 0, true);
+        return true;
+    }
+    return false;
+}
+// The rim sweep that introduces a new view (and the ambient face coming or going).
+static void nf_transition(ht_scene_t *f, uint32_t now, bool ambient)
+{
+    if (s.view != s.nf_last_view || ambient != s.nf_was_ambient) {
+        // Not on the first frame after boot, and not into the brand face (it has its own scanner).
+        if (s.nf_view_at || s.nf_last_view) s.nf_view_at = now | 1;
+        s.nf_last_view = (uint8_t)s.view;
+        s.nf_was_ambient = ambient;
+    }
+    if (brand_visible()) return;
+    uint32_t t = s.nf_view_at ? now - s.nf_view_at : NIXFRED_SWEEP_MS;
+    nixfred_sweep(f, t >= NIXFRED_SWEEP_MS ? 1000 : (int)(t * 1000 / NIXFRED_SWEEP_MS), ambient ? DIM : ACCENT);
+}
+static uint32_t nf3_period(uint32_t now)
+{
+    uint32_t best = 0;
+#define NF_WANT(ms_) do { uint32_t w_ = (ms_); if (!best || w_ < best) best = w_; } while (0)
+    if (s.nf_view_at && now - s.nf_view_at < NIXFRED_SWEEP_MS + 40) NF_WANT(NF_SWEEP_FRAME_MS);
+    if (nf_ambient_on(now)) NF_WANT(display_idle_ms() > NIXFRED_DIM_MS ? 250 : NF_AMBIENT_MS);
+    else if (s.view == HOME && s.connected && !s.loading && character.id == HT_CHARACTER_FOCUS &&
+             display_idle_ms() + 1000 >= NF_AMBIENT_AFTER_MS && nf_quiet_fleet(now)) NF_WANT(500); // to start it
+    if (s.view == HOME && s.nf_card_at) {
+        uint32_t t = now - s.nf_card_at;
+        NF_WANT(s.nf_card_gone || t < NF_CARD_IN_MS || t > NF_CARD_IN_MS + NF_CARD_HOLD_MS - 40 ? 30 : 250);
+    }
+    if (s.view == MESSAGE && s.nf_msg_kind == 3) NF_WANT(150);
+    if (s.view == MESSAGE && s.nf_msg_kind == 4) NF_WANT(NF_PHASE_MS);
+    if (nf_swarm_visible() && !s.quiet && !s.nap) {
+        for (int i = 0; i < s.count; i++)
+            if (nf_state(&s.agents[i], now) == NIXFRED_WORKING) { NF_WANT(NF_PHASE_MS); break; }
+    }
+#undef NF_WANT
+    return best;
+}
+// A swipe up that began on the card dismisses it with its trail. True when the card took the gesture.
+static bool nf_card_swipe(int start_y, int dy)
+{
+    if (!nf_card_up() || s.view != HOME || dy >= 0 || start_y < NF_CARD_Y - 10 || start_y > NF_CARD_Y + NIXFRED_CARD_H + 20)
+        return false;
+    s.nf_card_gone = ms() | 1;
+    change();
+    return true;
+}
+
 bool habitat_scene_take(ht_scene_t *f)
 {
 #ifdef DEVICE_CREATURE_GALLERY
@@ -1934,7 +2210,11 @@ bool habitat_scene_take(ht_scene_t *f)
         render_draft_options(f);
         break;
     case HOME:
-        render_home(f);
+        if (nf_ambient_on(ms())) nf_render_ambient(f, ms());
+        else { render_home(f); nf_home_extras(f, ms()); }
+        break;
+    case NF_PLANS:
+        nf_render_plans(f);
         break;
     case AGENTS:
         render_agents(f);
@@ -1954,7 +2234,9 @@ bool habitat_scene_take(ht_scene_t *f)
     case TABS:
     case MACHINES:
     case INBOX:
-        render_list(f);
+        if (s.view == MACHINES && character.id == HT_CHARACTER_FOCUS) nf_render_machines(f);
+        else render_list(f);
+        nf_swarm_overlay(f, ms());
         break;
     case VOICE:
         render_voice(f);
@@ -1999,6 +2281,7 @@ bool habitat_scene_take(ht_scene_t *f)
         render_brand(f);
         break;
     case MESSAGE:
+        if (nf_render_message(f, ms())) break;
         if (s.nf_msg_kind == 2) {
             nixfred_panic(f, ms() - s.nf_msg_at, s.nf_stopped, color(HT_THEME_FAILED), FG, DIM);
             control(f, 87, 67, 48, "<", A_HOME, 0, true);
@@ -2009,6 +2292,7 @@ bool habitat_scene_take(ht_scene_t *f)
         ht_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
         break;
     }
+    nf_transition(f, ms(), s.view == HOME && nf_ambient_on(ms()));
     return true;
 }
 
@@ -2294,6 +2578,13 @@ static void dispatch(action_t a)
         break;
     case A_INBOX:
         notice_open();
+        break;
+    case A_NF_CARD:
+        s.nf_card_at = 0;
+        notice_open();
+        break;
+    case A_NF_PLANS:
+        view(NF_PLANS);
         break;
     case A_NOTICE: {
         if (s.connected && !visit.pending && a.id[0]) {
@@ -2875,7 +3166,9 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         }
         int dx = x - s.start_x, dy = y - s.start_y;
         s.pressed = -1;
-        if (scrolled || s.touch_cancelled) {
+        if (!s.touch_cancelled && gesture.axis == 1 && abs(dy) > 40 && nf_card_swipe(s.start_y, dy)) {
+            // nixfred: a swipe up from the card dismissed it (with its trail).
+        } else if (scrolled || s.touch_cancelled) {
             // Motion owns this entire contact, even if it returns to its start.
         } else if (tab_contact) {
             int index = pressed_action.value;
@@ -3366,6 +3659,7 @@ void ui_set_connected(bool value)
         ht_carry_close(&carry);
     }
     s.connected = value;
+    if (value) s.nf_retries = 0;   // nixfred: the connecting ring starts over next time
     if (!value && form.id[0]) { ht_form_reset(&form); view(HOME); }
     if (!value && draft.page.active) { ht_draft_reset(&draft); view(HOME); }
     if (!value && (s.voice_open || audio_client_active())) {
@@ -3940,6 +4234,15 @@ void ui_notify_task_done(const char *id, const char *name, const char *machine, 
     uint32_t now = ms();
     { int i = find(id); if (i >= 0) s.agents[i].failed_at = 0; }
     if (!s.quiet && !s.nap) { s.nf_done_at = now | 1; COPY(s.nf_done_agent, id); }
+    {   // nixfred slice 3: another agent's finished turn slides up as a card (the active one has the done motion)
+        agent_t *shown = active();
+        if (!s.quiet && !s.nap && (!shown || strcmp(shown->id, id))) {
+            s.nf_card_at = now | 1; s.nf_card_gone = 0;
+            COPY(s.nf_card_id, id);
+            COPY(s.nf_card_name, name && *name ? name : "Harness");
+            recap_preview(s.nf_card_text, sizeof s.nf_card_text, recap);
+        }
+    }
     if (!waiting() && !s.nap && !s.quiet && (!s.last_celebration || now - s.last_celebration >= 20000)) {
         s.pet_pose = 3;
         s.pet_until = now + 2000;
@@ -4338,6 +4641,34 @@ void ui_nixfred_panic(int stopped)
     display_unlock();
 }
 // nixfred: the plans' weekly use, as the daemon's `nixfred.subs` frame carries it.
+void ui_nixfred_plan_detail(const char (*name)[10], const int16_t *banked, int pick, int n)
+{
+    display_lock();
+    if (n > NIXFRED_PLANS_MAX) n = NIXFRED_PLANS_MAX;
+    for (int i = 0; i < n; i++) { memcpy(s.nf_plan_name[i], name[i], 10); s.nf_plan_name[i][9] = 0; s.nf_plan_banked[i] = banked[i]; }
+    s.nf_plan_pick = pick >= 0 && pick < n ? pick + 1 : 0;   // stored +1: zero-initialised means none
+    change();
+    display_unlock();
+}
+// nixfred: `nixfred.fleet`. A new collision alert opens its card on the home face.
+void ui_nixfred_fleet(const ui_nf_fleet_t *fleet)
+{
+    display_lock();
+    s.nf_fleet = *fleet;
+    if (fleet->clock_s >= 0) { s.nf_clock_s = fleet->clock_s; s.nf_clock_at = ms() | 1; }
+    if (fleet->alert && fleet->alert_at != s.nf_alert_seen) {
+        s.nf_alert_seen = fleet->alert_at;
+        if (s.view == HOME && !s.voice_open && s.connected && !s.loading) {
+            s.nf_msg_kind = 4;
+            s.nf_msg_at = ms() | 1;
+            s.title[0] = s.message[0] = 0;
+            nf_msg_keep = true; view(MESSAGE); nf_msg_keep = false;
+            display_wake();
+        }
+    }
+    change();
+    display_unlock();
+}
 void ui_nixfred_plans(const uint16_t *used_permille, const uint8_t *tone, int n)
 {
     display_lock();
@@ -4697,7 +5028,14 @@ void ui_voice_error(const char *message)
     ht_gesture_guard(&gesture, ms());
     display_unlock();
 }
-void ui_show_connecting(const char *step) { (void)step; ui_enter_boot_loading(); }
+void ui_show_connecting(const char *step)
+{
+    (void)step;
+    display_lock();
+    if (s.nf_retries < 999) s.nf_retries++;   // nixfred: one dot on the connecting ring per attempt
+    display_unlock();
+    ui_enter_boot_loading();
+}
 void ui_enter_remote_offline(void)
 {
     ui_enter_boot_loading();
@@ -4710,15 +5048,26 @@ void ui_enter_link_guide(void)
 }
 void ui_leave_remote_offline_loading(void) { ui_enter_boot_loading(); }
 void ui_leave_error_screen(void) { ui_home_overview(); }
+// nixfred: a pairing code sits in a hexagon whose edges pulse until the daemon answers (the screen leaves).
+static void nf_show_pairing(const char *title, const char *code)
+{
+    display_lock();
+    COPY(s.title, title);
+    COPY(s.message, code ? code : "");
+    s.nf_msg_kind = 3;
+    s.nf_msg_at = ms() | 1;
+    nf_msg_keep = true; view(MESSAGE); nf_msg_keep = false;
+    display_unlock();
+}
 void ui_show_pairing(const char *code, int seconds)
 {
     (void)seconds;
-    ui_show_error("Pair device", code);
+    nf_show_pairing("Pair device", code);
 }
 void ui_show_e2ee_pair(const char *code, int seconds)
 {
     (void)seconds;
-    ui_show_error("Pair machine", code);
+    nf_show_pairing("Pair machine", code);
 }
 void ui_show_e2ee_paired(const char *fingerprint) { ui_show_error("Machine paired", fingerprint); }
 void ui_show_unpaired(void) { ui_enter_boot_loading(); }

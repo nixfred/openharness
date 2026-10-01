@@ -260,3 +260,337 @@ void nixfred_plans_rim(ht_scene_t *f, int start, int span, const uint16_t *used_
         else ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, s0, 1, f->background);
     }
 }
+
+// ---- slice 3 ------------------------------------------------------------------------------------------
+//
+// Ambient, connecting, pairing, machines, swarms, cards, collisions, transitions and the plans face. The
+// render path stays integer apart from placing a particle (one sinf/cosf per agent per frame, on the
+// S3's FPU). Outline masks (hexagons, the warning triangle) are rasterised once, on first use, into
+// static buffers that the device links into PSRAM, so they cost no internal RAM.
+#include <math.h>
+#include <stdio.h>
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define NF_PSRAM EXT_RAM_BSS_ATTR
+#else
+#define NF_PSRAM
+#endif
+
+uint16_t nixfred_state_color(uint8_t state, unsigned phase, uint16_t background, const nixfred_palette_t *p)
+{
+    switch (state) {
+    case NIXFRED_PERMISSION:
+    case NIXFRED_FAILED: return p->red;
+    case NIXFRED_WAITING: return over(p->yellow, background, 55 + tri(phase) * 45 / 8);
+    case NIXFRED_WORKING: return p->accent;
+    case NIXFRED_DONE: return p->green;
+    case NIXFRED_OFFLINE: return over(p->ink, background, 28);
+    default: return over(p->ink, background, 45);
+    }
+}
+
+// A point on a circle, `a` in 1/4096 turn clockwise from 12 o'clock.
+static void polar(int cx, int cy, int r, int a, int *x, int *y)
+{
+    float t = (float)a * 6.2831853f / HT_TURN;
+    *x = cx + (int)lroundf((float)r * sinf(t));
+    *y = cy - (int)lroundf((float)r * cosf(t));
+}
+
+static void text_centred(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, uint16_t bg,
+                         const char *s, int max_w)
+{
+    if (!s || !*s) return;
+    char line[HT_TEXT_BYTES];
+    snprintf(line, sizeof line, "%s", s);
+    int w = ht_measure(font, line);
+    for (size_t n = strlen(line); w > max_w && n > 1;) { // whole letters, then "..", until it fits
+        n--;
+        while (n && ((uint8_t)line[n] & 0xc0) == 0x80) n--;
+        if (n + 3 > sizeof line) continue;
+        memcpy(line + n, "..", 3);
+        w = ht_measure(font, line);
+    }
+    if (w <= 0) return;
+    ht_text(f, cx - w / 2, y, w, font, ink, bg, line);
+}
+
+void nixfred_ambient(ht_scene_t *f, const uint8_t *state, int n, int orbit, int scan_y, int drift_x,
+                     int drift_y, const char *clock, const char *line, const nixfred_palette_t *p)
+{
+    int cx = CX + drift_x, cy = CY + drift_y;
+    uint16_t bg = f->background;
+    // Grain and scanline at 6..8 percent: texture for a resting screen, never over the words.
+    ht_ring(f, cx, cy, 104, 105, 0, HT_TURN, over(p->ink, bg, 6));
+    ht_ring(f, cx, cy, 210, 211, 0, HT_TURN, over(p->ink, bg, 6));
+    {   // the band spans the glass's chord at its row (the corners of the square are not glass)
+        int dy = scan_y + 6 - CY, half = dy * dy < 228 * 228 ? (int)sqrtf((float)(228 * 228 - dy * dy)) : 0;
+        if (half < 8) half = 8;
+        ht_box(f, CX - half, scan_y, half * 2, 12, 6, over(p->accent, bg, 8), over(p->accent, bg, 8));
+    }
+    // The hub: what the particles orbit.
+    ht_ring(f, cx, cy, 86, 88, 0, HT_TURN, over(p->accent, bg, 22));
+    if (n > NIXFRED_AMBIENT_MAX) n = NIXFRED_AMBIENT_MAX;
+    for (int k = 0; k < n; k++) {
+        static const int radius[3] = {136, 164, 192};
+        int r = radius[k % 3];
+        // Inner orbits run faster, like a little planetary system; the caller sets the overall pace.
+        int a = k * HT_TURN / (n ? n : 1) + orbit * (5 - k % 3) / 4;
+        uint16_t c = nixfred_state_color(state[k], 0, bg, p);
+        ht_ring(f, cx, cy, r - 1, r + 1, a - HT_TURN / 12, HT_TURN / 12, over(c, bg, 30)); // comet tail
+        int x, y;
+        polar(cx, cy, r, a, &x, &y);
+        ht_ring(f, x, y, 0, state[k] == NIXFRED_WORKING ? 6 : 4, 0, HT_TURN, c);
+    }
+    const ht_font_t *big = &ht_lv_geist_med_38.base, *small = &ht_lv_geist_reg_20.base;
+    text_centred(f, cx, cy - 36, big, p->ink, bg, clock && *clock ? clock : "--:--", 160);
+    text_centred(f, cx, cy + 14, small, over(p->ink, bg, 55), bg, line, 150);
+}
+
+void nixfred_connect_dots(ht_scene_t *f, int retries, uint16_t accent, uint16_t dim_ink)
+{
+    if (retries < 0) retries = 0;
+    for (int k = 0; k < NIXFRED_CONNECT_DOTS; k++) {
+        bool lit = k < retries;
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN - 16, NIXFRED_RIM_IN - 8, k * HT_TURN / NIXFRED_CONNECT_DOTS - HT_TURN / 160,
+                HT_TURN / 80, lit ? accent : dim_ink);
+    }
+}
+
+// ---- outline masks ------------------------------------------------------------------------------------
+
+typedef struct { int16_t dx, dy, w, h; uint8_t *a; } nf_mask_t;
+
+// Antialiased strokes of `thick` px along `segs` (x0 y0 x1 y1 each, relative to the mask's centre).
+static void stroke(nf_mask_t *m, uint8_t *buf, int cap, const float *segs, int nseg, float thick)
+{
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    for (int i = 0; i < nseg * 2; i++) {
+        float x = segs[i * 2], y = segs[i * 2 + 1];
+        minx = fminf(minx, x); maxx = fmaxf(maxx, x); miny = fminf(miny, y); maxy = fmaxf(maxy, y);
+    }
+    float pad = thick / 2 + 2;
+    int x0 = (int)floorf(minx - pad), y0 = (int)floorf(miny - pad);
+    int w = (int)ceilf(maxx + pad) - x0, h = (int)ceilf(maxy + pad) - y0;
+    if (w * h > cap) h = cap / w;   // never past the buffer; the sizes below are chosen so this never cuts
+    m->dx = (int16_t)x0; m->dy = (int16_t)y0; m->w = (int16_t)w; m->h = (int16_t)h; m->a = buf;
+    for (int py = 0; py < h; py++)
+        for (int px = 0; px < w; px++) {
+            float x = (float)(x0 + px) + 0.5f, y = (float)(y0 + py) + 0.5f, best = 1e9f;
+            for (int s = 0; s < nseg; s++) {
+                const float *g = segs + s * 4;
+                float vx = g[2] - g[0], vy = g[3] - g[1], len = vx * vx + vy * vy;
+                float t = len > 0 ? ((x - g[0]) * vx + (y - g[1]) * vy) / len : 0;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                float ex = g[0] + t * vx - x, ey = g[1] + t * vy - y, d = sqrtf(ex * ex + ey * ey);
+                if (d < best) best = d;
+            }
+            float cover = thick / 2 + 0.5f - best;
+            buf[py * w + px] = (uint8_t)(cover <= 0 ? 0 : cover >= 1 ? 255 : (int)(cover * 255));
+        }
+}
+
+// Flat-top hexagon corners: corner i at 60*i degrees (screen y down, so i rises clockwise).
+static void hex_corner(float r, int i, float *x, float *y)
+{
+    float t = (float)i * 1.0471976f;
+    *x = r * cosf(t); *y = r * sinf(t);
+}
+enum { PAIR_EDGE_CAP = 132 * 116, TILE_CAP = 100 * 88, GLOW_CAP = 116 * 104, TRI_CAP = 84 * 76 };
+static NF_PSRAM uint8_t pair_buf[6][PAIR_EDGE_CAP], tile_buf[TILE_CAP], glow_buf[GLOW_CAP], tri_buf[TRI_CAP];
+static nf_mask_t pair_edge[6], tile_mask, glow_mask, tri_mask;
+static bool masks_ready;
+static void hex_segs(float r, float *segs)
+{
+    for (int i = 0; i < 6; i++) {
+        hex_corner(r, i, &segs[i * 4], &segs[i * 4 + 1]);
+        hex_corner(r, (i + 1) % 6, &segs[i * 4 + 2], &segs[i * 4 + 3]);
+    }
+}
+static void masks_init(void)
+{
+    if (masks_ready) return;
+    float segs[6 * 4];
+    hex_segs(NIXFRED_PAIR_R, segs);
+    for (int i = 0; i < 6; i++) stroke(&pair_edge[i], pair_buf[i], PAIR_EDGE_CAP, segs + i * 4, 1, 6);
+    hex_segs(NIXFRED_TILE_R, segs);
+    stroke(&tile_mask, tile_buf, TILE_CAP, segs, 6, 4);
+    hex_segs(NIXFRED_TILE_R + 8, segs);
+    stroke(&glow_mask, glow_buf, GLOW_CAP, segs, 6, 9);
+    // The warning triangle with its "!" inside: three edges, the bar, and the dot (a zero-length stroke).
+    const float tri[5 * 4] = {0, -34, 29.4f, 17, 29.4f, 17, -29.4f, 17, -29.4f, 17, 0, -34,
+                              0, -14, 0, 3, 0, 10, 0, 10};
+    stroke(&tri_mask, tri_buf, TRI_CAP, tri, 5, 5);
+    masks_ready = true;
+}
+static void draw_mask(ht_scene_t *f, int cx, int cy, const nf_mask_t *m, uint16_t c)
+{
+    ht_mask(f, cx + m->dx, cy + m->dy, m->w, m->h, m->a, c);
+}
+
+void nixfred_pair_hex(ht_scene_t *f, int cx, int cy, unsigned step, bool answered, uint16_t accent)
+{
+    masks_init();
+    // The lit edge walks clockwise, two steps an edge, with the one behind it still fading.
+    int lit = (int)(step / 2 % 6), behind = (lit + 5) % 6;
+    // The top edge is corners 4..5; start the walk there so the pulse begins at 12 o'clock.
+    for (int i = 0; i < 6; i++) {
+        int e = (i + 4) % 6;
+        unsigned pct = answered ? 100 : i == lit ? 100 : i == behind ? 55 : 22;
+        draw_mask(f, cx, cy, &pair_edge[e], over(accent, f->background, pct));
+    }
+}
+
+void nixfred_machine_tile(ht_scene_t *f, int cx, int cy, uint16_t edge, bool glow, int load, int aux,
+                          const nixfred_palette_t *p)
+{
+    masks_init();
+    uint16_t bg = f->background;
+    // The glow is always a run (canvas colour when not selected), so selecting is a recolour, not a reshape.
+    draw_mask(f, cx, cy, &glow_mask, glow ? over(edge, bg, 30) : bg);
+    draw_mask(f, cx, cy, &tile_mask, edge);
+    enum { R0 = NIXFRED_TILE_R + 14 };
+    if (load >= 0) {
+        if (load > 1000) load = 1000;
+        uint16_t c = load >= 950 ? p->red : load >= 800 ? 0xfd80 /* amber, as the plan arcs */ : p->accent;
+        ht_ring(f, cx, cy, R0, R0 + 5, 0, HT_TURN, over(c, bg, 18));
+        if (load > 0) ht_ring(f, cx, cy, R0, R0 + 5, 0, load * HT_TURN / 1000, c);
+    }
+    if (aux >= 0) {
+        if (aux > 1000) aux = 1000;
+        ht_ring(f, cx, cy, R0 + 8, R0 + 10, 0, HT_TURN, over(p->ink, bg, 14));
+        if (aux > 0) ht_ring(f, cx, cy, R0 + 8, R0 + 10, 0, aux * HT_TURN / 1000, over(p->ink, bg, 70));
+    }
+}
+
+void nixfred_swarm(ht_scene_t *f, int cx, int cy, int r_parent, int r_orbit, const uint8_t *child, int n,
+                   unsigned phase, const nixfred_palette_t *p)
+{
+    uint16_t bg = f->background;
+    if (n > 12) n = 12;
+    int top = NIXFRED_IDLE;
+    for (int i = 0; i < n; i++) if (child[i] > top) top = child[i];
+    uint16_t pc = nixfred_state_color((uint8_t)top, phase, bg, p);
+    // Glow is urgency: only when a child waits on someone.
+    ht_ring(f, cx, cy, r_parent, r_parent + 10, 0, HT_TURN, top >= NIXFRED_WAITING ? over(pc, bg, 20) : bg);
+    ht_ring(f, cx, cy, r_parent - 5, r_parent, 0, HT_TURN, pc);
+    ht_ring(f, cx, cy, r_orbit, r_orbit + 1, 0, HT_TURN, over(p->ink, bg, 10)); // the orbit itself, faint
+    for (int k = 0; k < n; k++) {
+        int a = k * HT_TURN / n + (int)(phase * HT_TURN / (NIXFRED_PHASES * 6)), x, y;
+        polar(cx, cy, r_orbit, a, &x, &y);
+        uint16_t c = nixfred_state_color(child[k], phase, bg, p);
+        if (child[k] == NIXFRED_WORKING)
+            ht_ring(f, x, y, 11, 17, (int)(phase * HT_TURN / NIXFRED_PHASES), HT_TURN * 3 / 4, c);
+        else
+            ht_ring(f, x, y, child[k] == NIXFRED_IDLE || child[k] == NIXFRED_OFFLINE ? 14 : 11, 17, 0, HT_TURN, c);
+    }
+}
+
+void nixfred_card(ht_scene_t *f, int y, uint16_t edge, const char *name, const char *summary, int trail,
+                  uint16_t ink, uint16_t dim_ink)
+{
+    uint16_t bg = f->background;
+    if (trail < 0) trail = 0;
+    if (trail > 1000) trail = 1000;
+    y -= trail * 90 / 1000;
+    int x = NIXFRED_CARD_X, w = NIXFRED_CARD_W, h = NIXFRED_CARD_H;
+    // The trail: three bars under a card that is leaving, fading with distance. Canvas colour at rest.
+    for (int i = 0; i < 3; i++) {
+        int inset = 30 + i * 30;
+        ht_box(f, x + inset, y + h + 6 + i * 9, w - inset * 2, 4, 2,
+               trail ? over(edge, bg, (unsigned)(48 - i * 14) * (unsigned)(1000 - trail / 2) / 1000) : bg,
+               trail ? over(edge, bg, (unsigned)(48 - i * 14) * (unsigned)(1000 - trail / 2) / 1000) : bg);
+    }
+    uint16_t fill = over(ink, bg, 9);
+    ht_box(f, x, y, w, h, 18, fill, over(edge, bg, 40));
+    ht_box(f, x + 10, y + 14, 6, h - 28, 3, edge, edge);    // the state colour on the left edge
+    const ht_font_t *head = &ht_lv_geist_med_28.base, *body = &ht_lv_geist_reg_20.base;
+    char line[HT_TEXT_BYTES];
+    snprintf(line, sizeof line, "%s", name && *name ? name : "Harness");
+    ht_text(f, x + 30, y + 8, w - 48, head, ink, fill, line);
+    snprintf(line, sizeof line, "%s", summary ? summary : "");
+    for (char *c = line; *c; c++) if (*c == '\n') *c = ' ';
+    ht_text(f, x + 30, y + 44, w - 48, body, dim_ink, fill, line[0] ? line : " ");
+}
+
+void nixfred_collision(ht_scene_t *f, const char *a, uint8_t sa, const char *b, uint8_t sb, unsigned phase,
+                       const nixfred_palette_t *p)
+{
+    masks_init();
+    uint16_t bg = f->background;
+    ht_center(f, 40, &ht_mono_20, p->red, "COLLISION");
+    enum { LX = 148, RX = 318, RY = 216 };
+    const char *name[2] = {a, b};
+    uint8_t st[2] = {sa, sb};
+    for (int i = 0; i < 2; i++) {
+        int x = i ? RX : LX;
+        uint16_t c = nixfred_state_color(st[i], phase, bg, p);
+        ht_ring(f, x, RY, 58, 68, 0, HT_TURN, over(p->red, bg, 14));   // both are in the alert's glow
+        ht_ring(f, x, RY, 50, 58, 0, HT_TURN, c);
+        text_centred(f, x, RY - 14, &ht_lv_geist_reg_20.base, p->ink, bg, name[i] && *name[i] ? name[i] : "?", 92);
+    }
+    draw_mask(f, CX, 126, &tri_mask, over(p->red, bg, 60 + tri(phase) * 40 / 8));
+}
+
+void nixfred_sweep(ht_scene_t *f, int permille, uint16_t accent)
+{
+    if (permille < 0) permille = 0;
+    uint16_t bg = f->background;
+    if (permille >= 1000) { // at rest: the same two runs, invisible, so the end of a sweep is a damage diff
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 1, NIXFRED_RIM_OUT, 0, 1, bg);
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 1, NIXFRED_RIM_OUT, 0, 1, bg);
+        return;
+    }
+    int e = 1000 - (1000 - permille) * (1000 - permille) / 1000; // ease out
+    int head = e * HT_TURN / 1000, seg = HT_TURN / 9;
+    int tail = head - seg;
+    if (tail > 0) ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, 0, tail, over(accent, bg, 25 * (1000 - e) / 1000 + 6));
+    else ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 1, NIXFRED_RIM_OUT, 0, 1, bg);
+    ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, tail, seg, accent);
+}
+
+void nixfred_plans_face(ht_scene_t *f, const nixfred_plan_t *plan, int n, int pick, uint16_t ink, uint16_t dim_ink)
+{
+    uint16_t bg = f->background;
+    if (n > NIXFRED_PLANS_MAX) n = NIXFRED_PLANS_MAX;
+    if (n <= 0) {
+        ht_center(f, 214, &ht_lv_geist_reg_20.base, dim_ink, "No plans yet");
+        return;
+    }
+    // A gauge: from 7:30 clockwise to 4:30, the gap at the bottom holds the verdict.
+    enum { START = HT_TURN * 5 / 8, SWEEP = HT_TURN * 3 / 4, THICK = 20, PITCH = 32 };
+    for (int i = 0; i < n; i++) {
+        int outer = 214 - i * PITCH, inner = outer - THICK;
+        uint16_t c = plan[i].tone;
+        ht_ring(f, CX, CY, outer + 2, outer + 8, START, SWEEP, i == pick ? over(c, bg, 30) : bg); // next: glow
+        ht_ring(f, CX, CY, inner, outer, START, SWEEP, over(c, bg, 16));
+        int u = plan[i].used > 1000 ? 1000 : plan[i].used, fill = SWEEP * u / 1000;
+        ht_ring(f, CX, CY, inner, outer, START, fill > 0 ? fill : 1, fill > 0 ? c : over(c, bg, 16));
+    }
+    // The centre legend, one line per plan, outermost first; the next plan carries the marker.
+    const ht_font_t *font = n > 3 ? &ht_mono_16 : &ht_mono_20;
+    int lh = font->height + 4, top = CY - n * lh / 2;
+    for (int i = 0; i < n; i++) {
+        char name[8], line[32];
+        int k = 0;
+        for (; k < 6 && plan[i].name[k]; k++) name[k] = (char)(plan[i].name[k] >= 'a' && plan[i].name[k] <= 'z' ? plan[i].name[k] - 32 : plan[i].name[k]);
+        name[k] = 0;
+        int pct = (plan[i].used + 5) / 10, bank = plan[i].banked >= 0 ? (plan[i].banked + 5) / 10 : -((-plan[i].banked + 5) / 10);
+        snprintf(line, sizeof line, "%c%-6s%3d%% %+d", i == pick ? '>' : ' ', name, pct > 999 ? 999 : pct, bank);
+        int w = ht_measure(font, line);
+        ht_text(f, CX - w / 2, top + i * lh, w, font, i == pick ? plan[i].tone : ink, bg, line);
+    }
+    if (pick >= 0 && pick < n) {
+        char line[24], name[10];
+        snprintf(name, sizeof name, "%s", plan[pick].name);
+        for (char *c = name; *c; c++) if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
+        snprintf(line, sizeof line, "NEXT: %s", name);
+        ht_center(f, 404, &ht_mono_20, plan[pick].tone, line);
+    }
+    (void)ink;
+}
+
+void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, const char *text, int max_w)
+{
+    text_centred(f, cx, y, font, ink, f->background, text, max_w);
+}

@@ -1264,6 +1264,66 @@ static void handle_message(const cJSON *root)
             count++;
         }
         ui_nixfred_plans(used, tone, count);
+        // Slice 3: optional name, banked and pick for the plans detail face (older daemons omit them).
+        char name[4][10] = {{0}}; int16_t banked[4] = {0}; int pick = -1, k = 0;
+        const cJSON *pk = cJSON_GetObjectItemCaseSensitive(p, "pick");
+        cJSON_ArrayForEach(row, subs) {
+            if (k == 4) break;
+            const cJSON *u = cJSON_GetObjectItemCaseSensitive(row, "used"), *kk = cJSON_GetObjectItemCaseSensitive(row, "tone");
+            if (!cJSON_IsNumber(u) || !cJSON_IsNumber(kk)) continue;
+            const cJSON *nm = cJSON_GetObjectItemCaseSensitive(row, "name"), *id = cJSON_GetObjectItemCaseSensitive(row, "id");
+            const cJSON *bk = cJSON_GetObjectItemCaseSensitive(row, "banked");
+            const char *label = cJSON_IsString(nm) ? nm->valuestring : cJSON_IsString(id) ? id->valuestring : "";
+            snprintf(name[k], sizeof name[k], "%s", label);
+            if (cJSON_IsNumber(bk)) banked[k] = (int16_t)(bk->valuedouble < -1000 ? -1000 : bk->valuedouble > 1000 ? 1000 : bk->valuedouble);
+            if (cJSON_IsString(pk) && cJSON_IsString(id) && !strcmp(pk->valuestring, id->valuestring)) pick = k;
+            k++;
+        }
+        ui_nixfred_plan_detail((const char (*)[10])name, banked, pick, k);
+        return;
+    }
+    if (strcmp(t, "nixfred.fleet") == 0) {
+        static ui_nf_fleet_t nf;   // static: ~2 KB is too much for the reader task's stack
+        memset(&nf, 0, sizeof nf);
+        nf.clock_s = -1; nf.load = nf.battery = nf.vram = -1;
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(p, "clock");
+        if (cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble < 86400) nf.clock_s = (int32_t)v->valuedouble;
+        const cJSON *m = cJSON_GetObjectItemCaseSensitive(p, "machine");
+        if (cJSON_IsObject(m)) {
+            const cJSON *id = cJSON_GetObjectItemCaseSensitive(m, "id");
+            if (cJSON_IsString(id)) snprintf(nf.machine_id, sizeof nf.machine_id, "%s", id->valuestring);
+            const char *keys[3] = {"load", "battery", "vram"};
+            int16_t *dst[3] = {&nf.load, &nf.battery, &nf.vram};
+            for (int i = 0; i < 3; i++) {
+                const cJSON *x = cJSON_GetObjectItemCaseSensitive(m, keys[i]);
+                if (cJSON_IsNumber(x) && x->valuedouble >= 0) *dst[i] = (int16_t)(x->valuedouble > 1000 ? 1000 : x->valuedouble);
+            }
+        }
+        const cJSON *row, *lanes = cJSON_GetObjectItemCaseSensitive(p, "lanes");
+        cJSON_ArrayForEach(row, lanes) {
+            if (nf.lane_count == UI_NF_LANES) break;
+            const cJSON *id = cJSON_GetObjectItemCaseSensitive(row, "id"), *l = cJSON_GetObjectItemCaseSensitive(row, "lane");
+            if (!cJSON_IsString(id) || !cJSON_IsString(l) || !l->valuestring[0]) continue;
+            snprintf(nf.lanes[nf.lane_count].id, ID_MAX, "%s", id->valuestring);
+            char c = l->valuestring[0];
+            nf.lanes[nf.lane_count++].letter = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+        }
+        const cJSON *al = cJSON_GetObjectItemCaseSensitive(p, "alert");
+        if (cJSON_IsObject(al)) {
+            const cJSON *a = cJSON_GetObjectItemCaseSensitive(al, "a"), *b = cJSON_GetObjectItemCaseSensitive(al, "b");
+            const cJSON *an = cJSON_GetObjectItemCaseSensitive(al, "an"), *bn = cJSON_GetObjectItemCaseSensitive(al, "bn");
+            const cJSON *d = cJSON_GetObjectItemCaseSensitive(al, "detail"), *at = cJSON_GetObjectItemCaseSensitive(al, "at");
+            if (cJSON_IsString(a) && cJSON_IsString(b)) {
+                nf.alert = true;
+                snprintf(nf.alert_a, sizeof nf.alert_a, "%s", a->valuestring);
+                snprintf(nf.alert_b, sizeof nf.alert_b, "%s", b->valuestring);
+                snprintf(nf.alert_an, sizeof nf.alert_an, "%s", cJSON_IsString(an) ? an->valuestring : a->valuestring);
+                snprintf(nf.alert_bn, sizeof nf.alert_bn, "%s", cJSON_IsString(bn) ? bn->valuestring : b->valuestring);
+                snprintf(nf.alert_detail, sizeof nf.alert_detail, "%s", cJSON_IsString(d) ? d->valuestring : "");
+                nf.alert_at = cJSON_IsNumber(at) ? (uint32_t)((uint64_t)at->valuedouble / 1000) : 1;
+            }
+        }
+        ui_nixfred_fleet(&nf);
         return;
     }
     if (strcmp(t,"question.state")==0) { ui_question_state(p); return; }

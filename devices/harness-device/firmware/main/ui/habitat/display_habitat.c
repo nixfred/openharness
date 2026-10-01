@@ -225,6 +225,7 @@ void display_unlock(void)
 bool display_is_asleep(void) { return atomic_load(&asleep); }
 void display_set_power_cb(void (*cb)(bool)) { power_cb = cb; }
 void display_bump_activity(void) { atomic_store(&last_activity, now_ms()); }
+uint32_t display_idle_ms(void) { return elapsed_since(&last_activity); }
 void display_sleep(void)
 {
     if (atomic_exchange(&asleep, true))
@@ -393,6 +394,12 @@ static void render_task(void *arg)
 #endif
         display_unlock();
         unsigned brightness = atomic_load(&requested_brightness);
+        // nixfred: after two quiet minutes the panel steps down to a third (never under 8%), on the way
+        // to the existing five-minute sleep. A touch bumps activity and the next pass restores it.
+        if (elapsed_since(&last_activity) > NIXFRED_DIM_MS) {
+            unsigned dimmed = brightness / 3;
+            brightness = dimmed < 8 ? (brightness < 8 ? brightness : 8) : dimmed;
+        }
         if (brightness != applied_brightness) {
             render_progress(RENDER_POWER);
             ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, brightness));
