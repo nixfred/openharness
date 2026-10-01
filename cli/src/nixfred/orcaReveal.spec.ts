@@ -49,3 +49,28 @@ describe('revealOrcaTerminal', () => {
     expect(r).toMatchObject({ host: 'herdr', window: 'new-terminal' })
   })
 })
+
+describe('revealSession: Orca and herdr both present', () => {
+  const both = 'ORCA_TERMINAL_HANDLE=term_c07405a6-d443\u0000HERDR_WORKSPACE_ID=w2T\u0000HERDR_TAB_ID=w2T:t1\u0000HERDR_BIN_PATH=/usr/bin/herdr\u0000'
+  const clients = JSON.stringify([{ class: 'orca', address: '0xabc' }, { class: 'kitty', address: '0xa1', pid: 50 }])
+  it('Orca wins by default, then herdr focuses the workspace inside it', async () => {
+    const calls: string[][] = []
+    const run = async (bin: string, args: string[]) => { calls.push([bin, ...args]); if (args[0] === 'terminal') return '{ "ok": true }'; if (args[0] === '-j') return clients; return 'ok' }
+    const r = await revealSession(900, null, { run, fs: { environ: () => both, ppid: () => null }, orcaBin: '/usr/bin/orca', openTerminal: null })
+    expect(r).toMatchObject({ host: 'orca', switched: true, window: 'orca' })
+    expect(calls[0]).toEqual(['/usr/bin/orca', 'terminal', 'switch', '--terminal', 'term_c07405a6-d443', '--json'])
+    expect(calls[1]).toEqual(['/usr/bin/herdr', 'workspace', 'focus', 'w2T'])
+  })
+  it('falls back to herdr when Orca cannot switch', async () => {
+    const run = async (_b: string, args: string[]) => { if (args[0] === 'terminal') throw new Error('orca down'); if (args[0] === '-j') return clients; return 'ok' }
+    const r = await revealSession(900, null, { run, fs: { environ: () => both, ppid: () => null, clientPids: () => [50] }, orcaBin: '/usr/bin/orca', openTerminal: null })
+    expect(r).toMatchObject({ host: 'herdr', switched: true, window: 'kitty' })
+  })
+  it('HARNESS_REVEAL_PREFER=herdr flips the winner and leaves Orca alone', async () => {
+    const calls: string[][] = []
+    const run = async (bin: string, args: string[]) => { calls.push([bin, ...args]); if (args[0] === '-j') return clients; return 'ok' }
+    const r = await revealSession(900, null, { run, fs: { environ: () => both, ppid: () => null, clientPids: () => [50] }, orcaBin: '/usr/bin/orca', openTerminal: null, prefer: 'herdr' })
+    expect(r).toMatchObject({ host: 'herdr', switched: true })
+    expect(calls.some((c) => c[0] === '/usr/bin/orca')).toBe(false)
+  })
+})

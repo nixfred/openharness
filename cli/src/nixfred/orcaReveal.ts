@@ -6,6 +6,10 @@
  *   1. Orca      ORCA_TERMINAL_HANDLE        -> `orca terminal switch --terminal <handle>`
  *   2. tmux      TMUX_PANE (+ TMUX socket)   -> `tmux switch-client -t <pane>` and `select-window`
  *   3. herdr     HERDR_WORKSPACE_ID/TAB_ID   -> `herdr workspace focus`, `herdr tab focus`
+ * When an agent carries BOTH an Orca handle and herdr ids (herdr running inside an Orca terminal, or a
+ * herdr server started from one), Orca is the default winner: Orca switches to its terminal, then herdr
+ * focuses the agent's workspace inside it. If Orca cannot switch (closed, stale handle) herdr takes over.
+ * HARNESS_REVEAL_PREFER=herdr flips the winner.
  * Then, for ANY terminal or IDE (kitty, Ghostty, Alacritty, WezTerm, foot, VS Code, Cursor, Zed, Orca,
  * herdr's own window...), the process tree is walked up to the first ancestor that owns a Hyprland
  * window, and that window is focused (Omarchy 4 takes a Lua dispatch: hl.dsp.focus({window=...})).
@@ -73,7 +77,7 @@ function defaultOpenTerminal(prog: string): void {
   child.unref()
 }
 
-export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null; openTerminal?: ((prog: string) => void) | null } = {}): Promise<RevealResult> {
+export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null; openTerminal?: ((prog: string) => void) | null; prefer?: 'orca' | 'herdr' } = {}): Promise<RevealResult> {
   const run = deps.run ?? defaultRun
   const fs = deps.fs ?? nodeProcFs
   if (!pid && !(orcaHandle && ORCA_HANDLE_RE.test(orcaHandle))) return { host: 'none', switched: false, focused: false, window: null }
@@ -82,10 +86,30 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
   let host: RevealResult['host'] = 'none'
   let switched = false
 
-  if (handle && ORCA_HANDLE_RE.test(handle)) {
+  const herdrWs = vars.get('HERDR_WORKSPACE_ID') ?? ''
+  const hasHerdr = HERDR_ID_RE.test(herdrWs)
+  const hasOrca = !!handle && ORCA_HANDLE_RE.test(handle)
+  const prefer = (deps.prefer ?? process.env.HARNESS_REVEAL_PREFER ?? 'orca') === 'herdr' ? 'herdr' : 'orca'
+  const focusHerdr = async (): Promise<boolean> => {
+    const tab = vars.get('HERDR_TAB_ID') ?? ''
+    const env = { ...process.env, ...(vars.get('HERDR_SOCKET_PATH')?.startsWith('/') ? { HERDR_SOCKET_PATH: vars.get('HERDR_SOCKET_PATH')! } : {}) }
+    const bin = vars.get('HERDR_BIN_PATH')?.startsWith('/') ? vars.get('HERDR_BIN_PATH')! : 'herdr'
+    let ok = false
+    try { await run(bin, ['workspace', 'focus', herdrWs], env); ok = true } catch { /* herdr down */ }
+    if (HERDR_ID_RE.test(tab)) { try { await run(bin, ['tab', 'focus', tab], env) } catch { /* old herdr */ } }
+    return ok
+  }
+
+  if (hasOrca && !(hasHerdr && prefer === 'herdr')) {
     host = 'orca'
     const bin = deps.orcaBin === undefined ? findOrcaBin() : deps.orcaBin
-    if (bin) { try { switched = /"ok"\s*:\s*true/.test(await run(bin, ['terminal', 'switch', '--terminal', handle, '--json'])) } catch { /* Orca down */ } }
+    if (bin) { try { switched = /"ok"\s*:\s*true/.test(await run(bin, ['terminal', 'switch', '--terminal', handle!, '--json'])) } catch { /* Orca down */ } }
+    // Orca won. A herdr inside that terminal still gets moved to the agent's workspace; if Orca could not
+    // switch at all, herdr becomes the host so the tap still lands somewhere.
+    if (hasHerdr) {
+      const h = await focusHerdr()
+      if (!switched && h) { host = 'herdr'; switched = true }
+    }
   } else if (TMUX_PANE_RE.test(vars.get('TMUX_PANE') ?? '')) {
     host = 'tmux'
     const pane = vars.get('TMUX_PANE')!
@@ -93,14 +117,9 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
     const sock = socket && socket.startsWith('/') ? ['-S', socket] : []
     try { await run('tmux', [...sock, 'select-window', '-t', pane]); await run('tmux', [...sock, 'select-pane', '-t', pane]); switched = true } catch { /* no server */ }
     try { await run('tmux', [...sock, 'switch-client', '-t', pane]) } catch { /* no attached client is fine */ }
-  } else if (HERDR_ID_RE.test(vars.get('HERDR_WORKSPACE_ID') ?? '')) {
+  } else if (hasHerdr) {
     host = 'herdr'
-    const ws = vars.get('HERDR_WORKSPACE_ID')!
-    const tab = vars.get('HERDR_TAB_ID') ?? ''
-    const env = { ...process.env, ...(vars.get('HERDR_SOCKET_PATH')?.startsWith('/') ? { HERDR_SOCKET_PATH: vars.get('HERDR_SOCKET_PATH')! } : {}) }
-    const bin = vars.get('HERDR_BIN_PATH')?.startsWith('/') ? vars.get('HERDR_BIN_PATH')! : 'herdr'
-    try { await run(bin, ['workspace', 'focus', ws], env); switched = true } catch { /* herdr down */ }
-    if (HERDR_ID_RE.test(tab)) { try { await run(bin, ['tab', 'focus', tab], env) } catch { /* old herdr */ } }
+    switched = await focusHerdr()
   }
 
   // Generic: the first ancestor of the agent that owns a Hyprland window is its terminal or IDE.
