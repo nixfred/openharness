@@ -14,6 +14,7 @@ import { notificationReadToken, type UnreadNotification } from './notificationRe
 
 import { AuthSessionManager, readAuthSession } from '../lib/authSession.js'
 import { registry, projectDisplayName, type RegisteredSession } from '../lib/registry.js'
+import { revealOrcaTerminal } from '../nixfred/orcaReveal.js'
 import { fetchRelease, loadImage, otaKeyForBoard, shouldOffer } from './fwPush.js'
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
@@ -626,6 +627,10 @@ export class DaemonCableHost implements CableHost {
     }
     this.wiring.log(`cable: open ${machineId}/${agentId} (${reason ?? 'notification'})`)
     this.wiring.opened?.(machineId, agentId, reason)
+    // nixfred: a tap on an agent running in an Orca terminal brings that terminal to the front.
+    const row = machineId === this.localId() ? registry.byAgent(agentId) : undefined
+    const handle = row?.hosted === 'external' ? row.external?.orca?.terminal : undefined
+    if (handle) void revealOrcaTerminal(handle).then((r) => this.wiring.log(`cable: reveal orca ${handle} · switched=${r.switched} focused=${r.focused}`)).catch(() => {})
   }
 
   form(command: FormCommand): Promise<FormResult> {
