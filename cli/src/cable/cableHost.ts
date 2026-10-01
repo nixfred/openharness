@@ -14,7 +14,7 @@ import { notificationReadToken, type UnreadNotification } from './notificationRe
 
 import { AuthSessionManager, readAuthSession } from '../lib/authSession.js'
 import { registry, projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { revealOrcaTerminal } from '../nixfred/orcaReveal.js'
+import { revealSession } from '../nixfred/orcaReveal.js'
 import { fetchRelease, loadImage, otaKeyForBoard, shouldOffer } from './fwPush.js'
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
@@ -617,6 +617,26 @@ export class DaemonCableHost implements CableHost {
     return this.agentMachine.get(agentId) ?? this.seenOn.get(agentId) ?? ''
   }
 
+  private revealTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * nixfred: take the desktop to a local agent that runs outside the Harness window (Orca, herdr, tmux,
+   * any terminal or IDE). See nixfred/orcaReveal.ts. Daemon-owned panes are left to the app.
+   */
+  private revealLocal(machineId: string, agentId: string, delayMs: number): void {
+    if (machineId !== this.localId()) return
+    const row = typeof registry.byAgent === 'function' ? registry.byAgent(agentId) : undefined
+    if (!row || row.hosted !== 'external') return
+    if (this.revealTimer) clearTimeout(this.revealTimer)
+    this.revealTimer = setTimeout(() => {
+      this.revealTimer = null
+      const pid = row.external?.proc?.pid ?? null
+      void revealSession(pid, row.external?.orca?.terminal ?? null)
+        .then((r) => this.wiring.log(`cable: reveal ${agentId.slice(0, 8)} · host=${r.host} switched=${r.switched} window=${r.window ?? '-'} focused=${r.focused}`))
+        .catch(() => {})
+    }, delayMs)
+    this.revealTimer.unref?.()
+  }
+
   openAgent(agentId: string, reason?: OpenReason): void {
     const machineId = this.machineOf(agentId)
     if (!machineId) {
@@ -627,10 +647,7 @@ export class DaemonCableHost implements CableHost {
     }
     this.wiring.log(`cable: open ${machineId}/${agentId} (${reason ?? 'notification'})`)
     this.wiring.opened?.(machineId, agentId, reason)
-    // nixfred: a tap on an agent running in an Orca terminal brings that terminal to the front.
-    const row = machineId === this.localId() ? registry.byAgent(agentId) : undefined
-    const handle = row?.hosted === 'external' ? row.external?.orca?.terminal : undefined
-    if (handle) void revealOrcaTerminal(handle).then((r) => this.wiring.log(`cable: reveal orca ${handle} · switched=${r.switched} focused=${r.focused}`)).catch(() => {})
+    this.revealLocal(machineId, agentId, 0)
   }
 
   form(command: FormCommand): Promise<FormResult> {
@@ -860,6 +877,8 @@ export class DaemonCableHost implements CableHost {
     // only question the old arcs answered, and there is nothing left to replace.
     this.wiring.log(`cable: focus ${machineId}/${agentId}`)
     this.wiring.focused?.(machineId, agentId)
+    // nixfred: the dial sends a tap on a session as focus too. Debounced so a carousel walk does not drag the desktop.
+    this.revealLocal(machineId, agentId, 700)
   }
 
   /**

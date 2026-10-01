@@ -18,7 +18,8 @@ export interface DiscoveredSession {
   sessionId: string
   cwd: string | null
   transcriptPath: string | null
-  orca: { terminal: string; worktree?: string; tab?: string; pane?: string }
+  /** Null when the session is not in an Orca terminal (herdr, tmux, a plain terminal, an IDE). */
+  orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -62,6 +63,8 @@ export function discoverOrcaClaudes(claudeHome: string, fs: DiscoveryFs = nodeDi
     const sessionId = typeof meta.sessionId === 'string' && UUID_RE.test(meta.sessionId) ? meta.sessionId.toLowerCase() : null
     if (!pid || !sessionId) continue
     if (meta.kind !== undefined && meta.kind !== 'interactive') continue
+    // The SDK sessions Harness itself runs (recaps, voice routing) are not agents anyone is working with.
+    if (meta.entrypoint === 'sdk-cli') continue
     // A reused pid must not resurrect a dead session: the start time has to match what Claude recorded.
     const start = fs.procStart(pid)
     if (!start) continue
@@ -74,13 +77,16 @@ export function discoverOrcaClaudes(claudeHome: string, fs: DiscoveryFs = nodeDi
       if (i > 0 && kv.startsWith('ORCA_')) vars.set(kv.slice(0, i), kv.slice(i + 1))
     }
     const terminal = vars.get('ORCA_TERMINAL_HANDLE')
-    if (!terminal || !ORCA_HANDLE_RE.test(terminal)) continue
     const cwd = typeof meta.cwd === 'string' && meta.cwd.startsWith('/') ? meta.cwd : null
+    if (cwd && /\/\.harness(\/|$)/.test(cwd)) continue
     const guess = cwd ? join(claudeHome, 'projects', claudeProjectSlug(cwd), `${sessionId}.jsonl`) : null
-    const orca: DiscoveredSession['orca'] = { terminal }
-    const worktree = vars.get('ORCA_WORKTREE_ID'); if (worktree) orca.worktree = worktree
-    const tab = vars.get('ORCA_TAB_ID'); if (tab) orca.tab = tab
-    const pane = vars.get('ORCA_PANE_KEY'); if (pane) orca.pane = pane
+    let orca: DiscoveredSession['orca'] = null
+    if (terminal && ORCA_HANDLE_RE.test(terminal)) {
+      orca = { terminal }
+      const worktree = vars.get('ORCA_WORKTREE_ID'); if (worktree) orca.worktree = worktree
+      const tab = vars.get('ORCA_TAB_ID'); if (tab) orca.tab = tab
+      const pane = vars.get('ORCA_PANE_KEY'); if (pane) orca.pane = pane
+    }
     out.push({ pid, sessionId, cwd, transcriptPath: guess && fs.exists(guess) ? guess : null, orca })
   }
   return out

@@ -4012,7 +4012,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       const res = await handleExternalHook({ engine: 'claude', event: 'SessionStart', sessionId: d.sessionId, cwd: d.cwd, transcriptPath: d.transcriptPath, callerPid: d.pid, orca: d.orca })
       if (res.ok && typeof res.agentId === 'string') {
         hooklessExternal.add(res.agentId)
-        console.log(`[orca] ${sid(res.agentId)} discovered claude (no hook yet) · orca=${d.orca.terminal} · cwd=${d.cwd ?? '?'}`)
+        console.log(`[orca] ${sid(res.agentId)} discovered claude (no hook yet) · orca=${d.orca?.terminal ?? '-'} · cwd=${d.cwd ?? '?'}`)
       }
     }
   }

@@ -16,9 +16,10 @@ function fakeFs(over: Partial<DiscoveryFs> = {}): DiscoveryFs {
 }
 
 describe('discoverOrcaClaudes', () => {
-  it('finds a live Claude in an Orca terminal and skips one outside Orca', () => {
+  it('finds live Claudes in Orca and outside it (herdr, tmux, plain terminals, IDEs)', () => {
     const found = discoverOrcaClaudes('/h/.claude', fakeFs())
-    expect(found).toHaveLength(1)
+    expect(found).toHaveLength(2)
+    expect(found[1]).toMatchObject({ pid: 200, orca: null })
     expect(found[0]).toMatchObject({ pid: 100, sessionId: SID, cwd: '/w/a.b', orca: { terminal: 'term_c07405a6-d443-408b', tab: 't1' } })
     expect(found[0]!.transcriptPath).toBe(`/h/.claude/projects/-w-a-b/${SID}.jsonl`)
   })
@@ -30,5 +31,9 @@ describe('discoverOrcaClaudes', () => {
   })
   it('slugs a cwd the way Claude names its project folder', () => {
     expect(claudeProjectSlug('/home/pi/Projects/autonomous.harness.device')).toBe('-home-pi-Projects-autonomous-harness-device')
+  })
+  it('skips the SDK sessions Harness runs itself', () => {
+    const fs = fakeFs({ readText: (p) => JSON.stringify({ pid: p.endsWith('100.json') ? 100 : 200, sessionId: SID, cwd: '/h/.harness/cli/data/voice-route-scratch', procStart: p.endsWith('100.json') ? '42' : '7', kind: 'interactive', entrypoint: 'sdk-cli' }) })
+    expect(discoverOrcaClaudes('/h/.claude', fs)).toHaveLength(0)
   })
 })
