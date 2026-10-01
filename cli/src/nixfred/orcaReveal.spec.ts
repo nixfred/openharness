@@ -29,7 +29,7 @@ describe('revealOrcaTerminal', () => {
       return 'ok'
     }
     const fs = { environ: () => 'HERDR_WORKSPACE_ID=w2T\u0000HERDR_TAB_ID=w2T:t1\u0000HERDR_BIN_PATH=/usr/bin/herdr\u0000', ppid: (p: number) => (p === 900 ? 120 : p === 120 ? 50 : null) }
-    const r = await revealSession(900, null, { run, fs, orcaBin: null })
+    const r = await revealSession(900, null, { run, fs, orcaBin: null, openTerminal: null })
     expect(r).toMatchObject({ host: 'herdr', switched: true, focused: true, window: 'kitty' })
     expect(calls[0]).toEqual(['/usr/bin/herdr', 'workspace', 'focus', 'w2T'])
     expect(calls[1]).toEqual(['/usr/bin/herdr', 'tab', 'focus', 'w2T:t1'])
@@ -39,5 +39,13 @@ describe('revealOrcaTerminal', () => {
     const run = async (_b: string, args: string[]) => (args[0] === '-j' ? JSON.stringify([{ class: 'code', address: '0xc', pid: 7 }]) : 'ok')
     const fs = { environ: () => 'HOME=/h\u0000', ppid: (p: number) => (p === 30 ? 7 : null) }
     expect(await revealSession(30, null, { run, fs, orcaBin: null })).toMatchObject({ host: 'window', focused: true, window: 'code' })
+  })
+  it('herdr with no local window opens a terminal running herdr', async () => {
+    const opened: string[] = []
+    const run = async (_b: string, args: string[]) => (args[0] === '-j' ? '[]' : 'ok')
+    const fs = { environ: () => 'HERDR_WORKSPACE_ID=w2T\u0000HERDR_BIN_PATH=/usr/bin/herdr\u0000', ppid: () => null, clientPids: () => [] }
+    const r = await revealSession(900, null, { run, fs, orcaBin: null, openTerminal: (p) => { opened.push(p) } })
+    expect(opened).toEqual(['/usr/bin/herdr'])
+    expect(r).toMatchObject({ host: 'herdr', window: 'new-terminal' })
   })
 })

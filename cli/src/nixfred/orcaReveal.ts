@@ -11,7 +11,7 @@
  * window, and that window is focused (Omarchy 4 takes a Lua dispatch: hl.dsp.focus({window=...})).
  * Every id is validated before it reaches a command line.
  */
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import { findOrcaBin } from './orcaWatch.js'
 
@@ -64,7 +64,16 @@ function envVars(raw: string | null): Map<string, string> {
 }
 
 /** Bring the agent with this engine pid to the front. `orcaHandle` wins when the registry already knows it. */
-export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null } = {}): Promise<RevealResult> {
+/** Open the desktop's default terminal running one program, detached (Omarchy: xdg-terminal-exec under uwsm). */
+function defaultOpenTerminal(prog: string): void {
+  // herdr refuses to start inside another herdr ("nested herdr is disabled"): drop its markers.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('HERDR_')))
+  const child = spawn('uwsm-app', ['--', 'xdg-terminal-exec', prog], { detached: true, stdio: 'ignore', env })
+  child.on('error', () => {})
+  child.unref()
+}
+
+export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null; openTerminal?: ((prog: string) => void) | null } = {}): Promise<RevealResult> {
   const run = deps.run ?? defaultRun
   const fs = deps.fs ?? nodeProcFs
   if (!pid && !(orcaHandle && ORCA_HANDLE_RE.test(orcaHandle))) return { host: 'none', switched: false, focused: false, window: null }
@@ -115,6 +124,11 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
         }
         if (addr) break
       }
+    }
+    // No local herdr window at all (its only viewer may be over SSH): open one. A bare `herdr` attaches to
+    // the persistent session, which is already on the agent's workspace; the next tap finds this window.
+    if (!addr && host === 'herdr' && deps.openTerminal !== null) {
+      try { (deps.openTerminal ?? defaultOpenTerminal)(vars.get('HERDR_BIN_PATH')?.startsWith('/') ? vars.get('HERDR_BIN_PATH')! : 'herdr'); window = 'new-terminal'; focused = true } catch { /* no launcher */ }
     }
     if (!addr && host === 'orca') { const c = clients.find((x) => x.class === 'orca'); addr = c?.address; window = c ? 'orca' : null }
     if (addr && HYPR_ADDR_RE.test(addr)) {
