@@ -40,6 +40,7 @@ describe('nixfred firmware is never replaced by a published release', () => {
   it('does not offer any release to a dial running 0.0.86-nixfred.N', () => {
     expect(shouldOffer('0.0.86-nixfred.1', '0.0.87')).toBe(false)
     expect(shouldOffer('0.0.86-nixfred.1', '9.9.9')).toBe(false)
+    expect(shouldOffer('0.0.86-nixfred.2', '0.0.86')).toBe(false)
   })
 })
 

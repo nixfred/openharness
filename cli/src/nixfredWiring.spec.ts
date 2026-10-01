@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
+import { dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
 
 vi.mock('./lib/desktopNotify.js', () => ({ notifyAttention: vi.fn(async () => 'skipped') }))
 vi.mock('./lib/hooks.js', () => ({ installGateHook: () => 'installed', uninstallGateHook: () => 'removed', gateHookInstalled: () => false }))
@@ -20,6 +20,7 @@ describe('Nixfred wiring', () => {
   let tokens: number
   let nix: Nixfred
   let now: number
+  let dial: Array<Record<string, unknown>>
 
   const deps = (): NixfredDeps => ({
     dataDir: dir,
@@ -32,11 +33,12 @@ describe('Nixfred wiring', () => {
     tokenUsage: () => ({ totalTokens: tokens }),
     hookPort: () => 18473,
     now: () => now,
+    toDial: (m) => { dial.push(m) },
   })
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'nixfred-'))
-    sent = []; errors = []; cancelled = []; tokens = 0; now = Date.UTC(2026, 8, 26, 16, 0)
+    sent = []; errors = []; cancelled = []; dial = []; tokens = 0; now = Date.UTC(2026, 8, 26, 16, 0)
     sessions = [session('a'), session('b')]
     nix = new Nixfred(deps())
   })
@@ -102,6 +104,22 @@ describe('Nixfred wiring', () => {
     expect(out.cancelled).toEqual(['a'])
     expect(cancelled).toEqual(['a'])
     expect(nix.attention.get('a')?.state).toBe('idle')
+  })
+
+  it('stopAll tells the dial (nixfred.panic) how many it stopped', async () => {
+    await nix.stopAll(null)
+    expect(dial).toEqual([{ t: 'nixfred.panic', stopped: 2 }])
+  })
+
+  it('dialPlans turns the compact subscriptions block into the dial frame (permille, tone code, max 4)', () => {
+    expect(dialPlans(null)).toBeNull()
+    const sub = (id: string, used: number, tone: string) => ({ id, name: id, used, bankedSigned: 0, tone, resetsInMs: 0, comeBackMs: 0 })
+    const frame = dialPlans({ at: 1, pick: 'claude', verdict: '', subs: [
+      sub('claude', 0.62, 'on-pace'), sub('codex', 1.4, 'red'), sub('kimi', 0.1, 'banked'), sub('gemini', -1, 'amber'), sub('x', 0.5, 'what'),
+    ] } as never)
+    expect(frame).toEqual({ t: 'nixfred.subs', pick: 'claude', subs: [
+      { id: 'claude', used: 620, tone: 2 }, { id: 'codex', used: 1000, tone: 4 }, { id: 'kimi', used: 100, tone: 1 }, { id: 'gemini', used: 0, tone: 3 },
+    ] })
   })
 
   it('raises a collision alert when two agents edit the same file, and it rides on the attention payload', async () => {

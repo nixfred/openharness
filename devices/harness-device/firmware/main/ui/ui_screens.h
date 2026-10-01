@@ -313,6 +313,13 @@ void ui_voice_route_abort(void);
 // One short line from the cabled Mac (a routing refusal, a send that did not land). Releases the routing
 // overlay first, then shows the message for ~2s over whatever is on screen.
 void ui_cable_toast(const char *msg);
+// nixfred graphics slice 2 (nixfred/DESIGN.md "Device"). A turn that ended in `turn.error`: the failure
+// screen flashes the rim twice, and the agent's rim arc holds thin red until it works again.
+void ui_nixfred_turn_failed(const char *agent_id, const char *message);
+// `nixfred.panic`: the daemon stopped every agent; every ring closes to one red dot.
+void ui_nixfred_panic(int stopped);
+// `nixfred.subs`: each plan's weekly use (permille) and tone (0 unknown, 1 banked, 2 on pace, 3 amber, 4 red).
+void ui_nixfred_plans(const uint16_t *used_permille, const uint8_t *tone, int n);
 
 /*
  * THE DEVICE'S SETTINGS, AS THE APP SEES THEM.

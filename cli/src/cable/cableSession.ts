@@ -2263,4 +2263,13 @@ export class CableSession {
   async toast(text: string): Promise<void> {
     await this.send({ t: 'toast', text })
   }
+  /**
+   * nixfred: a frame only the nixfred firmware draws (`nixfred.panic`, `nixfred.subs`). Stock firmware has
+   * no case for it and counts it as unknown, so sending it to any dial is safe. Anything not under the
+   * `nixfred.` prefix is refused here, so this cannot become a side door for stock message types.
+   */
+  async nixfred(msg: { t: string; [key: string]: unknown }): Promise<void> {
+    if (typeof msg.t !== 'string' || !msg.t.startsWith('nixfred.')) return
+    await this.send(msg)
+  }
 }

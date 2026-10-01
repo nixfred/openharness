@@ -188,4 +188,5 @@ export class CableFleet {
   turnDone(...args: Parameters<Surface['turnDone']>) { return this.send('turnDone', ...args) }
   summary(...args: Parameters<Surface['summary']>) { return this.send('summary', ...args) }
   turnError(...args: Parameters<Surface['turnError']>) { return this.send('turnError', ...args) }
+  nixfred(...args: Parameters<Surface['nixfred']>) { return this.send('nixfred', ...args) }
 }

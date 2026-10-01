@@ -74,3 +74,189 @@ void nixfred_attention(ht_scene_t *f, bool permission, const char *initials, uin
         ht_box(f, LX - 1, LY + 1, 3, 7, 1, f->background, f->background);
     }
 }
+
+// ---- slice 2 ------------------------------------------------------------------------------------------
+
+static unsigned tri(unsigned phase) // 0..8..0 over NIXFRED_PHASES
+{
+    phase %= NIXFRED_PHASES;
+    return phase <= NIXFRED_PHASES / 2 ? phase : NIXFRED_PHASES - phase;
+}
+static bool fail_lit(uint32_t since) // the two flashes: on 0..120, off 120..240, on 240..360, off 360..480
+{
+    return since < NIXFRED_FAIL_FLASH_MS && (since / 120) % 2 == 0;
+}
+
+static int state_runs(uint8_t st, bool rich)
+{
+    if (!rich) return 1;
+    return st == NIXFRED_OFFLINE ? 3 : st == NIXFRED_WORKING ? 2 : 1;
+}
+
+void nixfred_fleet_rim(ht_scene_t *f, const uint8_t *state, int n, int span, unsigned phase,
+                       uint32_t fail_ms, const nixfred_palette_t *p)
+{
+    if (n <= 0) return;
+    // Busiest first: a stable sort by priority, so two agents in one state keep the host's order.
+    uint8_t order[NIXFRED_RIM_MAX];
+    int m = 0;
+    for (int st = NIXFRED_STATES - 1; st >= 0 && m < NIXFRED_RIM_MAX; st--)
+        for (int i = 0; i < n && m < NIXFRED_RIM_MAX; i++)
+            if (state[i] == st) order[m++] = (uint8_t)st;
+    if (span <= 0 || span > HT_TURN) span = HT_TURN;
+    int need = 0;
+    for (int k = 0; k < m; k++) need += state_runs(order[k], true);
+    bool rich = f->count + need <= HT_RUNS - 2; // drawn last; leave the rest of the budget to a summary
+    int slot = span / m, gap = m == 1 ? 0 : slot / 10 < 24 ? 24 : slot / 10;
+    int arc = slot - gap;
+    unsigned t = tri(phase);
+    for (int k = 0; k < m; k++) {
+        int offset = k == 0 ? 0 : (k % 2 ? 1 : -1) * ((k + 1) / 2) * slot;
+        int start = offset - arc / 2;
+        uint8_t st = order[k];
+        switch (st) {
+        case NIXFRED_PERMISSION:
+            ht_ring(f, CX, CY, NIXFRED_RIM_IN - 3, NIXFRED_RIM_OUT, start, arc, p->red);
+            break;
+        case NIXFRED_FAILED:
+            if (fail_ms < NIXFRED_FAIL_FLASH_MS)
+                ht_ring(f, CX, CY, NIXFRED_RIM_IN - 3, NIXFRED_RIM_OUT, start, arc,
+                        fail_lit(fail_ms) ? p->red : f->background);
+            else
+                ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, start, arc, p->red);
+            break;
+        case NIXFRED_WAITING: // the breath: 55..100 percent of the yellow
+            ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, start, arc, dim(p->yellow, 55 + t * 45 / 8));
+            break;
+        case NIXFRED_WORKING: {
+            // The sweep: a bright segment travelling across the agent's own arc and back, over a dim track.
+            int seg = arc * 2 / 5, at = start + (arc - seg) * (int)t / 8;
+            if (rich) ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, start, arc, dim(p->accent, 30));
+            ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, at, seg, p->accent);
+            break;
+        }
+        case NIXFRED_DONE:
+            ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, start, arc, p->green);
+            break;
+        case NIXFRED_OFFLINE:
+            if (rich)
+                for (int d = 0; d < 3; d++) // dotted: three short marks across the slot
+                    ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, start + d * arc / 3 + arc / 12, arc / 6,
+                            dim(p->ink, 35));
+            else
+                ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 2, NIXFRED_RIM_OUT, start, arc, dim(p->ink, 25));
+            break;
+        default: // idle
+            ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, start, arc, dim(p->ink, 28));
+            break;
+        }
+    }
+}
+
+void nixfred_fleet_summary(char *out, int size, uint16_t *color, const uint8_t *state, int n,
+                           const nixfred_palette_t *p)
+{
+    static const char glyph[NIXFRED_STATES] = {'-', '.', '+', '~', '?', 'x', '!'};
+    if (!out || size < 12) return;
+    out[0] = 0;
+    if (n <= 0) return;
+    int top = 0, count = 0;
+    for (int i = 0; i < n; i++) if (state[i] > top) top = state[i];
+    for (int i = 0; i < n; i++) count += state[i] == top;
+    if (n > 99) n = 99;
+    if (count > 99) count = 99;
+    // Hand-rolled rather than snprintf: this runs in the render path and is five characters.
+    int k = 0;
+    out[k++] = glyph[top]; out[k++] = ' ';
+    if (count >= 10) out[k++] = (char)('0' + count / 10);
+    out[k++] = (char)('0' + count % 10); out[k++] = '/';
+    if (n >= 10) out[k++] = (char)('0' + n / 10);
+    out[k++] = (char)('0' + n % 10); out[k] = 0;
+    if (color) {
+        uint16_t c[NIXFRED_STATES] = {over(p->ink, 0, 60), over(p->ink, 0, 60), p->green, p->accent, p->yellow, p->red, p->red};
+        *color = c[top];
+    }
+}
+
+void nixfred_done_collapse(ht_scene_t *f, int cx, int cy, int permille, uint16_t green)
+{
+    if (permille < 0) permille = 0;
+    if (permille > 1000) permille = 1000;
+    // Ease out: fast from the rim, settling onto the dot.
+    int e = 1000 - (1000 - permille) * (1000 - permille) / 1000;
+    int outer = NIXFRED_RIM_OUT - (NIXFRED_RIM_OUT - 14) * e / 1000;
+    int band = 8 + (14 - 8) * e / 1000;                  // the band thickens as it closes
+    int inner = e >= 1000 ? 0 : outer - band;
+    if (inner < 0) inner = 0;
+    ht_ring(f, cx, cy, inner, outer, 0, HT_TURN, green);
+}
+
+void nixfred_failed_rim(ht_scene_t *f, uint32_t since_ms, uint16_t red)
+{
+    if (since_ms < NIXFRED_FAIL_FLASH_MS) {
+        uint16_t c = fail_lit(since_ms) ? red : f->background;
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN - 14, NIXFRED_RIM_IN, 0, HT_TURN, fail_lit(since_ms) ? dim(red, 18) : f->background);
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN - 2, NIXFRED_RIM_OUT, 0, HT_TURN, c);
+    } else {
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN - 14, NIXFRED_RIM_IN, 0, HT_TURN, f->background);
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 4, NIXFRED_RIM_OUT, 0, HT_TURN, red);
+    }
+}
+
+void nixfred_voice_rim(ht_scene_t *f, bool listening, unsigned level, unsigned step, uint16_t green,
+                       uint16_t accent)
+{
+    if (listening) {
+        if (level > 4) level = 4;
+        // A faint track, and the live ring growing inward from the glass: 3 px at silence, 19 px loud.
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, 0, HT_TURN, dim(green, 25));
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3 - (int)level * 4, NIXFRED_RIM_OUT, 0, HT_TURN, green);
+    } else {
+        // Sending: one bright arc lapping the rim over the dim track.
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, 0, HT_TURN, dim(accent, 30));
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, (int)(step % NIXFRED_VOICE_STEPS) * HT_TURN / NIXFRED_VOICE_STEPS,
+                HT_TURN / 5, accent);
+    }
+}
+
+void nixfred_panic(ht_scene_t *f, uint32_t since_ms, int stopped, uint16_t red, uint16_t ink, uint16_t dim_ink)
+{
+    int permille = since_ms >= NIXFRED_PANIC_MS ? 1000 : (int)(since_ms * 1000 / NIXFRED_PANIC_MS);
+    int e = 1000 - (1000 - permille) * (1000 - permille) / 1000;
+    // The words first: while the rings close they are drawn in the canvas colour (the same runs, so the
+    // step is a damage diff, not a reshape) and the rings, drawn after, pass over their boxes.
+    char line[24] = " ";
+    if (stopped >= 0) {
+        int k = 0, v = stopped > 999 ? 999 : stopped;
+        if (v >= 100) line[k++] = (char)('0' + v / 100);
+        if (v >= 10) line[k++] = (char)('0' + v / 10 % 10);
+        line[k++] = (char)('0' + v % 10);
+        memcpy(line + k, v == 1 ? " agent" : " agents", v == 1 ? 7 : 8);
+    }
+    ht_center(f, 250, &ht_mono_28, e >= 1000 ? ink : f->background, "ALL STOPPED");
+    ht_center(f, 296, &ht_mono_20, e >= 1000 ? dim_ink : f->background, line);
+    // Three rings (rim, middle, inner) close together onto one point; the red dot is what stays.
+    static const int from[3] = {NIXFRED_RIM_OUT, 170, 110};
+    for (int i = 0; i < 3; i++) {
+        int outer = from[i] - (from[i] - 18) * e / 1000;
+        int inner = outer - 6;
+        if (e >= 1000) { outer = 18; inner = i ? 17 : 0; } // done: one dot; the other two rest inside it
+        if (inner < 0) inner = 0;
+        ht_ring(f, CX, CY - 20, inner, outer, 0, HT_TURN, i == 0 || e >= 1000 ? red : dim(red, 45));
+    }
+}
+
+void nixfred_plans_rim(ht_scene_t *f, int start, int span, const uint16_t *used_permille, const uint16_t *tone, int n)
+{
+    if (n <= 0) return;
+    if (n > NIXFRED_PLANS_MAX) n = NIXFRED_PLANS_MAX;
+    int slot = span / n, gap = n > 1 ? 30 : 0, arc = slot - gap;
+    for (int i = 0; i < n; i++) {
+        int s0 = start + i * slot + gap / 2;
+        unsigned u = used_permille[i] > 1000 ? 1000 : used_permille[i];
+        ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, s0, arc, dim(tone[i], 25));
+        int fill = (int)(arc * u / 1000);
+        if (fill > 0) ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, s0, fill, tone[i]);
+        else ht_ring(f, CX, CY, NIXFRED_RIM_OUT - 3, NIXFRED_RIM_OUT, s0, 1, f->background);
+    }
+}

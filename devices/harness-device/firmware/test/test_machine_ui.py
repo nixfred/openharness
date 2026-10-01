@@ -37,7 +37,9 @@ static void display_lock(void) { lock_depth++; }
 static void display_unlock(void) { assert(lock_depth>0);lock_depth--; }
 static void change(void) { assert(lock_depth>0);changes++; }
 static void view(int value) { assert(lock_depth>0);viewed=value; }
-static void ui_show_error(const char *title,const char *message) {
+// nixfred: a failed selection is a failure screen (show_failure, under the display lock), not a note.
+static void show_failure(const char *title,const char *message) {
+    assert(lock_depth>0);
     errors++;snprintf(s.title,sizeof s.title,"%s",title);
     snprintf(s.message,sizeof s.message,"%s",message?message:"");
 }
