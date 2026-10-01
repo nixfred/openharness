@@ -2268,8 +2268,17 @@ export class CableSession {
    * no case for it and counts it as unknown, so sending it to any dial is safe. Anything not under the
    * `nixfred.` prefix is refused here, so this cannot become a side door for stock message types.
    */
+  private readonly nixfredLogged = new Map<string, number>()
   async nixfred(msg: { t: string; [key: string]: unknown }): Promise<void> {
     if (typeof msg.t !== 'string' || !msg.t.startsWith('nixfred.')) return
     await this.send(msg)
+    // One line per frame type per 10 minutes, so the journal shows the dial is being fed without flooding it.
+    const now = Date.now()
+    if (now - (this.nixfredLogged.get(msg.t) ?? 0) > 600_000) {
+      this.nixfredLogged.set(msg.t, now)
+      const subs = (msg as Record<string, unknown>).subs
+      const n = Array.isArray(subs) ? ` · ${subs.length} plans` : ''
+      this.log(`cable: ${msg.t} sent${n}`)
+    }
   }
 }
