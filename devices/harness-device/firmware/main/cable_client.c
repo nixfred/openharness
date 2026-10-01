@@ -1241,7 +1241,29 @@ static void handle_message(const cJSON *root)
     }
     if (strcmp(t, "turn.error") == 0) {
         if (agent_id) ui_project_emit(agent_id, "", "done", "", NULL);
-        ui_cable_toast(str_of(p, "message"));
+        // nixfred: the failure screen (two red flashes, then a thin red ring) instead of a plain toast.
+        ui_nixfred_turn_failed(agent_id ? agent_id : "", str_of(p, "message"));
+        return;
+    }
+    // nixfred frames. Stock firmware counts them as unknown and drops them, so the daemon may always send.
+    if (strcmp(t, "nixfred.panic") == 0) {
+        const cJSON *n = cJSON_GetObjectItemCaseSensitive(p, "stopped");
+        ui_nixfred_panic(cJSON_IsNumber(n) && n->valueint >= 0 ? n->valueint : -1);
+        return;
+    }
+    if (strcmp(t, "nixfred.subs") == 0) {
+        uint16_t used[4]; uint8_t tone[4]; int count = 0;
+        const cJSON *row, *subs = cJSON_GetObjectItemCaseSensitive(p, "subs");
+        cJSON_ArrayForEach(row, subs) {
+            if (count == 4) break;
+            const cJSON *u = cJSON_GetObjectItemCaseSensitive(row, "used"), *k = cJSON_GetObjectItemCaseSensitive(row, "tone");
+            if (!cJSON_IsNumber(u) || !cJSON_IsNumber(k)) continue;
+            double v = u->valuedouble;
+            used[count] = (uint16_t)(v <= 0 ? 0 : v >= 1000 ? 1000 : v);
+            tone[count] = (uint8_t)(k->valueint >= 0 && k->valueint <= 4 ? k->valueint : 0);
+            count++;
+        }
+        ui_nixfred_plans(used, tone, count);
         return;
     }
     if (strcmp(t,"question.state")==0) { ui_question_state(p); return; }

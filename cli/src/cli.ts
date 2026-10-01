@@ -3926,6 +3926,8 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     tokenUsage: (s) => { const r = registry.resolve(s.agentId); return r ? agentTokenUsage.get(r) : null },
     hookPort: () => hookPort,
     sendToAgent: (agentId, text) => submitAgent(agentId, text),
+    // The nixfred firmware's frames (panic stop, plan arcs); cableRef is null until the cable is built.
+    toDial: (msg) => { void cableRef?.nixfred(msg) },
   })
 
   // ── nixfred watch mode: external rows from hooks (nixfred/orcaWatch.ts, docs/nixfred-orca.md) ─────────

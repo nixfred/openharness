@@ -5,6 +5,45 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware graphics, second slice, 2026-09-30 (branch nixfred/firmware-graphics-2)
+
+Sits on nixfred/main 609968b2. Firmware `0.0.86-nixfred.2`, ESP-IDF v5.5.0, 1,664,672 B against an 8 MB
+slot (80% free), DIRAM 44.8% used.
+
+- Home overview: one arc per agent on the rim (top three quarters of the glass), busiest centred at
+  12 o'clock, then alternating right and left. Permission red (thick), failed thin red, waiting yellow
+  breathing, working an accent segment sweeping across its own arc over a dim track, done green, idle
+  dim, offline dotted. A summary line under the face ("! 1/9": most urgent state's glyph, how many,
+  fleet size), hidden while a recap owns that band. State comes from what the dial already holds
+  (busy, notices, open question plus its permission flag, machine state).
+- Done: on a finished turn the ring closes from the rim to a solid green dot (600 ms), then the face
+  and recap slide up into place (500 ms). No diff-stat bar: no lines-added/removed data reaches the dial.
+- Failed: `turn.error` now opens a failure screen (two 120 ms red rim flashes, then a steady thin red
+  ring) instead of a plain toast, and that agent's rim arc holds thin red until it works again. Voice
+  errors and machine-select errors use the same screen. Pairing codes and notes stay plain.
+- Voice: a rim level ring 3 to 19 px thick following the microphone level while recording; a lapping
+  arc while sending (around Focus's sparkles, which stay).
+- Panic stop: `harness stop-all` sends `nixfred.panic {stopped}`; the dial closes three rings onto one
+  red dot with "ALL STOPPED" and the count. Back with "<".
+- Plans: the daemon sends `nixfred.subs` (per plan: weekly use in permille, tone code) after each
+  subscriptions pass; the dial draws one arc per plan (max four) in the bottom quarter of the home rim.
+  Host side: `dialPlans` and `toDial` in nixfredWiring.ts, `CableSession.nixfred` (refuses any type
+  outside `nixfred.`), CableFleet fan-out. Stock firmware counts the frames unknown and drops them.
+- Renderer: HT_RUNS 40 to 56 (creature faces use up to 39 runs; each rim arc is its own damage sector).
+  One animation clock (`nf_period`) schedules frames only while something moves (8 fps rim, 30 ms for
+  done, flash and panic, 42 ms voice); quiet and nap freeze the rim.
+- Public repo: nixfred/firmware-graphics-host-render.png re-rendered with the neutral figure (it showed
+  "FN" initials). Slice 2 renders: nixfred/firmware-graphics-2-host-render.png. Both are HOST renders
+  of the firmware's drawing calls (test_nixfred_ring.c, test_nixfred_screens.c with NIXFRED_SHOT_DIR),
+  not photos of the glass.
+- Verified: firmware builds; full test/run.sh passes on gus with a local cc wrapper adding
+  -D_DEFAULT_SOURCE and -Wno-{format-truncation,misleading-indentation,restrict,clobbered} (host GCC
+  strictness, pre-existing); test_touch_ui, test_question_ui, test_voice_ui, test_machine_ui harnesses
+  updated for slices 1 and 2 (touch_ui and question_ui were already broken by slice 1). tsc clean;
+  nixfredWiring, cableHost, cableSession, cableFleet, fwPush specs pass (241). Flashed over USB; daemon
+  logged `fw 0.0.86-nixfred.2`, no offer. Not verified: the glass by eye, a live panic stop or plans
+  frame on the dial.
+
 ## Device firmware graphics, first slice, 2026-09-30 (branch nixfred/firmware-graphics)
 
 Sits on nixfred/main 7275f4fa. Firmware version `0.0.86-nixfred.1` (devices/harness-device/firmware/version.txt),

@@ -157,6 +157,7 @@ typedef struct {
     bool busy, has_event, recap_ready;
     uint32_t busy_ms, last_busy;
     int tokens;
+    uint32_t failed_at;   // nixfred: when its last turn ended in turn.error (0: it did not); busy clears it
 } agent_t;
 typedef struct {
     char key[256], prompt[256], options[OPTION_MAX][256], answer[1600];
@@ -247,6 +248,17 @@ static EXT_RAM_BSS_ATTR struct {
     uint8_t scan_step;
     int8_t ota_pct;
     char avatar_initials[4];
+    // nixfred graphics slice 2. `nf_tick` is the animation clock's last step (0: nothing animating), so
+    // an animation that ends still gets its final frame. The done motion belongs to one agent; the
+    // failure flash to the newest turn.error; the MESSAGE view is a failure or a panic stop when its
+    // kind says so. Plans are the daemon's `nixfred.subs` frame (stock daemons never send it).
+    uint32_t nf_tick, nf_done_at, nf_fail_at, nf_msg_at;
+    char nf_done_agent[ID_MAX];
+    uint8_t nf_msg_kind;   // 0 plain, 1 failed, 2 panic stop
+    int nf_stopped;
+    int nf_plan_count;
+    uint16_t nf_plan_used[NIXFRED_PLANS_MAX];
+    unsigned nf_plan_tone[NIXFRED_PLANS_MAX];
 } s;
 static QueueHandle_t actions;
 static _Atomic(TaskHandle_t) reload_waiter;
@@ -289,6 +301,7 @@ static ht_character_caption_t home_caption;
 static action_t pressed_action;
 static bool queue(action_t a);
 static void view(view_t v);
+static bool nf_msg_keep;   // nixfred: the MESSAGE being opened is a failure or a panic stop
 static const char *voice_status(void);
 static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void copy(char *dst, size_t cap, const char *src)
@@ -551,6 +564,7 @@ static void view(view_t v)
         !(v == VOICE && s.voice_open && s.voice_return == DRAFT)) return;
     if (s.voice_open && v != VOICE)
         return;
+    if (v == MESSAGE && !nf_msg_keep) s.nf_msg_kind = 0; // only show_failure and a panic stop mark it
     if (carry.pending && v != SELECTION) ht_carry_close(&carry);
     if (selection.active && v != SELECTION && v != VOICE) ht_selection_close(&selection);
     if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
@@ -680,6 +694,105 @@ static void question_chrome(ht_scene_t *f)
 {
     nixfred_attention(f, s.q.permission, s.avatar_initials, color(HT_THEME_QUESTION), color(HT_THEME_FAILED), FG);
 }
+/*
+ * nixfred graphics slice 2 (nixfred/DESIGN.md, "Device"): the fleet on the rim, the done motion, the
+ * failure flash, the voice ring and the panic stop. Everything is drawn from state the dial already
+ * holds; the animation clock below is the only thing that schedules frames, and only while something
+ * on the glass moves.
+ */
+enum { NF_DONE_CLOSE_MS = 600, NF_DONE_SLIDE_MS = 500, NF_DONE_SLIDE_PX = 48, NF_FAILED_HOLD_MS = 30 * 60 * 1000,
+       NF_FLEET_SPAN = HT_TURN * 3 / 4, NF_PHASE_MS = 125 };
+static nixfred_palette_t nf_palette(void)
+{
+    return (nixfred_palette_t){.accent = ACCENT, .yellow = color(HT_THEME_QUESTION), .red = color(HT_THEME_FAILED),
+                               .green = color(HT_THEME_DONE), .ink = FG};
+}
+static uint8_t nf_state(agent_t *a, uint32_t now)
+{
+    if (is_question(a->id))
+        return s.q.permission && !strcmp(s.q.agent, a->id) ? NIXFRED_PERMISSION : NIXFRED_WAITING;
+    if (a->busy) { a->failed_at = 0; return NIXFRED_WORKING; }
+    if (a->failed_at && now - a->failed_at < NF_FAILED_HOLD_MS) return NIXFRED_FAILED;
+    for (int i = 0; i < s.notice_count; i++)
+        if (!s.notice[i].question && !s.notice[i].read_on_dial && !strcmp(s.notice[i].agent_id, a->id))
+            return s.notice[i].failed ? NIXFRED_FAILED : NIXFRED_DONE;
+    if (a->recap_ready) return NIXFRED_DONE;
+    for (int i = 0; i < s.machine_count; i++)
+        if (a->machine_id[0] && !strcmp(s.machines[i].id, a->machine_id))
+            return !strcmp(s.machines[i].state, "offline") ? NIXFRED_OFFLINE : NIXFRED_IDLE;
+    return NIXFRED_IDLE;
+}
+static int nf_states(uint8_t *out, int max, uint32_t now)
+{
+    int n = s.count < max ? s.count : max;
+    for (int i = 0; i < n; i++) out[i] = nf_state(&s.agents[i], now);
+    return n;
+}
+static bool nf_home_live(void)
+{
+    return s.view == HOME && s.connected && !s.loading && !display_is_asleep();
+}
+static bool nf_done_running(uint32_t now)
+{
+    agent_t *a = active();
+    return s.nf_done_at && nf_home_live() && a && !strcmp(a->id, s.nf_done_agent) &&
+        now - s.nf_done_at < NF_DONE_CLOSE_MS + NF_DONE_SLIDE_MS;
+}
+// How often the glass needs a new frame right now, in ms; 0 when nothing nixfred draws is moving.
+static uint32_t nf_period(uint32_t now)
+{
+    if (display_is_asleep()) return 0;
+    if (s.view == MESSAGE && s.nf_msg_kind && now - s.nf_msg_at < NIXFRED_PANIC_MS + 40) return 30;
+    if (s.view == VOICE) return 42;
+    if (!nf_home_live()) return 0;
+    if (nf_done_running(now)) return 30;
+    if (s.nf_fail_at && now - s.nf_fail_at < NIXFRED_FAIL_FLASH_MS + 40) return 40;
+    if (s.quiet || s.nap) return 0;
+    for (int i = 0; i < s.count && i < NIXFRED_RIM_MAX; i++) {
+        uint8_t st = nf_state(&s.agents[i], now);
+        if (st == NIXFRED_WORKING || st == NIXFRED_WAITING) return NF_PHASE_MS;
+    }
+    return 0;
+}
+static unsigned nf_plan_color(unsigned tone)
+{
+    static const unsigned tones[] = {HT_THEME_SECONDARY, HT_THEME_DONE, HT_THEME_ACCENT, 0xffb000u, HT_THEME_FAILED};
+    return tones[tone < sizeof tones / sizeof *tones ? tone : 0];
+}
+// The fleet rim, the plans under it and the one-line summary; drawn last on the home face.
+static void nf_home_rim(ht_scene_t *f, uint32_t now, bool summary, int summary_y)
+{
+    uint8_t st[NIXFRED_RIM_MAX];
+    int n = nf_states(st, NIXFRED_RIM_MAX, now);
+    nixfred_palette_t p = nf_palette();
+    unsigned phase = s.quiet || s.nap ? 0 : (now / NF_PHASE_MS) % NIXFRED_PHASES;
+    uint32_t fail = s.nf_fail_at ? now - s.nf_fail_at : UINT32_MAX;
+    nixfred_fleet_rim(f, st, n, NF_FLEET_SPAN, phase, fail, &p);
+    if (s.nf_plan_count > 0) {
+        uint16_t tone[NIXFRED_PLANS_MAX];
+        for (int i = 0; i < s.nf_plan_count; i++) tone[i] = color(nf_plan_color(s.nf_plan_tone[i]));
+        nixfred_plans_rim(f, NF_FLEET_SPAN / 2 + 60, HT_TURN - NF_FLEET_SPAN - 120, s.nf_plan_used, tone,
+                          s.nf_plan_count);
+    }
+    if (summary && n > 1) {
+        char line[16]; uint16_t ink = FG;
+        nixfred_fleet_summary(line, sizeof line, &ink, st, n, &p);
+        ht_center(f, summary_y, &ht_mono_20, ink, line);
+    }
+}
+static void nf_message_chrome(ht_scene_t *f, uint32_t now)
+{
+    if (s.nf_msg_kind == 1) nixfred_failed_rim(f, now - s.nf_msg_at, color(HT_THEME_FAILED));
+}
+// A failure the person should see as one (the red flashes), rather than a plain message.
+static void show_failure(const char *title, const char *detail)
+{
+    COPY(s.title, title);
+    COPY(s.message, detail);
+    s.nf_msg_kind = 1;
+    s.nf_msg_at = ms() | 1;
+    nf_msg_keep = true; view(MESSAGE); nf_msg_keep = false;
+}
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
 {
@@ -804,6 +917,10 @@ static void surface_tick(uint32_t now)
         uint8_t step = (uint8_t)((now / (1000 / NIXFRED_SCAN_STEPS)) % NIXFRED_SCAN_STEPS);
         if (step != s.scan_step) { s.scan_step = step; change(); }
     }
+    {
+        uint32_t period = nf_period(now), tick = period ? now / period + 1 : 0;
+        if (tick != s.nf_tick) { s.nf_tick = tick; change(); }
+    }
     uint8_t phase = status_animated() ? ht_shimmer_phase(now * status_speed()) : 0;
     if (phase != s.status_phase) { s.status_phase = phase; change(); }
     bool main = s.view == HOME || s.view == AGENT;
@@ -891,6 +1008,14 @@ static void render_home(ht_scene_t *f)
     s.caption_arc = (ht_rect_t){0};
     if (!s.connected || s.loading) { render_brand(f); return; }
     if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
+    uint32_t nf_now = ms();
+    if (nf_done_running(nf_now) && nf_now - s.nf_done_at < NF_DONE_CLOSE_MS) {
+        // Done, first beat: the ring closes from the rim onto a solid dot; the recap follows it up.
+        nixfred_done_collapse(f, HT_WIDTH / 2, HT_HEIGHT / 2, (int)((nf_now - s.nf_done_at) * 1000 / NF_DONE_CLOSE_MS),
+                              color(HT_THEME_DONE));
+        s.hits[s.hit_count++] = (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
+        return;
+    }
     agent_t *a = active();
     // The top caption belongs to the current pane; only completed work gets
     // a recap. The bell has its own lower target, outside the voice surface.
@@ -954,7 +1079,15 @@ static void render_home(ht_scene_t *f)
     }
     if (visit.available) f_.hint = "";
     bool focus_face = character.id == HT_CHARACTER_FOCUS;
+    int nf_face = f->count;
     ht_character_face(f, &character, &f_, ACCENT, recap);
+    if (nf_done_running(nf_now)) {
+        // Done, second beat: the recap slides up into place (the face's text and art, not the caption arc).
+        int left = (int)(NF_DONE_CLOSE_MS + NF_DONE_SLIDE_MS - (nf_now - s.nf_done_at));
+        int dy = NF_DONE_SLIDE_PX * left * left / (NF_DONE_SLIDE_MS * NF_DONE_SLIDE_MS);
+        for (int i = nf_face; i < f->count; i++)
+            if (!f->runs[i].arc && !f->runs[i].ring.outer && f->runs[i].y + dy < HT_HEIGHT - 40) f->runs[i].y += dy;
+    }
     if (bell) {
         if (focus_face) focus_bell(f, unread);   // y 22..57, clear of the tab pill at 67
         else ht_notification_bell(f, unread, f_.ink);
@@ -1046,6 +1179,11 @@ static void render_home(ht_scene_t *f)
     // On Focus it stops where the microphone's target starts; nothing is drawn between the last recap
     // row (y 335) and the mic, so the band belongs to the button rather than to a tap-anywhere.
     s.hits[s.hit_count++] = (hit_t){{33, 66, 400, focus_face ? FOCUS_MIC_TOP - 66 : 316}, A_PET, 0, true};
+    // The fleet on the rim, last so the face keeps every run it needs. The summary sits in the empty
+    // band under the face: above the microphone on Focus, above the bell on a creature; not while a
+    // recap or a carried text owns that space.
+    nf_home_rim(f, nf_now, !recap && !carry.active && !carry.error[0] && !visit.available,
+                focus_face ? 318 : 350);
 }
 /*
  * FOCUS'S LISTS SPEAK THE AGENT SCREEN'S TYPE (owner, 2026-09-30): Geist and Montserrat from the
@@ -1629,6 +1767,11 @@ static void render_voice(ht_scene_t *f)
     s.status_phase = status_animated() ? ht_shimmer_phase(ms() * status_speed()) : 0;
     for (int i = 0; i < f->count; i++)
         if (f->runs[i].arc == 2) f->runs[i].shimmer = s.status_phase;
+    // The rim: a level ring whose thickness follows the microphone while it records, and an arc lapping
+    // the glass once a second while the words are on their way (around the sparkles on Focus).
+    bool nf_listening = !s.voice_start_pending && !s.voice_waiting && audio_client_recording();
+    nixfred_voice_rim(f, nf_listening, audio_client_input_level(),
+                      (ms() / (1000 / NIXFRED_VOICE_STEPS)) % NIXFRED_VOICE_STEPS, color(HT_THEME_VOICE), ACCENT);
     s.hits[s.hit_count++] = (hit_t){{33, 97, 400, 274}, A_PET, 0, true};
 }
 static void render_selection(ht_scene_t *f)
@@ -1856,6 +1999,12 @@ bool habitat_scene_take(ht_scene_t *f)
         render_brand(f);
         break;
     case MESSAGE:
+        if (s.nf_msg_kind == 2) {
+            nixfred_panic(f, ms() - s.nf_msg_at, s.nf_stopped, color(HT_THEME_FAILED), FG, DIM);
+            control(f, 87, 67, 48, "<", A_HOME, 0, true);
+            break;
+        }
+        nf_message_chrome(f, ms());
         heading(f, s.title);
         ht_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
         break;
@@ -2896,6 +3045,11 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t period = 1000 / NIXFRED_SCAN_STEPS, due = period - now % period;
         if (due < delay) delay = due ? due : 1;
     }
+    {
+        uint32_t period = nf_period(now);
+        if (period) { uint32_t due = period - now % period; if (due < delay) delay = due ? due : 1; }
+        else if (s.nf_tick && delay > 1) delay = 1; // the last frame of an animation that just ended
+    }
     if (status_animated()) {
         uint32_t due = status_wake_ms(now);
         if (due < delay) delay = due;
@@ -3784,6 +3938,8 @@ void ui_notify_task_done(const char *id, const char *name, const char *machine, 
     notice_add(id, name, machine, recap, false, false);
     s.notice_sequence++;
     uint32_t now = ms();
+    { int i = find(id); if (i >= 0) s.agents[i].failed_at = 0; }
+    if (!s.quiet && !s.nap) { s.nf_done_at = now | 1; COPY(s.nf_done_agent, id); }
     if (!waiting() && !s.nap && !s.quiet && (!s.last_celebration || now - s.last_celebration >= 20000)) {
         s.pet_pose = 3;
         s.pet_until = now + 2000;
@@ -4098,8 +4254,8 @@ void ui_machine_select_error(const char *id, const char *code, const char *messa
         return;
     }
     s.pending_machine[0] = 0;
+    show_failure("Machine", message);
     display_unlock();
-    ui_show_error("Machine", message);
 }
 void ui_tick_machine_select(void)
 {
@@ -4151,7 +4307,45 @@ void ui_show_error(const char *title, const char *detail)
     display_lock();
     COPY(s.title, title);
     COPY(s.message, detail);
-    view(MESSAGE);
+    view(MESSAGE);   // pairing codes and notes come through here too; view() clears the failure mark
+    display_unlock();
+}
+// nixfred: a turn ended in turn.error. Its rim arc flashes twice and holds thin red until it works again.
+void ui_nixfred_turn_failed(const char *id, const char *message)
+{
+    display_lock();
+    int i = find(id);
+    if (i >= 0) {
+        s.agents[i].failed_at = ms() | 1;
+        s.nf_fail_at = s.agents[i].failed_at;
+        change();
+    }
+    // The words the toast used to carry, on the failure screen. A live recording keeps its screen.
+    if (!s.voice_open && message && *message) show_failure(i >= 0 ? s.agents[i].name : "Harness", message);
+    display_unlock();
+}
+// nixfred: the daemon stopped every agent (`harness stop-all`). Every ring closes to one red dot.
+void ui_nixfred_panic(int stopped)
+{
+    display_lock();
+    s.nf_msg_kind = 2;
+    s.nf_stopped = stopped;
+    s.nf_msg_at = ms() | 1;
+    s.title[0] = s.message[0] = 0;
+    nf_msg_keep = true; view(MESSAGE); nf_msg_keep = false;
+    change();
+    display_wake();
+    display_unlock();
+}
+// nixfred: the plans' weekly use, as the daemon's `nixfred.subs` frame carries it.
+void ui_nixfred_plans(const uint16_t *used_permille, const uint8_t *tone, int n)
+{
+    display_lock();
+    if (n > NIXFRED_PLANS_MAX) n = NIXFRED_PLANS_MAX;
+    if (n < 0) n = 0;
+    for (int i = 0; i < n; i++) { s.nf_plan_used[i] = used_permille[i]; s.nf_plan_tone[i] = tone[i]; }
+    s.nf_plan_count = n;
+    change();
     display_unlock();
 }
 void ui_carry_state(const cJSON *p)
@@ -4498,7 +4692,7 @@ void ui_voice_error(const char *message)
         if (!s.voice_retry_until) s.voice_retry_until = 1;
         change();
     } else {
-        COPY(s.title, "Voice"); COPY(s.message, message); view(MESSAGE);
+        show_failure("Voice", message);
     }
     ht_gesture_guard(&gesture, ms());
     display_unlock();

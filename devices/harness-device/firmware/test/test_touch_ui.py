@@ -32,6 +32,7 @@ code = r'''
 #include "focus.h"
 #include "workspace.h"
 #include "command_face.h"
+#include "nixfred_art.h"
 #include "arc_geometry.inc"
 #include <assert.h>
 #include <stdlib.h>
@@ -73,7 +74,23 @@ static struct {
     question_t q;
     agent_t agents[MAX_PROJECTS]; hit_t hits[24];
     ht_rect_t caption_arc;
+    // nixfred graphics (slices 1 and 2): the same fields ui_habitat.c carries.
+    uint8_t scan_step; int8_t ota_pct; char avatar_initials[4];
+    uint32_t nf_tick, nf_done_at, nf_fail_at, nf_msg_at; char nf_done_agent[ID_MAX]; uint8_t nf_msg_kind; int nf_stopped;
+    int nf_plan_count; uint16_t nf_plan_used[NIXFRED_PLANS_MAX]; unsigned nf_plan_tone[NIXFRED_PLANS_MAX];
 } s;
+static bool nf_msg_keep;
+// The boot face (nixfred slice 1) is the logo mask, its glow, the wordmark and the rim scanner, not the
+// one "Harness" run stock drew: it is recognised by the wordmark run and the logo mask.
+static bool nf_brand_in(const ht_scene_t *sc)
+{
+    bool word = false, mask = false;
+    for (int i = 0; i < sc->count; i++) {
+        if (!strcmp(sc->runs[i].text, "Harness")) word = true;
+        if (sc->runs[i].sprite.alpha == nixfred_logo_alpha) mask = true;
+    }
+    return word && mask;
+}
 static ht_gesture_t gesture;
 static ht_character_t character;
 static bool companion_celebrating, follow_companion=true;
@@ -197,7 +214,9 @@ static bool scroll_emit(ht_scroll_phase_t phase, int dy, int velocity, void *ctx
 code += function('color')
 code += function('settings_item') + function('settings_count') + function('hit_contains')
 code += function('find')
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+# nixfred graphics: the slice-2 constants, then its helpers, ahead of the render functions that call them.
+code += source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[0] + '\n' + source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[1] + '\n'
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'brand_visible', 'heading', 'question_chrome', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'nf_palette', 'nf_state', 'nf_states', 'nf_home_live', 'nf_done_running', 'nf_period', 'nf_plan_color', 'nf_home_rim', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
@@ -890,7 +909,7 @@ static void pane_memory_checks(const char *dir) {
     fake_ms+=3400; surface_tick(fake_ms); scene_take();
     assert(!active()->tool[0] && title_is("Working"));
     s.nap=true; scene_take(); assert(!title_is("Working")); s.nap=false;
-    s.connected=false; scene_take(); assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness")); s.connected=true;
+    s.connected=false; scene_take(); assert(nf_brand_in(&scene)); s.connected=true;
     ui_project_emit("a",NULL,"activity","Working",NULL);
     strcpy(active()->name,"hn"); scene_take(); portrait(dir,"short-name-working");
     strcpy(active()->name,"firmware v2");
@@ -1653,19 +1672,22 @@ int main(int argc, char **argv) {
     assert(s.view==TABS && !starts);
     reset(); active()->busy=true; scene_take(); tap(1000,233,41); assert(s.view==AGENTS && !starts);
     reset(); s.connected=false; scene_take(); portrait(dir,"offline");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
-    assert(!scene.runs[0].arc && !scene.runs[0].shimmer);
-    ht_rect_t brand=ht_run_bounds(&scene.runs[0]);
-    assert(abs(brand.x*2+brand.w-466)<=1 && abs(brand.y*2+brand.h-466)<=1);
+    assert(nf_brand_in(&scene) && !s.hit_count);
+    // The nixfred boot face: the wordmark is centred across the glass and sits under the logo, which
+    // is centred above the middle (the rim carries the scanner), so only the horizontal centre is fixed.
+    int word=-1; for(int i=0;i<scene.count;i++) if(!strcmp(scene.runs[i].text,"Harness")) word=i;
+    assert(word>=0 && !scene.runs[word].arc && !scene.runs[word].shimmer);
+    ht_rect_t brand=ht_run_bounds(&scene.runs[word]);
+    assert(abs(brand.x*2+brand.w-466)<=1 && brand.y>233);
     tap(1000,233,220); assert(!starts);
     surface_tick(1500); assert(!character.motion.running);
     // Handshake alone is not ready: retain the wordmark until the roster lands.
     s.connected=true; s.loading=true; scene_take(); portrait(dir,"connecting");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
+    assert(nf_brand_in(&scene) && !s.hit_count);
     surface_tick(2000); assert(!character.motion.running);
     ui_land_after_reload(); scene_take(); assert(scene.count>1);
     s.view=OTA; scene_take(); portrait(dir,"updating");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
+    assert(nf_brand_in(&scene) && !s.hit_count);
     reset(); s.count=0; s.active=-1; scene_take();
     tap(1000,233,220); assert(!starts);
     // A missed utterance keeps the entire creature as the retry target.
@@ -1805,7 +1827,9 @@ int main(int argc, char **argv) {
         uint16_t gap[HT_WIDTH];
         for (int y = 55; y < 68; y++) {   // the bell pill ends at 54, the tab pill starts at 68
             ht_raster(&scene, (ht_rect_t){0, y, HT_WIDTH, 1}, gap);
-            for (int x = 0; x < HT_WIDTH; x++) assert(gap[x] == 0);
+            // Between the pills, not out at the glass: the nixfred fleet rim crosses these rows at x < 100
+            // and x > 366, which is the rim and not the gap this checks.
+            for (int x = 100; x < HT_WIDTH - 100; x++) assert(gap[x] == 0);
         }
         bool shown = false;
         for (int i = 0; i < scene.count; i++) if (strstr(scene.runs[i].text, "retry queue")) shown = true;
@@ -2069,7 +2093,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
                     str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'terminal.c'),
-                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),'-o',str(out/'touch_ui')],check=True)
+                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),str(native/'nixfred_art.c'),str(native/'nixfred_logo.c'),'-o',str(out/'touch_ui')],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):
         dest=Path(os.environ['HABITAT_PREVIEW_DIR']);dest.mkdir(parents=True,exist_ok=True)

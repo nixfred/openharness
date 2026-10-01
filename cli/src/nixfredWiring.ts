@@ -72,6 +72,28 @@ export interface NixfredDeps {
   clipWrite?: (text: string) => Promise<void>
   /** Where pushed files land (default ~/Downloads/harness-drop or HARNESS_DROP_DIR). */
   dropDir?: string
+  /** Send a `nixfred.*` frame to every plugged-in dial. Stock firmware counts it unknown and drops it. */
+  toDial?: (msg: { t: string; [key: string]: unknown }) => void
+}
+
+/** The dial's tone codes, in the order the nixfred firmware's palette reads them. */
+const DIAL_TONES: Record<string, number> = { unknown: 0, banked: 1, 'on-pace': 2, amber: 3, red: 4 }
+
+/**
+ * The subscriptions block as the dial draws it: one arc per plan, weekly use in permille (0..1000) and
+ * a tone code. At most four plans (the rim's plan sector holds four). Null when there is nothing yet.
+ */
+export function dialPlans(compact: ReturnType<SubscriptionsService['compact']>): { t: 'nixfred.subs'; pick: string; subs: Array<{ id: string; used: number; tone: number }> } | null {
+  if (!compact) return null
+  return {
+    t: 'nixfred.subs',
+    pick: compact.pick,
+    subs: compact.subs.slice(0, 4).map((s) => ({
+      id: s.id,
+      used: Math.round(Math.min(1, Math.max(0, Number.isFinite(s.used) ? s.used : 0)) * 1000),
+      tone: DIAL_TONES[s.tone] ?? 0,
+    })),
+  }
 }
 
 /** A live, E2EE-terminated link to one linked machine, as the daemon's relay pool hands it out. */
@@ -323,6 +345,8 @@ export class Nixfred {
     try {
       const payload = await this.subs.collect(force)
       this.deps.sendLocal({ type: 'subscriptions', payload: payload as unknown as Record<string, unknown> })
+      const dial = dialPlans(this.subs.compact())
+      if (dial) this.deps.toDial?.(dial)
       return payload
     } catch (e) {
       console.log(`[subs] collect failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -586,6 +610,8 @@ export class Nixfred {
     }
     this.log({ kind: 'command', name: 'stop-all', detail: `cancelled ${cancelled.length}, kept ${exceptAgentId ?? 'none'}` })
     console.log(`[nixfred] panic stop: cancelled ${cancelled.length} agent(s)`)
+    // The dial's panic face: every ring closes to one red dot.
+    this.deps.toDial?.({ t: 'nixfred.panic', stopped: cancelled.length })
     return { cancelled }
   }
 

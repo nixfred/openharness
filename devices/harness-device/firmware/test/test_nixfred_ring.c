@@ -148,12 +148,17 @@ int main(void)
     assert(px(full, 233, 233 - 227) == yellow);    // waiting ring in yellow at the rim
     shot("question-waiting");
     ht_scene_clear(&b, black);
-    nixfred_attention(&b, true, "FN", yellow, crimson, ink);
+    nixfred_attention(&b, true, "", yellow, crimson, ink); // the neutral figure: no initials in a public render
     ht_center(&b, 214, &ht_mono_28, ink, "Allow: git push?");
     render(&b);
     assert(px(full, 233, 233 + 227) == crimson);   // permission ring in red
     shot("question-permission");
     transition(&a, &b);
+    // The initials path still draws (host-supplied initials; never baked into a render).
+    ht_scene_clear(&b, black);
+    nixfred_attention(&b, true, "AB", yellow, crimson, ink);
+    render(&b);
+    assert(px(full, 233, 233 + 227) == crimson);
     puts("test_nixfred_ring: ok");
     return 0;
 }

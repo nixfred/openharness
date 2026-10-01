@@ -12,7 +12,10 @@
 // and not about a number.
 #define HT_WIDTH 466
 #define HT_HEIGHT 466
-#define HT_RUNS 40
+// 56, not 40 (nixfred graphics slice 2): a creature face uses up to 39 runs, and the fleet rim adds one
+// arc per agent (Fred runs nine) plus the plan arcs. Each run is its own damage sector, which is what
+// keeps an animated rim from repainting the face. Two static scenes, so this is ~6 KB of internal RAM.
+#define HT_RUNS 56
 #define HT_TEXT_BYTES 128
 #define HT_DAMAGE_MAX 24
 typedef struct {
