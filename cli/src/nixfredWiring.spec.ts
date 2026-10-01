@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
+import { dialFleet, dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
 
 vi.mock('./lib/desktopNotify.js', () => ({ notifyAttention: vi.fn(async () => 'skipped') }))
 vi.mock('./lib/hooks.js', () => ({ installGateHook: () => 'installed', uninstallGateHook: () => 'removed', gateHookInstalled: () => false }))
@@ -108,7 +108,7 @@ describe('Nixfred wiring', () => {
 
   it('stopAll tells the dial (nixfred.panic) how many it stopped', async () => {
     await nix.stopAll(null)
-    expect(dial).toEqual([{ t: 'nixfred.panic', stopped: 2 }])
+    expect(dial.filter((m) => m.t === 'nixfred.panic')).toEqual([{ t: 'nixfred.panic', stopped: 2 }])
   })
 
   it('dialPlans turns the compact subscriptions block into the dial frame (permille, tone code, max 4)', () => {
@@ -118,8 +118,35 @@ describe('Nixfred wiring', () => {
       sub('claude', 0.62, 'on-pace'), sub('codex', 1.4, 'red'), sub('kimi', 0.1, 'banked'), sub('gemini', -1, 'amber'), sub('x', 0.5, 'what'),
     ] } as never)
     expect(frame).toEqual({ t: 'nixfred.subs', pick: 'claude', subs: [
-      { id: 'claude', used: 620, tone: 2 }, { id: 'codex', used: 1000, tone: 4 }, { id: 'kimi', used: 100, tone: 1 }, { id: 'gemini', used: 0, tone: 3 },
+      { id: 'claude', name: 'claude', used: 620, tone: 2, banked: 0 }, { id: 'codex', name: 'codex', used: 1000, tone: 4, banked: 0 },
+      { id: 'kimi', name: 'kimi', used: 100, tone: 1, banked: 0 }, { id: 'gemini', name: 'gemini', used: 0, tone: 3, banked: 0 },
     ] })
+    const banked = dialPlans({ at: 1, pick: 'claude', verdict: '', subs: [{ ...sub('claude', 0.5, 'banked'), name: 'Claude Max plan', bankedSigned: 0.123 }, { ...sub('codex', 0.9, 'red'), bankedSigned: -2 }] } as never)
+    expect(banked!.subs.map((s) => [s.name, s.banked])).toEqual([['Claude Ma', 123], ['codex', -1000]])
+  })
+
+  it('dialFleet carries the clock, lanes, the newest collision and this machine\'s load, battery and VRAM', () => {
+    const now = new Date(2026, 8, 30, 14, 7, 30).getTime()
+    const frame = dialFleet({
+      machineId: 'm1',
+      agents: [{ agentId: 'a', lane: 'planner' }, { agentId: 'b', lane: null }, { agentId: 'c', lane: 'Publisher' }],
+      alerts: [{ kind: 'file', key: 'k', at: now - 5000, agents: [{ agentId: 'a', agentName: 'api' }, { agentId: 'c', agentName: 'docs' }], detail: 'both edited x.ts' }],
+    }, { at: now, hostname: 'h', cpu: { cores: 8, load1: 2, load5: 1 }, gpus: [{ name: 'g', vramTotalMb: 12000, vramUsedMb: 3000, utilizationPct: 10 }],
+      power: { onAc: false, batteryPct: 81 }, thermal: { maxC: null }, lid: 'open', toolchains: {} }, now)
+    expect(frame).toEqual({
+      t: 'nixfred.fleet', clock: 14 * 3600 + 7 * 60 + 30,
+      machine: { id: 'm1', load: 250, battery: 810, vram: 250 },
+      lanes: [{ id: 'a', lane: 'P' }, { id: 'c', lane: 'P' }],
+      alert: { a: 'a', b: 'c', an: 'api', bn: 'docs', detail: 'both edited x.ts', at: now - 5000 },
+    })
+    // No capabilities read yet and no alert: the frame still carries the clock and lanes, nothing else.
+    const bare = dialFleet({ machineId: 'm1', agents: [], alerts: [] }, null, now)
+    expect(bare).toEqual({ t: 'nixfred.fleet', clock: 14 * 3600 + 7 * 60 + 30, lanes: [] })
+  })
+
+  it('sends nixfred.fleet to the dial when attention changes', () => {
+    nix.attention.turnStarted('a', 'fix login')
+    expect(dial.some((m) => m.t === 'nixfred.fleet')).toBe(true)
   })
 
   it('raises a collision alert when two agents edit the same file, and it rides on the attention payload', async () => {

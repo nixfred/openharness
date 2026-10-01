@@ -83,17 +83,60 @@ const DIAL_TONES: Record<string, number> = { unknown: 0, banked: 1, 'on-pace': 2
  * The subscriptions block as the dial draws it: one arc per plan, weekly use in permille (0..1000) and
  * a tone code. At most four plans (the rim's plan sector holds four). Null when there is nothing yet.
  */
-export function dialPlans(compact: ReturnType<SubscriptionsService['compact']>): { t: 'nixfred.subs'; pick: string; subs: Array<{ id: string; used: number; tone: number }> } | null {
+export function dialPlans(compact: ReturnType<SubscriptionsService['compact']>): { t: 'nixfred.subs'; pick: string; subs: Array<{ id: string; name: string; used: number; tone: number; banked: number }> } | null {
   if (!compact) return null
+  const permille = (v: number, lo: number): number => Math.round(Math.min(1, Math.max(lo, Number.isFinite(v) ? v : 0)) * 1000)
   return {
     t: 'nixfred.subs',
     pick: compact.pick,
+    // name (9 characters, the dial's label) and banked (signed permille, + under the even pace) feed the
+    // nixfred firmware's plans face (slice 3); older nixfred firmware reads only used and tone.
     subs: compact.subs.slice(0, 4).map((s) => ({
       id: s.id,
-      used: Math.round(Math.min(1, Math.max(0, Number.isFinite(s.used) ? s.used : 0)) * 1000),
+      name: String(s.name || s.id).slice(0, 9),
+      used: permille(s.used, 0),
       tone: DIAL_TONES[s.tone] ?? 0,
+      banked: permille(s.bankedSigned, -1),
     })),
   }
+}
+
+/** What the attention payload holds that `dialFleet` reads. */
+export interface DialFleetSource {
+  machineId: string
+  agents: Array<{ agentId: string; lane?: string | null }>
+  alerts: CollisionEvent[]
+}
+
+/**
+ * `nixfred.fleet`: what the dial cannot see for itself (nixfred firmware slice 3). The local time of day
+ * for the ambient clock, each agent's policy lane as one letter, the newest collision inside its hour,
+ * and this machine's load, battery and VRAM as permille for its machine tile. Every field is optional on
+ * the dial; stock firmware counts the frame unknown and drops it.
+ */
+export function dialFleet(src: DialFleetSource, caps: MachineCapabilities | null, now: number): Record<string, unknown> & { t: 'nixfred.fleet' } {
+  const d = new Date(now)
+  const frame: Record<string, unknown> & { t: 'nixfred.fleet' } = {
+    t: 'nixfred.fleet',
+    clock: d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds(),
+    lanes: src.agents.filter((a) => typeof a.lane === 'string' && a.lane).slice(0, 16).map((a) => ({ id: a.agentId, lane: a.lane!.charAt(0).toUpperCase() })),
+  }
+  if (caps) {
+    const pm = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 1000)
+    const gpu = caps.gpus[0]
+    frame.machine = {
+      id: src.machineId,
+      load: pm(caps.cpu.cores > 0 ? caps.cpu.load1 / caps.cpu.cores : 0),
+      ...(caps.power.batteryPct !== null ? { battery: pm(caps.power.batteryPct / 100) } : {}),
+      ...(gpu && gpu.vramTotalMb > 0 ? { vram: pm(gpu.vramUsedMb / gpu.vramTotalMb) } : {}),
+    }
+  }
+  const alert = src.alerts.find((e) => e.agents.length >= 2)
+  if (alert) {
+    const [a, b] = alert.agents
+    frame.alert = { a: a!.agentId, b: b!.agentId, an: a!.agentName, bn: b!.agentName, detail: alert.detail.slice(0, 118), at: alert.at }
+  }
+  return frame
 }
 
 /** A live, E2EE-terminated link to one linked machine, as the daemon's relay pool hands it out. */
@@ -347,6 +390,9 @@ export class Nixfred {
       this.deps.sendLocal({ type: 'subscriptions', payload: payload as unknown as Record<string, unknown> })
       const dial = dialPlans(this.subs.compact())
       if (dial) this.deps.toDial?.(dial)
+      // Once a minute the dial's clock and this machine's capability arcs are refreshed with the plans.
+      try { await this.capabilities(55_000) } catch { /* the frame goes without the machine block */ }
+      this.pushFleet()
       return payload
     } catch (e) {
       console.log(`[subs] collect failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -377,10 +423,22 @@ export class Nixfred {
     return wakes
   }
 
+  /** `nixfred.fleet` to every plugged-in dial, from the attention payload and the cached capabilities. */
+  private pushFleet(payload: Record<string, unknown> = this.attentionPayload()): void {
+    if (!this.deps.toDial) return
+    try {
+      this.deps.toDial(dialFleet(payload as unknown as DialFleetSource, this.capsCache?.value ?? null, this.now()))
+    } catch (e) {
+      console.log(`[dial] fleet frame skipped: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   private onCollision(e: CollisionEvent): void {
     console.log(`[collision] ${e.detail}`)
     this.log({ kind: 'turn', agentId: e.agents[0]?.agentId ?? 'daemon', name: `collision ${e.kind}`, detail: e.detail })
-    this.deps.sendLocal({ type: 'attention', payload: this.attentionPayload() })
+    const payload = this.attentionPayload()
+    this.deps.sendLocal({ type: 'attention', payload })
+    this.pushFleet(payload)
     void notifyAttention({ agentName: e.agents.map((a) => a.agentName).join(' and '), machine: this.deps.machineName(), state: 'waiting', detail: e.detail }).catch(() => {})
   }
 
@@ -459,6 +517,7 @@ export class Nixfred {
   private onAttentionChange(agentId: string, state: AttentionState, previous: AttentionState | null, detail: string): void {
     const payload = this.attentionPayload()
     this.deps.sendLocal({ type: 'attention', payload })
+    this.pushFleet(payload)
     const row = (payload.agents as AttentionRow[]).find((r) => r.agentId === agentId)
     const name = row?.name ?? agentId
     this.log({ kind: 'turn', agentId, name: `attention ${previous ?? 'none'} -> ${state}`, detail })

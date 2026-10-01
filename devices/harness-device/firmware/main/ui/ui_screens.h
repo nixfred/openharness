@@ -320,6 +320,22 @@ void ui_nixfred_turn_failed(const char *agent_id, const char *message);
 void ui_nixfred_panic(int stopped);
 // `nixfred.subs`: each plan's weekly use (permille) and tone (0 unknown, 1 banked, 2 on pace, 3 amber, 4 red).
 void ui_nixfred_plans(const uint16_t *used_permille, const uint8_t *tone, int n);
+// nixfred graphics slice 3: the same frame's optional per-plan name and banked share (signed permille,
+// + under the even pace), and which plan the host says to use next (-1 none). For the plans detail face.
+void ui_nixfred_plan_detail(const char (*name)[10], const int16_t *banked, int pick, int n);
+// `nixfred.fleet`: what the dial cannot see for itself. Every field optional; stock firmware drops the frame.
+#define UI_NF_LANES 16
+typedef struct {
+    int32_t clock_s;                       // local seconds since midnight, -1 unknown
+    char machine_id[ID_MAX];               // the host's own machine, for its capability arcs
+    int16_t load, battery, vram;           // permille, -1 unknown
+    int lane_count;
+    struct { char id[ID_MAX]; char letter; } lanes[UI_NF_LANES];
+    bool alert;                            // a collision inside its hour
+    uint32_t alert_at;                     // the alert's identity (its time), so one alert opens one card
+    char alert_a[ID_MAX], alert_b[ID_MAX], alert_an[CABLE_NAME_MAX], alert_bn[CABLE_NAME_MAX], alert_detail[120];
+} ui_nf_fleet_t;
+void ui_nixfred_fleet(const ui_nf_fleet_t *fleet);
 
 /*
  * THE DEVICE'S SETTINGS, AS THE APP SEES THEM.

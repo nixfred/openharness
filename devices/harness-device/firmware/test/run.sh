@@ -63,7 +63,8 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 # nixfred graphics: rings, arcs, the one-colour mask and the boot/question faces built from them.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_nixfred_ring" "$here/test_nixfred_ring.c" "$here/../main/ui/habitat/nixfred_art.c" \
-   "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
+   "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" \
+   "$here/../main/ui/habitat/lvgl_fonts.c" -lm
 "$out/test_nixfred_ring"
 
 # nixfred graphics slice 2: the fleet rim over the real skin faces, done, failed, voice, panic, plans.
@@ -74,8 +75,19 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    "$here/../main/ui/habitat/character_layout.c" "$here/../main/ui/habitat/tux.c" "$here/../main/ui/habitat/focus.c" \
    "$here/../main/ui/habitat/lvgl_fonts.c" "$here/../main/ui/habitat/lvgl_icons.c" "$here/../main/ui/habitat/octopus.c" \
    "$here/../main/ui/habitat/octopus_font.c" "$here/../main/ui/habitat/ascii_clip.c" \
-   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
 "$out/test_nixfred_screens"
+
+# nixfred graphics slice 3: ambient, connecting, pairing, machines, swarm, card, collision, sweep, plans.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_nixfred_slice3" "$here/test_nixfred_slice3.c" "$here/../main/ui/habitat/nixfred_art.c" \
+   "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/character.c" \
+   "$here/../main/ui/habitat/illustrated.c" "$here/../main/ui/habitat/character_motion.c" \
+   "$here/../main/ui/habitat/character_layout.c" "$here/../main/ui/habitat/tux.c" "$here/../main/ui/habitat/focus.c" \
+   "$here/../main/ui/habitat/lvgl_fonts.c" "$here/../main/ui/habitat/lvgl_icons.c" "$here/../main/ui/habitat/octopus.c" \
+   "$here/../main/ui/habitat/octopus_font.c" "$here/../main/ui/habitat/ascii_clip.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_nixfred_slice3"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -I "$here/../main/ui/habitat" -o "$out/test_arc_storage" "$here/test_arc_storage.c" \

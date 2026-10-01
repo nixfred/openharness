@@ -78,8 +78,14 @@ static struct {
     uint8_t scan_step; int8_t ota_pct; char avatar_initials[4];
     uint32_t nf_tick, nf_done_at, nf_fail_at, nf_msg_at; char nf_done_agent[ID_MAX]; uint8_t nf_msg_kind; int nf_stopped;
     int nf_plan_count; uint16_t nf_plan_used[NIXFRED_PLANS_MAX]; unsigned nf_plan_tone[NIXFRED_PLANS_MAX];
+    int nf_retries; // slice 3: the connecting ring and the notification card
+    uint32_t nf_card_at, nf_card_gone; char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
 } s;
 static bool nf_msg_keep;
+// Slice 3's animation clock and card gesture live in their own block; this harness drives slice 2's.
+static uint32_t nf2_period(uint32_t now);
+static uint32_t nf3_period(uint32_t now) { (void)now; return 0; }
+static bool nf_card_swipe(int start_y, int dy) { (void)start_y; (void)dy; return false; }
 // The boot face (nixfred slice 1) is the logo mask, its glow, the wordmark and the rim scanner, not the
 // one "Harness" run stock drew: it is recognised by the wordmark run and the logo mask.
 static bool nf_brand_in(const ht_scene_t *sc)
@@ -216,7 +222,7 @@ code += function('settings_item') + function('settings_count') + function('hit_c
 code += function('find')
 # nixfred graphics: the slice-2 constants, then its helpers, ahead of the render functions that call them.
 code += source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[0] + '\n' + source[source.index('enum { NF_DONE_CLOSE_MS'):].split('\n',2)[1] + '\n'
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'brand_visible', 'heading', 'question_chrome', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'nf_palette', 'nf_state', 'nf_states', 'nf_home_live', 'nf_done_running', 'nf_period', 'nf_plan_color', 'nf_home_rim', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'ui_scroll_reportable', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'brand_visible', 'heading', 'question_chrome', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'nf_palette', 'nf_state', 'nf_states', 'nf_home_live', 'nf_done_running', 'nf_period', 'nf2_period', 'nf_plan_color', 'nf_home_rim', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
@@ -2093,7 +2099,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
                     str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'terminal.c'),
-                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),str(native/'nixfred_art.c'),str(native/'nixfred_logo.c'),'-o',str(out/'touch_ui')],check=True)
+                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),str(native/'nixfred_art.c'),str(native/'nixfred_logo.c'),'-o',str(out/'touch_ui'),'-lm'],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):
         dest=Path(os.environ['HABITAT_PREVIEW_DIR']);dest.mkdir(parents=True,exist_ok=True)

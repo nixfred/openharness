@@ -73,3 +73,66 @@ void nixfred_panic(ht_scene_t *f, uint32_t since_ms, int stopped, uint16_t red, 
 enum { NIXFRED_PLANS_MAX = 4 };
 void nixfred_plans_rim(ht_scene_t *f, int start, int span, const uint16_t *used_permille,
                        const uint16_t *tone, int n);
+
+// ---- slice 3: ambient, connecting, pairing, machines, swarms, cards, transitions, plans -----------------
+
+// Idle face when nothing needs anyone: one particle per agent orbiting the hub (with a comet tail on its
+// orbit) in its state colour, the time of day, a faint scan band and grain rings at 6..8 percent. The
+// whole face sits `drift` px off centre (burn-in: the caller moves it 1 px a minute). `orbit` is the
+// orbit's angle in 1/4096 turn (the caller advances it faster the more agents work). `scan_y` is the
+// band's row. `clock` is "HH:MM" or empty; `line` is a short fleet line under it. One run count per
+// agent count, so a frame step is a damage diff of the particles and the band only.
+enum { NIXFRED_AMBIENT_MAX = 12 };
+void nixfred_ambient(ht_scene_t *f, const uint8_t *state, int n, int orbit, int scan_y, int drift_x,
+                     int drift_y, const char *clock, const char *line, const nixfred_palette_t *p);
+
+// Connecting: a dotted ring that draws itself clockwise, one dot per retry (24 dots a lap; past that
+// every dot is lit and the caller prints the count).
+enum { NIXFRED_CONNECT_DOTS = 24 };
+void nixfred_connect_dots(ht_scene_t *f, int retries, uint16_t accent, uint16_t dim);
+
+// Hexagon outlines, rasterised once into static masks (PSRAM on the device). Pairing: a large hexagon
+// whose six edges pulse in turn (`step` 0..11, two steps an edge) until `answered`, then all solid.
+void nixfred_pair_hex(ht_scene_t *f, int cx, int cy, unsigned step, bool answered, uint16_t accent);
+// A machine tile: hexagon in `edge` colour, an outer glow hexagon when `glow` (selected), and up to two
+// capability arcs around it (permille, -1 for none): `load` (accent, amber from 800, red from 950) and
+// `aux` (battery or VRAM, thinner, dim ink). Radius of the tile's hexagon: NIXFRED_TILE_R.
+enum { NIXFRED_TILE_R = 42, NIXFRED_PAIR_R = 118 };
+void nixfred_machine_tile(ht_scene_t *f, int cx, int cy, uint16_t edge, bool glow, int load, int aux,
+                          const nixfred_palette_t *p);
+
+// The colour a state is drawn in (the rim's palette), and its 55..100 percent breath at `phase`.
+uint16_t nixfred_state_color(uint8_t state, unsigned phase, uint16_t background, const nixfred_palette_t *p);
+
+// Swarm: a ring of rings. The parent ring at the centre (radius `r_parent`) in the most urgent child's
+// colour (glowing when someone waits), the children on an orbit of `r_orbit`, each its own state: a
+// working child is an open ring whose gap turns with `phase`, the others solid. At most 12 children.
+void nixfred_swarm(ht_scene_t *f, int cx, int cy, int r_parent, int r_orbit, const uint8_t *child, int n,
+                   unsigned phase, const nixfred_palette_t *p);
+
+// Notification card sliding up from the rim: top edge at `y`, the state colour on its left edge, the
+// agent name and one line of summary. `trail` 0..1000 is the dismiss motion: the card rises and leaves
+// a short trail of fading bars under it. Always the same run count.
+enum { NIXFRED_CARD_X = 63, NIXFRED_CARD_W = 340, NIXFRED_CARD_H = 76 };
+void nixfred_card(ht_scene_t *f, int y, uint16_t edge, const char *name, const char *summary, int trail,
+                  uint16_t ink, uint16_t dim);
+
+// Collision: two agents' rings side by side, a warning triangle between them over the top, their names
+// under the rings. `phase` breathes the triangle.
+void nixfred_collision(ht_scene_t *f, const char *a, uint8_t sa, const char *b, uint8_t sb, unsigned phase,
+                       const nixfred_palette_t *p);
+
+// Transition: a rim sweep from 12 o'clock, `permille` 0..1000 of its lap, bright head over a fading tail.
+// Two runs, drawn last so it passes over whatever face it introduces.
+enum { NIXFRED_SWEEP_MS = 320 };
+void nixfred_sweep(ht_scene_t *f, int permille, uint16_t accent);
+
+// Subscription detail: one big gauge arc per plan (concentric, outermost first), track and used fill in
+// the tone colour, the next plan glowing with a marker at the end of its arc, and a centre legend
+// "NAME  62%  +8" per plan (banked signed, + under pace). At most NIXFRED_PLANS_MAX.
+typedef struct { char name[10]; uint16_t used; int16_t banked; uint16_t tone; } nixfred_plan_t;
+void nixfred_plans_face(ht_scene_t *f, const nixfred_plan_t *plan, int n, int pick, uint16_t ink,
+                        uint16_t dim);
+
+// One line centred on `cx`, cut to whole letters with ".." to fit `max_w` px.
+void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, const char *text, int max_w);
