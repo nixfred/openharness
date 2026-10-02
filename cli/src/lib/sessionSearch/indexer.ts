@@ -138,7 +138,17 @@ export class SessionSearchIndex {
   /** Callers waiting for a session's next pass (`tail`). */
   private readonly waiters = new Map<string, Array<() => void>>()
 
+  private readonly deletedSessions = new Set<string>()
+
   constructor(private readonly opts: SessionSearchIndexOptions) {}
+
+  deleteHistory(sessionId: string): void {
+    this.deletedSessions.add(sessionId)
+    this.sources.delete(sessionId)
+    this.queue.delete(sessionId)
+    this.dirty.delete(sessionId)
+    this.opts.store.removeSession(sessionId)
+  }
 
   /** The first sweep after `delayMs` (boot has other work), then one every `sweepEveryMs`. */
   start(delayMs = 15_000): void {
@@ -307,7 +317,7 @@ export class SessionSearchIndex {
     if (!force && Date.now() - this.sourcesReadAt < 5_000) return
     const next = new Map<string, SearchSource>()
     for (const source of this.opts.sources()) {
-      if (!source.sessionId) continue
+      if (!source.sessionId || this.deletedSessions.has(source.sessionId)) continue
       const known = next.get(source.sessionId)
       // One session can be listed live and stopped at once: the fresher record wins.
       if (!known || source.changedAt > known.changedAt) next.set(source.sessionId, source)
@@ -318,6 +328,7 @@ export class SessionSearchIndex {
 
   /** One pass over one session: from where the last one stopped, or from the start. */
   async pass(source: SearchSource): Promise<void> {
+    if (this.deletedSessions.has(source.sessionId)) return
     const store = this.opts.store
     const existing = store.session(source.sessionId)
     const dirty = this.dirty.delete(source.sessionId)
@@ -329,6 +340,7 @@ export class SessionSearchIndex {
     if (!file || !source.transcriptPath || !normalize) {
       // Nothing to read (a terminal, a database-backed engine, a missing file): its name is still findable.
       if (existing?.header === header && existing.agentId === source.agentId) return
+      if (this.deletedSessions.has(source.sessionId)) return
       store.writeSession({
         sessionId: source.sessionId, agentId: source.agentId, engine: source.engine,
         path: existing?.path ?? source.transcriptPath ?? '', header,
@@ -344,6 +356,7 @@ export class SessionSearchIndex {
     const samePath = existing?.path === path
     if (samePath && existing.size === file.size && existing.mtime === mtime) {
       if (existing.header !== header || existing.agentId !== source.agentId) {
+        if (this.deletedSessions.has(source.sessionId)) return
         store.writeSession({ ...existing, header, agentId: source.agentId, ...externalFields(source, knownTitle) }, NO_TURN_DELETE, [])
       }
       return
@@ -387,6 +400,7 @@ export class SessionSearchIndex {
     // a daemon stopped between them resumes there.
     for (let start = WRITE_BATCH; start < turns.length; start += WRITE_BATCH) {
       const next = turns[start]
+      if (this.deletedSessions.has(source.sessionId)) return
       store.writeSession(
         { ...session, size: next.offset, mtime: 0, resumeOffset: next.offset, resumeTurn: next.turn },
         start === WRITE_BATCH ? fromTurn : NO_TURN_DELETE,
@@ -396,6 +410,7 @@ export class SessionSearchIndex {
       if (this.stopped) return
     }
     const written = Math.floor(Math.max(0, turns.length - 1) / WRITE_BATCH) * WRITE_BATCH
+    if (this.deletedSessions.has(source.sessionId)) return
     store.writeSession(session, written ? NO_TURN_DELETE : fromTurn, turns.slice(written))
     if (!resume) {
       this.opts.log?.(`[search] indexed ${source.sessionId.slice(0, 8)} · ${source.engine} · ${closed.length + (open ? 1 : 0)} turns · ${Math.round(file.size / 1024)} KB`)
@@ -415,6 +430,7 @@ export class SessionSearchIndex {
     if (existing && !dirty && existing.mtime === stamp) {
       const again = source.external ? headed(existing.title ?? '') : { header: source.header }
       if (existing.header !== again.header || existing.agentId !== source.agentId) {
+        if (this.deletedSessions.has(source.sessionId)) return
         store.writeSession({ ...existing, ...again, agentId: source.agentId }, NO_TURN_DELETE, [])
       }
       return
@@ -435,6 +451,7 @@ export class SessionSearchIndex {
     if (existing && existing.size === fingerprint && existing.mtime === stamp
       && existing.header === head.header && existing.agentId === source.agentId) return
     const changed = !existing || existing.size !== fingerprint
+    if (this.deletedSessions.has(source.sessionId)) return
     store.writeSession({
       sessionId: source.sessionId, agentId: source.agentId, engine: source.engine, path: '',
       ...head, size: fingerprint, mtime: stamp, resumeOffset: 0, resumeTurn: 0,

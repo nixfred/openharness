@@ -2,6 +2,7 @@
 #pragma once
 #include "terminal.h"
 extern const ht_pfont_t ht_lv_geist_med_30;
+extern const ht_pfont_t ht_lv_geist_med_26;
 extern const ht_pfont_t ht_lv_roboto_med_38;
 extern const ht_pfont_t ht_lv_roboto_med_32;
 extern const ht_pfont_t ht_lv_roboto_med_28;

@@ -750,14 +750,15 @@ export function engineKeepsTranscriptFile(engine: AgentEngine): boolean {
   return TRANSCRIPT_ROOT[engine] !== null
 }
 
-export function validTranscriptPath(engine: AgentEngine, filePath: string, codexHome?: string): boolean {
+export function validTranscriptPath(engine: AgentEngine, filePath: string, codexHome?: string, allowMissing = false): boolean {
   const rootFor = TRANSCRIPT_ROOT[engine]
   if (!rootFor) return false
   try {
-    const actual = realpathSync(filePath)
+    const missing = allowMissing && !existsSync(filePath)
+    const actual = missing ? join(realpathSync(dirname(filePath)), basename(filePath)) : realpathSync(filePath)
     const root = realpathSync(rootFor(codexHome))
-    const st = statSync(actual)
-    if (!st.isFile() || !isWithin(root, actual)) return false
+    const st = statSync(missing ? dirname(actual) : actual)
+    if (!(missing ? st.isDirectory() : st.isFile()) || !isWithin(root, actual)) return false
     if (engine === 'cursor') {
       const id = basename(actual).replace(/\.jsonl$/, '')
       if (!id || basename(dirname(actual)) !== id || basename(dirname(dirname(actual))) !== 'agent-transcripts') return false
@@ -2031,6 +2032,15 @@ class Registry {
     NAME_OVERRIDES.set(s.sessionId || s.agentId, trimmed)
     this.saveNames()
     return s
+  }
+
+  deleteSavedNames(ids: string[]): void {
+    secureStateDirectory(env.ADAPTER_DATA_DIR)
+    let existing: Record<string, unknown> = {}
+    try { existing = JSON.parse(readPrivateStateFile(NAMES_FILE, 1024 * 1024)) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    for (const id of ids) { delete existing[id]; NAME_OVERRIDES.delete(id) }
+    atomicWriteJson(NAMES_FILE, { ...existing, ...Object.fromEntries(NAME_OVERRIDES) })
   }
 
   list(): RegisteredSession[] {

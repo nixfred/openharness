@@ -62,11 +62,11 @@ test('the stylesheet defines dark in both the ways the app can ask for it', asyn
 
 test('the verbs the pane offers are the verbs the server accepts', async () => {
   const [js, server] = await Promise.all([read('viewer/app.js'), read('viewer.mjs')])
-  const allowed = new Set(server.match(/const VERBS = new Set\(\[([^\]]+)\]\)/)[1].match(/'[a-z]+'/g).map((word) => word.slice(1, -1)))
-  for (const match of js.matchAll(/\bverb:\s*'([a-z]+)'/g)) {
+  const allowed = new Set(server.match(/const VERBS = new Set\(\[([^\]]+)\]\)/)[1].match(/'[a-z-]+'/g).map((word) => word.slice(1, -1)))
+  for (const match of js.matchAll(/\bverb:\s*'([a-z-]+)'/g)) {
     if (match[1] !== 'clear') assert.ok(allowed.has(match[1]), `the server does not accept ${match[1]}`)
   }
-  for (const forbidden of ['delete', 'kill', 'remove']) assert.equal(allowed.has(forbidden), false)
+  for (const forbidden of ['kill', 'remove']) assert.equal(allowed.has(forbidden), false)
 })
 
 /**

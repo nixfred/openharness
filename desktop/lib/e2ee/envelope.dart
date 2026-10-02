@@ -51,6 +51,10 @@ const Set<String> encryptedDownTypes = {
   'agent_create_status',
   'agent_delete',
   'agent_restart',
+  // Reopens stopped work and forks a harness: the CLI has required both sealed since they were
+  // added, so unsealed the machine answers E2EE_REQUIRED (the web build sends them itself).
+  'agent_resume',
+  'agent_fork',
   'agent_recent',
   'agent_update',
   'agent_files',

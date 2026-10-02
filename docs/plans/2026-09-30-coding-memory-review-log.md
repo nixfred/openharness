@@ -775,3 +775,27 @@ type is now set without prematurely sending headers. No product device behavior 
 This change prevents new duplicate capture; it does not rewrite previously saved evidence or
 memories. No live memory, installed app, global plugin, provider setting or release was changed.
 The real-session quality sample still requires explicit approval for its external model destination.
+
+### Keep the companion available for continuous learning
+
+A read-only completion audit found a live memory service with Learn and Recall enabled, learning
+waiting for a model, and capture at its bounded backlog limit. The selected collection conversation
+was saved as stopped. This does not establish whether that specific stop was manual or automatic.
+It exposed a reproducible lifecycle gap: the collection's ten-minute idle timer stops its native
+runtime even when background coding-memory learning remains enabled. OpenCode requires that live
+runtime for its observed account/model binding; cached names cannot replace that authority.
+
+The collection now remains open while its current owner has authorized background learning. This
+applies equally to Claude, Codex and OpenCode, including time between reviews or while work is
+deferred. It does not send a keepalive prompt, launch a model request, reopen a stopped conversation,
+switch engines, retain provider credentials on disk or enlarge the queue. Normal idle shutdown
+resumes when learning is disabled. Explicit stop and experiment-off still take precedence, and
+account or watching changes immediately revoke the memory runtime's keep-open requirement.
+
+The regression first failed for all three engines: a synthetic idle collection was stopped despite
+its background-use requirement. After the fix it stayed live for three idle intervals, with no
+prompt or resume calls, and stopped on the next check after learning was disabled. Runtime checks
+cover an empty queue, Recall-only mode, identity changes, watching/experimental-off and pause.
+This is lifecycle validation with synthetic state. The live stopped conversation and its backlog
+were left untouched; a fresh model connection and real-user extraction-quality validation remain
+necessary before claiming end-to-end completion.

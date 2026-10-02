@@ -163,7 +163,11 @@ export interface HookServerHandlers {
    *  log as this machine verified it (lib/e2ee/deviceLogSyncer.ts). */
   onDevicesList?: () => Promise<PairOutcome>
   onDevicesRemove?: (pub: string) => Promise<PairOutcome>
-  onDevicesRebaseline?: (confirm: boolean) => Promise<PairOutcome>
+  onDevicesRebaseline?: (confirm: boolean, head?: { seq: number; hash: string }) => Promise<PairOutcome>
+  /** `harness devices history` and the window's History — every add and remove, as this machine verified it. */
+  onDevicesHistory?: () => Promise<PairOutcome>
+  /** `harness devices dismiss` and the window's "It's mine" / "Got it" — mark new devices as seen. */
+  onDevicesDismiss?: (body: { pub?: string; pubs?: string[]; baseline?: boolean }) => PairOutcome
   /** Local dashboard status snapshot (GET /api/status). */
   onStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>
   /** Recent adapter log tail (GET /api/logs). */
@@ -886,9 +890,43 @@ export function startHookServer(
       if (req.method === 'POST' && url === '/api/devices/rebaseline') {
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
         if (!handlers.onDevicesRebaseline) { json(503, { error: 'UNAVAILABLE' }); return }
-        let body: { confirm?: unknown }
+        let body: { confirm?: unknown; head?: unknown }
         try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
-        const out = await handlers.onDevicesRebaseline(body.confirm === true); json(out.status, out.body); return
+        if (!body || typeof body !== 'object') { json(400, { error: 'bad json' }); return }
+        // The head the person was shown in the preview: a confirm only goes ahead on that same list.
+        let head: { seq: number; hash: string } | undefined
+        if (body.head !== undefined) {
+          const h = body.head as { seq?: unknown; hash?: unknown } | null
+          if (!h || typeof h !== 'object' || typeof h.seq !== 'number' || !Number.isSafeInteger(h.seq) || h.seq < 0
+            || typeof h.hash !== 'string' || h.hash.length > 128) { json(400, { error: 'BAD_HEAD' }); return }
+          head = { seq: h.seq, hash: h.hash }
+        }
+        const out = await handlers.onDevicesRebaseline(body.confirm === true, head); json(out.status, out.body); return
+      }
+
+      // `harness devices history` → the log's adds and removes, newest first. Local only: it is the
+      // account's whole device story, and the fetch behind it is a backend call as this machine.
+      if (req.method === 'GET' && url === '/api/devices/history') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesHistory) { json(503, { error: 'UNAVAILABLE' }); return }
+        const out = await handlers.onDevicesHistory(); json(out.status, out.body); return
+      }
+      // `harness devices dismiss [<fp>]` / "It's mine" / "Got it" → new devices marked as seen here.
+      if (req.method === 'POST' && url === '/api/devices/dismiss') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onDevicesDismiss) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: { pub?: unknown; pubs?: unknown; baseline?: unknown }
+        try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
+        if (!body || typeof body !== 'object') { json(400, { error: 'bad json' }); return }
+        if (body.pub !== undefined && (typeof body.pub !== 'string' || !body.pub)) { json(400, { error: 'MISSING_PUB' }); return }
+        // The keys a window displayed, so a key accepted since the window read the list is not cleared unseen.
+        if (body.pubs !== undefined && (!Array.isArray(body.pubs) || body.pubs.length > 256
+          || body.pubs.some((k) => typeof k !== 'string' || !k || k.length > 256))) { json(400, { error: 'BAD_PUBS' }); return }
+        const out = handlers.onDevicesDismiss({
+          ...(typeof body.pub === 'string' ? { pub: body.pub } : {}),
+          ...(Array.isArray(body.pubs) ? { pubs: body.pubs as string[] } : {}),
+          ...(body.baseline === true ? { baseline: true } : {}),
+        }); json(out.status, out.body); return
       }
 
       // `harness remote-password status` → whether one is set, and its fingerprint. Read-only, same

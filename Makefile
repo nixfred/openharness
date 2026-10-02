@@ -4,7 +4,12 @@
 #   make install-cli ARGS="--no-restart"
 #   make release-cli ARGS="--dry-run"
 
-.PHONY: cli-test install-cli upload-cli-install-sh release-cli release-backend release-desktop release-web remote-machine upload-circle device-test
+.PHONY: validate cli-test install-cli upload-cli-install-sh release-cli release-backend release-desktop release-web remote-machine upload-circle device-test
+
+## validate: bounded independent checks with logs and a source/timing receipt.
+## See docs/validation-and-release.md. ARGS="path/to/plan.json".
+validate:
+	python3 scripts/validate-change.py $(ARGS)
 
 ## cli-test: typecheck + run the CLI test suite.
 cli-test:

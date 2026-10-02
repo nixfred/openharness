@@ -10,8 +10,10 @@ import 'package:harness/core/models.dart';
 import 'package:harness/screens/swarm_screen.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
+import 'package:harness/state/harness_activity.dart';
 import 'package:harness/state/terminal_pane.dart';
 import 'package:harness/web/shell/web_chrome.dart';
+import 'package:harness/widgets/web_download_button.dart';
 
 import 'support/real_fonts.dart';
 
@@ -145,6 +147,9 @@ void main() {
     await capture(tester, 'web-phone-solo-pane');
 
     await openSwitcher(tester);
+    // Resting harnesses say nothing: a column of "Idle" is only noise.
+    expect(harnessActivity(app, 'm', 'a0'), HarnessActivity.idle);
+    expect(find.text(HarnessActivity.idle.label), findsNothing);
     await capture(tester, 'web-phone-harness-menu');
     await tester.tap(find.byKey(const ValueKey('web-pane:101')));
     await tester.pump(const Duration(milliseconds: 300));
@@ -186,6 +191,25 @@ void main() {
         find.byKey(const ValueKey('workspace-subscription-usage')),
         findsNothing,
       );
+      // Beside it, Download app alone: Share is off until asked for.
+      expect(
+        tester.getRect(find.byKey(footer)).right,
+        lessThanOrEqualTo(tester.getRect(find.byType(WebDownloadButton)).left),
+      );
+      expect(
+        find.byKey(const ValueKey('workspace-share-button')),
+        findsNothing,
+      );
+
+      // One harness drawn alone still has a desk to split: the menu offers it.
+      await tester.tap(find.byKey(const ValueKey('web-app-menu-button')));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        find.byKey(const ValueKey('web-menu:pane.split_right')),
+        findsOneWidget,
+      );
+      await tester.tapAt(const Offset(350, 600));
+      await tester.pump(const Duration(milliseconds: 100));
 
       await tester.tap(find.byKey(footer));
       await tester.pump(const Duration(milliseconds: 100));
@@ -225,6 +249,14 @@ void main() {
     expect(find.byKey(const ValueKey('swarm-store-button')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('workspace-subscription-usage')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('workspace-machine-resources')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('workspace-harness-monitor')),
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('web-footer-menu-button')), findsNothing);

@@ -172,6 +172,29 @@ test('a policy is validated before it is written', async (t) => {
   assert.match(rules, /"pinned": true/, 'the pane may only change the thresholds it draws, never a guard')
 })
 
+test('permanent deletion requires one explicit target, matching identity, and a review token', async t => {
+  const target = row({ id: 'a1', createdAt: 1234 }), calls = []
+  const previewDelete = async target => { calls.push('review'); return { ok: true, id: target.id, reviewId: 'review-token' } }
+  const deleteHarness = async (target, options) => { calls.push(options.reviewId); return { ok: true, id: target.id, deleted: true } }
+  const worktreeAction = async (target, options) => { calls.push(options); return { ok: true, id: target.id, deleted: true } }
+  const { viewer, base } = await serve([target], { verbs: { previewDelete, deleteHarness, worktreeAction } })
+  t.after(() => viewer.close())
+  const request = payload => post(base, viewer.token, '/api/act', payload)
+  const approved = { ids: ['a1'], manual: true, expected: [target] }
+  for (const verb of ['delete', 'delete-review', 'worktree-review', 'worktree-delete']) {
+    assert.ok((await request({ verb, ids: ['a1'] })).error)
+    assert.ok((await request({ ...approved, verb, ids: ['a1', 'a2'] })).error)
+    const changed = await request({ ...approved, verb, reviewId: 'token', expected: [{ ...target, createdAt: 5678 }] })
+    assert.equal(changed.results[0].ok, false)
+  }
+  assert.ok((await request({ ...approved, verb: 'delete' })).error)
+  assert.deepEqual(calls, [])
+  assert.equal((await request({ ...approved, verb: 'delete-review' })).results[0].reviewId, 'review-token')
+  assert.equal((await request({ ...approved, verb: 'delete', reviewId: 'review-token' })).results[0].deleted, true)
+  assert.equal((await request({ ...approved, verb: 'worktree-delete', reviewId: 'worktree-token', path: '/reviewed/path', discardChanges: true })).results[0].deleted, true)
+  assert.deepEqual(calls, ['review', 'review-token', { reviewId: 'worktree-token', path: '/reviewed/path', discardChanges: true }])
+})
+
 test('the pane header verdict is written from the same plan the page draws', async (t) => {
   const { viewer, workspace } = await serve()
   t.after(() => viewer.close())
@@ -179,6 +202,34 @@ test('the pane header verdict is written from the same plan the page draws', asy
   assert.equal(verdict.ready, false)
   assert.match(verdict.summary, /2 harnesses/)
   assert.ok(verdict.findings.length)
+})
+
+test('workspace inspection binds identity and does not refresh the fleet or write an action receipt', async t => {
+  let reads = 0, inspections = 0
+  const target = row({ id: 'a1', createdAt: 1234 })
+  const { viewer, base } = await serve([target], {
+    collect: async () => { reads++; return { rows: [target], machines: [], problems: [] } },
+    verbs: { inspectWorkspace: async () => { inspections++; return { ok: true, workspace: { kind: 'main', path: '/project' } } } },
+  })
+  t.after(() => viewer.close())
+  const request = payload => post(base, viewer.token, '/api/act', payload)
+  const payload = { verb: 'workspace-inspect', ids: ['a1'], manual: true, expected: [target] }
+  assert.equal((await request({ ...payload, expected: [{ ...target, createdAt: 5678 }] })).results[0].ok, false)
+  assert.equal(inspections, 0)
+  assert.equal((await request(payload)).results[0].workspace.path, '/project')
+  assert.equal(inspections, 1); assert.equal(reads, 1)
+  assert.deepEqual(viewer.snapshot().log, [])
+})
+
+test('selected deletion carries the checkboxes, full path and dirty consent to the owning operation', async t => {
+  const target = row({ id: 'a1', createdAt: 1234 }), received = []
+  const { viewer, base } = await serve([target], { verbs: { deleteHarness: async (row, options) => {
+    received.push(options); return { ok: true, id: row.id, deleted: true, sessionDeleted: false, worktreeDeleted: true }
+  } } })
+  t.after(() => viewer.close())
+  const selection = { reviewId: 'reviewed', choices: { sessionData: false, worktreeData: true }, path: '/full/worktree', discardChanges: true }
+  assert.equal((await post(base, viewer.token, '/api/act', { verb: 'delete', ids: ['a1'], manual: true, expected: [target], ...selection })).results[0].worktreeDeleted, true)
+  assert.deepEqual(received, [selection])
 })
 
 test('the stream opens with the current snapshot', async (t) => {

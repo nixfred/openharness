@@ -10,6 +10,7 @@ import '../models/api_connections_controller.dart'
 import '../models/local_model.dart';
 import '../models/model_search_catalog.dart';
 import '../core/dsh_catalog.dart';
+import '../store/experimental_harnesses.dart';
 import '../core/machine_resources.dart';
 import '../core/models.dart'
     show Agent, ConnectionStatus, GridModels, GridModel;
@@ -90,6 +91,7 @@ class SwarmSearchController extends ChangeNotifier {
     }
     _refresh();
     app.addListener(_refresh);
+    app.experimentalFeatures.addListener(_refresh);
     projects?.addListener(_refresh);
     models?.addListener(_modelsChanged);
     app.gridPictures.addListener(_modelChoicesChanged);
@@ -1502,9 +1504,11 @@ class SwarmSearchController extends ChangeNotifier {
 
   bool _refreshStore() {
     final entries = {
-      for (final machine in app.machineStates.values)
-        for (final entry in machine.dsh.byId.values)
-          if (!entry.isViewerPackage) entry.id: entry,
+      for (final entry in storeVisibleHarnesses(
+        app.machineStates.values.expand((machine) => machine.dsh.byId.values),
+        app.experimentalFeatures,
+      ))
+        if (!entry.isViewerPackage) entry.id: entry,
     };
     if (mapEquals(entries, _storeEntries)) return false;
     _storeEntries = entries;
@@ -2322,6 +2326,7 @@ class SwarmSearchController extends ChangeNotifier {
     _modelUseTimer?.cancel();
     if (_modelUseWait?.isCompleted == false) _modelUseWait!.complete();
     app.removeListener(_refresh);
+    app.experimentalFeatures.removeListener(_refresh);
     projects?.removeListener(_refresh);
     models?.removeListener(_modelsChanged);
     app.gridPictures.removeListener(_modelChoicesChanged);

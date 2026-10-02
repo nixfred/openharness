@@ -51,6 +51,11 @@ String webPaneTitle(AppNotifier app, TerminalPane pane) {
   return pane.isWeb ? '$name · viewer' : name;
 }
 
+/// What a row says about its harness or tab. Idle says nothing: it is the
+/// resting state, and a column of it only hides the rows that are not.
+String? _statusLabel(HarnessActivity? activity) =>
+    activity == HarnessActivity.idle ? null : activity?.label;
+
 /// The menu's rows: this tab's harnesses (a phone draws one at a time), then
 /// every tab, then rename. Harnesses and tabs both close from their row.
 List<Widget> webTabMenuRows(
@@ -101,11 +106,13 @@ List<Widget> webTabMenuRows(
           content: PaneMenuRow(
             selected: pane.id == shown,
             title: webPaneTitle(app, pane),
-            status: harnessActivity(
-              app,
-              pane.machineId,
-              (pane.isWeb ? pane.ownerAgentId : pane.agentId) ?? '',
-            )?.label,
+            status: _statusLabel(
+              harnessActivity(
+                app,
+                pane.machineId,
+                (pane.isWeb ? pane.ownerAgentId : pane.agentId) ?? '',
+              ),
+            ),
           ),
         ),
     ],
@@ -119,7 +126,7 @@ List<Widget> webTabMenuRows(
         content: PaneMenuRow(
           selected: tab.id == app.activeSwarmId,
           title: '${index + 1}:${names[tab.id] ?? tab.name}',
-          status: tabActivity(app, tab)?.label,
+          status: _statusLabel(tabActivity(app, tab)),
         ),
       ),
     // New tabs are the `+` beside the switcher, as on desktop.

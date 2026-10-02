@@ -46,6 +46,23 @@ describe('CommanderMirror recap events', () => {
     expect(mirror.recent('session-ask', 3)[0].recap).toBe('1945.')
   })
 
+  it('permanently removes only the selected conversation from persisted recap history', async () => {
+    const options = { send: () => {}, sendWeb: () => {}, hasDevice: () => true, summarize: async () => 'Fixture recap', dataDir }
+    const mirror = new CommanderMirror(options)
+    for (const id of ['selected', 'kept']) mirror.ingest([
+      { type: 'turn_started', payload: { userMessage: 'question ' + id } },
+      { type: 'text_delta', payload: { content: 'answer ' + id } },
+      { type: 'turn_ended', payload: {} },
+    ] as LiveEvent[], id)
+    await vi.runAllTimersAsync()
+    mirror.deleteHistory('selected')
+    const reloaded = new CommanderMirror(options)
+    expect(reloaded.recent('selected')).toEqual([])
+    expect(reloaded.recentAsks('selected')).toEqual([])
+    expect(reloaded.recent('kept')).toHaveLength(1)
+    expect(reloaded.recentAsks('kept')).toEqual(['question kept'])
+  })
+
   it('keeps the question even when the turn produces no summary at all', async () => {
     // The fault this replaced: the ask was written in the summariser's success branch, so a turn with
     // no assistant text — or a summariser that returned null — left no record of what was asked.

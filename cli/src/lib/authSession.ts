@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
 export interface AuthSession {
   version: 1
@@ -20,6 +20,9 @@ export interface AuthSession {
   updatedAt: number
   /** Opaque local knowledge owner, learned from authenticated /auth/me, bound to this sign-in. */
   memoryOwner?: { key: string; binding: string }
+  /** Which sign-in by hand this session is: minted here when the person signs in, never anything the
+   *  backend sends — the device key log keeps its marks per sign-in (deviceLogSyncer `signIn`). */
+  signInEpoch?: string
 }
 
 /**
@@ -71,8 +74,39 @@ function parse(raw: string): AuthSession | null {
       ...(value.memoryOwner && /^[a-f0-9]{64}$/.test(value.memoryOwner.key)
         && value.memoryOwner.binding === memoryOwnerBinding(value.accessToken, value.autonomousEnv)
         ? { memoryOwner: value.memoryOwner } : {}),
+      ...(typeof value.signInEpoch === 'string' && value.signInEpoch ? { signInEpoch: value.signInEpoch } : {}),
     }
   } catch { return null }
+}
+
+/** A new `signInEpoch`, for a session a sign-in by hand just made: random, then `@` and when it was
+ *  made (ms) — the device key log lets a sign-in start its file over only shortly after it was made. */
+export const newSignInEpoch = (now = Date.now()): string => `${randomBytes(16).toString('hex')}@${now}`
+
+/** How a `signInEpoch` given to a session from before epochs existed starts: nobody saw that sign-in
+ *  being made here, so the device key log may take its file over for it but never starts one over. */
+export const ADOPTED_SIGN_IN = 'adopted:'
+
+/** Give a session from before epochs existed one (`ADOPTED_SIGN_IN`), under the refresh lock so a
+ *  rotated refresh token is never written back over. The session's epoch; null when signed out. */
+export async function ensureSignInEpoch(): Promise<string | null> {
+  if (!readAuthSession()) return null
+  return withLock(async () => {
+    const latest = readAuthSession()
+    if (!latest) return null
+    if (latest.signInEpoch) return latest.signInEpoch
+    const signInEpoch = ADOPTED_SIGN_IN + newSignInEpoch()
+    writeAuthSession({ ...latest, signInEpoch })
+    return signInEpoch
+  })
+}
+
+/** A `signInEpoch` as the device key log reads it (deviceLogSyncer `signIn`): whether it was adopted,
+ *  and when it was made — null when it does not say (one from before the time was recorded). */
+export function signInOf(epoch: string | undefined | null): { epoch: string; adopted: boolean; at: number | null } | null {
+  if (!epoch) return null
+  const at = /@(\d{1,15})$/.exec(epoch)
+  return { epoch, adopted: epoch.startsWith(ADOPTED_SIGN_IN), at: at ? Number(at[1]) : null }
 }
 
 function memoryOwnerBinding(token: string, environment: AuthSession['autonomousEnv']): string {

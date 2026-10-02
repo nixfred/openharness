@@ -8,6 +8,7 @@ import '../shared/theme/app_icons.dart';
 import '../shared/widgets/app_icon_button.dart';
 import '../state/harness_attachments.dart';
 import 'desktop_chrome.dart';
+import 'new_harness_attachment_chip.dart';
 
 /// Reads picked or dropped files into attachments, and says what was left out.
 Future<void> _attach(
@@ -19,8 +20,12 @@ Future<void> _attach(
     for (final file in files)
       HarnessAttachment(file.name, await file.readAsBytes()),
   ];
-  final problem = attachments.add(read);
-  if (problem == null || !context.mounted) return;
+  if (context.mounted) reportAttachProblem(context, attachments.add(read));
+}
+
+/// Says what an attach left out, when it left anything.
+void reportAttachProblem(BuildContext context, String? problem) {
+  if (problem == null) return;
   ScaffoldMessenger.maybeOf(context)
       ?.showSnackBar(SnackBar(content: Text(problem)));
 }
@@ -71,50 +76,10 @@ class NewHarnessAttachmentChips extends StatelessWidget {
       runSpacing: 6,
       children: [
         for (final file in attachments.files)
-          _AttachmentChip(
+          NewHarnessAttachmentChip(
             file: file,
             onRemove: enabled ? () => attachments.remove(file) : null,
           ),
-      ],
-    ),
-  );
-}
-
-class _AttachmentChip extends StatelessWidget {
-  const _AttachmentChip({required this.file, required this.onRemove});
-
-  final HarnessAttachment file;
-  final VoidCallback? onRemove;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    key: ValueKey('new-harness-attachment:${file.name}'),
-    constraints: const BoxConstraints(maxWidth: 220),
-    padding: const EdgeInsets.only(left: 10, right: 2),
-    height: DesktopChrome.compactControlHeight,
-    decoration: BoxDecoration(
-      color: DesktopChrome.foreground.withValues(alpha: .055),
-      borderRadius: BorderRadius.circular(20),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(AppIcons.file, size: 13, color: DesktopChrome.muted),
-        const SizedBox(width: 6),
-        Flexible(
-          child: Text(
-            file.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: DesktopChrome.control(),
-          ),
-        ),
-        AppIconButton(
-          icon: AppIcons.close,
-          tooltip: 'Remove ${file.name}',
-          size: AppIcons.closeSize,
-          onPressed: onRemove,
-        ),
       ],
     ),
   );

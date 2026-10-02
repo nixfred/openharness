@@ -41,6 +41,21 @@ class NativeClipboard {
     return bytes;
   }
 
+  /// The files the clipboard holds, as paths in the order they were copied —
+  /// what a file manager's Copy puts there (Finder, Nautilus, Dolphin).
+  ///
+  /// Empty when it holds none, and on a runner that does not answer: Windows,
+  /// or an app built before `readFilePaths` existed.
+  static Future<List<String>> readFilePaths() async {
+    if (!RuntimePlatform.isMacOS && !RuntimePlatform.isLinux) return const [];
+    try {
+      return await _channel.invokeListMethod<String>('readFilePaths') ??
+          const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
   /// Under WSL, the WINDOWS clipboard's image as PNG, read through
   /// `powershell.exe` (WSL interop). WSLg mirrors a Windows screenshot into
   /// the Linux clipboard as BMP only, when it mirrors it at all

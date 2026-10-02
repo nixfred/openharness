@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:harness/shared/theme/app_icons.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -16,12 +17,14 @@ import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/shortcuts/keymap_host.dart';
 import 'package:harness/state/app_state.dart';
+import 'package:harness/state/harness_attachments.dart';
 import 'package:harness/state/harness_placement.dart';
 import 'package:harness/state/new_harness.dart';
 import 'package:harness/state/pane_arrangement.dart';
 import 'package:harness/widgets/desktop_chrome.dart';
 import 'package:harness/widgets/engine_identity.dart';
 import 'package:harness/widgets/new_harness_form.dart';
+import 'package:harness/widgets/new_harness_paste.dart';
 
 import 'box_render_preview_test.dart' show loadPreviewFonts;
 import 'keymap_host_test.dart' show MemoryKeymap, key;
@@ -208,6 +211,7 @@ Future<_ReviewFixture> _mount(
   double scale = 1,
   Brightness brightness = Brightness.dark,
   NewHarnessDraft? draft,
+  HarnessAttachments? attachments,
   FutureOr<void> Function(_ReviewFixture)? onBrowse,
 }) async {
   final app = _ReviewApp(
@@ -221,6 +225,7 @@ Future<_ReviewFixture> _mount(
     engine: engine,
     folder: folder,
     draft: draft,
+    attachments: attachments,
   );
   final fixture = _ReviewFixture(app, box, MemoryKeymap());
   addTearDown(fixture.dispose);
@@ -379,7 +384,7 @@ void main() {
         expect(find.text('New Harness'), findsOneWidget);
         expect(
           tester.widget<TextField>(_task).decoration!.hintText,
-          'Harness anything',
+          'What would you like to work on?',
         );
         expect(find.text('Options'), findsNothing);
         expect(find.text('Add task'), findsNothing);
@@ -529,6 +534,48 @@ void main() {
     expect(fixture.box.task, 'Keep this draft');
     expect(fixture.app.launches, isEmpty);
   });
+
+  testWidgets('⌘V in the task attaches the clipboard\'s picture', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const clipboardImage = MethodChannel('harness/clipboard_image');
+    // A screenshot: pixels on the clipboard, and no text beside them.
+    messenger.setMockMethodCallHandler(
+      clipboardImage,
+      (call) async => switch (call.method) {
+        'readFilePaths' => const <String>[],
+        'readImagePng' => Uint8List.fromList([0x89, 0x50, 0x4E, 0x47]),
+        _ => null,
+      },
+    );
+    messenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async => null,
+    );
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(clipboardImage, null);
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+    // The box owns its files, and disposes them with itself.
+    final files = HarnessAttachments();
+    await _mount(tester, attachments: files);
+    await tester.tap(_task);
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+    expect(files.files.single.name, kPastedImageName);
+    expect(
+      find.byKey(const ValueKey('new-harness-attachment:$kPastedImageName')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
+  }, skip: !Platform.isMacOS && !Platform.isLinux);
 
   testWidgets('the platform send action submits the exact prompt once', (
     tester,

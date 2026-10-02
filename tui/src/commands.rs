@@ -297,11 +297,11 @@ fn respawn(app: &mut App, p: u64, command: Option<String>, cwd: Option<String>) 
     let Some((machine, agent)) = app.panes.get(&p).map(|x| (x.machine_id.clone(), x.agent_id.clone())) else { return };
     let Some(link) = app.link(&machine) else { return app.say("That machine is not connected", theme::WARN) };
     if crate::local::is_local(&machine) {
+        let previous_exit = app.panes.get(&p).and_then(|pane| pane.dead.as_ref().map(|exit| exit.id.clone()));
         app.spawn(async move { link.rpc("agent_restart", serde_json::json!({"agentId":agent,"command":command,"cwd":cwd}), std::time::Duration::from_secs(30)).await }, move |app, reply| match reply {
             Ok(_) => {
                 if let Some(pane) = app.panes.get_mut(&p) {
-                    pane.dead = None;
-                    if start_command.is_some() { pane.start_command = start_command; }
+                    pane.complete_restart(previous_exit.as_deref(), start_command);
                 }
                 app.relist(&machine); app.open_stream(p, true);
             }

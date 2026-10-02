@@ -14,57 +14,52 @@ api ?    web ⠹    blender ✓  +                   Search  Bell  (✿ Harness 
 
                                  panes
 
-Harnesses 118   CPU 20%   RAM 10 GB   GPU 10%   SSD 1 GB   Claude 100%   Codex 90%
+Harnesses 118   Machines 3   Models 4   [Claude icon] 68%   [Codex icon] 18%
                                                      M2 > project > branch > #439
 ```
 
 The context follows the focused pane. The branch stays clickable in the
-footer; pane headers do not repeat it. An empty New Tab keeps the footer when
-there are live sessions to inspect.
+footer; pane headers do not repeat it. An empty New Tab and the first welcome
+screen keep the footer visible, including zero counts, so Machines and Models
+are discoverable. Leave the right-side context blank on Welcome and New Tab;
+show machine/project/branch context only when a harness is open. A fresh computer
+with no sessions or installed models shows `Harnesses 0`, `Machines 1`, and
+`Models 0` after local setup and inventory finish; unread model inventory shows
+`—`.
 
-The left side shows open harnesses (including idle and starting sessions) and their CPU, RAM, GPU and SSD consumption across connected
-owned machines, followed by subscription allowance used per account. The focused-pane context
-remains at the right. Count each live session even when no tab currently displays it.
+The left side shows the number of open harnesses across connected owned machines, including
+idle and starting sessions. Count each live session even when no tab currently displays it. The
+focused-pane context remains at the right. Clicking Harnesses selects the existing Harness Monitor
+across all tabs/machines, creating one only when absent.
 
-Clicking Harnesses or any resource metric selects the existing Harness Monitor tab across all tabs
-and machines. Create one only when absent. Clicking does not open a separate resource popover.
-Saved sessions and open/resume actions belong in Open Harness (Cmd-P). The monitor itself starts
-with only open sessions, sortable resource and AI metrics, an inspector and a visible × close
-button on every row. Closing reviews one harness, ends its work and retains history and files.
+Machines counts linked owned computers, including this computer; hover explains online/offline
+counts and click opens `@`. Models counts unique installed local variants (model id and
+quantization) across those machines, including stopped models. Downloads in the catalog, shared
+grids, APIs and subscriptions do not contribute. Click opens local models. Unknown inventory
+shows `—`; known cached inventory remains during outages with a tooltip explaining stale or
+missing machines. The model picker and footer share per-machine inventories; background
+reads never force a scan or set up Grid.
+
+Monitor starts with open sessions; a Stopped harnesses filter exposes retained work for cleanup.
+Storage is shown as separate Workspace and Session data columns before RAM, CPU and GPU. Explicit
+Stop Harness and Delete Harness buttons review one session. Stop retains history and files; Delete
+Harness permanently removes the selected conversation data while keeping workspace files.
+Inspect → Delete Worktree separately reviews its path, branch, size and uncommitted changes.
+See [Harness Monitor](../../store/agents/harness-monitor/README.md) for accounting and safeguards.
 
 Use spaces of 0.75 character cells within components and two cells between complete groups,
 including the count. Adjacent controls contribute one cell of horizontal padding on each side;
 before the fixed companion slot, omit the preceding control's trailing cell because the artwork
 already has its own optical gutter. Do not add extra separation. The shared `workspaceBarValueGapCells`
-and `workspaceBarGroupGapCells` keep Flutter and native views aligned. Use neutral
-workspace ink at every usage level. Do not pad numbers or add dots, decimal figures or plus suffixes.
+and `workspaceBarGroupGapCells` keep Flutter and native views aligned. Count labels use neutral
+workspace ink. Do not pad numbers or add dots or decimal figures.
 
-CPU is the sum of attributable process-tree interval use; 100% is one core, so multicore and fleet
-totals can exceed 100%. RAM is process-tree resident memory. Nested harness roots are excluded from
-the parent and shared Codex servers count once; shared memory pages may still overlap. GPU uses
-process GPU time per interval on supported macOS drivers and process utilization on Linux NVIDIA.
-Multiple contexts/devices can exceed 100%. First samples and unavailable counters show —;
-whole-host GPU activity is not a substitute for attribution. Cloud inference is not local GPU use.
+The footer reads existing live harness inventory and never polls resource metrics. The Monitor viewer samples
+local inventory every four seconds and linked machines every fifteen seconds while visible, with
+bounded storage work cached separately. Native and Flutter footers share the count, tooltip and
+navigation. Keep counts usable at narrow widths and preserve focused context.
 
-RAM and SSD use rounded whole MB/GB, such as `RAM 10 GB` and `SSD 1 GB` (10.4 rounds to 10).
-SSD means allocated workspace disk space, including existing files. Shared and nested canonical
-folders count once per machine. It is not free space, capacity or a claim that every host uses an
-SSD. Stopping a process keeps its files. Directory sizes use bounded reads cached for one minute.
-
-Unknown readings show —, with valid zero preserved. Partial totals show the available number without
-a prefix. The tooltip explains partial coverage, scope, units and shared accounting. Samples expire
-after 45 seconds. The count and resource totals cover the same connected owned sessions and never
-substitute whole-machine utilization.
-
-Sample connected owners every fifteen seconds while the app is foregrounded. Clear readings and
-stop polling when hidden; refresh on return. Coalesce process samples in the owning daemon, verify
-PID birth identity and keep telemetry off the terminal-input queue. The viewer samples local
-inventory every four seconds and linked machines every fifteen seconds while visible. Reading
-token usage uses the existing incremental ledger and does not trigger a new transcript scan.
-
-Native and Flutter footers share data, tooltips and button behavior. At narrow widths remove SSD,
-then GPU, then RAM as complete groups, keeping CPU and the full tooltip. Subscription usage remains
-visible in wide windows and accessible through Models at every size. Preserve focused context.
+The captures below are historical and include resource groups that have since moved into Monitor.
 
 ![Compact footer and companion with synthetic readings, dark](images/workspace-footer-compact-dark.png)
 
@@ -74,12 +69,10 @@ The previous capture below documents spacing; its whole-machine percentages have
 
 ![Historical status spacing with synthetic readings](images/workspace-resources.png)
 
-Validation covers harness scope, shared/nested totals, unavailable/late responses, rounding, hidden
-polling, tab reuse and native/Flutter clicks. Run `harness_resources_test.dart`,
-`harness_monitor_test.dart` and `workspace_status_test.dart`. Set
-`HARNESS_WORKSPACE_CONTROLS_CAPTURE_DIR` for Flutter fixtures and `HARNESS_RESOURCE_CAPTURE_DIR` for
-native captures from `tool/check_swarm_titlebar.sh`. CLI ownership, telemetry and failure checks live
-in `harnessResources.spec.ts` and `harnessTelemetry.spec.ts`.
+Validation covers harness count, no footer resource polling, tab reuse, full 70/30 Monitor recovery,
+and native/Flutter clicks. Run `harness_monitor_summary_test.dart`, `harness_monitor_test.dart` and
+`workspace_status_test.dart`; set `HARNESS_WORKSPACE_CONTROLS_CAPTURE_DIR` for Flutter captures.
+`tool/check_swarm_titlebar.sh` verifies AppKit layout and hidden legacy resource controls.
 
 The layout takes cues from [Stats' combined view](https://github.com/exelban/stats/blob/master/Stats/Views/CombinedView.swift)
 and [Mini widget](https://github.com/exelban/stats/blob/master/Kit/Widgets/Mini.swift): compact modules
@@ -223,13 +216,14 @@ truncate without moving or covering the close target. Clicking the model focuses
 that pane and opens the same unified Models picker as Cmd-:, preserving the
 existing target and availability guards.
 
-The footer shows subscription allowance **used**, alongside harness resource totals.
-Read the same deduplicated account rows as Models: each percentage uses the
-limiting window and expires under the same rules. Compute used = 100 − remaining
-and round to a whole percentage. Different accounts remain distinct. Unknown
-usage shows `-`; exhausted allowance shows `100%`. Names and percentages use
-the same neutral ink. Hover explains usage, account identity and reset windows;
-click opens Subscriptions. Do not invent account or usage readings.
+The footer shows subscription allowance **remaining**, with one provider icon and percentage
+per deduplicated account. Use the same limiting window and freshness rules as Models. Floor
+whole percentages, preserve a positive fraction as `<1%`, and show unknown as `—` and exhausted
+as `0%`. Healthy values are neutral, 6–20% uses `usageLow`, and 5% or less uses `usageCritical`.
+Only percentages change color; provider icons retain their real artwork. Each tooltip identifies
+its account, machines, remaining allowance, freshness and reset windows. Click selects that
+account in Subscriptions. At narrow widths, keep whole icon/value pairs and use `+N` to open
+overflow subscriptions. Do not invent account or usage readings.
 
 For the model label, prefer
 its local model ID or the daemon's observed subscription model (`selectedModel`),

@@ -116,6 +116,11 @@ export class CodingMemoryRuntime {
     return !this.stopped && context.experimental ? context.profileId : null
   }
 
+  /** Learning is a continuing use of the collection's model, even with an empty or deferred queue. */
+  needsCompanion(): boolean {
+    return !!this.active?.ready && this.authorized(this.active) && this.active.preferences.learn
+  }
+
   /** Explicit owner controls remain usable with watching/learning/recall off. No capture is started. */
   async libraryStatus(owner: string) {
     return this.withOwner(owner, async port => ({ runtime: this.status(),

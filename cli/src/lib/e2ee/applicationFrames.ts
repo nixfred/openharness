@@ -20,7 +20,7 @@ const FLEET_RESULTS = new Set([...FLEET_REQUESTS].map(type => `${type}_result`))
 // `group_sync`: the trust-group roster exchange (groupSyncer.ts) — keys, so always sealed.
 // nixfred adds clip_push: clipboard and file drop between paired machines is user content, sealed
 // the same way (core.ts itself is a pinned interop keystone and stays untouched).
-const MACHINE_REQUESTS = new Set(['agents_cleanup_preview', 'agent_close', 'git_project_info', 'git_pull_request', 'machine_resources', 'api_connections', 'group_sync', 'phone_pair', 'viewer_surface', 'orchestrator', 'clip_push', ...OWNER_COMMAND_TYPES])
+const MACHINE_REQUESTS = new Set(['agent_purge', 'agent_worktree_delete', 'agents_cleanup_preview', 'agent_close', 'git_project_info', 'git_pull_request', 'machine_resources', 'api_connections', 'group_sync', 'phone_pair', 'viewer_surface', 'orchestrator', 'clip_push', ...OWNER_COMMAND_TYPES])
 const MACHINE_RESULTS = new Set([...MACHINE_REQUESTS].map(type => `${type}_result`))
 /** The pair brain, machine to machine (daemons/BRAIN.md). A watch carries question text and recaps; the
  * writes (answer, send, stop, start, pause, resume) act on a harness through the owning machine's floor

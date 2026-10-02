@@ -23,6 +23,7 @@ import { join } from 'path'
 import type { LastTurnText, LiveEvent } from './normalize.js'
 import { AgentNotifications } from './agentNotifications.js'
 import { deriveTurnSummary } from './deviceRecap.js'
+import { atomicWriteJson } from './registry.js'
 
 export type CommanderFrame = {
   type: 'commander_event'
@@ -966,6 +967,17 @@ export class CommanderMirror {
   }
 
   // ── persistence ──────────────────────────────────────────────────────────────────────────────
+  deleteHistory(sessionId: string): void {
+    this.forget(sessionId)
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = null
+    this.summaries.delete(sessionId)
+    this.history.delete(sessionId)
+    this.fullTexts.delete(sessionId)
+    this.asks.delete(sessionId)
+    this.save(true)
+  }
+
   private load(): void {
     try {
       const obj = JSON.parse(readFileSync(this.file, 'utf-8')) as Record<string, string>
@@ -998,14 +1010,24 @@ export class CommanderMirror {
     this.saveTimer = setTimeout(() => this.save(), 200)
   }
 
-  private save(): void {
+  private save(strict = false): void {
     try {
       mkdirSync(this.opts.dataDir, { recursive: true, mode: 0o700 })
+      if (strict) {
+        // Cleanup is often requested on a full disk. Never truncate other sessions' shared
+        // history while rewriting these files; failed atomic writes remain safely retryable.
+        atomicWriteJson(this.file, Object.fromEntries(this.summaries))
+        atomicWriteJson(this.historyFile, Object.fromEntries(this.history))
+        atomicWriteJson(this.fullTextFile, Object.fromEntries(this.fullTexts))
+        atomicWriteJson(this.askFile, Object.fromEntries(this.asks))
+        return
+      }
       writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.summaries), null, 2))
       writeFileSync(this.historyFile, JSON.stringify(Object.fromEntries(this.history), null, 2))
       writeFileSync(this.fullTextFile, JSON.stringify(Object.fromEntries(this.fullTexts), null, 2))
       writeFileSync(this.askFile, JSON.stringify(Object.fromEntries(this.asks), null, 2))
     } catch (err) {
+      if (strict) throw err
       console.error('[commander] save summaries failed:', err)
     }
   }

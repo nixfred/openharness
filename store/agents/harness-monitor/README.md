@@ -1,25 +1,45 @@
 # Harness Monitor
 
-Inspect active harnesses across connected machines and decide what to stop. The workspace footer's
-Harnesses, CPU, RAM, GPU and SSD controls select the existing Harness Monitor tab, creating one when
-needed. The tab uses the standard 70% viewer / 30% assistant split. Use the pane Zoom icon for a full-width table. Opening the table submits no model prompt.
+Inspect harnesses across connected machines and decide what to stop or delete. The workspace footer
+shows only **Harnesses N**; click it to select the existing Harness Monitor tab, creating one when
+needed. The footer does not poll resource metrics. The tab retains the standard 70% viewer / 30%
+assistant split, including loading, failures and restore. Opening it submits no model prompt.
 
-The table lists only currently open harnesses on connected machines, including idle, working,
-waiting and starting sessions. Closed sessions and offline history never appear in this table.
-Harness, Status, CPU, RAM, GPU and SSD come first, followed by Agent, Tokens,
-Machine, Project and Branch. RAM is the initial default sort. Filter by machine or activity, search session
-metadata, and choose Overview, Resources or AI usage. Click a header to sort; unknown readings sort
-last in either direction. Drag a separator or use its arrow keys to resize a column. Columns and
-widths persist; search and status reset on entry. The harness name stays visible during horizontal
-scrolling. Arrow keys select; Enter or double-click opens the inspector. It includes process IDs,
-parent IDs and resource readings. Each row has a visible × close button that stays available during
-horizontal scrolling. Saved sessions remain available in Open Harness (Cmd-P).
+The default view lists open harnesses. **Stopped harnesses** exposes retained sessions for cleanup;
+offline inventory never enables actions. Storage comes first: **Workspace**, **Session data**, then
+RAM, CPU and GPU. Workspace size is the default descending sort. Project/worktree files and
+conversation data are never combined into one disk figure. Shared folders repeat on individual
+rows but count once in workspace totals.
 
-The × button reviews that harness before asking its owning daemon to stop the validated process
-and close its panes. A confirmed close removes the row and updates the totals.
-Conversation history, launch settings and files remain. The daemon checks conversation identity again
-before stopping. Offline or disconnected sessions cannot be stopped. Freeze updates holds the displayed readings
-without affecting work, and disables closing until live updates return.
+Search, machine/activity filters, sortable/resizable columns and Overview, Resources and AI usage
+presets remain available. Unknown readings sort last. Arrow keys select; Enter or double-click
+opens Inspect. Freeze updates disables actions until live readings return.
+
+Each row has **Stop Harness** and **Delete Harness** buttons:
+
+- **Stop** ends running work and closes its panes, keeping history, configuration and files.
+- **Delete** opens one confirmation directly from the row or Inspect. It shows two independent
+  checkboxes, each with its size and full path: **Session data** and **Worktree data**. Available
+  options start checked. Nothing is removed until the person confirms; neither option selected
+  disables Delete. Main project folders and worktrees used by another harness cannot be selected.
+- **Session data** removes only this conversation's verified native history and Harness checkpoints,
+  search history, saved metadata and retained harness. Unchecked worktree files stay. Some native
+  stores have unsupported schemas or dependent conversations; their session option is unavailable.
+  Shared database space becomes reusable but its file may not shrink immediately. Engine-wide
+  caches and older conversations from `/clear` are not removed.
+- **Worktree data** removes the exact reviewed checkout folder, including ignored dependencies and
+  build output. Dirty worktrees require explicit consent to discard uncommitted and untracked files.
+  The owning daemon stops the harness, revalidates the checkout and uses `git worktree remove`.
+  The main checkout, branch and commits stay. Unchecked session data remains as a stopped harness;
+  recreate the checkout to resume later. Locked or nested worktrees and detached commits without
+  a saved branch are protected. Selecting both removes the worktree first, then the session data;
+  if only part succeeds, the result says what was already removed and is never retried automatically.
+- **Inspect** prominently shows the full working folder, worktree path and main project path, with
+  copy buttons and an explanation of cleanup eligibility. Opening Inspect only reads these facts.
+
+Deletion is one harness at a time, never automatic. Reviews expire after two minutes and are bound
+to the machine, harness and conversation. Changed identities, paths or worktree status require a new
+review. Cancel is the default. A lost response is uncertain and is never automatically retried.
 
 ## Metric definitions
 
@@ -29,7 +49,8 @@ without affecting work, and disables closing until live updates return.
 | RAM | Process-tree resident memory, in rounded MB/GB. Shared pages can overlap. Nested harness roots are excluded from their parent. Shared Codex servers appear separately and count once. |
 | GPU % | GPU use of the harness process tree. macOS reads IOAccelerator clients owned by each PID: Apple Silicon AppUsage and Intel/AMD accumulatedGPUTime counters. GPU nanoseconds divided by the sample interval give percent. Linux reads NVIDIA process utilization. Summed use can exceed 100% across contexts/devices. Initial samples, context changes, resets and unavailable drivers show —. Cloud inference is not local GPU use. |
 | GPU memory | NVIDIA compute allocations on supported Linux drivers. macOS and unsupported counters show —. |
-| SSD | Allocated workspace disk space, including pre-existing files, from bounded du reads cached for one minute. Shared and nested canonical folders count once per machine in totals. Stopping does not release this space. SSD is a display label, not a hardware-media probe. |
+| Workspace | Allocated disk space of the entire working folder (project, linked worktree or subfolder), from bounded `du` reads cached for one minute. Shared and nested canonical folders count once per machine in totals. Delete reviews the full worktree root before deletion. |
+| Session data | Allocated conversation-file and checkpoint bytes, or estimated conversation content within a shared native database plus checkpoints. Excludes project/worktree files. Cached for one minute; unsupported or unreadable stores show —. |
 | Disk read/s / write/s | Physical process-tree I/O deltas from Linux /proc/<pid>/io. Restricted counters, resets and macOS show —. |
 | Transcript | Individual conversation-file size when reported. Shared databases show —. |
 | Tokens | Conversation input plus output, with cached input counted once. Claude, Codex and OpenCode use the existing incremental daemon ledger. Other frameworks remain visible with unavailable token fields. |
@@ -41,17 +62,13 @@ Model, framework, machine, project, branch, folder, process count, start time an
 provide context. There is no invented dollar cost: subscription plans, caching and provider prices
 cannot be inferred reliably from total tokens.
 
-Totals describe the shown open harnesses and their shared servers. ≥ marks partial totals; — means
-unavailable, never measured zero. Footer totals cover the open harnesses in its count across
-connected owned machines. CPU/GPU use whole percentages; RAM/SSD use whole MB/GB (10.4 GB → 10 GB).
-They do not include unrelated applications or whole-machine utilization.
-
+Totals describe the filtered harnesses and their shared servers. ≥ marks partial totals; — means
+unavailable, never measured zero. CPU/GPU use whole percentages; storage and RAM use rounded MB/GB.
 The viewer polls local inventory every four seconds and linked machines every fifteen seconds while
-visible. The foreground desktop footer samples every fifteen seconds; hidden apps clear readings and
-stop polling. The daemon coalesces process reads, verifies PID birth identity, bounds macOS IORegistry/NVIDIA commands
-and directory walks, and keeps telemetry off the terminal-input queue. No extra transcript scan is
-started by the table or footer. Older daemons retain basic inventory but require updating for new
-metrics. Identity and all stop actions remain machine-scoped through the paired bridge.
+visible. Storage work is cached and bounded separately; it does not wait on the terminal-input queue.
+The daemon verifies PID birth identity and bounds process probes and directory walks. Older daemons
+retain basic inventory but require updating for new metrics and deletion actions. Actions stay
+machine-scoped through the paired bridge; remote deletion requires an encrypted owner connection.
 
 ## Design references and checks
 
@@ -66,9 +83,9 @@ to locate IOAccelerator data and [GPUI's process GPU probe](https://github.com/l
 to verify the per-process counters. Stats' whole-device percentages are never included in harness totals.
 
 `npm test` uses isolated policy/state fixtures. `node test/preview.mjs` serves synthetic sessions and
-simulated stops, without a daemon bridge or model call. Daemon checks live in harnessResources,
+simulated stops and deletions, without a daemon bridge or model call. Daemon checks live in harnessResources,
 harnessTelemetry, agentTokenUsage and backendSocket specs. Desktop tests cover footer scope,
-rounding, hidden polling and tab reuse; `tool/check_swarm_titlebar.sh` checks native clicks/layout.
+count-only behavior, layout and tab reuse; `tool/check_swarm_titlebar.sh` checks native clicks/layout.
 Real Linux NVIDIA counters still require hardware validation; parser fixtures do not establish
 support for every driver.
 On macOS, `cd cli && RUN_MACOS_GPU=1 npm test -- src/lib/macosProcessGpu.integration.spec.ts`

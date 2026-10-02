@@ -8,6 +8,50 @@ import 'package:harness/core/config.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  // Deliberately plain tests: no widget binding's HTTP override to hide the
+  // account-lifecycle fixture's inherited calls into the real local daemon.
+  for (final url in [
+    AppConfig.dev.localCliBaseUrl,
+    'http://localhost:18473',
+    'http://[::1]:18473',
+    AppConfig.defaultApiUrl,
+  ]) {
+    test(
+      'test API refuses live reads and writes before opening HTTP: $url',
+      () async {
+        var clients = 0;
+        await HttpOverrides.runZoned(
+          () async {
+            final api = ApiClient(
+              config: AppConfig(
+                apiBaseUrl: AppConfig.defaultApiUrl,
+                localCliBaseUrl: url,
+              ),
+              session: AuthSession(),
+            );
+            final blocked = isA<DioException>().having(
+              (error) => error.error.toString(),
+              'reason',
+              contains('access to live services is disabled'),
+            );
+            await expectLater(api.desk(), throwsA(blocked));
+            await expectLater(
+              api.deskOps([
+                {'op': 'seed', 'tabs': []},
+              ]),
+              throwsA(blocked),
+            );
+            expect(clients, 0);
+          },
+          createHttpClient: (_) {
+            clients++;
+            throw StateError('A test attempted to open a real HTTP client');
+          },
+        );
+      },
+    );
+  }
+
   test(
     'account experiment writes include identity and the local proxy header',
     () async {

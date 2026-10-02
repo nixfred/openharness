@@ -30,10 +30,19 @@ pub fn handle(app: &mut App, event: CEvent) {
             app.session_activity = now; app.session_used = crate::app::use_order(); on_key(app, key)
         }
         CEvent::Paste(text) => on_paste(app, text),
-        CEvent::Mouse(mouse) => { if app.mouse { on_mouse(app, mouse) } }
-        CEvent::Resize(cols, rows) => { app.size = (cols, rows); app.fit_panes(); crate::commands::notify(app, "client-resized", None, None) }
+        CEvent::Mouse(mouse) => {
+            if app.mouse {
+                // A turn of the wheel: the screen is written whole once it rests (app.scrolled_at).
+                if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight) { app.scrolled_at = Some(Instant::now()) }
+                on_mouse(app, mouse)
+            }
+        }
+        // (A resize also writes the whole screen again: other diff renderers do the same, since a
+        // terminal reflows its own cells and the diff then trusts a screen that is not there.)
+        CEvent::Resize(cols, rows) => { app.size = (cols, rows); app.redraw_all = true; app.fit_panes(); crate::commands::notify(app, "client-resized", None, None) }
         // The terminal in front: the dial follows its pane again (and hears it is in front).
-        CEvent::FocusGained => { app.terminal_focused = true; app.welcome_back(); crate::dial::announce(app, false); app.announce_focus(); crate::commands::notify(app, "client-focus-in", None, None) }
+        // (A repaint of the whole screen too: whatever the terminal drew wrongly while it was behind goes.)
+        CEvent::FocusGained => { app.terminal_focused = true; app.redraw_all = true; app.welcome_back(); crate::dial::announce(app, false); app.announce_focus(); crate::commands::notify(app, "client-focus-in", None, None) }
         CEvent::FocusLost => { app.terminal_focused = false; app.away = Some((Instant::now(), app.fleet_counts())); crate::dial::announce(app, false); crate::commands::notify(app, "client-focus-out", None, None) }
         _ => {}
     }

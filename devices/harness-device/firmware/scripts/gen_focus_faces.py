@@ -5,7 +5,7 @@
 
 Writes main/ui/habitat/focus_faces.c and focus_faces.h: the faces lvgl_fonts.c (the LVGL firmware's
 own Geist and Montserrat) does not have. Focus draws in Geist (owner, 2026-10-02), so that means
-geist_med_30 for the recap; the Roboto set from an earlier trial stays generated but unused, and the
+geist_med_30 for the recap and geist_med_26 for the curved name; the Roboto set from an earlier trial stays generated but unused, and the
 linker drops it. Each is converted exactly as the LVGL Geist faces were: lv_font_conv
 (pinned, run through npx) with --bpp 4 --no-compress --no-prefilter, kerning on, over gen_lvgl_assets.py's
 TEXT codepoints, then parsed with that script's lv_font() / emit_font(). Roboto has no check / cross marks
@@ -44,6 +44,7 @@ WEIGHTS = {'Regular': 400, 'Medium': 500}
 # FontAwesome glyphs (roboto_med_22: the bell count's neighbour and the close cross).
 FACES = [
     ('geist_med_30', 'Geist-Medium', 30, 'NULL'),   # the Focus recap: 2 px over the LVGL 28 (owner, 2026-10-02)
+    ('geist_med_26', 'Geist-Medium', 26, 'NULL'),   # the curved name and lower-arc status (ht_arc_geist_prop)
     ('roboto_med_38', 'Roboto-Medium', 38, 'NULL'),
     ('roboto_med_32', 'Roboto-Medium', 32, 'NULL'),
     ('roboto_med_28', 'Roboto-Medium', 28, 'NULL'),
@@ -122,6 +123,10 @@ def main():
             total += size
             print(f'{name}: {len(codes)} glyphs, line {font["line"]}, ascent {font["line"] - font["base"]},'
                   f' {size} bytes')
+    # The curved name's arc face lives with its font: terminal.c names no Focus face, so the compositor's
+    # tests need not link these (terminal.h declares it).
+    c.append('// The Focus curved name and lower-arc status: Geist Medium 26 along the 205 px arcs.\n'
+             'const ht_arc_face_t ht_arc_geist_prop = {.prop = &ht_lv_geist_med_26};\n')
     (root / 'main/ui/habitat/focus_faces.c').write_text(''.join(c))
     (root / 'main/ui/habitat/focus_faces.h').write_text(''.join(h))
     print(f'total {total} bytes')

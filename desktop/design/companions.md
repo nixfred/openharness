@@ -46,12 +46,11 @@ computer; this is not cross-machine memory sync.
 
 ![Pending memory review with source evidence and guarded approval, using synthetic fixture data](companion-memory-inbox.png)
 
-The header's **Powered by** menu chooses Codex or Claude Code for the collection.
-A new collection asks the person to choose; there is no Claude-first default or
-automatic fallback when usage runs out. Existing collections keep their agent.
-The choice stays visible across Story, Collection and Memories, and moves below
-the title in a narrow viewer. Selecting an uninstalled agent explains which one
-is missing and keeps the current choice.
+The agent and model controls live in the right conversation pane's header.
+The viewer header contains the Companions title and settings button, with no
+duplicate agent selector at any width. Existing collections keep their agent
+and do not switch automatically when usage runs out. Selecting an uninstalled
+agent explains which one is missing and keeps the current choice.
 
 Opening the home starts or resumes the selected pair DSH through a UI-only local
 socket request, without a prompt, pasted text or Enter key. The complete engine

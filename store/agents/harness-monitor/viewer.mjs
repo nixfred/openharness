@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { stop, open } from './lib/actions.mjs'
+import { stop, open, previewDelete, deleteHarness, worktreeAction, inspectWorkspace } from './lib/actions.mjs'
 import { cleanupReviews } from './lib/cleanup.mjs'
 import { closeBridges } from './lib/bridge.mjs'
 import { collect as collectFleet, summarize, tilde } from './lib/inventory.mjs'
@@ -14,9 +14,9 @@ import { DEFAULT_POLICY, decide, normalizePolicy } from './lib/policy.mjs'
 import { pin, readLog, readState, record, savePolicyValues, writeState, writeVerdict } from './lib/state.mjs'
 
 const PACKAGE = dirname(fileURLToPath(import.meta.url))
-const VERBS = new Set(['stop', 'open', 'pin', 'unpin'])
+const VERBS = new Set(['stop', 'open', 'pin', 'unpin', 'delete-review', 'delete', 'worktree-review', 'worktree-delete', 'workspace-inspect'])
 
-export function createViewer({ workspace, port = 0, intervalMs = 4000, remoteIntervalMs = 15_000, now = () => Date.now(), collect = collectFleet, verbs = { stop, open }, cleanup = cleanupReviews() }) {
+export function createViewer({ workspace, port = 0, intervalMs = 4000, remoteIntervalMs = 15_000, now = () => Date.now(), collect = collectFleet, verbs = { stop, open, previewDelete, deleteHarness, worktreeAction, inspectWorkspace }, cleanup = cleanupReviews() }) {
   const token = randomBytes(24).toString('base64url')
   const clients = new Set()
   const cache = new Map()
@@ -112,12 +112,15 @@ export function createViewer({ workspace, port = 0, intervalMs = 4000, remoteInt
     return result
   }
   const act = payload => write(() => actOnce(payload))
-  async function actOnce({ verb, ids, manual = false, expected }) {
+  async function actOnce({ verb, ids, manual = false, expected, reviewId, path, discardChanges, choices }) {
     if (!VERBS.has(verb)) return { error: `Not a verb Harness Monitor has: ${verb}` }
     const targets = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string'))].slice(0, 64)
     if (!targets.length) return { error: 'Name at least one harness.' }
     const explicit = manual === true && targets.length === 1
-    const reviewed = new Map((Array.isArray(expected) ? expected : snapshot.rows).filter(row => row && typeof row.id === 'string').map(({ id, sessionId, lastActivity }) => [id, { sessionId, lastActivity }]))
+    const deleting = ['delete', 'delete-review', 'worktree-review', 'worktree-delete', 'workspace-inspect'].includes(verb)
+    if (deleting && (!explicit || !Array.isArray(expected) || expected.length !== 1)) return { error: 'Review one harness at a time before deleting.' }
+    if (['delete', 'worktree-delete'].includes(verb) && (typeof reviewId !== 'string' || !reviewId)) return { error: 'Review this harness before deleting it.' }
+    const reviewed = new Map((Array.isArray(expected) ? expected : snapshot.rows).filter(row => row && typeof row.id === 'string').map(({ id, sessionId, lastActivity, createdAt }) => [id, { sessionId, lastActivity, createdAt }]))
     // Bulk actions are restricted to what is still in the reviewed cleanup plan.
     if (verb === 'stop' && !explicit) {
       await polling
@@ -133,7 +136,7 @@ export function createViewer({ workspace, port = 0, intervalMs = 4000, remoteInt
     const eligible = new Set(snapshot.plan.filter(entry => entry.action === 'stop').map(entry => entry.id))
     for (const row of rows) {
       const review = reviewed.get(row.id)
-      if (verb === 'stop' && (!review || review.sessionId !== row.sessionId || (!explicit && review.lastActivity !== row.lastActivity))) {
+      if ((verb === 'stop' || deleting) && (!review || review.sessionId !== row.sessionId || (deleting && review.createdAt !== row.createdAt) || (!explicit && review.lastActivity !== row.lastActivity))) {
         results.push({ id: row.id, name: row.name, action: verb, ok: false, refused: true, detail: 'This session changed since you reviewed it. Refresh and review it again.' })
         continue
       }
@@ -141,14 +144,23 @@ export function createViewer({ workspace, port = 0, intervalMs = 4000, remoteInt
         results.push({ id: row.id, name: row.name, action: verb, ok: false, refused: true, detail: 'This session is no longer eligible for cleanup. Review the new plan.' })
         continue
       }
+      if (verb === 'workspace-inspect') {
+        results.push(await verbs.inspectWorkspace(row))
+        continue
+      }
       if (verb === 'pin' || verb === 'unpin') {
         next = pin(next, row.id, verb === 'pin')
         results.push({ ok: true, action: verb, id: row.id, name: row.name, detail: verb === 'pin' ? 'never stopped by the policy' : 'the policy may stop it again' })
         continue
       }
-      const result = verb === 'stop' ? await verbs.stop(row, { policy, force: explicit }) : await verbs.open(row)
+      const result = verb === 'stop' ? await verbs.stop(row, { policy, force: explicit })
+        : verb === 'delete-review' ? await verbs.previewDelete(row)
+        : verb === 'delete' ? await verbs.deleteHarness(row, { reviewId, choices, path, discardChanges })
+        : verb === 'worktree-review' ? await verbs.worktreeAction(row)
+        : verb === 'worktree-delete' ? await verbs.worktreeAction(row, { reviewId, path, discardChanges }) : await verbs.open(row)
       results.push(result)
     }
+    if (verb === 'workspace-inspect') return { results }
     if (verb === 'pin' || verb === 'unpin') await writeState(workspace, next)
     for (const result of results) await record(workspace, { ...result, by: 'pane' })
     await polling

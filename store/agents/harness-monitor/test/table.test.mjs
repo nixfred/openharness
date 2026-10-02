@@ -30,7 +30,7 @@ test('every filter excludes saved history, exited processes and cached offline s
     { ...history, id: 'stale-live-flag', live: true },
     { ...rows[0], id: 'offline-state', state: 'offline' }]
   assert.deepEqual(visibleRows([...rows, ...closed]).map(r => r.id).sort(), ['m1/a', 'm1/b', 'm2/a'])
-  for (const filter of ['all', 'working', 'idle', 'stopped', 'offline']) {
+  for (const filter of ['all', 'working', 'idle', 'offline']) {
     assert.equal(visibleRows(closed, { filter }).length, 0)
   }
   assert.equal(visibleRows([...rows, ...closed], { query: 'Old' }).length, 0)
@@ -53,4 +53,10 @@ test('shared and nested workspace paths count once on each owning machine', () =
   assert.deepEqual(sumReading([{ cpu: null }], 'cpu'), { value: null, partial: true })
   assert.equal(formatValue('rssBytes', 10.4e9), '10 GB')
   assert.equal(formatValue('cpu', 126.4), '126%')
+})
+
+test('stopped filter makes saved harnesses available for permanent deletion', () => {
+  const saved = { id: 'saved', name: 'History', state: 'stopped', activity: 'stopped', live: false }
+  assert.deepEqual(visibleRows([...rows, saved], { filter: 'stopped' }), [saved])
+  assert.deepEqual(visibleRows([{ ...saved, online: false }], { filter: 'stopped' }), [])
 })

@@ -223,6 +223,7 @@ static EXT_RAM_BSS_ATTR struct {
     question_t q;
     char message[256], title[80], pending_focus[ID_MAX], opening_notice[ID_MAX];
     char voice_target[CABLE_NAME_MAX];
+    char voice_engine[12];   // the engine of whoever this voice turn is for; empty for Find, forms and drafts
     uint32_t voice_retry_until;
     model_item_t models[48];
     int model_count;
@@ -246,7 +247,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t coast_until;
     uint32_t character_activity;
     uint8_t status_phase;
-    uint32_t pet_next_ms;   // when the engine pet's drawn frame next changes (clock_ms), 0 = never
+    uint32_t pet_next_ms;   // when the pet's (or the voice screen's listening scene's) drawn frame next changes (clock_ms), 0 = never
     int start_x, start_y, last_x, last_y;
     uint32_t touch_started;
     // nixfred graphics: the boot scanner's step, the firmware transfer's percent (-1 when none), and the
@@ -1101,7 +1102,8 @@ static void surface_tick(uint32_t now)
     }
     uint8_t phase = status_animated() ? ht_shimmer_phase(now * status_speed()) : 0;
     if (phase != s.status_phase) { s.status_phase = phase; change(); }
-    if (s.pet_next_ms && (s.view == HOME || s.view == AGENT) && !s.touch_down &&
+    // The voice screen's listening scene runs while the finger is down (hold-to-talk); the pets do not.
+    if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE) &&
         (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
     bool main = s.view == HOME || s.view == AGENT;
     bool visible = !display_is_asleep() &&
@@ -1164,11 +1166,12 @@ static void render_workspace_preview(ht_scene_t *f)
  * THE BLUE BELL — the Focus skin's notification pill, as the LVGL firmware drew it: #006fff, fully
  * round, padded 13 px, always 32 px tall: the bell in montserrat_14 and, 6 px on, the count in
  * montserrat_22, each centred vertically in it. Three runs: box, bell, count. It sits at the bottom edge, where the
- * microphone was: the top belongs to the curved name.
+ * microphone was: the top belongs to the curved name. `bell_y` is 400, or 376 where the working scene's status
+ * is on the lower arc and the pill steps up to clear it.
  */
-static void focus_bell(ht_scene_t *f, unsigned count)
+static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
 {
-    enum { BELL_Y = 400, BELL_H = 32, BELL_PAD_H = 13, BELL_GAP = 6 };
+    enum { BELL_H = 32, BELL_PAD_H = 13, BELL_GAP = 6 };
     const ht_font_t *bf = &ht_lv_montserrat_14.base, *cf = &ht_lv_montserrat_22.base;
     char text[16];
     snprintf(text, sizeof text, "%u", count);
@@ -1176,10 +1179,10 @@ static void focus_bell(ht_scene_t *f, unsigned count)
     int h = BELL_H, box_w = 2 * BELL_PAD_H + bw + BELL_GAP + cw;
     int x = (HT_WIDTH - box_w) / 2;
     uint16_t blue = color(0x006fff), ink = color(0xeaeaf0);
-    ht_box(f, x, BELL_Y, box_w, h, h / 2, blue, blue);
-    ht_text(f, x + BELL_PAD_H, BELL_Y + (h - bf->height) / 2, bw, bf, ink, blue,
+    ht_box(f, x, bell_y, box_w, h, h / 2, blue, blue);
+    ht_text(f, x + BELL_PAD_H, bell_y + (h - bf->height) / 2, bw, bf, ink, blue,
             HT_LV_BELL);
-    ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, BELL_Y + (h - cf->height) / 2, cw, cf, ink, blue, text);
+    ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, bell_y + (h - cf->height) / 2, cw, cf, ink, blue, text);
 }
 static void render_home(ht_scene_t *f)
 {
@@ -1271,8 +1274,10 @@ static void render_home(ht_scene_t *f)
             if (!f->runs[i].arc && !f->runs[i].ring.outer && f->runs[i].y + dy < HT_HEIGHT - 40) f->runs[i].y += dy;
     }
     s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
+    // The pill sits at 400..432, or at 376..408 above the working scene's arc status.
+    int bell_y = focus_face && ht_focus_scene_shown(&f_, recap) ? 376 : 400;
     if (bell) {
-        if (focus_face) focus_bell(f, unread);   // y 400..432, under the recap
+        if (focus_face) focus_bell(f, unread, bell_y);
         else ht_notification_bell(f, unread, f_.ink);
     }
     s.status_phase = status_animated() ? ht_shimmer_phase(ms()) : 0;
@@ -1303,7 +1308,7 @@ static void render_home(ht_scene_t *f)
         }
     }
     // The badge's own target follows it, at the bottom on every skin.
-    if (bell) s.hits[s.hit_count++] = (hit_t){{83, 382, 300, 84}, A_INBOX, 0, unread > 0};
+    if (bell) s.hits[s.hit_count++] = (hit_t){{83, bell_y - 18, 300, 84}, A_INBOX, 0, unread > 0};
     // The bell and the creature never share a target, even when the bell is
     // hidden or its count changes under a finger. Centre always starts voice. On Focus the whole face
     // below the name does, down to the bottom edge; the bell's target, registered above, wins there.
@@ -1908,7 +1913,8 @@ static void render_voice(ht_scene_t *f)
     snprintf(draft_detail, sizeof draft_detail, s.voice_draft_append ? "Add to your message" : "Replace part %d / %d",
         draft.page.position, draft.page.total);
     ht_character_face_t f_ = {.recipient = s.voice_target, .status = voice_status(),
-        .hint = "",
+        .hint = "", .engine = s.voice_engine,   // whom this turn is for, not the pane on the face
+        .clock_ms = (s.quiet || display_is_asleep()) ? 0 : (ms() | 1),   // the listening scene's step (Focus)
         .mood = !s.voice_start_pending && !s.voice_waiting && audio_client_recording() ? HT_CHARACTER_LISTENING : HT_CHARACTER_WORKING,
         .pose = character.motion.reaction.pose, .ink = FG, .foreground = FG, .dim = DIM, .primary_title = true,
         .detail = s.voice_search ? "Say a phrase from the output" : s.voice_return == DRAFT ? draft_detail :
@@ -1917,6 +1923,7 @@ static void render_voice(ht_scene_t *f)
         .carrying = s.voice_carry, .voice = true};
     f_.focus = f_.detail && *f_.detail;
     ht_character_face(f, &character, &f_, ACCENT, NULL);
+    s.pet_next_ms = character.id == HT_CHARACTER_FOCUS ? ht_focus_pet_next_ms(&f_, NULL) : 0;
     s.status_phase = status_animated() ? ht_shimmer_phase(ms() * status_speed()) : 0;
     for (int i = 0; i < f->count; i++)
         if (f->runs[i].arc == 2) f->runs[i].shimmer = s.status_phase;
@@ -3224,6 +3231,8 @@ static void dispatch(action_t a)
             else if (a.value == 7) COPY(s.voice_target, "Find in output");
             else if (a.value == 5 || a.value == 6) COPY(s.voice_target, draft.page.name);
             else COPY(s.voice_target, target >= 0 ? s.agents[target].name : "harness");
+            COPY(s.voice_engine, target >= 0 && a.value != 2 && a.value != 5 && a.value != 6 && a.value != 7 ?
+                s.agents[target].engine : "");
             s.voice_started = ms();
             view(VOICE);
             ESP_LOGI("habitat", "voice queued generation=%lu", (unsigned long)a.revision);
@@ -3890,7 +3899,7 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t due = status_wake_ms(now);
         if (due < delay) delay = due;
     }
-    if (s.pet_next_ms && (s.view == HOME || s.view == AGENT) && !s.touch_down) {
+    if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
         int32_t left = (int32_t)(s.pet_next_ms - now);
         uint32_t due = left < 1 ? 1 : (uint32_t)left;
         if (due < delay) delay = due;

@@ -31,8 +31,13 @@ class HarnessAttachments extends ChangeNotifier {
 
   /// Adds the files that fit, replacing one of the same name. Returns what
   /// to tell the person about any left out, or null when all were taken.
-  String? add(Iterable<HarnessAttachment> files) {
-    final tooLarge = <String>[];
+  /// [oversized] names files already known to be over [maxBytes], which were
+  /// never read into memory to be refused here.
+  String? add(
+    Iterable<HarnessAttachment> files, {
+    Iterable<String> oversized = const [],
+  }) {
+    final tooLarge = [...oversized];
     for (final file in files) {
       if (file.bytes.isEmpty) continue;
       if (file.bytes.length > maxBytes) {
@@ -49,6 +54,32 @@ class HarnessAttachments extends ChangeNotifier {
     return tooLarge.length == 1
         ? '${tooLarge.single} is over $limit.'
         : '${tooLarge.length} files are over $limit.';
+  }
+
+  /// Adds what was pasted beside what is there. A clipboard names every
+  /// picture alike, so one whose name is taken is numbered, not swapped in.
+  String? addPasted(
+    Iterable<HarnessAttachment> files, {
+    Iterable<String> oversized = const [],
+  }) {
+    final taken = {for (final file in _files) file.name};
+    return add([
+      for (final file in files)
+        HarnessAttachment(_freeName(file.name, taken), file.bytes),
+    ], oversized: oversized);
+  }
+
+  /// [name], or `name-2.ext`, `name-3.ext`… — the first not in [taken], which
+  /// then holds it.
+  static String _freeName(String name, Set<String> taken) {
+    final dot = name.lastIndexOf('.');
+    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final extension = dot > 0 ? name.substring(dot) : '';
+    var candidate = name;
+    for (var count = 2; !taken.add(candidate); count++) {
+      candidate = '$stem-$count$extension';
+    }
+    return candidate;
   }
 
   void remove(HarnessAttachment file) {

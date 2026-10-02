@@ -8,10 +8,11 @@ export const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 export const COLUMNS = [
   { key: 'name', label: 'Harness', width: 230, required: true, group: 'Session' },
   { key: 'activity', label: 'Status', width: 112, group: 'Session' },
-  { key: 'cpu', label: 'CPU %', width: 80, numeric: true, group: 'Resources', help: 'Interval CPU of this process tree. 100% is one core; multiple cores can exceed 100%.' },
+  { key: 'workspaceBytes', label: 'Workspace', width: 120, numeric: true, group: 'Resources', help: 'Disk space used by the entire working folder: a project, worktree or subfolder. Shared folders repeat per row. Delete lets you review worktree cleanup separately from session data. Main project folders are protected.' },
+  { key: 'sessionBytes', label: 'Session data', width: 130, numeric: true, group: 'Resources', help: 'Conversation history and Harness checkpoints stored on disk. Database sizes estimate conversation content, not the whole shared database. Deleting only session data keeps workspace files. — means not measured.' },
   { key: 'rssBytes', label: 'RAM', width: 88, numeric: true, group: 'Resources', help: 'Resident memory, including child processes. Shared memory pages can overlap. Shared servers appear separately.' },
+  { key: 'cpu', label: 'CPU %', width: 80, numeric: true, group: 'Resources', help: 'Interval CPU of this process tree. 100% is one core; multiple cores can exceed 100%.' },
   { key: 'gpuPercent', label: 'GPU %', width: 80, numeric: true, group: 'Resources', help: 'GPU use of this process tree: GPU time per interval on supported macOS drivers, utilization on Linux NVIDIA. Can exceed 100% across processes or devices. First samples and unavailable counters show —. Cloud model GPU usage is not reported.' },
-  { key: 'workspaceBytes', label: 'SSD', width: 88, numeric: true, group: 'Resources', help: 'Workspace disk space, including existing files. Shared folders repeat per row but count once in totals. Updated at most once a minute; stopping keeps these files.' },
   { key: 'engine', label: 'Agent', width: 118, group: 'Session' },
   { key: 'tokens', label: 'Tokens', width: 98, numeric: true, group: 'AI usage', help: 'Total conversation input and output, including cached input once. Reported by the owning agent; — means unreported.' },
   { key: 'machine', label: 'Machine', width: 120, group: 'Session' },
@@ -36,18 +37,18 @@ export const COLUMNS = [
 ]
 export const PRESETS = {
   overview: COLUMNS.filter(c => !c.optional).map(c => c.key),
-  resources: ['name', 'activity', 'cpu', 'rssBytes', 'gpuPercent', 'workspaceBytes', 'gpuMemoryBytes', 'diskReadBytesPerSecond', 'diskWriteBytesPerSecond', 'processCount', 'machine'],
+  resources: ['name', 'activity', 'workspaceBytes', 'sessionBytes', 'rssBytes', 'cpu', 'gpuPercent', 'gpuMemoryBytes', 'diskReadBytesPerSecond', 'diskWriteBytesPerSecond', 'processCount', 'machine'],
   ai: ['name', 'activity', 'engine', 'machine', 'model', 'tokens', 'tokensPerMinute', 'inputTokens', 'outputTokens', 'cachedTokens', 'lastActivity'],
 }
 // Activity describes what an open harness is doing, not whether it is open.
-// Saved history and cached offline inventory never become process rows.
+// Saved harnesses appear only in the explicit Stopped harnesses view.
 export const isLive = row => row.online !== false
   && !['stopped', 'offline', 'gone'].includes(row.state)
   && !['stopped', 'offline'].includes(row.activity)
   && (row.live ?? ['running', 'terminal', 'starting'].includes(row.state))
-export function visibleRows(rows, { query = '', filter = 'all', machine = 'all', sort = 'rssBytes', direction = -1 } = {}) {
+export function visibleRows(rows, { query = '', filter = 'all', machine = 'all', sort = 'workspaceBytes', direction = -1 } = {}) {
   const q = query.trim().toLocaleLowerCase(), rank = Object.keys(ACTIVITY)
-  return rows.filter(row => isLive(row) && (machine === 'all' || row.machineId === machine)
+  return rows.filter(row => (filter === 'stopped' ? row.online !== false && row.state === 'stopped' : isLive(row)) && (machine === 'all' || row.machineId === machine)
     && (filter === 'all' || row.activity === filter)
     && (!q || [row.name, row.title, row.engine, row.machine, row.project, row.branch, row.model, row.agentId, row.sessionId, row.home]
       .some(v => String(v ?? '').toLocaleLowerCase().includes(q))))
@@ -72,7 +73,7 @@ export const age = (stamp, now = Date.now()) => {
 }
 export function formatValue(key, value) {
   if (['cpu', 'gpuPercent'].includes(key)) return percent(value)
-  if (['rssBytes', 'workspaceBytes', 'gpuMemoryBytes', 'transcriptBytes'].includes(key)) return bytes(value)
+  if (['rssBytes', 'sessionBytes', 'workspaceBytes', 'gpuMemoryBytes', 'transcriptBytes'].includes(key)) return bytes(value)
   if (key.endsWith('PerSecond')) return value == null ? '—' : bytes(value) + '/s'
   if (['tokens', 'inputTokens', 'outputTokens', 'cachedTokens', 'tokensPerMinute'].includes(key)) return number(value)
   if (['lastActivity', 'createdAt'].includes(key)) return age(value)

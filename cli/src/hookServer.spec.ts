@@ -774,3 +774,51 @@ describe('watch mode: /api/hook/external', () => {
     expect((await fetch(`${base}/api/hook/external`, { method: 'POST', headers, body: '{' })).status).toBe(400)
   })
 })
+
+describe('the device history and dismiss endpoints', () => {
+  const local = { 'x-adapter-local': '1', 'content-type': 'application/json' }
+
+  it('history needs the local header', async () => {
+    const onDevicesHistory = vi.fn(async () => ({ status: 200, body: { rows: [], complete: true, frozen: null } }))
+    const { base } = await start({ onDevicesHistory })
+    expect((await fetch(`${base}/api/devices/history`)).status).toBe(403)
+    expect(onDevicesHistory).not.toHaveBeenCalled()
+    const ok = await fetch(`${base}/api/devices/history`, { headers: local })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ rows: [], complete: true, frozen: null })
+  })
+
+  it('dismiss needs the local header, parses the body and refuses bad JSON', async () => {
+    const onDevicesDismiss = vi.fn(() => ({ status: 200, body: { ok: true } }))
+    const { base } = await start({ onDevicesDismiss })
+    const post = (body: string, headers: Record<string, string> = local) => fetch(`${base}/api/devices/dismiss`, { method: 'POST', headers, body })
+    expect((await post('{}', { 'content-type': 'application/json' })).status).toBe(403)
+    expect(onDevicesDismiss).not.toHaveBeenCalled()
+    expect((await post('{bad')).status).toBe(400)
+    expect((await post(JSON.stringify({ pub: 5 }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pub: 'k' }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ pub: 'k' })
+    expect((await post(JSON.stringify({ baseline: true }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ baseline: true })
+    expect((await post('{}')).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({})
+    // The keys a window displayed: a list of strings, bounded.
+    expect((await post(JSON.stringify({ pubs: ['a', 'b'] }))).status).toBe(200)
+    expect(onDevicesDismiss).toHaveBeenLastCalledWith({ pubs: ['a', 'b'] })
+    expect((await post(JSON.stringify({ pubs: 'a' }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pubs: ['a', 5] }))).status).toBe(400)
+    expect((await post(JSON.stringify({ pubs: Array.from({ length: 257 }, (_, i) => `k${i}`) }))).status).toBe(400)
+  })
+
+  it('rebaseline passes the previewed head on, and refuses a malformed one', async () => {
+    const onDevicesRebaseline = vi.fn(async () => ({ status: 200, body: {} }))
+    const { base } = await start({ onDevicesRebaseline })
+    const post = (body: unknown) => fetch(`${base}/api/devices/rebaseline`, { method: 'POST', headers: local, body: JSON.stringify(body) })
+    expect((await post({ confirm: true, head: { seq: 3, hash: 'h' } })).status).toBe(200)
+    expect(onDevicesRebaseline).toHaveBeenLastCalledWith(true, { seq: 3, hash: 'h' })
+    expect((await post({ confirm: true })).status).toBe(200)
+    expect(onDevicesRebaseline).toHaveBeenLastCalledWith(true, undefined)
+    expect((await post({ confirm: true, head: { seq: -1, hash: 'h' } })).status).toBe(400)
+    expect((await post({ confirm: true, head: 'x' })).status).toBe(400)
+  })
+})

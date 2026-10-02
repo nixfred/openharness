@@ -648,3 +648,20 @@ unmerged.
   remains unverified. macOS per-process GPU and restricted driver counters display —. Token totals
   and breakdowns currently come from Claude, Codex and OpenCode ledgers; other engines show missing
   metrics explicitly. See the Harness Monitor README for definitions and research references.
+
+### Experimental Store workspaces, 2026-10-02
+
+- Devices and Companions now appear in Store discovery, categories and search only after the
+  current account enables their respective experiments. Live disabling, account changes and
+  server availability remove them, including open product pages and stale actions. This
+  supersedes the earlier unconditional Store hiding; the public daemon catalog stays unchanged.
+- Their Open action reuses the existing workspace without offering package installation,
+  updates or removal. Companions reserves the 70/30 viewer/chat layout while its collection or
+  conversation is unavailable, then attaches the ordinary terminal in the same slot.
+- **201 targeted tests** and changed-file analysis passed. Synthetic real-font renders were
+  inspected for [Devices](../../docs/research/2026-10-02-experimental-store/devices-dark.png)
+  and [Companions](../../docs/research/2026-10-02-experimental-store/companions-dark.png), plus
+  [Devices at 200% text](../../docs/research/2026-10-02-experimental-store/devices-light-large-text.png)
+  and [Companions at 200% text](../../docs/research/2026-10-02-experimental-store/companions-light-large-text.png)
+  in a narrow light window. These widget renders do not establish native VoiceOver or physical
+  IME behavior. The installed desktop app was not replaced.

@@ -16,6 +16,25 @@ const nested: TerminalRootObservation = {
 }
 
 describe('process discovery', () => {
+  it('ignores the startup help probe and discovers only the subsequent Codex resume', () => {
+    const probe: ProcessRow = {
+      pid: 30, parentPid: 20, executable: 'node', startMarker: start,
+      args: 'node /opt/node_modules/@openai/codex/bin/codex.js --help',
+    }
+    const snapshot = (engine: ProcessRow) => discoverTerminalAgentsFromSnapshot(
+      [tmux], [shell(10, 1), shell(20, 10), engine], 999, ['tmux'],
+    )
+    expect(snapshot(probe).agents).toEqual([])
+    const live = snapshot({ ...probe, pid: 31,
+      args: 'node /opt/node_modules/@openai/codex/bin/codex.js --no-daemon resume 01234567-89ab-cdef-0123-456789abcdef',
+    })
+    expect(live.agents).toHaveLength(1)
+    expect(live.agents[0]).toMatchObject({
+      engine: 'codex', processIdentity: { pid: 31 },
+      resumeSessionId: '01234567-89ab-cdef-0123-456789abcdef',
+    })
+  })
+
   it('deduplicates nested roots by engine PID and start marker', () => {
     const result = discoverTerminalAgentsFromSnapshot(
       [tmux, nested],

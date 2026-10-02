@@ -61,6 +61,8 @@ class _Api extends ApiClient {
   var inventoryRequests = 0;
   Object? inventoryFailure;
   @override
+  Future<Map<String, dynamic>?> desk() async => null;
+  @override
   Future<Map<String, dynamic>?> me() async => {
     'user': {'id': 'fixture-account', 'email': 'fixture@example.invalid'},
   };

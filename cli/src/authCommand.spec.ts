@@ -466,7 +466,8 @@ describe('harness login --json', () => {
     expect(await login.next()).toEqual({ type: 'result', status: 'success', email: 'dee@example.com', fingerprint: expect.stringMatching(FP) })
     expect(await login.exit).toBe(0)
     const session = JSON.parse(readFileSync(join(root, 'auth', 'session.json'), 'utf8')) as Record<string, unknown>
-    expect(session).toMatchObject({ accessToken: 'tok_qr', method: 'qr' })
+    // A sign-in by hand: a sign-in epoch of its own, which the device key log keeps its marks by.
+    expect(session).toMatchObject({ accessToken: 'tok_qr', method: 'qr', signInEpoch: expect.stringMatching(/^[0-9a-f]{32}@\d+$/) })
     expect(calls.map((c) => c.url)).not.toContain('/api/auth/qr/cancel')
   }, 30_000)
 

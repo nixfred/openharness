@@ -1052,6 +1052,128 @@ void main() {
   );
 
   testWidgets(
+    'stalled learning is visible from the library and review only navigates',
+    (tester) async {
+      transport.runtime = {
+        'state': 'ready',
+        'learning': {'state': 'waiting_for_model'},
+        'capture': {'state': 'unavailable', 'reason': 'memory_backlog_full'},
+      };
+      await mount(tester);
+      expect(find.text('Learning needs attention'), findsOneWidget);
+      expect(find.textContaining('queue is full'), findsOneWidget);
+      expect(
+        find.textContaining('terminal beside this viewer'),
+        findsOneWidget,
+      );
+      await tap(tester, 'Review learning');
+      expect(find.text('Learn from coding sessions'), findsOneWidget);
+      expect(find.textContaining('queue is full'), findsOneWidget);
+      expect(
+        transport.calls.every(
+          (p) => p['action'] != 'preview' && p['action'] != 'apply',
+        ),
+        isTrue,
+      );
+      expect(transport.learn, isTrue);
+      expect(transport.recall, isTrue);
+
+      transport.runtime = {
+        'state': 'ready',
+        'learning': {'state': 'idle'},
+        'capture': {'state': 'idle', 'sources': 0},
+      };
+      await library.refresh();
+      await tester.pumpAndSettle();
+      expect(find.textContaining('queue is full'), findsNothing);
+      expect(find.textContaining('No work is ready'), findsOneWidget);
+      await tap(tester, 'How you work');
+      expect(find.text('Learning needs attention'), findsNothing);
+    },
+  );
+
+  testWidgets('pausing learning hides stale failures and preserves recall', (
+    tester,
+  ) async {
+    transport.learn = false;
+    transport.runtime = {
+      'state': 'off',
+      'learning': {'state': 'failed'},
+      'capture': {'state': 'unavailable', 'reason': 'memory_backlog_full'},
+    };
+    await mount(tester);
+    expect(find.text('Learning needs attention'), findsNothing);
+    await tap(tester, 'Learning');
+    expect(find.textContaining('Learning is paused'), findsOneWidget);
+    expect(find.textContaining('queue is full'), findsNothing);
+    expect(tester.widgetList<Switch>(find.byType(Switch)).map((s) => s.value), [
+      false,
+      true,
+    ]);
+  });
+
+  for (final state in [
+    ('off', null, 'Resume it', true),
+    ('unavailable', null, 'memory service', true),
+    ('ready', 'failed', 'could not finish', true),
+    ('ready', 'source_incomplete', 'incomplete source evidence', true),
+    ('ready', 'no_useful_memory', 'no useful memory to save', false),
+    ('ready', 'foreground_busy', 'until it is free', false),
+    ('ready', 'budget_deferred', 'next learning allowance', false),
+    ('ready', 'future_state', 'Learning is on.', false),
+  ]) {
+    testWidgets('learning distinguishes ${state.$1}/${state.$2}', (
+      tester,
+    ) async {
+      transport.runtime = {
+        'state': state.$1,
+        'learning': {'state': state.$2},
+      };
+      await mount(tester);
+      expect(
+        find.text('Learning needs attention'),
+        state.$4 ? findsOneWidget : findsNothing,
+      );
+      await tap(tester, 'Learning');
+      expect(find.textContaining(state.$3), findsOneWidget);
+      expect(
+        find.textContaining('Learning from completed coding work.'),
+        findsNothing,
+      );
+    });
+  }
+
+  for (final brightness in [Brightness.dark, Brightness.light]) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets(
+        'learning backlog ${brightness.name} ${scale}x stays readable',
+        (tester) async {
+          transport.runtime = {
+            'state': 'ready',
+            'learning': {'state': 'waiting_for_model'},
+            'capture': {
+              'state': 'unavailable',
+              'reason': 'memory_backlog_full',
+            },
+          };
+          await mount(
+            tester,
+            brightness: brightness,
+            scale: scale,
+            size: Size(scale == 1 ? 850 : 440, 900),
+          );
+          await capture(tester, 'learning-notice-${brightness.name}-${scale}x');
+          await tap(tester, 'Review learning');
+          await capture(tester, 'learning-status-${brightness.name}-${scale}x');
+          await tester.ensureVisible(find.text('Recall useful memories'));
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets(
     'learning and recall remain independent and do not change until settings are applied',
     (tester) async {
       await mount(tester);

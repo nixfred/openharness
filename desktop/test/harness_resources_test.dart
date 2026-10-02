@@ -105,7 +105,7 @@ void main() {
     await monitor.refresh();
     expect(monitor.label, 'Harnesses 1');
     expect(monitor.sharedLabel, 'Shared Codex servers · 600 MB RAM');
-    expect(monitor.detail, contains('included once'));
+    expect(monitor.summary.detail, contains('included once'));
     ((connection.reply['harnesses'] as Map)['shared'] as List).first.remove(
       'memoryBytes',
     );

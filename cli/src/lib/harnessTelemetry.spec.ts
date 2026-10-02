@@ -49,3 +49,28 @@ it('storage failures and unknown transcripts remain unknown and do not immediate
   expect(values.get('b')?.workspaceBytes).toBeNull()
   expect(size).toHaveBeenCalledTimes(1)
 })
+it('reports session storage separately, caches it, and refreshes a rotated conversation', async () => {
+  const session = vi.fn(async () => 4096)
+  const read = createHarnessStorageReader({ now: () => 10000, size: async () => 1e9,
+    transcript: async () => 2048, canonical: async p => p, session })
+  const rows = [{ agentId: 'a', sessionId: 'first', cwd: '/project', transcriptPath: '/history' }]
+  await read(rows)
+  await vi.waitFor(async () => expect((await read(rows)).get('a')).toMatchObject({ workspaceBytes: 1e9, sessionBytes: 4096, transcriptBytes: 2048 }))
+  expect(session).toHaveBeenCalledTimes(1)
+  await read([{ ...rows[0], sessionId: 'second' }])
+  expect(session).toHaveBeenCalledTimes(2)
+})
+it('invalidates disk totals after deletion without accepting a late pre-deletion probe', async () => {
+  const pending: Array<(size: number) => void> = []
+  const read = createHarnessStorageReader({ now: () => 10000,
+    size: () => new Promise(resolve => pending.push(resolve)), transcript: async () => null, canonical: async p => p })
+  const rows = [{ agentId: 'a', cwd: '/project' }]
+  await read(rows)
+  await read([], true)
+  await read(rows)
+  pending[1](20)
+  await Promise.resolve()
+  pending[0](1000)
+  await Promise.resolve()
+  expect((await read(rows)).get('a')?.workspaceBytes).toBe(20)
+})

@@ -1,5 +1,5 @@
 /** Disk checkpoints made only when closing a session, never by a resource sampler. */
-import { constants } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
 import { chmod, copyFile, lstat, open, rename, rm, stat } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -65,6 +65,22 @@ export class SessionCheckpointStore {
 
   private key(s: RegisteredSession): string {
     return createHash('sha256').update(JSON.stringify([s.agentId, s.engine, s.codexHome ?? null, s.sessionId])).digest('hex')
+  }
+
+  /** Exact files for this conversation only; no workspace or directory removal. */
+  deletionFiles(s: RegisteredSession): string[] {
+    if (!existsSync(this.directory)) return []
+    secureStateDirectory(this.directory, false)
+    const key = this.key(s), manifest = join(this.directory, `${key}.json`)
+    const files = [join(this.directory, `${key}.screen.json`)].filter(existsSync)
+    if (!existsSync(manifest)) return files
+    const saved = JSON.parse(readPrivateStateFile(manifest, 16384)) as Checkpoint
+    if (saved.version !== 1 || saved.agentId !== s.agentId || saved.sessionId !== s.sessionId
+      || saved.engine !== s.engine || !previousFileSafe(saved.file) || !saved.file.startsWith(key + '-')) {
+      throw new Error('The saved checkpoint does not match this harness.')
+    }
+    const history = join(this.directory, saved.file)
+    return [...files, ...(existsSync(history) ? [history] : []), manifest]
   }
 
   async save(s: RegisteredSession, options: { screen?: string | null } = {}): Promise<void> {

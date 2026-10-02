@@ -4,7 +4,7 @@
   "name": "Harness Monitor",
   "category": "Compute",
   "author": "Autonomous",
-  "description": "Inspect active harnesses across your machines. Sort CPU, RAM, GPU, storage and conversation usage, inspect processes, and stop selected work while keeping history and files.",
+  "description": "Inspect harnesses across your machines. See workspace and session storage separately, stop work, or review permanent session and Git worktree cleanup.",
   "engine": "opencode",
   "workspace": {
     "template": "template",

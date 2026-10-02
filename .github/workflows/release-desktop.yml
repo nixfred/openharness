@@ -81,7 +81,8 @@ env:
   #
   # It used to live in ci.yml, whose test suite gated every release. That gate was removed by the
   # team's decision on 2026-09-10 — it had failed every tag since v1.0.92, so none of them reached a
-  # user — and nothing here runs the tests any more: run `flutter analyze` and `flutter test` locally.
+  # user — and nothing here runs the tests any more. Complete the relevant validation described in
+  # docs/validation-and-release.md before tagging; don't repeat full suites at release time.
   FLUTTER_VERSION: '3.47.2'
 
 jobs:
@@ -173,19 +174,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: subosito/flutter-action@v2
+      # main prepares shared caches. A release only restores: per-tag uploads cannot
+      # help the next tag and added 81s after the 1.2.51 macOS build had finished.
+      - uses: ./.github/actions/desktop-flutter
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      # SPM must be on BEFORE pub get: the generated FlutterGeneratedPluginSwiftPackage only lists
-      # the plugin dependencies when it is enabled at `pub get` time, and with it off the build
-      # falls back to CocoaPods and rewrites tracked files under macos/. See CLAUDE.md.
-      - name: Enable Swift Package Manager
-        run: flutter config --enable-swift-package-manager
-
-      - run: flutter pub get
+          version: ${{ env.FLUTTER_VERSION }}
 
       # The throwaway keychain, the Developer ID certificate in it and the `harness-notarize` profile
       # upload-desktop.sh submits with. It sets KEYCHAIN_PATH. internal-build.yml signs with the same
@@ -260,12 +253,10 @@ jobs:
       # linux-arm64/artifacts.zip and dart-sdk-linux-arm64.zip are served for this engine), so the
       # SAME toolchain is reached by the other route: clone the SDK at the same tag and let
       # precache pull the artifacts. x64 keeps the action for its cache.
-      - uses: subosito/flutter-action@v2
+      - uses: ./.github/actions/desktop-flutter
         if: matrix.arch != 'arm64'
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
+          version: ${{ env.FLUTTER_VERSION }}
 
       - name: Install Flutter from git (arm64 has no published archive)
         if: matrix.arch == 'arm64'
@@ -275,15 +266,15 @@ jobs:
             https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
 
-      # Runs on both arches so the two install paths have one place to prove they landed on the
-      # same toolchain, and so a missing arm64 artifact fails in a step that says so rather than
-      # halfway through a build.
+      # x64 is prepared by the shared action. arm64 has no SDK archive/cache.
       - name: Verify the toolchain and precache Linux artifacts
+        if: matrix.arch == 'arm64'
         run: |
           flutter --version
           flutter precache --linux
 
-      - run: flutter pub get
+      - if: matrix.arch == 'arm64'
+        run: flutter pub get
 
       # appimagetool packages the Linux bundle into the single-file .AppImage the release publishes
       # (see RELEASE.md). --appimage-extract-and-run in upload-desktop-linux.sh means the runner
@@ -381,6 +372,32 @@ jobs:
                  "$dst" "gs://${GCS_BUCKET}/${METADATA_PATH}"
           echo "Published to \`${METADATA_PATH}\`" >> "$GITHUB_STEP_SUMMARY"
 
+  # Start as soon as the public manifest is live, beside release-page creation.
+  # A green workflow is the six-download verification receipt; do not download them
+  # all again locally just to finish the release task.
+  verify:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify all public artifacts as the updater
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          METADATA_PATH: ${{ needs.version.outputs.metadata_path }}
+        run: |
+          python3 scripts/verify-desktop-release.py "$VERSION" \
+            --manifest-url "https://storage.googleapis.com/${GCS_BUCKET}/${METADATA_PATH}" \
+            --receipt desktop-release-verification.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-release-verification
+          path: desktop-release-verification.json
+          if-no-files-found: error
+
   # The GitHub Release. Notes are the tag's OWN message, verbatim — the same rule
   # autonomous-grid's release.yml follows. CI generates nothing: what a human wrote and reviewed at
   # tag time is exactly what publishes, and `generate_release_notes` would append a second,
@@ -398,7 +415,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Take the release notes from the tag
         env:
@@ -409,7 +426,7 @@ jobs:
           # actions/checkout replaces the pushed annotated tag with a LIGHTWEIGHT local ref, even at
           # fetch-depth: 0, so `git cat-file -t` below would see "commit" and reject a properly
           # annotated tag. Re-fetch the tag object to restore the annotation before reading it.
-          git fetch --force origin tag "$REF_NAME"
+          git fetch --depth=1 --force origin tag "$REF_NAME"
           # A lightweight tag has no message of its own, and %(contents) would quietly fall through
           # to the commit's — publishing "chore(release): vX.Y.Z" as the notes. The release scripts
           # always push an annotated tag with notes, but a hand-made `git tag` does not, and this
@@ -423,6 +440,9 @@ jobs:
           fi
           if [ ! -s RELEASE_NOTES.md ]; then
             echo "::warning::$REF_NAME carries no release notes (lightweight or empty tag) — generating them from the commit list. Next time: make release-desktop"
+            # Only the legacy fallback needs history. Annotated releases already
+            # carry their complete notes; cloning all history cost 108s in 1.2.41.
+            git fetch --unshallow --tags --force origin
             prev="$(git tag -l 'v*_desktop' \
               | { grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)_desktop$' || true; } \
               | grep -vx "$REF_NAME" | sort -V | tail -1)"

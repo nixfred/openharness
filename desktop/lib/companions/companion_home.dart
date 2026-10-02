@@ -18,7 +18,6 @@ import '../state/dial_status.dart';
 import '../theme/app_theme.dart';
 import '../widgets/daemon_illustration.dart';
 import 'companion_dial.dart';
-import 'companion_engine_picker.dart';
 import 'companion_story.dart';
 import 'memory_review_text.dart';
 import 'coding_memory_connection.dart';
@@ -37,8 +36,6 @@ class CompanionHome extends StatefulWidget {
     required this.onHatch,
     required this.onOpenControls,
     this.onOpenConversation,
-    this.onSelectEngine,
-    this.openingTerminal = false,
     this.terminalStatus,
     this.dial,
     this.onDeviceSettings,
@@ -49,8 +46,6 @@ class CompanionHome extends StatefulWidget {
   final ValueChanged<ZooEgg> onHatch;
   final ValueChanged<String> onOpenControls;
   final VoidCallback? onOpenConversation;
-  final ValueChanged<String>? onSelectEngine;
-  final bool openingTerminal;
   final String? terminalStatus;
   final DialState? dial;
   final void Function(String, Map<String, Object?>)? onDeviceSettings;
@@ -210,116 +205,93 @@ class _CompanionHomeState extends State<CompanionHome> {
     return Material(
       key: const ValueKey('companion-home'),
       color: AppColors.background,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final enginePicker = CompanionEnginePicker(
-            engine: widget.brain.pairEngine,
-            onSelected: widget.onSelectEngine,
-            busy: widget.openingTerminal,
-          );
-          final viewer = Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(28, 20, 18, 14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Companions',
-                            style: ink(17)
-                                .copyWith(fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                        if (constraints.maxWidth >= 500) enginePicker,
-                        IconButton(
-                          tooltip: 'Companion settings',
-                          key: const ValueKey('companion-settings'),
-                          onPressed: () => widget.onOpenControls('settings'),
-                          icon: Icon(
-                            AppIcons.slidersHorizontal,
-                            size: 20,
-                            color: AppColors.textSoft,
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (constraints.maxWidth < 500) enginePicker,
-                  ],
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(28, 20, 18, 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Companions',
+                    style: ink(17).copyWith(fontWeight: FontWeight.w600),
+                  ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Wrap(
-                        spacing: 4,
-                        runSpacing: 4,
-                        children: [
-                          for (final section in [
-                            'Story',
-                            'Collection',
-                            'Memories',
-                          ])
-                            Semantics(
-                              selected: _section == section,
-                              child: _button(
-                                section,
-                                () => _selectSection(section),
-                                primary: _section == section,
-                                key: ValueKey('companion-nav-$section'),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
+                IconButton(
+                  tooltip: 'Companion settings',
+                  key: const ValueKey('companion-settings'),
+                  onPressed: () => widget.onOpenControls('settings'),
+                  icon: Icon(
+                    AppIcons.slidersHorizontal,
+                    size: 20,
+                    color: AppColors.textSoft,
+                  ),
                 ),
-              ),
-              if (widget.terminalStatus != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(28, 0, 28, 10),
-                  child: Row(
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
                     children: [
-                      Expanded(
-                        child: Text(
-                          widget.terminalStatus!,
-                          style: ink(13, AppColors.textSoft),
+                      for (final section in ['Story', 'Collection', 'Memories'])
+                        Semantics(
+                          selected: _section == section,
+                          child: _button(
+                            section,
+                            () => _selectSection(section),
+                            primary: _section == section,
+                            key: ValueKey('companion-nav-$section'),
+                          ),
                         ),
-                      ),
-                      if (widget.onOpenConversation != null)
-                        _button('Open terminal', widget.onOpenConversation),
                     ],
                   ),
                 ),
-              Expanded(
-                child: SingleChildScrollView(
-                  key: _memoryViewport,
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(28, 6, 28, 40),
-                  child: Align(
-                    alignment: Alignment.topCenter,
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 1100),
-                      child: switch (_section) {
-                        'Collection' => _collection(),
-                        'Memories' => _memories(),
-                        _ =>
-                          zoo.zoo.daemons.isEmpty && _previewSpecies == null
-                              ? _nest()
-                              : _story(),
-                      },
+              ],
+            ),
+          ),
+          if (widget.terminalStatus != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(28, 0, 28, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.terminalStatus!,
+                      style: ink(13, AppColors.textSoft),
                     ),
                   ),
+                  if (widget.onOpenConversation != null)
+                    _button('Open terminal', widget.onOpenConversation),
+                ],
+              ),
+            ),
+          Expanded(
+            child: SingleChildScrollView(
+              key: _memoryViewport,
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(28, 6, 28, 40),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1100),
+                  child: switch (_section) {
+                    'Collection' => _collection(),
+                    'Memories' => _memories(),
+                    _ => zoo.zoo.daemons.isEmpty && _previewSpecies == null
+                        ? _nest()
+                        : _story(),
+                  },
                 ),
               ),
-            ],
-          );
-          return viewer;
-        },
+            ),
+          ),
+        ],
       ),
     );
   }

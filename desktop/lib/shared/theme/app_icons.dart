@@ -71,8 +71,18 @@ abstract final class AppIcons {
   static const eye = LucideIcons.eye400;
   static const eyeOff = LucideIcons.eyeOff400;
   static const file = LucideIcons.file400;
+  static const fileArchive = LucideIcons.fileArchive400;
+  static const fileBraces = LucideIcons.fileBraces400;
+  static const fileCode = LucideIcons.fileCode400;
+  static const fileDiff = LucideIcons.fileDiff400;
   static const fileDown = LucideIcons.fileDown400;
+  static const fileImage = LucideIcons.fileImage400;
+  static const fileMusic = LucideIcons.fileMusic400;
+  static const filePlay = LucideIcons.filePlay400;
+  static const fileSpreadsheet = LucideIcons.fileSpreadsheet400;
+  static const fileTerminal = LucideIcons.fileTerminal400;
   static const fileText = LucideIcons.fileText400;
+  static const fileType = LucideIcons.fileType400;
   static const film = LucideIcons.film400;
   static const flaskConical = LucideIcons.flaskConical400;
   static const folder = LucideIcons.folder400;
@@ -120,6 +130,7 @@ abstract final class AppIcons {
   static const plug = LucideIcons.plug400;
   static const plus = LucideIcons.plus400;
   static const power = LucideIcons.power400;
+  static const presentation = LucideIcons.presentation400;
   static const radioTower = LucideIcons.radioTower400;
   static const refreshCw = LucideIcons.refreshCw400;
   static const rocket = LucideIcons.rocket400;

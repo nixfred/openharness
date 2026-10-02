@@ -96,6 +96,29 @@ it('opens no store and invokes no model while experimental, watching consent or 
   expect(inference.run).not.toHaveBeenCalled()
 })
 
+it('keeps the companion available between reviews only while this owner has enabled learning', async () => {
+  sessions = []
+  expect(runtime.needsCompanion()).toBe(false)
+  await runtime.tick()
+  await runtime.configure({ learn: true, recall: false })
+  expect(runtime.needsCompanion()).toBe(true)
+  expect(inference.target).not.toHaveBeenCalled()
+  expect(inference.run).not.toHaveBeenCalled()
+  await runtime.configure({ learn: false, recall: true })
+  expect(runtime.needsCompanion()).toBe(false)
+  await runtime.configure({ learn: true, recall: true })
+  context.watching = false
+  expect(runtime.needsCompanion()).toBe(false)
+  context.watching = true; context.experimental = false
+  expect(runtime.needsCompanion()).toBe(false)
+  context.experimental = true; context.profileId = 'owner_b'
+  expect(runtime.needsCompanion()).toBe(false)
+  context.profileId = 'owner_a'
+  expect(runtime.needsCompanion()).toBe(true)
+  await runtime.pause()
+  expect(runtime.needsCompanion()).toBe(false)
+})
+
 it.each(['replace', 'mutate'] as const)('binds activity to open host sessions and rejects a native-session %s during the read', async mode => {
   await learn()
   sessions[0].name = 'Parser fixes'

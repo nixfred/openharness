@@ -58,10 +58,10 @@ static struct {
     bool coasting, touch_brake, touch_down, touch_cancelled, quiet, nap, focus_face, straight_title, muted;
     ht_rect_t pressed_rect;
     int brightness;
-    char voice_target[CABLE_NAME_MAX];
+    char voice_target[CABLE_NAME_MAX], voice_engine[12];
     int pattern_mask, pattern_len, view, voice_return, offset, active, count, pressed, hit_count;
     int draft_drag, tab_drag, pane_pos, start_x, start_y, last_x, last_y, tab_count, machine_count, model_count, notice_count, pet_pose;
-    uint32_t touch_started, coast_until, character_activity, pet_until, last_celebration;
+    uint32_t touch_started, coast_until, character_activity, pet_until, nap_until, last_celebration;
     uint32_t notice_sequence, voice_retry_until;
     uint8_t status_phase;
     uint32_t pet_next_ms;
@@ -288,6 +288,8 @@ static void dispatch(action_t a) {
     } else if (a.kind == A_SELECT_FIND) { a.kind=A_VOICE; a.value=7; dispatch(a);
     } else if (a.kind == A_VOICE) {
         starts++; COPY(target, a.id); COPY(s.voice_target, a.value==7 ? "Find in output" : active()->name);
+        s.voice_engine[0]=0;   // as the real dispatch: the recipient's engine, none for Find / form / draft voice
+        for (int i=0;i<s.count;i++) if (a.value!=2 && a.value!=5 && a.value!=6 && a.value!=7 && !strcmp(s.agents[i].id,a.id)) COPY(s.voice_engine,s.agents[i].engine);
         s.voice_carry=a.value==3; s.voice_search=a.value==7; COPY(voice_context,a.text);
         s.voice_return=s.view; s.voice_open = recording = true; view(VOICE);
     } else if (a.kind == A_VOICE_STOP) { stops++; if(a.value==1)reviews++; recording = false; }
@@ -333,7 +335,7 @@ for name in ['nf_name_of', 'nf_asks', 'nf_suggest', 'nf_suggest_do', 'nf_hub_ord
     code += function(name)
 card_action = source.split('    case A_NF_CARD: {',1)[1].split('    case A_NF_SUGGEST:',1)[0]
 code += 'static void card_action(action_t a) { switch(a.kind) { case A_NF_CARD: {' + card_action + 'default: break; } }\n'
-code += function('habitat_touch') + function('habitat_touch_cancel')
+code += function('habitat_touch') + function('habitat_touch_cancel') + function('habitat_next_wake_ms')
 code += r'''
 static ht_scene_t scene;
 static void scene_take(void) {
@@ -424,7 +426,7 @@ static bool title_is(const char *text) {
         if((scene.runs[i].arc==1 || (s.straight_title && scene.runs[i].y==41)) && !strcmp(scene.runs[i].text,text)) return true;
     return false;
 }
-// A Focus scene draws in Geist: no Roboto face, and a curved run is GeistMono; then the portrait.
+// A Focus scene draws in Geist: no Roboto face, no GeistMono, and a curved run is Geist Medium 26; then the portrait.
 static void portrait(const char *dir, const char *name);
 static void portrait_focus(const char *dir, const char *name) {
     const ht_pfont_t *roboto[] = {&ht_lv_roboto_med_38, &ht_lv_roboto_med_32, &ht_lv_roboto_med_30,
@@ -432,7 +434,8 @@ static void portrait_focus(const char *dir, const char *name) {
         &ht_lv_roboto_reg_25, &ht_lv_roboto_reg_20};
     for (int i = 0; i < scene.count; i++) {
         for (unsigned g = 0; g < sizeof roboto / sizeof roboto[0]; g++) assert(scene.runs[i].font != &roboto[g]->base);
-        if (scene.runs[i].arc == 1) assert(scene.runs[i].font == &ht_mono_24);
+        assert(scene.runs[i].font != &ht_mono_24 && scene.runs[i].font != &ht_viet_24);
+        if (scene.runs[i].arc) assert(scene.runs[i].font == &ht_lv_geist_med_26.base);
     }
     portrait(dir, name);
 }
@@ -2241,7 +2244,192 @@ int main(int argc, char **argv) {
         fake_ms = 1200; scene_take(); assert(s.pet_next_ms == due);
         s.touch_down = true; changes = 0; surface_tick(due); assert(s.pet_next_ms == due);
         s.touch_down = false;
-        s.view = VOICE; surface_tick(due); assert(s.pet_next_ms == due); s.view = HOME;   // not consumed
+        s.view = HOME;
+    }
+    // THE WORKING SCENE (claude): a busy agent's face is the large cooking Clawd, which changes every
+    // 110 ms, so s.pet_next_ms is the next step and surface_tick redraws then and not before.
+    {
+        const ht_pet_scene_t *ws = ht_pets[0].working_scene;
+        assert(!strcmp(ht_pets[0].engine, "claude") && ws);
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        fake_ms = 1200; scene_take();
+        uint32_t due = (1201 / ws->step_ms + 1) * ws->step_ms;
+        assert(s.pet_next_ms == due);
+        bool scene_run = false, lower_arc = false;
+        for (int i = 0; i < scene.count; i++) {
+            scene_run |= scene.runs[i].sprite.width == ws->w;
+            lower_arc |= scene.runs[i].arc == 2 && !strncmp(scene.runs[i].text, "Running firmware", 16);
+        }
+        assert(scene_run && lower_arc);
+        // Other clocks (the status shimmer) may ask too: replay the ticks for a Cursor agent, whose
+        // face has no scene, and the scene's request is the difference.
+        unsigned seen[2][2];
+        for (int k = 0; k < 2; k++) { s.pet_next_ms = due; changes = 0; surface_tick(k ? due : due - 1); seen[1][k] = changes; }
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "cursor");
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        fake_ms = 1200; scene_take(); assert(!s.pet_next_ms);
+        for (int k = 0; k < 2; k++) { changes = 0; surface_tick(k ? due : due - 1); seen[0][k] = changes; }
+        assert(seen[1][0] == seen[0][0] && seen[1][1] == seen[0][1] + 1);
+    }
+    // CODEX'S SCENES: the same three, on the same clocks. Working on the face (status on the lower arc),
+    // listening and sending on VOICE by the recipient's engine (pane on the face is Claude), quiet holds them.
+    {
+        const ht_pet_t *xp = &ht_pets[1];
+        assert(!strcmp(xp->engine, "codex") && xp->working_scene && xp->listening_scene && xp->sending_scene);
+        const ht_pet_scene_t *ws = xp->working_scene, *ls = xp->listening_scene, *ss = xp->sending_scene;
+        #define XRUN(sc) ({ bool v_ = false; for (int i_ = 0; i_ < scene.count; i_++) v_ |= scene.runs[i_].sprite.width == (sc)->w && scene.runs[i_].sprite.cells; v_; })
+        #define XBARS() ({ int b_ = 0; for (int i_ = 0; i_ < scene.count; i_++) b_ += scene.runs[i_].font == &ht_wave && scene.runs[i_].text[0]; b_; })
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "codex");
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        fake_ms = 1200; scene_take();
+        uint32_t due = (1201 / ws->step_ms + 1) * ws->step_ms;
+        assert(s.pet_next_ms == due && XRUN(ws));
+        bool lower_arc = false;
+        for (int i = 0; i < scene.count; i++) lower_arc |= scene.runs[i].arc == 2 && !strncmp(scene.runs[i].text, "Running firmware", 16);
+        assert(lower_arc);
+        changes = 0; s.pet_next_ms = due; surface_tick(due - 1); assert(s.pet_next_ms == due);
+        surface_tick(due); assert(!s.pet_next_ms && changes >= 1);
+        // Listening: pane is Claude, the voice goes to Codex: its scene, no bars, its 80 ms step.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
+        strcpy(s.agents[0].engine, "claude"); strcpy(s.agents[1].engine, "codex");
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "b"}); scene_take();
+        assert(s.view == VOICE && !strcmp(s.voice_engine, "codex") && XRUN(ls) && !XBARS());
+        // Level 0 (no mic yet), at the rest of the "Listening" sweep: the word's first step of the next period (1365),
+        // or the scene's own next frame, whichever is first. The word is on the lower arc, the bars are not drawn.
+        due = s.pet_next_ms; assert(due > 1200 && due <= 1365);
+        bool word = false;
+        for (int i = 0; i < scene.count; i++) word |= scene.runs[i].arc == 2 && !strcmp(scene.runs[i].text, "Listening") && scene.runs[i].gained;
+        assert(word);
+        s.touch_down = true; changes = 0;
+        surface_tick(due - 1); assert(s.pet_next_ms == due);
+        surface_tick(due); assert(!s.pet_next_ms && changes >= 1);
+        s.touch_down = false;
+        fake_ms = 1200; s.quiet = true; scene_take(); assert(XRUN(ls) && !s.pet_next_ms); s.quiet = false;
+        // Sending to Codex: the paper plane on its own 140 ms step; quiet holds it.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude"); strcpy(s.agents[1].engine, "codex");
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "b"}); s.voice_waiting = true; scene_take();
+        assert(s.view == VOICE && !strcmp(s.voice_engine, "codex") && XRUN(ss) && !XBARS() && s.pet_next_ms);
+        due = s.pet_next_ms; assert(due > 1200 && due <= 1201 + ss->step_ms * ss->steps);
+        changes = 0; surface_tick(due - 1); assert(s.pet_next_ms == due);
+        surface_tick(due); assert(!s.pet_next_ms && changes >= 1);
+        fake_ms = 1200; s.quiet = true; scene_take(); assert(!s.pet_next_ms); s.quiet = false;
+        #undef XRUN
+        #undef XBARS
+    }
+    // THE WORKING SCENE beside the bell: its status stays on the lower arc and the pill steps up to 376..408
+    // (the arc's glyphs start ~y 422). A footer control has the bottom band, so there the status is a straight line.
+    {
+        const ht_pet_scene_t *ws = ht_pets[0].working_scene;
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        cable_notif_t note={.agent_id="b",.name="Other",.summary="Done"};
+        ui_notif_replace(&note,1);
+        fake_ms = 1200; scene_take();
+        assert(action_enabled(A_INBOX));
+        bool bell = false, scene_run = false, raised_arc = false, box = false;
+        for (int i = 0; i < scene.count; i++) {
+            bell |= scene.runs[i].font == &ht_lv_montserrat_14.base && !strcmp(scene.runs[i].text, HT_LV_BELL);
+            scene_run |= scene.runs[i].sprite.width == ws->w;
+            if (scene.runs[i].arc == 2 && scene.runs[i].text[0]) { raised_arc = true; assert(scene.runs[i].fg == ht_rgb(0x00ff2f)); }
+            if (scene.runs[i].box.h == 32) { box = true; assert(scene.runs[i].y == 376); }
+            assert(scene.runs[i].font != &ht_lv_geist_med_28.base || !scene.runs[i].text[0]);
+        }
+        assert(bell && scene_run && raised_arc && box);
+        // Ink: the pill is rows 376..407; the arc's green text, under the pill's columns, starts below it
+        // (further out the arc rises past those rows, but beside the pill, not under it).
+        static uint16_t px[HT_WIDTH * HT_HEIGHT];
+        ht_raster(&scene, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, px);
+        uint16_t bg = px[0];
+        int green_top = 999, green_bottom = -1, blue_top = 999, blue_bottom = -1, px0 = 0, px1 = 0;
+        for (int i = 0; i < scene.count; i++) if (scene.runs[i].box.h == 32) { px0 = scene.runs[i].x; px1 = px0 + scene.runs[i].w; }
+        for (int y = 0; y < HT_HEIGHT; y++) for (int x = 0; x < HT_WIDTH; x++) {
+            uint16_t v = px[y * HT_WIDTH + x];
+            if (v == bg) continue;
+            uint16_t p = (uint16_t)((v >> 8) | (v << 8));   // panel order back to RGB565
+            bool green = (p >> 5 & 63) > 40 && (p >> 11) < 8 && (p & 31) < 12;
+            bool blue = (p & 31) > 20 && (p >> 11) < 4;
+            if (green && y > 326 && x >= px0 - 4 && x < px1 + 4) { if (y < green_top) green_top = y; if (y > green_bottom) green_bottom = y; }
+            if (blue && y >= 340) { if (y < blue_top) blue_top = y; if (y > blue_bottom) blue_bottom = y; }
+        }
+        assert(blue_top >= 376 && blue_bottom <= 407 && green_bottom >= green_top && green_top > blue_bottom);   // no ink overlap
+        // Tapping the raised bell opens the inbox.
+        tap(1500, 233, 392); assert(s.view == INBOX);
+        // A recap or no scene (idle): the bell keeps 400.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        ui_notif_replace(&note,1); fake_ms = 1200; scene_take();
+        box = false;
+        for (int i = 0; i < scene.count; i++) if (scene.runs[i].box.h == 32) { box = true; assert(scene.runs[i].y == 400); }
+        assert(box && action_enabled(A_INBOX));
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks");
+        // A footer control (carried text): the straight line at 334, no arc.
+        carry.active = true; strcpy(carry.source, "x"); carry.rows = 2; fake_ms = 1300; scene_take();
+        scene_run = false; bool line = false;
+        for (int i = 0; i < scene.count; i++) {
+            scene_run |= scene.runs[i].sprite.width == ws->w; assert(scene.runs[i].arc != 2);
+            if (scene.runs[i].font == &ht_lv_geist_med_28.base && !strncmp(scene.runs[i].text, "Running firm", 12)) { line = true; assert(scene.runs[i].y == 334); }
+        }
+        assert(scene_run && line);
+        carry.active = false;
+        // Free bottom edge: the lower arc again, and no straight line.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        s.agents[0].busy = true; strcpy(s.agents[0].tool, "Running firmware checks"); fake_ms = 34000 + 1200; scene_take();
+        bool arc = false;
+        for (int i = 0; i < scene.count; i++) {
+            if (scene.runs[i].arc == 2) { arc = true; assert(strlen(scene.runs[i].text) <= 26); }
+            assert(scene.runs[i].font != &ht_lv_geist_med_28.base || !scene.runs[i].text[0]);
+        }
+        assert(arc);
+    }
+    // THE LISTENING SCENE follows the recipient's engine, not the pane on the face, and has its own
+    // schedule: the next 140 ms step, honoured on VOICE with the finger down (hold-to-talk); quiet holds it.
+    {
+        const ht_pet_scene_t *ls = ht_pets[0].listening_scene;
+        assert(!strcmp(ht_pets[0].engine, "claude") && ls);
+        #define VOICE_SCENE() ({ bool v_ = false; for (int i_ = 0; i_ < scene.count; i_++) v_ |= scene.runs[i_].sprite.width == ls->w && scene.runs[i_].sprite.cells; v_; })
+        #define VOICE_BARS() ({ int b_ = 0; for (int i_ = 0; i_ < scene.count; i_++) b_ += scene.runs[i_].font == &ht_wave && scene.runs[i_].text[0]; b_; })
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
+        strcpy(s.agents[0].engine, "codex"); strcpy(s.agents[1].engine, "claude");
+        // Pane on the face is Codex, the voice goes to Claude: the scene.
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "b"}); scene_take();
+        assert(s.view == VOICE && !strcmp(s.voice_engine, "claude") && VOICE_SCENE() && !VOICE_BARS());
+        uint32_t due = (1201 / ls->step_ms + 1) * ls->step_ms;
+        assert(s.pet_next_ms == due);
+        s.touch_down = true; changes = 0;
+        surface_tick(due - 1); assert(s.pet_next_ms == due);
+        surface_tick(due); assert(!s.pet_next_ms && changes >= 1);
+        assert(habitat_next_wake_ms() >= 1);
+        s.touch_down = false;
+        // The wake honours it too: 1 ms from the step on VOICE, finger down or not.
+        fake_ms = 1200; scene_take(); s.touch_down = true;
+        fake_ms = due - 3; assert(habitat_next_wake_ms() <= 3); s.touch_down = false;
+        // Quiet: still, no schedule.
+        fake_ms = 1200; s.quiet = true; scene_take();
+        assert(VOICE_SCENE() && !s.pet_next_ms);
+        s.quiet = false;
+        // Pane on the face is Claude, the voice goes to an engine without scenes (Cursor): the bars.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
+        strcpy(s.agents[0].engine, "claude"); strcpy(s.agents[1].engine, "cursor");
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "b"}); scene_take();
+        assert(s.view == VOICE && !strcmp(s.voice_engine, "cursor") && !VOICE_SCENE() && VOICE_BARS() == 7 && !s.pet_next_ms);
+        // Find in output (no agent): the bars even though the pane is Claude.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "a", .value = 7}); scene_take();
+        assert(s.view == VOICE && !s.voice_engine[0] && !VOICE_SCENE() && VOICE_BARS() == 7 && !s.pet_next_ms);
+        // Sending to Claude: the rocket scene animates on its own 120 ms step; quiet holds it.
+        const ht_pet_scene_t *ss = ht_pets[0].sending_scene;
+        assert(ss);
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "a"}); s.voice_waiting = true; scene_take();
+        assert(s.view == VOICE && !strcmp(s.voice_engine, "claude") && !VOICE_BARS());
+        bool rocket = false; for (int i = 0; i < scene.count; i++) rocket |= scene.runs[i].sprite.width == ss->w && scene.runs[i].sprite.cells;
+        assert(rocket && s.pet_next_ms);
+        due = s.pet_next_ms; assert(due > 1200 && due <= 1201 + ss->step_ms * ss->steps);
+        changes = 0; surface_tick(due - 1); assert(s.pet_next_ms == due);
+        surface_tick(due); assert(!s.pet_next_ms && changes >= 1);
+        fake_ms = 1200; s.quiet = true; scene_take(); assert(!s.pet_next_ms); s.quiet = false;
+        #undef VOICE_SCENE
+        #undef VOICE_BARS
     }
     // THE FOCUS INBOX: the close pill, then a column of cards — machine, mark or dot + agent, message.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");

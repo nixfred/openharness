@@ -15,10 +15,21 @@ name: CI
 on:
   # The only way this runs on its own: Actions -> CI -> Run workflow, on any branch.
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Affected components (full for shared protocols or uncertain impact)'
+        type: choice
+        options: [full, cli, tui, backend, process]
+        default: full
   # Callable as a reusable workflow. release.yml used to gate on this and take the Node pin from
   # its output; it no longer does (see the note above `publish` there) and pins the same version
   # itself, so the output below is kept only for any future caller.
   workflow_call:
+    inputs:
+      scope:
+        description: 'full, cli, tui, backend, or process (repository tooling only)'
+        type: string
+        default: full
     outputs:
       node-version:
         description: The Node the suite ran on. release.yml bundles the release with it.
@@ -28,16 +39,34 @@ permissions:
   contents: read
 
 concurrency:
-  group: cli-ci-${{ github.workflow }}-${{ github.ref }}
+  group: cli-ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.scope || 'full' }}
   # Every run here was started by a person or by a release, and is the record of whether that commit
   # was green — never killed to make room for a newer one.
   cancel-in-progress: false
 
 jobs:
+  process-checks:
+    if: ${{ contains(fromJSON('["full","cli","tui","backend","process"]'), inputs.scope || 'full') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validation deadlines, cleanup, receipts and release version guards
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+  # workflow_dispatch restricts the choice; reusable callers can pass any string.
+  # Fail invalid calls rather than reporting success after skipping every check.
+  invalid-scope:
+    if: ${{ !contains(fromJSON('["full","cli","tui","backend","process"]'), inputs.scope || 'full') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '::error::scope must be full, cli, tui, backend, or process'; exit 1
+
   # tty.ReadStream uses libuv's native TTY handle. Exercise descriptor ownership,
   # binary backpressure and unplug behavior on both supported OSes and runtimes.
   # These are disposable PTYs; no USB device or existing daemon is touched.
   serial-native:
+    if: ${{ contains(fromJSON('["full","cli"]'), inputs.scope || 'full') }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +94,7 @@ jobs:
 
   # Typecheck, the full suite, and the package updater's complete-coverage gate.
   typecheck-test:
+    if: ${{ contains(fromJSON('["full","cli"]'), inputs.scope || 'full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -125,7 +155,7 @@ jobs:
 
       - run: npx tsc --noEmit
 
-      # 1,871 tests over 144 files, ~30s. The four `*.real.spec.ts` / `localE2e.spec.ts` suites that
+      # Run the full default suite. The `*.real.spec.ts` / `localE2e.spec.ts` suites that
       # need a live tmux or Cursor are gated behind RUN_* env vars and stay skipped here —
       # `npm run test:tmux-real` and friends are how those are run, on a machine that has them.
       # The guard fuzz suite measures a wall-clock CPU budget. Sibling workers running
@@ -152,6 +182,7 @@ jobs:
   # Native shell lifecycle checks on the Linux platforms used over SSH. This workflow
   # remains on demand; it builds and tests without publishing or installing a release.
   tui-test:
+    if: ${{ contains(fromJSON('["full","tui"]'), inputs.scope || 'full') }}
     strategy:
       fail-fast: false
       matrix:
@@ -168,6 +199,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: tui
+          shared-key: tui-${{ matrix.target }}
+          cache-bin: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22.23.2
@@ -196,63 +232,30 @@ jobs:
           RUN_REAL_TMUX_CODEX_STARTUP: '1'
         run: npx vitest run src/lib/codexStartupRetry.real.spec.ts --maxWorkers=1
       - name: Release unit tests
-        run: cargo test --locked --release
+        # Use the shipped target for both commands so Cargo can reuse the
+        # dependencies, instead of compiling once for glibc and again for musl.
+        run: cargo test --locked --release --target ${{ matrix.target }}
       - name: Build static Linux binary
         run: cargo build --locked --release --target ${{ matrix.target }}
-      - name: End-to-end against a private mock daemon
-        env:
-          HARNESS_TUI_BIN: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          E2E_PORT: 19297
-          HN_SOCKET_NAME: hn-ci-e2e
-        run: bash tests/e2e.sh
-      - name: Pane surfaces, mouse coordinates and layout compatibility
-        env:
-          HN_PANE_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_PANE_UI_PORT: 19783
-        run: python3 -u tests/pane-ui.py
-      - name: Animation, timed messages and idle input
-        env:
-          HARNESS_TUI_BIN: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_REPAINT_TEST_PORT: 19794
-        run: python3 -u tests/repaint.py
-      - name: New Harness popup, draft and launch recovery
-        env:
-          HN_NEW_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-        run: python3 -u tests/new-harness.py
-
-      - name: Layout keys and shared desk synchronization
-        env:
-          HN_LAYOUT_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_LAYOUT_TEST_PORT: 19801
-        run: python3 -u tests/layout-sync.py
-      - name: Terminal lease expiry and stalled-open recovery
-        env:
-          HN_RECONNECT_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_RECONNECT_TEST_PORT: 19781
-        run: python3 -u tests/reconnect.py
-      - name: Browser viewer commands and SSH handoff
-        env:
-          HN_VIEWER_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_VIEWER_TEST_PORT: 19671
-        run: python3 -u tests/viewer.py
-      - name: Persistent local shell lifecycle
-        env:
-          HN_LOCAL_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_LOCAL_TEST_PORT: 19441
-          HN_LOCAL_TEST_PREFIX: hn-local-test-ci
-        run: python3 -u tests/local-shells.py
-
-      - name: Native terminal exits, startup input and small PTYs
-        env:
-          HN_NATIVE_TEST_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
-          HN_NATIVE_TEST_PORT: 19433
-          HN_NATIVE_TEST_PREFIX: hnt19fixnativeci
-        run: python3 -u tests/native-terminal.py
-
-      - name: Terminal attributes and attribute-only repaints
-        run: python3 -u tests/terminal-attributes.py target/${{ matrix.target }}/release/harness-tui
+      - name: Complete native fixtures with bounded parallelism
+        working-directory: .
+        run: python3 scripts/validate-tui-native.py tui/target/${{ matrix.target }}/release/harness-tui
+      - name: Show native fixture failures
+        if: failure()
+        working-directory: .
+        run: |
+          find .harness/validation -name '*.log' -type f -exec sh -c 'echo "::group::$1"; cat "$1"; echo "::endgroup::"' sh {} \;
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tui-validation-${{ matrix.target }}
+          path: .harness/validation/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
 
   backend-desk:
+    if: ${{ contains(fromJSON('["full","backend"]'), inputs.scope || 'full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

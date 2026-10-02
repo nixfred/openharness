@@ -155,6 +155,33 @@ describe('tmux process primitives', () => {
   })
 
   it.each([
+    'codex --help',
+    '/opt/bin/codex -h',
+    'codex --version',
+    'codex -V',
+    'node /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'node --require setup.js /opt/node_modules/@openai/codex/bin/codex.js --help',
+    'env CODEX_HOME=/tmp/profile codex --help',
+    'ori --log-level debug codex --help',
+  ])('does not adopt a capability probe as the restarted engine: %s', args => {
+    const commands: AgentCommandOwnershipSnapshot = {
+      ...ownership(), engineFileKeys: new Map([['codex', new Set(['codex-file'])]]),
+    }
+    // A known binary is still only a probe. File ownership must not override argv.
+    expect(engineProcessMatchScore({ executable: 'codex', args, imageFileKey: 'codex-file' }, 'codex', commands)).toBe(0)
+  })
+
+  it.each([
+    'codex resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex --no-daemon resume 01234567-89ab-cdef-0123-456789abcdef',
+    'codex "explain --help"',
+    'codex -- "--help"',
+    'codex --model --help',
+  ])('keeps interactive launches and prompt text: %s', args => {
+    expect(engineProcessMatchScore({ executable: 'codex', args }, 'codex')).toBeGreaterThan(0)
+  })
+
+  it.each([
     ['codex', 'codex-aarch64-apple-darwin'],
     ['codex', 'codex-x86_64-unknown-linux-musl'],
     ['kilo', 'kilo-darwin-arm64'],

@@ -77,10 +77,30 @@ static FlMethodResponse* write_clipboard_image_png(FlValue* args) {
   return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(TRUE)));
 }
 
+// The files the GTK clipboard holds, as paths in the order they were copied — what a file
+// manager's Copy puts there (Nautilus, Dolphin, Thunar and the rest all offer `text/uri-list`).
+// An empty list when the clipboard holds none. A URI that is not a local file — a remote mount
+// with no path here — is left out.
+static FlMethodResponse* read_clipboard_file_paths() {
+  GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  g_autoptr(FlValue) paths = fl_value_new_list();
+  g_auto(GStrv) uris = gtk_clipboard_wait_for_uris(clipboard);
+  if (uris != nullptr) {
+    for (gchar** uri = uris; *uri != nullptr; uri++) {
+      g_autofree gchar* path = g_filename_from_uri(*uri, nullptr, nullptr);
+      if (path != nullptr) {
+        fl_value_append_take(paths, fl_value_new_string(path));
+      }
+    }
+  }
+  return FL_METHOD_RESPONSE(fl_method_success_response_new(paths));
+}
+
 // Dart calls into this channel to read/write a native image on the GTK clipboard. Flutter's own
 // `Clipboard` API only ever sees text/plain — see terminal_panel.dart's `_paste()` — so a real
 // image (a screenshot, "Copy Image" from a browser, ...) needs this native round trip instead.
-// Mirrors macOS's `harness/clipboard_image` channel (MainFlutterWindow.swift).
+// It also answers for the FILES a clipboard holds (`readFilePaths`), which that API cannot see
+// either. Mirrors macOS's `harness/clipboard_image` channel (MainFlutterWindow.swift).
 static void clipboard_image_method_call_cb(FlMethodChannel* channel,
                                             FlMethodCall* method_call,
                                             gpointer user_data) {
@@ -90,6 +110,8 @@ static void clipboard_image_method_call_cb(FlMethodChannel* channel,
     response = read_clipboard_image_png();
   } else if (g_strcmp0(method, "writeImagePng") == 0) {
     response = write_clipboard_image_png(fl_method_call_get_args(method_call));
+  } else if (g_strcmp0(method, "readFilePaths") == 0) {
+    response = read_clipboard_file_paths();
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }

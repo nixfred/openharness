@@ -17,10 +17,10 @@ static size_t encode(char *p, unsigned cp)
 static const ht_arc_face_t *face;
 static void compare(const char *text, int edge)
 {
-    if(edge && face!=&ht_arc_geist) return; // only the upper arc takes a face
+    if(edge && face==&ht_arc_roboto) return; // Roboto Mono is upper arc only
     ht_scene_t scene;
     ht_scene_clear(&scene,ht_rgb(next()&0xffffff));
-    if(edge) ht_arc_status(&scene,ht_rgb(next()&0xffffff),text);
+    if(edge) ht_arc_status_face(&scene,ht_rgb(next()&0xffffff),text,face);
     else ht_arc_title_face(&scene,ht_rgb(next()&0xffffff),text,face);
     ht_rect_t rect={HT_ARC_X,edge ? HT_HEIGHT-HT_ARC_Y-HT_ARC_HEIGHT : HT_ARC_Y,
                     HT_ARC_WIDTH,HT_ARC_HEIGHT};
@@ -57,5 +57,7 @@ int main(void)
     face=&ht_arc_geist; run();
     // Roboto Mono's own ink table (and its Vietnamese atlas) must bound every glyph just as tightly.
     face=&ht_arc_roboto; run(); // upper arc only
-    puts("arc bounds: Roboto Mono face matches too; 227 glyphs at every upper/lower rotation + 2000 mixed labels match full-cell pixels PASS");
+    // The proportional face: the same sweeps, here with its own 1/16 px layout at both edges.
+    face=&ht_arc_geist_prop; run();
+    puts("arc bounds: Roboto Mono and Geist Medium 26 (both arcs) match too; 227 glyphs at every upper/lower rotation + 2000 mixed labels match full-cell pixels PASS");
 }

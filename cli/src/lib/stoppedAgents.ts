@@ -198,6 +198,15 @@ export class StoppedAgentStore {
     try { fsyncSync(fd) } finally { closeSync(fd) }
   }
 
+  /** Permanent deletion is separate from Stop, which always retains this record. */
+  remove(agentId: string): void {
+    if (!SAFE_ID.test(agentId)) throw new Error('Invalid stopped harness identity.')
+    if (!this.get(agentId)) return
+    unlinkSync(join(this.directory, `${agentId}.json`))
+    this.forgetCatalogRecord(agentId)
+    this.syncDirectory()
+  }
+
   /** Suppress archives whose identity or conversation is already running. */
   available(live: readonly RegisteredSession[]): RegisteredSession[] {
     const ids = new Set(live.map(session => session.agentId))

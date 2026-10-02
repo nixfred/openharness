@@ -268,7 +268,6 @@ void main() {
                       : () => codingMemory,
                   onHatch: (_) {},
                   onOpenControls: (_) {},
-                  onSelectEngine: (_) {},
                 ),
               ),
             ),

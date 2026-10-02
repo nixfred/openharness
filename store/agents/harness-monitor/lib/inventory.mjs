@@ -68,7 +68,7 @@ export function mergeRows(agents, { state = {}, machine = null, local = true, no
       diskReadBytesPerSecond: online && !stopped ? reading(monitor?.diskReadBytesPerSecond) : null,
       diskWriteBytesPerSecond: online && !stopped ? reading(monitor?.diskWriteBytesPerSecond) : null,
       workspaceBytes: reading(monitor?.workspaceBytes), workspacePath: monitor?.workspacePath ?? cwd, workspaceSampledAt: time(monitor?.workspaceSampledAt),
-      transcriptBytes: reading(monitor?.transcriptBytes),
+      sessionBytes: reading(monitor?.sessionBytes), transcriptBytes: reading(monitor?.transcriptBytes),
       processes: online && !stopped && Array.isArray(monitor?.processes) ? monitor.processes : [],
       tokenUpdatedAt: time(agent.tokenUsage?.updatedAt),
       inputTokens: reading(agent.tokenUsage?.inputTokens), outputTokens: reading(agent.tokenUsage?.outputTokens),
@@ -79,6 +79,7 @@ export function mergeRows(agents, { state = {}, machine = null, local = true, no
       verdict: agent.verdict?.ready ?? null,
       machine: machine?.name ?? 'This machine', machineId: machine?.machineId ?? null,
       local, online, self, canStop: canControl && terminalAvailable,
+      canDelete: canControl && time(agent.createdAt) != null && (terminalAvailable || stopped),
       canOpen: online && (terminalAvailable || (stopped && agent.resumeMode != null)), resumeMode: agent.resumeMode ?? null,
       unavailable: !online ? 'Reconnect this machine.' : self ? 'Manage this assistant from its monitor tab.' : agent.launch?.detail ?? null,
     }

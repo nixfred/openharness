@@ -11,7 +11,8 @@ private let kMenuChannel = "harness/app_menu"
 /// Flutter's own `Clipboard` API only ever sees `text/plain` — see `terminal_panel.dart`'s
 /// `_paste()` — so a real image (a screenshot, "Copy Image" from a browser, ...) needs this native
 /// round trip instead. The other direction of `harness/clipboard_image` (Dart calling Swift) rather
-/// than `harness/app_menu`'s (Swift calling Dart).
+/// than `harness/app_menu`'s (Swift calling Dart). It also answers for the FILES a pasteboard
+/// holds (`readFilePaths`), which Flutter's `Clipboard` cannot see either.
 private let kClipboardImageChannel = "harness/clipboard_image"
 
 class MainFlutterWindow: NSWindow {
@@ -334,6 +335,8 @@ class MainFlutterWindow: NSWindow {
           return
         }
         result(MainFlutterWindow.writeClipboardImagePng(bytes))
+      case "readFilePaths":
+        result(MainFlutterWindow.readClipboardFilePaths())
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -369,6 +372,19 @@ class MainFlutterWindow: NSWindow {
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
     return pasteboard.setData(data, forType: .png)
+  }
+
+  /// The files the general pasteboard holds, as paths in the order they were copied — what
+  /// Finder's Copy puts there. Empty when the clipboard holds none. Beside them Finder also
+  /// leaves each file's NAME as text and its ICON as an image, so a caller that wants the files
+  /// has to ask for them first: the text and the picture are not what was copied.
+  private static func readClipboardFilePaths() -> [String] {
+    let urls =
+      NSPasteboard.general.readObjects(
+        forClasses: [NSURL.self],
+        options: [.urlReadingFileURLsOnly: true]
+      ) as? [URL] ?? []
+    return urls.map { $0.path }
   }
 }
 

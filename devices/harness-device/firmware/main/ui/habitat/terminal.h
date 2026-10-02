@@ -63,6 +63,9 @@ extern const ht_pfont_t ht_lv_geist_med_38, ht_lv_geist_med_32, ht_lv_geist_med_
 #define HT_LV_CROSS "\xef\x80\x8d"
 // A full-colour icon from the LVGL firmware (lvgl_icons.c): RGB565 in panel order plus alpha.
 typedef struct { uint16_t w, h; const uint16_t *px; const uint8_t *a; } ht_icon_t;
+// A CELL SPRITE (the pets' large scenes, scripts/gen_pets.py): cols x rows cells of `cell` px, one byte
+// each — a palette index, 0 transparent — and the palette in RGB565 panel order, entry 0 unused.
+typedef struct { uint8_t cols, rows, cell; const uint16_t *palette; const uint8_t *cells; } ht_cell_frame_t;
 // The engines' marks in focus.c's ENGINES order: 20 px as the inbox drew them, and 27 px — LVGL's
 // own 28/20 scaling of the same 20 px art, as the header drew it. And the microphone.
 extern const ht_icon_t ht_icon_engine20[14], ht_icon_engine28[14], ht_icon_mic;
@@ -119,6 +122,10 @@ typedef struct {
     // Blend as LVGL's lv_color_24_16_mix does — (src * a + dst * (255 - a)) >> 8 per 565 channel —
     // for the icons taken from the LVGL firmware, so they come out as that dial drew them.
     bool lvgl;
+    // A cell sprite instead of pixels (ht_cell_sprite): width x height px of `cell`-px squares.
+    const uint8_t *cells;
+    const uint16_t *palette;
+    uint8_t cell;
 } ht_sprite_t;
 typedef struct {
     int16_t x, y, w;
@@ -138,6 +145,14 @@ typedef struct {
     // `ring.outer` is set. Angles are in 1/4096 of a turn, 0 at 12 o'clock, clockwise; a sweep of 4096
     // (or more) is the whole ring. ht_ring() makes one. Integer only, no tables beyond one quarter sine.
     struct { uint16_t inner, outer, start, sweep; } ring;
+    // A proportional arc label's tight bounds, set once by ht_arc_*_face (`ink` 1) from its text and
+    // place, so equal runs hold equal bounds; ht_run_bounds returns them.
+    uint8_t ink;
+    ht_rect_t ink_box;
+    // A proportional arc label's per-glyph brightness (ht_arc_status_sweep): `gained` set means glyph i of
+    // the text is drawn at gain[i] / 255 of its coverage, a glyph past HT_ARC_GAINS at full.
+    uint8_t gained;
+    uint8_t gain[16];
 } ht_run_t;
 typedef struct {
     uint16_t background;
@@ -162,6 +177,8 @@ bool ht_ascii_text(ht_scene_t *scene, int x, int y, int width, const ht_font_t *
 void ht_center(ht_scene_t *scene, int y, const ht_font_t *font, uint16_t fg, const char *text);
 // One icon, as a sprite run at x, y.
 bool ht_icon(ht_scene_t *scene, int x, int y, const ht_icon_t *icon);
+// A cell sprite (ht_cell_frame_t) as one run; its frame pointer is what ht_damage compares.
+bool ht_cell_sprite(ht_scene_t *scene, int x, int y, const ht_cell_frame_t *frame);
 // A rounded box — the Focus skin's pills and cards. Colours are already mixed over what they sit on.
 bool ht_box(ht_scene_t *scene, int x, int y, int w, int h, int radius, uint16_t fill, uint16_t border);
 // A ring or arc (nixfred graphics): see ht_run_t.ring. `sweep` >= HT_TURN draws the whole annulus.
@@ -193,12 +210,31 @@ int ht_fit_width(char *dst, size_t cap, const char *text, int width, const ht_fo
 typedef struct {
     const ht_font_t *mono, *viet, *open, *right, *bell;
     const uint8_t (*ink)[4], (*open_ink)[4], (*right_ink)[4], (*bell_ink)[4];
+    // A PROPORTIONAL arc face (NULL for the mono faces above, which are then all unused): the label is laid
+    // out by advance and kerning in 1/16 px and each glyph stands upright at its own place on the curve.
+    // The curved run's font is this face's base, as it is the mono atlas for the other faces.
+    const ht_pfont_t *prop;
 } ht_arc_face_t;
 extern const ht_arc_face_t ht_arc_geist, ht_arc_roboto;
+// Geist Medium 26 on the same arcs (focus_faces.c, which holds the face): the Focus name and status.
+extern const ht_arc_face_t ht_arc_geist_prop;
+// The arc length a proportional label may span, in px: the 26 cells the mono arcs allow.
+enum { HT_ARC_SPAN = HT_ARC_COLS * HT_ARC_CELL_WIDTH };
 void ht_arc_title(ht_scene_t *scene, uint16_t fg, const char *text);
 void ht_arc_title_face(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face);
-// The lower arc, in the GeistMono face only (Focus has no lower arc).
+// The lower arc, in GeistMono; ht_arc_status_face takes any face, like ht_arc_title_face.
 void ht_arc_status(ht_scene_t *scene, uint16_t fg, const char *text);
+void ht_arc_status_face(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face);
+// What `text` takes of the arc in `face`, in px of arc length (a proportional face rounds up; fits when
+// <= HT_ARC_SPAN). A proportional title or status longer than that ends at a word and "…".
+int ht_arc_measure(const ht_arc_face_t *face, const char *text);
+// The lower arc with a brightness per glyph (the voice screen's "Listening" sweep): `gain` is
+// HT_ARC_GAINS entries, 0..255 for each glyph of `text` in order (the glyph's coverage scales by it; the
+// ground is black, so that is the dimmed colour), NULL = all 255, which is exactly ht_arc_status_face.
+// Proportional faces only. One run, as ht_arc_status_face; the mask cache is keyed by the gains too.
+enum { HT_ARC_GAINS = 16 };
+void ht_arc_status_sweep(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face,
+                         const uint8_t *gain);
 // Same conservative bounds used for damage; useful for matching curved hit areas.
 ht_rect_t ht_run_bounds(const ht_run_t *run);
 uint32_t ht_arc_cache_builds(void);

@@ -423,12 +423,28 @@ void main() {
           for (final machine in app.machineStates.values) {
             machine.agents = [];
           }
+          app.machineStates.removeWhere((id, _) => id != 'm');
+          app.machines = [app.machineStates['m']!.machine];
+          app.modelManager
+            ..loaded = true
+            ..inventoryAvailable = true;
           await tester.pumpWidget(const SizedBox());
           await tester.pumpWidget(preview);
           await tester.pumpAndSettle();
           expect(find.byKey(const ValueKey('welcome-sessions')), findsNothing);
           expect(
             find.byKey(const ValueKey('workspace-status-bar')),
+            findsOneWidget,
+          );
+          for (final control in [
+            'workspace-harness-monitor',
+            'workspace-machines',
+            'workspace-models',
+          ]) {
+            expect(find.byKey(ValueKey(control)).hitTestable(), findsOneWidget);
+          }
+          expect(
+            find.byKey(const ValueKey('workspace-pane-context')),
             findsNothing,
           );
           expect(tester.widget<TextField>(task).focusNode!.hasFocus, isTrue);
@@ -439,17 +455,31 @@ void main() {
   }
 
   testWidgets(
-    'native footer exposes live sessions on an empty tab and hides with no work',
+    'native footer keeps zero inventory visible on the empty welcome screen',
     (tester) async {
       await setup(tester, mac: true);
       expect(updates.last['footerCovered'], isFalse);
       expect(updates.last['harnessMonitor']['text'], startsWith('Harnesses 2'));
+      expect(updates.last['focusedContext'], isNull);
       for (final machine in app.machineStates.values) {
         machine.agents = [];
       }
+      app.machineStates.removeWhere((id, _) => id != 'm');
+      app.machines = [app.machineStates['m']!.machine];
       app.notifyListeners();
       await tester.pumpAndSettle();
-      expect(updates.last['footerCovered'], isTrue);
+      expect(updates.last['footerCovered'], isFalse);
+      expect(updates.last['harnessMonitor']['text'], 'Harnesses 0');
+      expect(updates.last['footerMachines']['text'], 'Machines 1');
+      expect(updates.last['footerModels']['text'], 'Models —');
+      expect(updates.last['focusedContext'], isNull);
+      app.modelManager
+        ..loaded = true
+        ..inventoryAvailable = true;
+      app.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(updates.last['footerModels']['text'], 'Models 0');
+      expect(updates.last['footerCovered'], isFalse);
       app.adoptSessionForTest(terminal('a0', []));
       app.notifyListeners();
       await tester.pumpAndSettle();

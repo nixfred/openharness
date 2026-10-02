@@ -68,6 +68,17 @@ MachineHarnessResources _resources(
 );
 
 void main() {
+  test('the footer count never samples resources, including refresh and foreground updates', () async {
+    final app = _App()..machine('m', [_live]);
+    final monitor = HarnessMonitor(app, sampleResources: false)..start();
+    addTearDown(monitor.dispose);
+    addTearDown(app.dispose);
+    await monitor.refresh();
+    app.changed();
+    expect(monitor.label, 'Harnesses 1');
+    expect(monitor.detail, contains('Click to open Harness Monitor'));
+    expect(app.requests, isEmpty);
+  });
   test('one snapshot preserves partial totals, shared servers, machine scope and nested storage', () async {
     final app = _App();
     final monitor = _Monitor(app);

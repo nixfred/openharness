@@ -39,6 +39,17 @@ function setup(initial: string, agents?: () => string[]) {
 }
 
 describe('SessionSearchIndex', () => {
+  it('does not resurrect deleted conversation history from an in-flight pass or stale source list', async () => {
+    const { index, found, settle, store } = setup(prompt('purge search history', 0) + answer('sensitive fixture', 1))
+    await settle()
+    expect(found('sensitive')).toEqual(['s1'])
+    const pass = index.pass({ agentId: 'agent-1', sessionId: 's1', engine: 'claude', transcriptPath: store.session('s1')!.path, header: 'stale row', changedAt: 2 })
+    index.deleteHistory('s1')
+    await pass
+    await settle()
+    expect(found('sensitive')).toEqual([])
+    expect(store.session('s1')).toBeUndefined()
+  })
   it('indexes a transcript on the first sweep and picks up only what was added since', async () => {
     const { path, store, found, settle } = setup(prompt('why does the dial scroll jump', 0) + answer('The delta is doubled.', 1))
     await settle()

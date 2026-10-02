@@ -15,8 +15,18 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// npm test injects its installation prefix. A child zsh login shell can source nvm,
+// which prints a prefix-conflict warning into fixture stdout. This made unchanged
+// doctor/materialize tests fail locally while pinned CI passed (release 1.2.50).
+// Specs that exercise an installation prefix set their own explicit fixture value.
+delete process.env.npm_config_prefix
+delete process.env.NPM_CONFIG_PREFIX
+
 process.env.ADAPTER_DATA_DIR = mkdtempSync(join(tmpdir(), 'adapter-test-data-'))
 process.env.ADAPTER_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'adapter-test-runtime-'))
+// Real zsh subprocesses must not load a developer's prompts, plugins, updates,
+// or nvm configuration. Shell-startup tests supply their own ZDOTDIR fixture.
+process.env.ZDOTDIR = process.env.ADAPTER_DATA_DIR
 // Auth is stored outside ADAPTER_DATA_DIR in production. Never let a spec
 // discover, refresh, or replace the developer's real Harness account session.
 process.env.HARNESS_AUTH_DIR = join(process.env.ADAPTER_DATA_DIR, 'auth')

@@ -10,12 +10,15 @@ import 'package:harness/state/agent_switch_handoff.dart';
 import 'package:harness/state/desk_sync.dart';
 import 'package:harness/core/dsh_catalog.dart';
 import 'package:harness/core/models.dart';
+import 'package:harness/devices/devices_harness_controller.dart';
+import 'package:harness/settings/experimental_features.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/state/swarm_search.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:harness/widgets/engine_identity.dart';
 
 import 'support/harness_monitor.dart';
+import 'experimental_features_test.dart' show AccountSettings;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 
@@ -67,7 +70,8 @@ class SwitchConnection extends MonitorConnection {
           'engine': creations.last['engine'],
           if (launch != null) 'launch': launch,
           'project': {'name': 'work', 'cwd': '/projects/work'},
-          if (creations.last['dsh'] != null)
+          if (creations.last['dsh'] != null &&
+              creations.last['dsh'] != devicesHarnessId)
             'viewerUrl': 'http://127.0.0.1:4179/',
         },
       };
@@ -80,6 +84,7 @@ AppNotifier fixture(
   SwitchConnection connection, {
   bool viewer = false,
   bool companion = false,
+  String? harnessId,
   String sourceEngine = 'codex',
 }) {
   final app = createApp(connectionForTest: (_) => connection, connected: true);
@@ -94,11 +99,13 @@ AppNotifier fixture(
     terminalAvailable: true,
     permissionMode: 'ask',
     project: const AgentProject(name: 'work', cwd: '/projects/work'),
-    dsh: companion
-        ? 'autonomous/pair'
-        : viewer
-        ? 'test/viewer'
-        : null,
+    dsh:
+        harnessId ??
+        (companion
+            ? 'autonomous/pair'
+            : viewer
+            ? 'test/viewer'
+            : null),
     viewerUrl: viewer ? 'http://127.0.0.1:4179/' : null,
   );
   app.stateOf('m')!.agents = [source, app.stateOf('m')!.agents[1]];
@@ -139,6 +146,114 @@ class SwitchDeskApi extends ApiClient {
 }
 
 void main() {
+  test('Devices offers every agent while absent from the public catalog', () {
+    final connection = SwitchConnection();
+    final app = fixture(connection, harnessId: devicesHarnessId);
+    addTearDown(app.dispose);
+    app.stateOf('m')!.dsh.replace(const []);
+    final search = SwarmSearchController(app, []);
+    addTearDown(search.dispose);
+    search.setQuery('&');
+    search.setAgentSelection('m', 'a0');
+    expect(app.stateOf('m')!.dsh[devicesHarnessId], isNull);
+    expect(search.rows, hasLength(allEngines.length));
+    for (final engine in allEngines) {
+      search.move(
+        search.rows.indexWhere((row) => row.agentEngine == engine.id) -
+            search.cursor,
+      );
+      expect(search.canSelectAgent(engine.id), isTrue, reason: engine.id);
+      expect(search.selected!.detail, isNot('Not supported by this harness'));
+      expect(search.submit()?.destination.agentEngine, engine.id);
+    }
+    expect(search.canSelectAgent('terminal'), isFalse);
+    expect(
+      connection.events,
+      isEmpty,
+      reason: 'Browsing does not switch agents.',
+    );
+  });
+
+  test(
+    'Devices still respects explicit compatibility reported by its machine',
+    () {
+      final connection = SwitchConnection();
+      final app = fixture(connection, harnessId: devicesHarnessId);
+      addTearDown(app.dispose);
+      app.stateOf('m')!.dsh.replace(const [
+        DshEntry(id: devicesHarnessId, name: 'Devices', engine: 'codex'),
+      ]);
+      expect(app.agentSwitchEngines('m', app.stateOf('m')!.agents.first), [
+        'codex',
+      ]);
+    },
+  );
+
+  test('an unknown harness does not inherit Devices compatibility', () async {
+    final connection = SwitchConnection();
+    final app = fixture(connection, harnessId: 'acme/missing');
+    addTearDown(app.dispose);
+    app.stateOf('m')!.dsh.replace(const []);
+    expect(
+      await app.changeAgent('m', 'a0', 'claude'),
+      contains('not supported'),
+    );
+    expect(connection.events, isEmpty);
+  });
+
+  for (final engine in allEngines.where((engine) => engine.id != 'codex')) {
+    test(
+      'Devices switches to ${engine.id} while retaining its dashboard and split',
+      () async {
+        final connection = SwitchConnection();
+        final app = fixture(connection, harnessId: devicesHarnessId);
+        addTearDown(app.dispose);
+        app.currentUser = const CurrentUserProfile(
+          id: 'a',
+          email: 'a@example.test',
+        );
+        app.experimentalFeatures.bind('a', transport: AccountSettings('a'));
+        await app.experimentalFeatures.refresh();
+        await app.experimentalFeatures.set(
+          ExperimentalFeature.devicesTab,
+          true,
+        );
+        app.stateOf('m')!.dsh.replace(const []);
+        app.openDevices();
+        await app.showDevicesTerminal('m', 'a0');
+        final tab = app.activeSwarm;
+        final panes = [...tab.panes];
+        final sizes = Map.of(tab.paneSizes);
+        expect(panes, hasLength(2));
+        expect(panes.first.isDevices, isTrue);
+        expect(tab.manualLayout!.tiles.first.width, .7);
+
+        expect(await app.changeAgent('m', 'a0', engine.id), isNull);
+        expect(connection.events, ['save/stop', 'start']);
+        expect(connection.creations.single, containsPair('engine', engine.id));
+        expect(
+          connection.creations.single,
+          containsPair('dsh', devicesHarnessId),
+        );
+        expect(
+          connection.creations.single,
+          containsPair('cwd', '/projects/work'),
+        );
+        expect(
+          connection.creations.single,
+          containsPair('permissionMode', 'ask'),
+        );
+        expect(app.activeSwarm, same(tab));
+        expect(tab.panes, panes);
+        expect(panes.first.isDevices, isTrue);
+        expect(panes.first.ownerAgentId, 'manager');
+        expect(panes.last.agentId, 'manager');
+        expect(tab.paneSizes, sizes);
+        expect(app.agentPreference.engineFor(devicesHarnessId), engine.id);
+      },
+    );
+  }
+
   for (final state in ['starting', 'failed']) {
     test(
       'attaches a $state replacement immediately so startup prompts can be answered',

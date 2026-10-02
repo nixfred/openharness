@@ -11,3 +11,6 @@ import 'state/app_state.dart';
 /// nixfred: the fleet overview wraps the native workspace only.
 Widget authenticatedWorkspace(AppNotifier app) =>
     FleetOverviewHost(app: app, child: SwarmScreen(notifier: app));
+
+/// A native build draws nothing around its screens.
+Widget appFrame(Widget app) => app;

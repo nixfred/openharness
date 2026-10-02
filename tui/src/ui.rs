@@ -2487,7 +2487,7 @@ fn preview_grid(buf: &mut Buffer, pane: &Pane, area: Rect, scroll: u16) {
         if cell.flags.contains(Flags::ITALIC) { style = style.add_modifier(Modifier::ITALIC) }
         if cell.flags.intersects(Flags::ALL_UNDERLINES) { style = style.add_modifier(Modifier::UNDERLINED) }
         if cell.flags.contains(Flags::STRIKEOUT) { style = style.add_modifier(Modifier::CROSSED_OUT) }
-        if let Some(t) = buf.cell_mut((area.x + col, area.y + row as u16)) { t.set_char(if cell.c == '\0' { ' ' } else { cell.c }).set_style(style); }
+        if let Some(t) = buf.cell_mut((area.x + col, area.y + row as u16)) { t.set_char(shown_char(cell.c)).set_style(style); }
     }
 }
 
@@ -2535,13 +2535,13 @@ pub fn screen_preview(buf: &mut Buffer, pane: &Pane, x: u16, y: u16, nx: u16, ny
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) { out += 1; continue }
             let w = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
             if xx + w > px + nx { break }
-            if let Some(t) = buf.cell_mut((x + out, y + j)) { t.set_char(if cell.c == '\0' { ' ' } else { cell.c }).set_style(style_of(cell)); }
+            if let Some(t) = buf.cell_mut((x + out, y + j)) { t.set_char(shown_char(cell.c)).set_style(style_of(cell)); }
             out += 1;
         }
     }
     if shown && cx >= px && cy >= py && cx < px + nx && cy < py + ny && cx < sx && cy < sy {
         let cell = &grid[Line(cy as i32)][Column(cx as usize)];
-        if let Some(t) = buf.cell_mut((x + cx - px, y + cy - py)) { t.set_char(if cell.c == '\0' { ' ' } else { cell.c }).set_style(style_of(cell).add_modifier(Modifier::REVERSED)); }
+        if let Some(t) = buf.cell_mut((x + cx - px, y + cy - py)) { t.set_char(shown_char(cell.c)).set_style(style_of(cell).add_modifier(Modifier::REVERSED)); }
     }
 }
 
@@ -2748,7 +2748,9 @@ fn pane_body(buf: &mut Buffer, pane: &mut Pane, area: Rect, active: bool, window
         if underline != 0 || link.is_some() || overline { crate::term_out::set_extra(area.x + col, area.y + row as u16, crate::term_out::Extra { underline, link, overline }) }
         let target = buf.cell_mut((area.x + col, area.y + row as u16));
         let Some(target) = target else { continue };
-        if cell.c == '\0' {
+        // An empty cell, or the tab `ls` aligned a column with (the grid keeps it where the tab
+        // jumped from): the blank the screen shows, never the control character itself.
+        if shown_char(cell.c) != cell.c {
             target.set_symbol(" ").set_style(style);
             continue;
         }
@@ -2798,6 +2800,11 @@ fn pane_body(buf: &mut Buffer, pane: &mut Pane, area: Rect, active: bool, window
     (row >= 0 && (row as u16) < area.height && col < area.width).then(|| Position::new(area.x + col, area.y + row as u16))
 }
 
+/// A grid cell's character as it is drawn: alacritty keeps a tab in the cell a tab jumped from (so
+/// copying keeps it), and an empty cell holds '\0' — both are the blank the screen shows. Drawn as
+/// they are, a tab would reach the terminal and move its cursor to the next tab stop.
+pub fn shown_char(c: char) -> char { if c == '\0' || c.is_control() { ' ' } else { c } }
+
 fn card(buf: &mut Buffer, area: Rect, lines: &[(String, Style)]) {
     let top = area.y + area.height.saturating_sub(lines.len() as u16) / 2;
     for (index, (text, style)) in lines.iter().enumerate() {
@@ -2806,6 +2813,25 @@ fn card(buf: &mut Buffer, area: Rect, lines: &[(String, Style)]) {
         let w = (text.width() as u16).min(area.width);
         let x = area.x + area.width.saturating_sub(w) / 2;
         buf.set_stringn(x, y, text, area.width as usize, *style);
+    }
+}
+
+#[cfg(test)]
+mod tab_cell_tests {
+    use super::*;
+
+    #[test]
+    fn a_tab_in_a_pane_is_drawn_as_the_blank_it_stands_for() {
+        // `ls` aligns its columns with tabs; the pane's grid keeps the tab in the cell it jumped from.
+        let mut pane = crate::pane::Pane::new(1, "m", "a", 20, 2);
+        pane.phase = crate::pane::Phase::Live;
+        pane.feed(b"ab\tc");
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        pane_body(&mut buf, &mut pane, area, true, (None, None));
+        let row: String = (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(!row.contains('\t'), "a tab reached the frame: {row:?}");
+        assert_eq!(&row[..9], "ab      c");
     }
 }
 

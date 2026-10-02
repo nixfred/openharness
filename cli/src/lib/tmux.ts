@@ -93,8 +93,7 @@ const INLINE_CODE_OPTIONS = new Set(['-c', '--command', '-e', '--eval', '--print
  * shell in `comm`, so for those interpreters the first non-option token is the real entrypoint. Absolute
  * prefixes are deliberately retained only for suffix/package-layout checks and are never hard-coded.
  */
-function processEntrypoint(args: string): string {
-  const next = argvPrefix(args)
+function processEntrypoint(args: string, next = argvPrefix(args)): string {
   let token = next() ?? ''
   let command = basename(token).toLowerCase()
   if (command === 'env') {
@@ -127,6 +126,18 @@ function processEntrypoint(args: string): string {
     token = next() ?? ''
   }
   return token
+}
+
+/** A launcher's capability check is not the interactive engine it is about to start.
+ * In particular, Codex startup runs `codex --help` before the real resume. Adopting
+ * that short-lived PID ends a restart too early and discovery then evicts its pane.
+ * Only a standalone probe argument counts: prompt text and option values do not. */
+function engineCapabilityProbe(args: string): boolean {
+  const next = argvPrefix(args)
+  if (!processEntrypoint(args, next)) return false
+  const option = next()
+  return (option === '--help' || option === '-h' || option === '--version' || option === '-V')
+    && next() === undefined
 }
 
 function hasCursorPackageEntrypoint(args: string): boolean {
@@ -559,6 +570,7 @@ export function engineProcessMatch(
   engine: RegisteredSession['engine'],
   ownership = agentCommandOwnershipSnapshot(),
 ): EngineProcessMatch {
+  if (engineCapabilityProbe(row.args)) return { score: 0, evidence: 'none' }
   const owners = engineFileOwners([row.imageFileKey, row.entrypointFileKey], ownership)
   if (owners.length === 1) {
     return owners[0] === engine
@@ -597,6 +609,7 @@ export function ambiguousAgentProcess(
   row: Pick<ProcessRow, 'executable' | 'args' | 'imageFileKey' | 'entrypointFileKey'>,
   ownership = agentCommandOwnershipSnapshot(),
 ): boolean {
+  if (engineCapabilityProbe(row.args)) return false
   if (!agentAliasCandidate(row) || hasCursorPackageEntrypoint(row.args)) return false
   const executable = basename(row.executable).toLowerCase()
   const entrybase = basename(processEntrypoint(row.args)).toLowerCase()

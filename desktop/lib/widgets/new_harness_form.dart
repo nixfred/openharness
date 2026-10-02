@@ -21,6 +21,7 @@ import 'box_chrome.dart' show kTerminalCornerRadius, terminalPaneBorder;
 import 'dsh_install_panel.dart' show describeInstallFailure;
 import 'desktop_chrome.dart';
 import 'new_harness_attachments.dart';
+import 'new_harness_paste.dart';
 import 'engine_identity.dart';
 
 /// Desktop composer and legacy terminal launch form sharing the same draft.
@@ -152,7 +153,9 @@ class NewHarnessFormState extends State<NewHarnessForm> {
       box.useDesktopChoices(widget.desktop);
       if (box.checking) _row = _Row.start;
       _syncField();
-      (widget.desktop ? _desktopDefaultFocus : _focus).requestFocus();
+      // Restoring the successful agent can replace an unfocusable Terminal
+      // editor and its attachment wrappers. Let that rebuild finish first.
+      _focusEditor();
     });
   }
 
@@ -1824,12 +1827,18 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     visualDensity: VisualDensity.compact,
   );
 
-  /// The task box, taking dropped files when the host attaches them.
+  /// The task box, taking dropped files and pasted pictures when the host
+  /// attaches them.
   Widget _desktopTaskEditor() => switch (box.attachments) {
     final attachments? when box.takesTask => NewHarnessDropZone(
       attachments: attachments,
       enabled: !box.locked,
-      child: _desktopTaskBox(),
+      child: NewHarnessPasteTarget(
+        attachments: attachments,
+        enabled: !box.locked,
+        focusNode: _taskFocus,
+        child: _desktopTaskBox(),
+      ),
     ),
     _ => _desktopTaskBox(),
   };
@@ -1913,7 +1922,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                 onTapOutside: (_) {},
                 decoration: InputDecoration(
                   hintText: box.takesTask
-                      ? 'Harness anything'
+                      ? 'What would you like to work on?'
                       : 'Open a terminal in this repo',
                   hintStyle: DesktopChrome.text(
                     size: 15,

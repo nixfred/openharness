@@ -47,11 +47,21 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
     if (mounted && library.valid) await library.refresh();
   }
 
+  void _selectSection(String name) {
+    setState(() => section = name);
+    unawaited(
+      library.refresh(
+        filter: name == 'Project knowledge' ? 'project' : 'personal',
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: library,
     builder: (context, _) {
       if (library.available == false) return const SizedBox.shrink();
+      final learning = _learningStatus(library);
       return DesktopChrome(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -80,16 +90,7 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
                     selected: section == name,
                     onSelected: library.busy || !library.valid
                         ? null
-                        : (_) {
-                            setState(() => section = name);
-                            unawaited(
-                              library.refresh(
-                                filter: name == 'Project knowledge'
-                                    ? 'project'
-                                    : 'personal',
-                              ),
-                            );
-                          },
+                        : (_) => _selectSection(name),
                   ),
               ],
             ),
@@ -100,6 +101,31 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: LinearProgressIndicator(),
               ),
+            if (library.available == true &&
+                library.valid &&
+                section != 'Learning' &&
+                learning.needsAttention) ...[
+              Text(
+                'Learning needs attention',
+                style: AppType.body(
+                  color: AppPalette.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 4),
+              _text(learning.message),
+              if (learning.captureIssue != null) ...[
+                const SizedBox(height: 8),
+                _text(learning.captureIssue!),
+              ],
+              TextButton(
+                onPressed: library.busy
+                    ? null
+                    : () => _selectSection('Learning'),
+                child: const Text('Review learning'),
+              ),
+              const SizedBox(height: 16),
+            ],
             if (library.available == true && library.valid)
               if (section == 'Learning')
                 _learning()
@@ -150,8 +176,7 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
 
   Widget _learning() {
     final status = library.status!;
-    final runtime = memoryMap(status['runtime']);
-    final learning = memoryMap(runtime['learning']);
+    final learning = _learningStatus(library);
     final queue = memoryMap(status['queue']);
     final jobs = memoryMap(queue['jobs']);
     final pending = [
@@ -166,31 +191,14 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
     final gaps =
         (memoryMap(queue['retention'])['expiredEpisodes'] as num?)?.toInt() ??
         0;
-    final state = runtime['state'] == 'off'
-        ? 'Your companion is paused. These choices take effect when it resumes.'
-        : !library.learn
-        ? 'Learning is paused. Your existing memories are still here.'
-        : learning['state'] == 'waiting_for_model'
-        ? 'Waiting for the model selected in your companion’s terminal. Your model choice stays in control.'
-        : runtime['state'] != 'ready'
-        ? 'Waiting for your companion’s memory service to be ready.'
-        : learning['state'] == 'foreground_busy'
-        ? 'Your companion is working. Learning waits until it is free.'
-        : learning['state'] == 'waiting_for_quiet'
-        ? 'Giving your latest request a moment before reviewing completed work.'
-        : learning['state'] == 'budget_deferred'
-        ? 'Waiting for the next learning allowance before reviewing more work.'
-        : learning['state'] == 'notebook_updated'
-        ? 'A project notebook was updated from saved memories. Its sources and conditions are available in Project knowledge.'
-        : learning['state'] == 'notebook_empty'
-        ? 'The latest notebook review found no supported explanation to add. Individual memories are still available.'
-        : learning['state'] == 'stale'
-        ? 'The source memories or learning settings changed during review. That result was not saved.'
-        : 'Learning from completed coding work. Your companion and new requests take priority.';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _text(state),
+        _text(learning.message),
+        if (learning.captureIssue != null) ...[
+          const SizedBox(height: 8),
+          _text(learning.captureIssue!),
+        ],
         const SizedBox(height: 12),
         _preference(
           'Learn from coding sessions',
@@ -271,6 +279,67 @@ class _CodingMemoryViewState extends State<CodingMemoryView> {
           ],
         ),
       );
+}
+
+({String message, String? captureIssue, bool needsAttention}) _learningStatus(
+  CodingMemoryLibrary library,
+) {
+  final runtime = memoryMap(library.status?['runtime']);
+  final learning = memoryMap(runtime['learning']);
+  if (!library.learn || learning['state'] == 'learning_off') {
+    return (
+      message: 'Learning is paused. Your existing memories are still here.',
+      captureIssue: null,
+      needsAttention: false,
+    );
+  }
+  if (runtime['state'] != 'ready') {
+    return (
+      message: runtime['state'] == 'off'
+          ? 'Your companion is paused. Resume it to continue learning.'
+          : 'Waiting for your companion’s memory service to be ready.',
+      captureIssue: null,
+      needsAttention: true,
+    );
+  }
+  final capture = memoryMap(runtime['capture']);
+  final captureIssue = capture['state'] != 'unavailable'
+      ? null
+      : capture['reason'] == 'memory_backlog_full'
+      ? 'The learning queue is full. Some new work could not be added. Capture can retry as reviews free space; queued work may expire before it is reviewed.'
+      : 'Some recent work could not be read for learning. Your existing memories are still available.';
+  final state = learning['state'];
+  final message = switch (state) {
+    'waiting_for_model' => 'Waiting for your companion’s model. Check that its terminal beside this viewer is running with a model selected, and complete any setup shown there.',
+    'foreground_busy' =>
+      'Your companion is working. Learning waits until it is free.',
+    'waiting_for_quiet' =>
+      'Giving your latest request a moment before reviewing completed work.',
+    'budget_deferred' =>
+      'Waiting for the next learning allowance before reviewing more work.',
+    'failed' => 'The last memory review could not finish. Queued work can be retried while learning is on.',
+    'source_incomplete' =>
+      'Some work has incomplete source evidence and cannot yet be reviewed.',
+    'idle' => 'No work is ready for review right now. Learning is on for new, included coding sessions.',
+    'learned' => 'The latest review saved new memories. You can read their evidence in your library.',
+    'no_useful_memory' =>
+      'The latest review found no useful memory to save. Learning is still on.',
+    'notebook_updated' => 'A project notebook was updated from saved memories. Its sources and conditions are available in Project knowledge.',
+    'notebook_empty' => 'The latest notebook review found no supported explanation to add. Individual memories are still available.',
+    'stale' => 'The source memories or learning settings changed during review. That result was not saved.',
+    _ => 'Learning is on. Completed coding work is reviewed when your companion is available.',
+  };
+  return (
+    message: message,
+    captureIssue: captureIssue,
+    needsAttention:
+        captureIssue != null ||
+        const [
+          'waiting_for_model',
+          'failed',
+          'source_incomplete',
+        ].contains(state),
+  );
 }
 
 Widget _text(String value, {bool small = false}) => Text(

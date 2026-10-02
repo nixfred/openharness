@@ -20,7 +20,7 @@
     <div class="segmented" role="group" aria-label="Column presets"><button data-preset="overview" aria-pressed="true">Overview</button><button data-preset="resources" aria-pressed="false">Resources</button><button data-preset="ai" aria-pressed="false">AI usage</button></div>
     <label class="sr-only" for="machine">Machine</label><select id="machine"><option value="all">All machines</option></select>
     <label class="sr-only" for="filter">Status</label><select id="filter">
-      <option value="all">All open harnesses</option><option value="working">Working</option><option value="needsInput">Needs you</option>
+      <option value="all">Open harnesses</option><option value="stopped">Stopped harnesses</option><option value="working">Working</option><option value="needsInput">Needs you</option>
       <option value="idle">Idle</option><option value="done">Done</option><option value="starting">Starting</option><option value="failed">Failed</option><option value="unknown">Unknown</option>
     </select>
     <span class="spacer"></span>
@@ -29,7 +29,7 @@
     <button id="freeze" title="Hold the displayed readings; running work continues">Freeze updates</button><button id="refresh" title="Refresh all machines">Refresh</button>
   </nav>
   <div id="problems" role="status" hidden></div>
-  <main id="grid" tabindex="0" aria-label="Open harnesses. Arrow keys select, Enter inspects, Delete reviews closing.">
+  <main id="grid" tabindex="0" aria-label="Open harnesses. Arrow keys select, Enter inspects, Delete reviews permanent deletion.">
     <table id="table" aria-label="Open harnesses"><colgroup id="colgroup"></colgroup><thead id="head"></thead><tbody id="body"></tbody></table>
     <div id="empty"><strong>Connecting to your machines…</strong><p>Open harnesses will appear here.</p></div>
   </main>
@@ -39,12 +39,24 @@
   <dialog id="inspector" aria-labelledby="inspect-title">
     <div class="dialog-heading"><h2 id="inspect-title">Harness details</h2><button id="inspect-close" aria-label="Close details">Close</button></div>
     <p id="inspect-context" class="muted"></p><div id="inspect-content"></div>
-    <div class="dialog-actions"><button id="inspect-stop" class="danger">Close harness…</button></div>
+    <div class="dialog-actions"><button id="inspect-stop">Stop</button><button id="inspect-delete" class="danger">Delete</button></div>
   </dialog>
   <dialog id="stop-dialog" aria-labelledby="stop-title">
-    <h2 id="stop-title">Close harness?</h2><p id="stop-context"></p><p>Its running work will end and its panes will close. Conversation history and workspace files are kept.</p>
+    <h2 id="stop-title">Stop harness?</h2><p id="stop-context"></p><p id="stop-description"></p><p id="stop-storage" class="muted"></p>
+    <div id="delete-choices" hidden>
+      <section class="delete-choice">
+        <label><input id="delete-session" type="checkbox" disabled> <strong>Session data</strong> <span id="delete-session-size"></span></label>
+        <div id="delete-session-paths" class="delete-paths"></div><p id="delete-session-note" class="muted"></p>
+      </section>
+      <section class="delete-choice">
+        <label><input id="delete-worktree" type="checkbox" disabled> <strong>Worktree data</strong> <span id="delete-worktree-size"></span></label>
+        <div id="delete-worktree-path" class="delete-paths"></div><p id="delete-worktree-note" class="muted"></p>
+      </section>
+      <pre id="worktree-changes" hidden></pre>
+      <label id="worktree-discard-label" hidden><input id="worktree-discard" type="checkbox"> Permanently discard all uncommitted changes and untracked files.</label>
+    </div>
     <p id="stop-result" role="status" aria-live="polite"></p>
-    <div class="dialog-actions"><button id="stop-cancel" autofocus>Cancel</button><button id="stop-confirm" class="danger filled">Close harness</button></div>
+    <div class="dialog-actions"><button id="stop-cancel" autofocus>Cancel</button><button id="stop-confirm" class="danger filled">Stop</button></div>
   </dialog>
   <script type="module" src="app.js"></script>
 </body>

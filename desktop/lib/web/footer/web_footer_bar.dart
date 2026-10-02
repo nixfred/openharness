@@ -8,14 +8,16 @@ import '../../terminal/terminal_theme.dart';
 import '../../terminal/terminal_theme_store.dart';
 import '../../widgets/box_chrome.dart' show kWorkspaceInset;
 import '../../widgets/pane_menu.dart';
+import '../../widgets/web_download_button.dart';
 import '../../widgets/workspace_bar_control.dart';
 import '../../widgets/workspace_share_button.dart';
 import '../shell/web_dropdown_control.dart';
 import '../shell/web_hidden_under_keyboard.dart';
 
 /// The footer on a phone, shaped like its header: the whole status line as one
-/// dropdown whose menu holds each entry, and Share beside it. Gone while the
-/// on-screen keyboard is up — the terminal needs that height more.
+/// dropdown whose menu holds each entry, then Download app, and Share when it
+/// is on. Gone while the on-screen keyboard is up — the terminal needs that
+/// height more.
 class WebFooterBar extends StatelessWidget {
   const WebFooterBar({super.key, required this.footer});
 
@@ -54,7 +56,12 @@ class WebFooterBar extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (share != null) _WebShareIconButton(share: share),
+                // One filled action in the bar: Share when it is on.
+                WebDownloadButton(prominent: share == null),
+                if (share != null) ...[
+                  SizedBox(width: workspaceBarCellSizeOf(context).width),
+                  _WebShareIconButton(share: share),
+                ],
               ],
             ),
           ),

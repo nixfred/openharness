@@ -337,7 +337,7 @@ void main() {
   );
 
   for (final nativeTabs in [false, true]) {
-    for (final resources in [false, true]) {
+    for (final resources in nativeTabs ? [false, true] : [false]) {
       testWidgets(
         'footer opens and reuses monitor (native=$nativeTabs resources=$resources)',
         (tester) async {
@@ -359,10 +359,6 @@ void main() {
                   MethodCall(resources ? 'resourceMonitor' : 'harnessControls'),
                 ),
                 (_) {},
-              );
-            } else if (resources) {
-              await tester.tap(
-                find.byKey(const ValueKey('workspace-machine-resources')),
               );
             } else {
               await openWorkspaceManagement(tester, 'harnesses');

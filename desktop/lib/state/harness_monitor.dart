@@ -9,12 +9,17 @@ import '../shared/theme/workspace_bar_style.dart'
 import 'app_state.dart';
 import 'harness_sessions.dart';
 
-/// A single, demand-driven sampler shared by the footer and its open panel.
+/// Live inventory with optional demand-driven resource sampling.
+/// The footer uses inventory only; resource readings belong in Harness Monitor.
 /// It never starts an agent, opens a connection, or scans conversation files.
 class HarnessMonitor extends ChangeNotifier {
-  HarnessMonitor(this.app, {DateTime Function()? now})
-    : _now = now ?? DateTime.now;
+  HarnessMonitor(
+    this.app, {
+    DateTime Function()? now,
+    this.sampleResources = true,
+  }) : _now = now ?? DateTime.now;
   final AppNotifier app;
+  final bool sampleResources;
   final DateTime Function() _now;
   final _samples = <String, (MachineState, MachineHarnessResources)>{};
   Timer? _timer;
@@ -77,7 +82,8 @@ class HarnessMonitor extends ChangeNotifier {
   }) => summary.metricsLabel(ram: ram, gpu: gpu, storage: storage);
 
   String get resourceDetail => summary.resourceDetail;
-  String get detail => summary.detail;
+  String get detail =>
+      '${live.length} open across connected machines. Click to open Harness Monitor.';
 
   void start() {
     if (_started || _disposed) return;
@@ -120,7 +126,7 @@ class HarnessMonitor extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
-    if (_disposed || _busy || !app.foreground.value) return;
+    if (_disposed || _busy || !app.foreground.value || !sampleResources) return;
     _timer?.cancel();
     _busy = true;
     final revision = _revision;

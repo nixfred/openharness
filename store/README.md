@@ -339,6 +339,12 @@ the saved collection's identity is restored, without sending a prompt or replaci
 Linked developer checkouts and custom forks remain owner-managed. Core resources are versioned
 beside the CLI, so a CLI rollback restores its corresponding core package revision as well.
 
+Devices and Companions appear in the desktop Store and its search only while the current account's
+**Devices tab** and **Focus-bar creature** experiments, respectively, are enabled. Switching either
+off hides its listing immediately. Their **Open** action reuses the app workspace; these bundled
+resources have no Store Get, Update or Remove action. They remain absent from the public daemon
+catalog, so an account opt-in never publishes them to other users.
+
 Other Store applications, such as Blender, keep explicit updates. The Store shows **Update** when a matching catalog source publishes a different
 commit with changed package content. Built-in catalog entries carry their package folder's Git tree
 revision, so a change elsewhere in the monorepo does not flag every installed harness. Hover over the
