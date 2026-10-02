@@ -29,6 +29,21 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
 [PLAN.md](PLAN.md), [nixfred/README.md](nixfred/README.md) (every command),
 [nixfred/DESIGN.md](nixfred/DESIGN.md) (the visual system).
 
+**The Harness dial (firmware `0.0.86-nixfred.6`, flashed over USB; see NIXFRED-CHANGELOG.md)**
+
+- **Open the menu (the hub):** pull down from the top edge (the small notch at 12 o'clock), or hold a
+  still finger 650 ms anywhere (a ring fills). Neither ever starts voice or answers a question; a press
+  under 650 ms on the microphone still talks.
+- **Hub wedges:** SESSIONS (agents, "2/9 need you"), PLANS (next plan and banked share), MACHINES (load,
+  VRAM), SWARMS (tabs), INBOX (unread). Urgent wedges move to the front; the last one used has a dot.
+- **Hub centre, the suggested next:** a waiting permission, then a question, then an unread recap, then
+  the inbox, else the plan with the most banked share ("Use Kimi, +36% banked"). One tap opens it.
+- **After answering** on the dial, "next: X" moves to the next agent that needs you (tap to stay).
+- **Back:** swipe in from the left edge (or swipe right on a list). **Tap to jump:** tapping a session
+  brings its real host window forward (tmux, herdr, Orca, the app). A notification card opens that
+  agent's recap. A machine tap selects it and stays on machines. **Plans:** the plans face shows each
+  subscription's weekly use and banked share.
+
 **Knowing what needs you**
 
 - Every agent has a typed state (working, waiting, permission, failed, done, idle, offline) with a

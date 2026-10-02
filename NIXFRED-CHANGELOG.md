@@ -22,6 +22,9 @@ Sits on nixfred/main 98da920e. Firmware `0.0.86-nixfred.6`, ESP-IDF v5.5.0, 1,73
 - ROOT CAUSE of "goes to my workload list": a tile pressed slowly ran into the hold, which on fw .4 opened
   the session list (on .5 the hub). Machine selection itself never changes view (the ack only moves the
   check mark); nothing on the host does either.
+- Fred's video on fw .5 (2026-10-01 night): holding for the hub repeatedly started voice ("that's trying
+  to talk") and only sometimes opened the hub, depending on where the finger sat. That matches the cause
+  below: inside the mic band the hold was never armed. README "This fork" now lists the dial gestures.
 - Gestures before: tap; hold 650 ms still (ring from 200 ms) opens the hub except on the footers, voice,
   draft, form, selection, answer review, transfer; footer slow press up to 1800 ms acts on release (the
   mic STARTS VOICE); creature middle tap starts voice (Focus: nothing); vertical swipes scroll or page,
