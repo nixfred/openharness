@@ -5,6 +5,39 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Upstream sync: 40 commits from autonomous-ai/openharness main (30d2381b), 2026-10-02
+
+Merges upstream/main 30d2381b4 into nixfred/main c60b38ba. Firmware `0.0.86-nixfred.8`, ESP-IDF v5.5.0,
+2,800,096 B against an 8 MB slot (66% free); the growth is upstream's pet scenes and arc geometry.
+
+- Upstream merged PR #608, a port of this fork's attention feed, destructive-action gate, spend brake,
+  capabilities, dispatcher, Omarchy palette, desktop attention and Harness Pulse, then reverted it in
+  #610 pending review. Net zero upstream; the fork's own files (cli/src/lib/attention.ts, actionPolicy.ts,
+  spendBrake.ts, desktop attention_glow.dart, nixfred/plugins) are byte-identical after the merge.
+- Upstream brought: Focus pet scenes on the dial (Clawd cooks while working, wears headphones while
+  listening, launches a rocket on send; the Codex robot with sandboxes, mic bars and a paper plane;
+  "Listening" swept along the lower arc, curved labels in Geist Medium 26); a tamper-evident Devices key
+  history with dismiss and rebaseline; agent purge and worktree delete with a confirmed cleanup dialog;
+  footer inventory counts and per-account allowance; paste pictures and files into a New Harness; Cmd-N
+  focus and launch fixes; restart pane loss fix; one Cancel/Stop dialog for tab sessions; companion runtime
+  kept for background learning and a stalled-learning explanation; web and mobile seal agent_resume,
+  agent_fork and the Devices DSH frames; web store banner and phone footer; hn 0.1.11 TUI fixes; CI and
+  release speedups. Dial gestures are unchanged, so the README dial section stands.
+- Conflicts, both sides kept: hookServer.spec.ts (watch-mode specs plus device history/dismiss/rebaseline
+  specs); applicationFrames.ts (agent_purge and agent_worktree_delete beside clip_push); app_shell.dart
+  (upstream appFrame inside the nixfred BootSplash); desktop_workspace.dart (FleetOverviewHost plus
+  appFrame); firmware terminal.c/.h (ht_ring and ht_mask beside upstream's proportional arc labels and
+  cell sprites; the alpha mask draws only when a sprite has neither pixels nor cells); test_touch_ui
+  (adds habitat_next_wake_ms) and test_voice_ui (voice_engine in the mirrored state).
+- Verified: cli npm ci, tsc clean; vitest 9054 passed, 4 failed, 58 skipped (last sync 8842 passed, 4
+  failed); the same four known failures (dsh shell and engineLaunch node PATH, tmuxPaneInfo,
+  tmuxStream.decode retention). Desktop: flutter analyze no errors or warnings, nixfred/attention_glow/
+  settings tests 116 passed, release build. boot_flow_widget_test "offline unlinked remote" fails, and
+  fails identically on pristine upstream/main (upstream's own). Firmware: idf.py build; full test/run.sh
+  passes with the cc wrapper, which now also needs -Wno-sign-compare (upstream's new pet asserts in
+  test_touch_ui fail the same way on pristine upstream under host GCC).
+- Not verified: the pet scenes and arc labels by eye on the glass; Devices key history end to end.
+
 ## Upstream sync: 164 commits from autonomous-ai/openharness main (c43b0186), 2026-10-02
 
 Merges upstream/main c43b01863 into nixfred/main 6c92df3e. Firmware `0.0.86-nixfred.7`, ESP-IDF v5.5.0,
