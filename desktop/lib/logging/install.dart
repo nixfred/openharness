@@ -28,15 +28,18 @@ void installFileLogs() {
     return;
   }
   final directory = DailyLogFile.defaultDirectory;
-  final file = FileAppLog(DailyLogFile(directory, kAppLogBase));
+  final file = FileAppLog(
+    DailyLogFile(directory, kAppLogBase),
+    bufferDebug: true,
+  );
   final cli = FileCliLog(DailyLogFile(directory, kCliLogBase));
   if (!kDebugSurfaceEnabled) {
     appLog = file;
     cliLog = cli;
     return;
   }
-  // The file first in both fan-outs: if the mirror ever throws, the durable
-  // copy is already written.
+  // The file first in both fan-outs: if the mirror ever throws, the record
+  // has already reached the file sink (routine debug entries may be buffered).
   appLog = FanoutAppLog([file, StreamAppLog(logStream)]);
   cliLog = FanoutCliLog([cli, StreamCliLog(logStream)]);
   // The dial's log is the daemon's to write; this app only reads it. Tailed

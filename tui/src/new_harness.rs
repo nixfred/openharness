@@ -1,6 +1,7 @@
-//! The desktop's compact New Harness form, with a persistent draft and side choosers.
+//! New Harness: a compact keyboard-driven form, with a persistent draft and side choosers.
 mod data;
 mod receipt;
+mod task;
 pub(crate) use receipt::Creation;
 mod view;
 use crate::{
@@ -15,8 +16,7 @@ use crossterm::event::{
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
-    style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders, Widget},
+    style::{Modifier, Style},
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
@@ -34,6 +34,7 @@ pub struct Draft {
     pub machine: String,
     pub what: What,
     pub project: Project,
+    pub task: String,
     pub permission: String,
     pub worktree: Option<bool>,
     pub branch: Option<String>,
@@ -46,7 +47,7 @@ pub struct Draft {
 enum Field {
     Agent,
     Project,
-    Options,
+    Task,
     Model,
     Approvals,
     Profile,
@@ -74,10 +75,11 @@ enum Choice {
     Path,
     Clone,
     NewFolder,
+    Task,
 }
 impl Choice {
     fn editing(&self) -> bool {
-        matches!(self, Self::Path | Self::Clone | Self::NewFolder)
+        matches!(self, Self::Path | Self::Clone | Self::NewFolder | Self::Task)
     }
 }
 struct Child {
@@ -95,7 +97,6 @@ pub struct Form {
     pub attempt: Option<Creation>,
     prepared_folder: Option<String>,
     focus: Field,
-    expanded: bool,
     child: Option<Child>,
     child_active: bool,
     trail: Vec<Child>,
@@ -130,18 +131,15 @@ impl Form {
         data::project_payload(&self.draft, &self.git)
     }
     fn fields(&self) -> Vec<Field> {
-        let mut fields = vec![Field::Agent, Field::Project, Field::Options];
-        if self.expanded {
-            if self.draft.what.engine != "terminal" {
-                fields.push(Field::Model);
-            }
-            if !data::modes(&self.draft.what.engine).is_empty() {
-                fields.push(Field::Approvals);
-            }
-            if self.draft.what.engine == "codex" && self.draft.model.is_none() {
-                fields.push(Field::Profile);
-            }
-            fields.extend([Field::Branch, Field::Worktree]);
+        let mut fields = vec![Field::Agent, Field::Project, Field::Task, Field::Branch, Field::Worktree];
+        if self.draft.what.engine != "terminal" {
+            fields.push(Field::Model);
+        }
+        if !data::modes(&self.draft.what.engine).is_empty() {
+            fields.push(Field::Approvals);
+        }
+        if self.draft.what.engine == "codex" && self.draft.model.is_none() {
+            fields.push(Field::Profile);
         }
         fields.push(Field::Create);
         fields
@@ -157,7 +155,9 @@ impl Form {
             && self.draft.worktree.unwrap_or(true)
     }
     fn blocked(&self, field: Field) -> Option<&str> {
-        if matches!(field, Field::Branch | Field::Worktree) {
+        if field == Field::Task && !task::supported(&self.draft.what.engine) && self.draft.task.trim().is_empty() {
+            Some("Not available for this agent")
+        } else if matches!(field, Field::Branch | Field::Worktree) {
             if self.git_loading {
                 Some("Checking Git…")
             } else if self.git["error"].is_string() {
@@ -171,9 +171,10 @@ impl Form {
             None
         }
     }
-    fn project_label(&self) -> String {
-        let value = match &self.draft.project {
-            Project::Folder(p) => short_path(p, &self.home),
+    fn project_name(&self) -> String {
+        match &self.draft.project {
+            Project::Folder(p) => p.trim_end_matches('/').rsplit('/').next()
+                .filter(|name| !name.is_empty()).unwrap_or("/").into(),
             Project::New(n) => {
                 if n.is_empty() {
                     "New Folder".into()
@@ -182,10 +183,33 @@ impl Form {
                 }
             }
             Project::Clone(url) => format!("Clone: {url}"),
-        };
-        format!("{}:{value}", self.machine_label)
+        }
     }
-    fn describe(&self, field: Field) -> (&str, String) {
+    fn project_label(&self) -> String {
+        format!("{} @ {}", self.project_name(), self.machine_label)
+    }
+    fn save_task(&mut self) {
+        if let Some(c) = &self.child {
+            if c.kind == Choice::Task {
+                self.draft.task.clone_from(&c.picker.query);
+            }
+        }
+    }
+    fn hint(&self) -> String {
+        if self.starting { return "Esc close · launch continues".into() }
+        if self.attempt.is_some() { return "Enter check status · Esc close".into() }
+        if self.focus == Field::Project {
+            if let Project::Folder(path) = &self.draft.project {
+                return format!("{} @ {}", short_path(path, &self.home), self.machine_label);
+            }
+        }
+        if self.focus == Field::Create {
+            "↑/↓ fields · Enter start · Esc close".into()
+        } else {
+            "↑/↓ fields · Enter choose · Esc back".into()
+        }
+    }
+    fn describe(&self, field: Field) -> (String, String) {
         let (label, value) = match field {
             Field::Agent => (
                 if self.draft.what.dsh.is_some() {
@@ -196,7 +220,11 @@ impl Form {
                 self.draft.what.label.clone(),
             ),
             Field::Project => ("Project", self.project_label()),
-            Field::Options => ("Options", if self.expanded { "[-]" } else { "[+]" }.into()),
+            Field::Task => ("Task", if self.draft.task.trim().is_empty() {
+                "Add a task (optional)".into()
+            } else {
+                self.draft.task.split_whitespace().collect::<Vec<_>>().join(" ")
+            }),
             Field::Model => (
                 "Model",
                 self.draft
@@ -256,13 +284,17 @@ impl Form {
                 } else if self.attempt.is_some() {
                     "Check status"
                 } else {
-                    "New Harness"
+                    "Start"
                 },
                 String::new(),
             ),
         };
         (
-            label,
+            if field == Field::Create && !self.starting && self.attempt.is_none() {
+                format!("Start {}", self.draft.what.label)
+            } else {
+                label.into()
+            },
             self.blocked(field).map(str::to_string).unwrap_or(value),
         )
     }
@@ -274,9 +306,15 @@ fn short_path(path: &str, home: &str) -> String {
         path.into()
     }
 }
+fn machine_label(app: &App, machine: &str) -> String {
+    if app.fleet.machines.iter().any(|m| m.id == machine && m.local) {
+        "local".into()
+    } else {
+        app.fleet.machine_name(machine)
+    }
+}
 fn defaults_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".harness/tui/new-harness.json")
+    crate::app::state_dir().join("new-harness.json")
 }
 fn defaults() -> Value {
     if cfg!(test) {
@@ -373,7 +411,7 @@ pub fn open(app: &mut App, machine: Option<String>, cwd: Option<String>) {
         .and_then(|p| app.fleet.agent(&p.machine_id, &p.agent_id));
     let engine = saved["engine"]
         .as_str()
-        .unwrap_or_else(|| current.map(|a| a.engine.as_str()).unwrap_or("codex"))
+        .unwrap_or("opencode")
         .to_string();
     let what = What {
         label: saved["label"]
@@ -398,6 +436,7 @@ pub fn open(app: &mut App, machine: Option<String>, cwd: Option<String>) {
         machine: machine.clone(),
         what,
         project,
+        task: String::new(),
         permission,
         worktree: None,
         branch: None,
@@ -414,7 +453,6 @@ pub fn open(app: &mut App, machine: Option<String>, cwd: Option<String>) {
         attempt: None,
         prepared_folder: None,
         focus: Field::Create,
-        expanded: false,
         child: None,
         child_active: false,
         trail: vec![],
@@ -439,7 +477,7 @@ pub fn open(app: &mut App, machine: Option<String>, cwd: Option<String>) {
     crate::input::load_dsh(app, machine);
 }
 fn refresh_form(app: &App, form: &mut Form) {
-    form.machine_label = app.fleet.machine_name(&form.draft.machine).to_string();
+    form.machine_label = machine_label(app, &form.draft.machine);
     form.home = app
         .homes
         .get(&form.draft.machine)
@@ -542,6 +580,7 @@ fn compatible_rows(app: &App, machine: &str, dsh: &str) -> Vec<Row> {
         .collect()
 }
 fn project_rows(app: &App, draft: &Draft) -> Vec<Row> {
+    const PER_MACHINE: usize = 50;
     let mut rows = vec![];
     if draft.what.engine != "terminal" {
         rows.push(Row::new("clone", "Clone Repository"));
@@ -558,16 +597,26 @@ fn project_rows(app: &App, draft: &Draft) -> Vec<Row> {
         .collect();
     agents.sort_by_key(|a| {
         (
-            a.machine_id != app.fleet.local_id,
+            app.fleet.launch_machine_id(&a.machine_id) != app.fleet.local_id,
             std::cmp::Reverse(a.recency()),
+            a.cwd.as_str(),
+            a.machine_id.as_str(),
         )
     });
+    // Each destination gets its own recent-folder allowance. Duplicate sessions and local
+    // shell aliases share that allowance; a large local history cannot consume a remote's.
     let mut seen = std::collections::HashSet::new();
+    let mut counts = HashMap::new();
     for a in agents {
         let machine = app.fleet.launch_machine_id(&a.machine_id);
         if !seen.insert((machine.to_string(), a.cwd.clone())) {
             continue;
         }
+        let count = counts.entry(machine).or_insert(0);
+        if *count >= PER_MACHINE {
+            continue;
+        }
+        *count += 1;
         let short = short_path(
             &a.cwd,
             app.homes
@@ -578,8 +627,9 @@ fn project_rows(app: &App, draft: &Draft) -> Vec<Row> {
         );
         let mut row = Row::new(
             format!("at:{machine}\t{}", a.cwd),
-            format!("{}:{short}", app.fleet.machine_name(machine)),
+            format!("{short} @ {}", machine_label(app, machine)),
         )
+        .extra(app.fleet.machine_name(machine))
         .group("Recent projects");
         row.disabled = !app
             .fleet
@@ -590,9 +640,6 @@ fn project_rows(app: &App, draft: &Draft) -> Vec<Row> {
             row.label.push_str(" · offline");
         }
         rows.push(row);
-        if seen.len() == 60 {
-            break;
-        }
     }
     rows
 }
@@ -738,9 +785,11 @@ fn child(app: &mut App, form: &mut Form, kind: Choice, initial: &str) {
         Choice::Path => "/path/to/project or ~/project",
         Choice::Clone => "GitHub URL or owner/repository",
         Choice::NewFolder => "Folder name (optional)",
+        Choice::Task => "Describe the task…",
     };
     let mut picker = Picker::new("", hint);
-    picker.keep_order = true;
+    picker.keep_order = kind != Choice::Project;
+    picker.search_extra = kind == Choice::Project;
     picker.query = initial.into();
     picker.qcursor = initial.chars().count();
     picker.empty = "No matches".into();
@@ -847,6 +896,7 @@ fn load_folder(app: &mut App, form: &mut Form, path: String) {
     );
 }
 fn reveal(app: &mut App, form: &mut Form) {
+    form.save_task();
     form.child = None;
     form.child_active = false;
     form.trail.clear();
@@ -856,13 +906,15 @@ fn reveal(app: &mut App, form: &mut Form) {
     let kind = match form.focus {
         Field::Agent => Choice::Agent,
         Field::Project => Choice::Project,
+        Field::Task => Choice::Task,
         Field::Model => Choice::Model,
         Field::Approvals => Choice::Approvals,
         Field::Profile => Choice::Profile,
         Field::Branch => Choice::Branch,
         _ => return,
     };
-    child(app, form, kind, "");
+    let initial = if kind == Choice::Task { form.draft.task.clone() } else { String::new() };
+    child(app, form, kind, &initial);
 }
 fn activate(app: &mut App, form: &mut Form) -> bool {
     form.error.clear();
@@ -874,10 +926,6 @@ fn activate(app: &mut App, form: &mut Form) -> bool {
     }
     match form.focus {
         Field::Create => return true,
-        Field::Options => {
-            form.expanded = !form.expanded;
-            form.child = None;
-        }
         Field::Worktree => {
             form.draft.worktree = Some(!form.worktree());
             form.draft.branch = None;
@@ -1117,6 +1165,7 @@ fn choose(app: &mut App, form: &mut Form) {
             set_project(form, Project::Clone(query));
         }
         Choice::NewFolder => set_project(form, Project::New(query)),
+        Choice::Task => form.draft.task = c.picker.query.clone(),
     }
     form.child_active = false;
     form.trail.clear();
@@ -1126,6 +1175,7 @@ fn choose(app: &mut App, form: &mut Form) {
     sync_git(app, form, false);
 }
 fn back(app: &mut App, form: &mut Form) -> bool {
+    form.save_task();
     if form.child_active {
         if let Some(previous) = form.trail.pop() {
             form.child = Some(previous);
@@ -1174,10 +1224,14 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
         return;
     }
     let mut launch = false;
+    let task_width = form.child_area.width.saturating_sub(6).max(1) as usize;
     if form.child_active {
         if let Some(c) = &mut form.child {
             let editing = c.kind.editing();
             match key.code {
+                KeyCode::Enter if c.kind == Choice::Task && key.modifiers.contains(KeyModifiers::ALT) => {
+                    c.picker.type_char('\n');
+                }
                 KeyCode::Enter => choose(app, &mut form),
                 KeyCode::Tab | KeyCode::BackTab => form.child_active = false,
                 KeyCode::Char('l') if ctrl && matches!(c.kind, Choice::Folder(_)) => {
@@ -1189,6 +1243,8 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
                     let previous = form.child.take().unwrap();
                     step_into(app, &mut form, previous, Choice::Path, &path);
                 }
+                KeyCode::Up if c.kind == Choice::Task => task::move_vertical(&mut c.picker, -1, task_width),
+                KeyCode::Down if c.kind == Choice::Task => task::move_vertical(&mut c.picker, 1, task_width),
                 KeyCode::Up if !editing => c.picker.move_by(-1),
                 KeyCode::Down if !editing => c.picker.move_by(1),
                 KeyCode::PageUp if !editing => c.picker.move_by(-c.picker.page_rows.get().max(1)),
@@ -1247,7 +1303,7 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => launch = activate(app, &mut form),
-            KeyCode::Right if form.child.is_some() || form.focus == Field::Worktree => {
+            KeyCode::Right if form.focus != Field::Create => {
                 activate(app, &mut form);
             }
             KeyCode::Left | KeyCode::PageUp | KeyCode::PageDown
@@ -1260,6 +1316,9 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
+                if form.child.is_none() && form.focus != Field::Create {
+                    reveal(app, &mut form);
+                }
                 if form.child.is_some() {
                     form.child_active = true;
                     form.child.as_mut().unwrap().picker.type_char(ch);
@@ -1267,7 +1326,7 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
                     let field = match ch {
                         'a' => Some(Field::Agent),
                         'p' => Some(Field::Project),
-                        'o' => Some(Field::Options),
+                        't' => Some(Field::Task),
                         _ => None,
                     };
                     if let Some(field) = field {
@@ -1279,6 +1338,7 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
             _ => {}
         }
     }
+    form.save_task();
     if form
         .child
         .as_ref()
@@ -1297,6 +1357,16 @@ pub fn paste(form: &mut Form, text: &str) {
     }
     if let Some(c) = &mut form.child {
         form.child_active = true;
+        if c.kind == Choice::Task {
+            let text: String = text.replace("\r\n", "\n").replace('\r', "\n").chars()
+                .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control()).collect();
+            let at = c.picker.query.char_indices().nth(c.picker.qcursor)
+                .map(|(at, _)| at).unwrap_or(c.picker.query.len());
+            c.picker.qcursor = c.picker.query[..at].chars().count() + text.chars().count();
+            c.picker.query.insert_str(at, &text);
+            form.save_task();
+            return;
+        }
         let mut line_break = false;
         for ch in text.chars() {
             if matches!(ch, '\r' | '\n') {
@@ -1338,17 +1408,24 @@ pub fn mouse(app: &mut App, mouse: MouseEvent) {
         {
             if let Some(c) = &mut form.child {
                 form.child_active = true;
-                c.picker.move_by(if mouse.kind == MouseEventKind::ScrollUp {
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
                     -1
                 } else {
                     1
-                });
+                };
+                if c.kind == Choice::Task {
+                    task::move_vertical(&mut c.picker, delta, form.child_area.width.saturating_sub(6).max(1) as usize);
+                } else {
+                    c.picker.move_by(delta as i64);
+                }
             }
         } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             if form.child.is_some() && form.child_area.contains(pos) {
                 form.child_active = true;
                 let c = form.child.as_mut().unwrap();
-                if let Some((_, index)) = c.picker.row_at.iter().find(|(y, _)| *y == mouse.row) {
+                if c.kind == Choice::Task {
+                    task::click(&mut c.picker, form.child_area, pos);
+                } else if let Some((_, index)) = c.picker.row_at.iter().find(|(y, _)| *y == mouse.row) {
                     c.picker.cursor = *index;
                     choose(app, &mut form);
                 }
@@ -1389,10 +1466,13 @@ pub fn start(app: &mut App) {
         return;
     }
     resolve_launch_machine(app, &mut form);
-    let fail = if form.git_loading {
+    form.save_task();
+    let fail = if let Some(error) = task::error(&form.draft.what.engine, &form.draft.task) {
+        Some(error)
+    } else if form.git_loading {
         Some("Checking the project…".into())
     } else if form.git["error"].is_string() {
-        Some("Could not read this project. Open Options → Branch to retry.".into())
+        Some("Could not read this project. Choose Branch to retry.".into())
     } else {
         form.project_payload().err()
     };
@@ -1477,7 +1557,7 @@ fn launch(app: &mut App, mut form: Box<Form>, visible: bool) {
         d.machine,
         d.what,
         cwd,
-        None,
+        Some(d.task),
         false,
         crate::input::NewOpts {
             extra: Some(extra),
@@ -1581,6 +1661,22 @@ mod tests {
         app
     }
 
+    /// Opening a chooser leaves the main form where it was, on a wide window and a narrow one.
+    #[tokio::test]
+    async fn the_form_stays_put_when_a_chooser_opens() {
+        let mut app = app();
+        open(&mut app, None, Some("/home/dev/project".into()));
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        for body in [Rect::new(0, 0, 150, 41), Rect::new(0, 0, 90, 30)] {
+            form.child = None;
+            draw(&mut Buffer::empty(body), body, &mut form);
+            let alone = form.area;
+            child(&mut app, &mut form, Choice::Agent, "codex");
+            draw(&mut Buffer::empty(body), body, &mut form);
+            assert_eq!(form.area, alone, "the form moved at {}x{}", body.width, body.height);
+        }
+    }
+
     #[tokio::test]
     async fn local_shell_entry_does_not_override_the_registered_launch_machine() {
         let mut app = app();
@@ -1593,7 +1689,7 @@ mod tests {
             open(&mut app, explicit, None);
             let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
             assert_eq!(form.draft.machine, "local");
-            assert_eq!(form.project_label(), "studio:New Folder");
+            assert_eq!(form.project_label(), "New Folder @ local");
             for rows in [modal::machine_rows(&app), modal::new_machine_rows(&app, shell)] {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].id, "local");
@@ -1610,7 +1706,111 @@ mod tests {
         let recent: Vec<_> = rows.iter().filter(|r| r.id.starts_with("at:")).collect();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, "at:local\t/home/dev/repo");
-        assert_eq!(recent[0].label, "studio:~/repo");
+        assert_eq!(recent[0].label, "~/repo @ local");
+    }
+
+    #[tokio::test]
+    async fn project_search_reaches_remote_machines_after_a_large_local_history() {
+        let mut app = app();
+        for name in ["office", "m2"] {
+            app.fleet.machines.push(crate::fleet::Machine {
+                id: name.into(), name: name.into(), local: false,
+                status: "running".into(), reach: crate::fleet::Reach::Ready,
+            });
+            app.homes.insert(name.into(), "/home/dev".into());
+        }
+        for (machine, count) in [("local", 100), ("office", 1), ("m2", 1)] {
+            for i in 0..count {
+                let agent = crate::fleet::agent_from(machine, &json!({
+                    "id": format!("agent-{i}"), "engine": "codex",
+                    "project": {"cwd": format!("/home/dev/harnesses/autonomous-harness-2026-{i:03}")},
+                }), None);
+                app.fleet.agents.insert(agent.key(), agent);
+            }
+        }
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        child(&mut app, &mut form, Choice::Project, "");
+        assert_eq!(form.child.as_ref().unwrap().picker.rows.iter().filter(|r| r.id.starts_with("at:")).count(), 52);
+        for machine in ["office", "m2"] {
+            for query in [format!("{machine} harness"), format!("harness {machine}")] {
+                let picker = &mut form.child.as_mut().unwrap().picker;
+                picker.set_query(&query);
+                let selected = picker.current().expect("the remote project is searchable");
+                assert_eq!(selected.id, format!("at:{machine}\t/home/dev/harnesses/autonomous-harness-2026-000"), "{query}");
+                assert!(selected.label.ends_with(&format!(" @ {machine}")));
+                assert!(!selected.disabled);
+            }
+            choose(&mut app, &mut form);
+            assert_eq!(form.draft.machine, machine);
+            assert!(matches!(&form.draft.project, Project::Folder(path) if path == "/home/dev/harnesses/autonomous-harness-2026-000"));
+            child(&mut app, &mut form, Choice::Project, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn project_limits_count_unique_folders_per_machine_by_recent_activity() {
+        let mut app = app();
+        let shell = crate::local::MACHINE;
+        for (id, local) in [(shell, true), ("office", false)] {
+            app.fleet.machines.push(crate::fleet::Machine {
+                id: id.into(), name: id.into(), local,
+                status: "running".into(), reach: crate::fleet::Reach::Ready,
+            });
+        }
+        for machine in ["local", "office"] {
+            for i in 0..70 {
+                let mut agent = crate::fleet::agent_from(machine, &json!({
+                    "id": format!("agent-{i}"), "engine": "codex",
+                    "project": {"cwd": format!("/home/dev/repo-{i:02}")},
+                }), None);
+                agent.updated_at = 1000 - i;
+                app.fleet.agents.insert(agent.key(), agent);
+            }
+            // Many sessions in the oldest folder make it most recent but use just one slot.
+            // A local shell is the same destination as its registered local daemon.
+            let source = if machine == "local" { shell } else { machine };
+            for i in 0..10 {
+                let mut agent = crate::fleet::agent_from(source, &json!({
+                    "id": format!("duplicate-{i}"), "engine": "terminal",
+                    "project": {"cwd": "/home/dev/repo-69"},
+                }), None);
+                agent.active_at = 2000 + i;
+                app.fleet.agents.insert(agent.key(), agent);
+            }
+        }
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
+        let rows = project_rows(&app, &form.draft);
+        for machine in ["local", "office"] {
+            let prefix = format!("at:{machine}\t");
+            let actual: Vec<_> = rows.iter().filter(|r| r.id.starts_with(&prefix)).map(|r| r.id.clone()).collect();
+            let expected: Vec<_> = std::iter::once(69).chain(0..49)
+                .map(|i| format!("at:{machine}\t/home/dev/repo-{i:02}")).collect();
+            assert_eq!(actual, expected);
+        }
+        assert!(!rows.iter().any(|r| r.id.starts_with(&format!("at:{shell}\t"))));
+    }
+
+    #[tokio::test]
+    async fn project_search_keeps_the_short_local_machine_name_searchable() {
+        let mut app = app();
+        app.fleet.machine_mut("local").unwrap().name = "M2".into();
+        let agent = crate::fleet::agent_from("local", &json!({
+            "id": "agent", "engine": "codex", "project": {"cwd": "/home/dev/harnesses/repo"},
+        }), None);
+        app.fleet.agents.insert(agent.key(), agent);
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        child(&mut app, &mut form, Choice::Project, "");
+        let picker = &mut form.child.as_mut().unwrap().picker;
+        for query in ["m2 harness", "harness m2", "M2 harness", "local harness"] {
+            picker.set_query(query);
+            let selected = picker.current().expect("the real machine name and local both work");
+            assert_eq!(selected.id, "at:local\t/home/dev/harnesses/repo", "{query}");
+            assert_eq!(selected.label, "~/harnesses/repo @ local");
+            assert!(picker.visible.iter().all(|(i, hits)| hits.iter().all(|at| (*at as usize) < picker.rows[*i].label.chars().count())));
+        }
     }
 
     #[tokio::test]
@@ -1634,7 +1834,7 @@ mod tests {
             refresh(&mut app);
             let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
             assert_eq!(form.draft.machine, if pending { shell } else { "local" });
-            assert_eq!(form.project_label(), "office:~/repo");
+            assert_eq!(form.project_label(), "repo @ local");
             if pending { assert_eq!(form.attempt.as_ref().unwrap().machine, shell); }
         }
     }
@@ -1646,6 +1846,7 @@ mod tests {
         let Some(Modal::NewHarness(mut form)) = app.modal.take() else {
             panic!()
         };
+        form.focus = Field::Agent;
         child(&mut app, &mut form, Choice::Agent, "codex");
         app.modal = Some(Modal::NewHarness(form));
         refresh(&mut app);
@@ -1663,6 +1864,16 @@ mod tests {
         };
         assert!(form.child.is_none());
         assert!(matches!(&form.draft.project, Project::Folder(p) if p == "/home/dev/project"));
+        let Some(Modal::NewHarness(form)) = app.modal.take() else { panic!() };
+        key(&mut app, form, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Modal::NewHarness(form)) = app.modal.take() else { panic!() };
+        assert!(form.child_active);
+        key(&mut app, form, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Some(Modal::NewHarness(form)) = app.modal.take() else { panic!() };
+        key(&mut app, form, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
+        assert!(form.child_active);
+        assert_eq!(form.child.as_ref().unwrap().picker.query, "c");
         app.modal = Some(Modal::Confirm {
             prompt: "keep me".into(),
             command: "".into(),
@@ -1674,23 +1885,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_form_is_centered_and_stays_anchored_at_every_terminal_size() {
+    async fn multiline_task_survives_editing_dismissal_and_agent_changes() {
+        let mut app = app();
+        open(&mut app, None, Some("/home/dev/project".into()));
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        form.focus = Field::Task;
+        assert!(!activate(&mut app, &mut form));
+        paste(&mut form, "Fix café\r\n\r\nKeep 界 and 🦀 intact.");
+        let expected = "Fix café\n\nKeep 界 and 🦀 intact.";
+        assert_eq!(form.draft.task, expected);
+        key(&mut app, form, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        let Some(Modal::NewHarness(form)) = app.modal.take() else { panic!() };
+        assert_eq!(form.draft.task, format!("{expected}\n"));
+        // Escape leaves the editor with its text, then dismisses the draft.
+        key(&mut app, form, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Some(Modal::NewHarness(form)) = app.modal.take() else { panic!() };
+        key(&mut app, form, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        assert_eq!(form.draft.task, format!("{expected}\n"));
+        set_engine(&mut form, "terminal");
+        assert!(task::error(&form.draft.what.engine, &form.draft.task).is_some());
+        assert!(form.blocked(Field::Task).is_none(), "a retained task can still be cleared");
+        set_engine(&mut form, "claude");
+        reveal(&mut app, &mut form);
+        assert_eq!(form.child.as_ref().unwrap().picker.query, format!("{expected}\n"));
+        choose(&mut app, &mut form);
+        assert_eq!(form.focus, Field::Create);
+        assert_eq!(form.draft.task, format!("{expected}\n"));
+    }
+
+    #[tokio::test]
+    async fn compact_form_and_side_choosers_stay_anchored_at_every_terminal_size() {
         let mut app = app();
         open(&mut app, None, None);
         let Some(Modal::NewHarness(mut form)) = app.modal.take() else {
             panic!()
         };
         for width in [
-            1, 10, 21, 22, 45, 80, 109, 110, 120, 122, 123, 124, 150, 220,
+            1, 10, 21, 22, 45, 80, 109, 110, 120, 128, 130, 131, 132, 150, 220,
         ] {
             for height in [1, 4, 5, 10, 14, 24, 42] {
                 let area = Rect::new(3, 2, width, height);
                 let mut anchor = None;
-                for expanded in [false, true, false] {
-                    form.expanded = expanded;
-                    for chooser in [None, Some(Choice::Agent), Some(Choice::Clone), None] {
+                for engine in ["claude", "codex", "terminal"] {
+                    set_engine(&mut form, engine);
+                    for chooser in [None, Some(Choice::Agent), Some(Choice::Clone), Some(Choice::Task), None] {
                         if let Some(kind) = chooser {
-                            child(&mut app, &mut form, kind, "");
+                            let text = if kind == Choice::Task { "A long task with 界 and 🦀.\n".repeat(50) } else { String::new() };
+                            child(&mut app, &mut form, kind, &text);
                         } else {
                             form.child = None;
                         }
@@ -1698,26 +1941,26 @@ mod tests {
                             form.child_active = active;
                             let mut buf = Buffer::empty(area);
                             if let Some(cursor) = draw(&mut buf, area, &mut form) {
+                                assert!(active, "a preview must not take keyboard focus");
                                 assert!(area.contains(cursor), "{area:?} {cursor:?}");
                             }
                             for (hit, _) in &form.hits {
                                 assert_eq!(hit.intersection(area), *hit);
                             }
                             if form.area.width > 0 {
-                                assert!(form.area.width <= 52);
+                                // The form's panel: its own height, one size and place whatever is open.
+                                assert_eq!(form.area, crate::settings::area(area, crate::settings::PanelSize::Form, view::HEIGHT));
+                                assert!(form.area.width <= 60 && form.area.height <= 17);
                                 let left = form.area.x - area.x;
                                 let right = area.right() - form.area.right();
                                 assert!(left.abs_diff(right) <= 1, "not centered in {area:?}");
-                                if !expanded {
-                                    let top = form.area.y - area.y;
-                                    let bottom = area.bottom() - form.area.bottom();
-                                    assert!(top.abs_diff(bottom) <= 1, "not centered in {area:?}");
-                                }
-                                let position = (form.area.x, form.area.y, form.area.width);
+                                let top = form.area.y - area.y;
+                                let bottom = area.bottom() - form.area.bottom();
+                                assert!(top.abs_diff(bottom) <= 1, "not centered in {area:?}");
                                 assert_eq!(
-                                    *anchor.get_or_insert(position),
-                                    position,
-                                    "form moved in {area:?}: expanded={expanded}, active={active}"
+                                    *anchor.get_or_insert(form.area),
+                                    form.area,
+                                    "form moved in {area:?}: engine={engine}, active={active}"
                                 );
                                 assert_eq!(form.area.intersection(area), form.area);
                             }
@@ -1725,16 +1968,97 @@ mod tests {
                                 assert_eq!(form.child_area.intersection(area), form.child_area);
                                 assert_eq!(form.child_area.y, form.area.y);
                                 if form.child_area.x == form.area.x {
-                                    assert!(active && width < 150);
-                                    assert_eq!(form.child_area.width, form.area.width);
+                                    assert!(active, "narrow previews must leave the form visible");
+                                    assert_eq!(form.child_area, form.area);
                                 } else {
                                     assert_eq!(form.child_area.x, form.area.right() + 2);
+                                    assert!(form.child_area.width >= 32);
                                 }
+                            }
+                            if width >= 80 && height >= 24
+                                && (form.child_area.is_empty() || form.child_area.x > form.area.x)
+                            {
+                                assert_eq!(form.hits.len(), form.fields().len(), "all settings stay visible");
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn project_chooser_keeps_the_selected_row_visible_past_the_action_separator() {
+        let mut app = app();
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        child(&mut app, &mut form, Choice::Project, "");
+        form.child_active = true;
+        let mut rows = vec![Row::new("clone", "Clone Repository"), Row::new("folder", "Open Folder"), Row::new("new", "New Folder")];
+        rows.extend((0..50).map(|n| Row::new(format!("at:local\t/project-{n}"), format!("project-{n} @ local"))));
+        form.child.as_mut().unwrap().picker.set_rows(rows);
+        for width in [80, 150] {
+            let area = Rect::new(0, 0, width, 42);
+            let count = form.child.as_ref().unwrap().picker.visible.len();
+            for cursor in (0..count).chain((0..count).rev()) {
+                form.child.as_mut().unwrap().picker.cursor = cursor;
+                draw(&mut Buffer::empty(area), area, &mut form);
+                let picker = &form.child.as_ref().unwrap().picker;
+                assert!(picker.row_at.iter().any(|(_, row)| *row == cursor), "selected row {cursor} is hidden at width {width}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_resize_before_its_input_event_keeps_the_form_and_choosers_in_frame() {
+        for choice in [None, Some(Choice::Agent), Some(Choice::Task)] {
+            let mut app = app();
+            open(&mut app, None, None);
+            if let Some(kind) = choice {
+                let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+                child(&mut app, &mut form, kind, "");
+                app.modal = Some(Modal::NewHarness(form));
+            }
+            // The backend has already resized, but no Resize input event has been delivered.
+            for (width, height) in [(80, 24), (45, 14), (22, 5), (1, 1), (150, 42)] {
+                let mut terminal = ratatui::Terminal::new(
+                    ratatui::backend::TestBackend::new(width, height),
+                ).unwrap();
+                terminal.draw(|frame| crate::ui::draw(frame, &mut app)).unwrap();
+                let bounds = Rect::new(0, 0, width, height);
+                let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
+                assert_eq!(form.area.intersection(bounds), form.area);
+                assert_eq!(form.child_area.intersection(bounds), form.child_area);
+                assert!(form.hits.iter().all(|(hit, _)| hit.intersection(bounds) == *hit));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn project_error_keeps_its_recovery_instruction_and_action_visible() {
+        let mut app = app();
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        form.error = "Could not start it: “My-First-Claude-Project” already exists. Select that folder from your projects.".into();
+        for width in [45, 80, 130] {
+            let area = Rect::new(0, 0, width, 38);
+            let mut buf = Buffer::empty(area);
+            draw(&mut buf, area, &mut form);
+            let text: String = (form.area.y..form.area.bottom()).map(|y| {
+                (form.area.x + 2..form.area.right() - 2)
+                    .map(|x| buf[(x, y)].symbol()).collect::<String>().trim().to_string()
+            }).collect::<Vec<_>>().join(" ");
+            assert!(text.contains("already exists. Select that folder from your projects."), "{text}");
+            assert!(form.hits.iter().any(|(_, f)| *f == Field::Create));
+            assert_eq!(form.area.intersection(area), form.area);
+        }
+        form.error = "项目".repeat(100);
+        for height in [5, 10, 24] {
+            let area = Rect::new(0, 0, 22, height);
+            let mut buf = Buffer::empty(area);
+            draw(&mut buf, area, &mut form);
+            assert_eq!(form.area.intersection(area), form.area);
+            assert!(form.hits.iter().any(|(_, f)| *f == Field::Create));
         }
     }
 
@@ -1745,7 +2069,10 @@ mod tests {
         let Some(Modal::NewHarness(mut f)) = app.modal.take() else {
             panic!()
         };
-        f.expanded = true;
+        assert_eq!(f.draft.what.engine, "opencode");
+        assert_eq!(f.draft.permission, "auto");
+        // Exercise remembered per-engine choices independently of the launch default.
+        set_engine(&mut f, "codex");
         f.draft.permission = "readOnly".into();
         set_engine(&mut f, "claude");
         assert_eq!(f.draft.permission, "auto");

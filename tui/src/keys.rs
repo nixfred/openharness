@@ -151,7 +151,9 @@ impl Keymap {
         // ── keys tmux leaves unbound: the Harness ones ──
         b(ch('C'), "customize-mode -Z", false, "Customize options");
         // Harness's own, on keys tmux leaves unbound.
-        b(ch('N'), "new-harness", false, "New Harness: agent, project and options");
+        // (Enter: the one key to remember — every command and setting by name.)
+        b(k(KeyCode::Enter, none), "choose-command", false, "Commands and settings, by name");
+        b(ch('N'), "new-harness", false, "New Harness: agent, project, task and launch settings");
         b(ch('@'), "choose-tree -m", false, "Machines (then their harnesses)");
         b(ch('T'), "new-terminal", false, "New terminal (a shell) beside this pane");
         b(ch('a'), "next-harness", false, "Go to the next harness that needs you");
@@ -185,6 +187,20 @@ impl Keymap {
         // enters copy mode, a drag on a border resizes, the right button opens the menus).
         let root: Vec<Binding> = include_str!("../tests/fixtures/tmux-3.5a-root.txt").lines().filter_map(fixture_binding).collect();
         Keymap { prefix: k(KeyCode::Char('b'), ctrl), prefix2: None, prefix_table: t, root_table: root, copy_vi: Vec::new(), copy_emacs: Vec::new(), named: Default::default(), copy_unbound: Vec::new(), removed: Vec::new(), repeat_ms: 500, hint_ms: 600 }
+    }
+
+    /// A prefix table saved before hn added a key: the new key is added where the table has
+    /// nothing on it (a key bound by hand to something else is left as it is).
+    pub fn migrate_defaults(table: &mut Vec<Binding>) {
+        // (key, command, note) — hn's keys added since tables were first saved.
+        const ADDED: &[(&str, &str, &str)] = &[
+            ("Enter", "choose-command", "Commands and settings, by name"),
+        ];
+        for (key, command, note) in ADDED {
+            let Ok(chord) = parse(key) else { continue };
+            if table.iter().any(|b| b.chord == chord) { continue }
+            table.push(Binding { chord, command: (*command).into(), repeat: false, note: (*note).into() });
+        }
     }
 
     /// Every key table, as `list-keys` walks them: by name, each by key code. The copy-mode tables
@@ -504,6 +520,20 @@ pub fn of(key: &KeyEvent) -> Chord { Chord::of(key) }
 mod tests {
     use super::*;
 
+    /// A table saved before Enter opened the command list gets it (Space stays tmux's
+    /// next-layout); Enter bound by hand to something else keeps it.
+    #[test]
+    fn a_saved_table_gets_the_keys_added_since() {
+        let mut old = vec![Binding { chord: parse("Space").unwrap(), command: "next-layout".into(), repeat: false, note: String::new() }];
+        Keymap::migrate_defaults(&mut old);
+        assert_eq!(old[0].command, "next-layout");
+        assert!(old.iter().any(|b| name(&b.chord) == "Enter" && b.command == "choose-command"));
+        let mut mine = vec![Binding { chord: parse("Enter").unwrap(), command: "resize-pane -Z".into(), repeat: false, note: String::new() }];
+        Keymap::migrate_defaults(&mut mine);
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].command, "resize-pane -Z");
+    }
+
     #[test]
     fn tmux_spellings() {
         assert_eq!(parse("C-b").unwrap(), Chord::normal(KeyCode::Char('b'), KeyModifiers::CONTROL));
@@ -592,4 +622,3 @@ mod tmux_parity {
         assert!(wrong.is_empty(), "keys that differ from tmux 3.5a:\n{}", wrong.join("\n"));
     }
 }
-

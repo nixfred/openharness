@@ -167,16 +167,12 @@ void main() {
           final model = tester.getRect(
             find.byKey(const ValueKey(('pane-model', 'local', 'agent-1'))),
           );
-          final controls = [
-            for (final key in [
-              'pane-split-down',
-              'pane-split-right',
-              'pane-zoom',
-            ])
-              tester.getRect(find.byKey(ValueKey(key))),
-            tester.getRect(find.byType(PaneCloseButton)),
-          ];
-          expect(rect.right, closeTo(model.left, 1));
+          final controls = [tester.getRect(find.byType(PaneCloseButton))];
+          final agent = tester.getRect(
+            find.byKey(const ValueKey('pane-agent-control')),
+          );
+          expect(rect.right, closeTo(agent.left, 1));
+          expect(agent.right, closeTo(model.left, 1));
           expect(model.right, closeTo(controls.first.left, 1));
           for (var i = 1; i < controls.length; i++) {
             expect(controls[i - 1].right, closeTo(controls[i].left, 1));
@@ -210,7 +206,8 @@ void main() {
     (tester) async {
       final session = sessionNamed('Desktop');
       addTearDown(session.dispose);
-      await pump(tester, session);
+      // Keep the full project readable beside both agent and model controls.
+      await pump(tester, session, width: 1100);
       final project = find.text('autonomous-harness');
       final projectRect = tester.getRect(project);
       for (final (status, label) in [
@@ -220,7 +217,7 @@ void main() {
         (TerminalSessionStatus.error, 'Reconnect'),
       ]) {
         session.status = status;
-        await pump(tester, session);
+        await pump(tester, session, width: 1100);
         final nameRect = tester.getRect(find.text('Desktop'));
         final statusRect = tester.getRect(
           find.widgetWithText(TextButton, label),

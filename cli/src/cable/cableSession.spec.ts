@@ -829,6 +829,42 @@ describe('cable session', () => {
     await session.stop()
   })
 
+  it('says so when the port is another product\'s, or never speaks at all, and never of a real dial', async () => {
+    // Told to whoever owns discovery, so a second ESP32 on the desk stops being opened every minute.
+    // A port that has been a dial is never reported: a hung or rebooting dial goes quiet and comes back.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const reports: Array<[string, string]> = []
+      const host = makeHost({ onForeignPort: (path, why) => { reports.push([path, why]) } })
+
+      // 1. Another product's greeting.
+      const other = await connect(host)
+      other.port.say({ t: 'hello', product: 'grid', fw: '0.1.2', proto: 1, mac: 'aa:bb' })
+      await settle()
+      expect(reports).toEqual([['/dev/loopback', "greeted as 'grid'"]])
+      await other.session.stop()
+
+      // 2. A port that never says anything.
+      reports.length = 0
+      const quiet = await connect(host)
+      await settle()
+      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
+      expect(reports).toEqual([['/dev/loopback', 'silent']])
+      await quiet.session.stop()
+
+      // 3. A real dial that then goes quiet is not written off.
+      reports.length = 0
+      const dial = await connect(host)
+      dial.port.say({ t: 'hello', product: 'harness', fw: '0.1.0', proto: 1, mac: 'aa:bb' })
+      await settle()
+      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
+      expect(reports).toEqual([])
+      await dial.session.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("refuses a dial that names another product, and lets go of its port", async () => {
     // The framing magic should already have made this greeting unreadable — reaching here means something
     // this code cannot see has changed (a re-unified magic, a fork of the firmware, a third product). The

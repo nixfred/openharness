@@ -31,6 +31,8 @@ code = r'''
 #include "octopus.h"
 #include "character.h"
 #include "focus.h"
+#include "focus_faces.h"
+#include "pets.h"
 #include "workspace.h"
 #include "command_face.h"
 #include "nixfred_art.h"
@@ -62,6 +64,7 @@ static struct {
     uint32_t touch_started, coast_until, character_activity, pet_until, last_celebration;
     uint32_t notice_sequence, voice_retry_until;
     uint8_t status_phase;
+    uint32_t pet_next_ms;
     cable_swarm_t tabs[SWARMS_MAX];
     cable_machine_t machines[2];
     char selected_tab[ID_MAX], pending_focus[ID_MAX], opening_notice[ID_MAX], title[80], message[256];
@@ -182,7 +185,8 @@ static unsigned preview_brightness = 100;
 #define SEL color(HT_THEME_SELECTION)
 #define ESP_LOGI(...) ((void)0)
 #define EXT_RAM_BSS_ATTR
-static void change(void) {}
+static unsigned changes;
+static void change(void) { changes++; }
 static void display_lock(void) {}
 static void display_unlock(void) {}
 static void display_wake(void) {}
@@ -247,7 +251,7 @@ for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notic
     code += function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
-code += function('focus_title') + function('focus_centred') + function('focus_clipped') + function('render_focus_panes') + function('panes_move') + function('panes_settle') + function('render_agents') + function('tabs_move') + function('tab_name') + function('render_focus_tabs') + function('render_tabs') + function('page_controls') + function('render_notice') + function('render_focus_inbox') + function('render_list')
+code += function('focus_centred') + function('focus_header') + function('focus_clipped') + function('render_focus_panes') + function('panes_move') + function('panes_settle') + function('render_agents') + function('tabs_move') + function('tab_name') + function('render_focus_tabs') + function('render_tabs') + function('page_controls') + function('render_notice') + function('render_focus_inbox') + function('render_list')
 for name in ['notice_remove', 'notice_sync_view', 'notice_selection', 'notice_restore_selection', 'notice_add', 'ui_notify_task_done', 'ui_notif_seen', 'ui_notif_read', 'ui_notif_replace', 'ui_notif_open', 'ui_question_close', 'ui_answer_receipt']:
     code += function(name)
 for name in ['event', 'ui_project_emit', 'ui_project_restore_event', 'ui_project_clear_event', 'ui_project_set_name', 'ui_project_remove', 'ui_project_clear_all', 'ui_project_apply_order']:
@@ -325,7 +329,7 @@ for prefix in ['enum { NF_SG_NONE', 'typedef struct { uint8_t kind; char id[ID_M
     code += [l for l in source.split('\n') if l.startswith(prefix)][0] + '\n'
 for name in ['nf_name_of', 'nf_asks', 'nf_suggest', 'nf_suggest_do', 'nf_hub_order', 'nf_hub_note', 'nf_nav_ok', 'nf_shade_move',
              'nf_back', 'nf_toast', 'nf_chain_after', 'nf_toast_touch', 'nf_toast_tick', 'nf_machine_selected', 'nf_render_toast',
-             'nf_render_machines', 'ui_machine_selected_ack', 'nf_render_hub']:
+             'nf_title', 'nf_render_machines', 'ui_machine_selected_ack', 'nf_render_hub']:
     code += function(name)
 card_action = source.split('    case A_NF_CARD: {',1)[1].split('    case A_NF_SUGGEST:',1)[0]
 code += 'static void card_action(action_t a) { switch(a.kind) { case A_NF_CARD: {' + card_action + 'default: break; } }\n'
@@ -419,6 +423,18 @@ static bool title_is(const char *text) {
     for(int i=0;i<scene.count;i++)
         if((scene.runs[i].arc==1 || (s.straight_title && scene.runs[i].y==41)) && !strcmp(scene.runs[i].text,text)) return true;
     return false;
+}
+// A Focus scene draws in Geist: no Roboto face, and a curved run is GeistMono; then the portrait.
+static void portrait(const char *dir, const char *name);
+static void portrait_focus(const char *dir, const char *name) {
+    const ht_pfont_t *roboto[] = {&ht_lv_roboto_med_38, &ht_lv_roboto_med_32, &ht_lv_roboto_med_30,
+        &ht_lv_roboto_med_28, &ht_lv_roboto_med_24, &ht_lv_roboto_med_22, &ht_lv_roboto_reg_38,
+        &ht_lv_roboto_reg_25, &ht_lv_roboto_reg_20};
+    for (int i = 0; i < scene.count; i++) {
+        for (unsigned g = 0; g < sizeof roboto / sizeof roboto[0]; g++) assert(scene.runs[i].font != &roboto[g]->base);
+        if (scene.runs[i].arc == 1) assert(scene.runs[i].font == &ht_mono_24);
+    }
+    portrait(dir, name);
 }
 static void portrait(const char *dir, const char *name) {
     if (!dir) return;
@@ -1226,7 +1242,7 @@ static void longpress_checks(void) {
     // Holding the agent's name gets to the same list; a tap on it still opens it as before.
     focus_setup(); hold_at(233,180,1000,1700); assert(s.view==NF_HUB && s.touch_cancelled);
     habitat_touch(false,233,180,1750); assert(s.view==NF_HUB);
-    focus_setup(); tap(1000,233,180); assert(s.view==AGENTS);
+    focus_setup(); tap(1000,233,30); assert(s.view==AGENTS);   // upstream moved the name to the top arc
     // The same from an agent's face, and from the inbox, the tab list, settings and machines.
     const int views[]={AGENT,AGENTS,INBOX,TABS,SETTINGS,MACHINES,NF_PLANS};
     for (unsigned i=0;i<sizeof views/sizeof *views;i++) {
@@ -1238,11 +1254,13 @@ static void longpress_checks(void) {
     focus_setup(); hold_at(233,300,1000,1300); habitat_touch(true,233,240,1310); hold_at(233,240,1314,1800);
     assert(s.view!=NF_HUB && !s.nf_hold_step); habitat_touch(false,233,240,1810);
     focus_setup(); hold_at(233,300,1000,1500); assert(s.nf_hold_step);
-    habitat_touch(false,233,300,1504); scene_take(); assert(s.view==HOME && !s.nf_hold_step && !starts);
-    // Slice 6: the footers are armed. The tab pill keeps its slow press under 650 ms (released on target it
-    // opens the tab list); held still to 650 ms it opens the hub like the rest of the glass.
+    habitat_touch(false,233,300,1504); scene_take();
+    // Upstream's Focus face talks on any press under 650 ms, so an early release is a press: no hub, voice.
+    assert(s.view!=NF_HUB && !s.nf_hold_step && starts==1);
+    // Slice 6, on upstream's layout (no tab pill any more): the top of the face under the name talks on a
+    // press under 650 ms; held still to 650 ms it opens the hub like the rest of the glass.
     focus_setup(); hold_at(233,100,1000,1500); assert(s.view==HOME && s.nf_hold_step);
-    habitat_touch(false,233,100,1550); assert(s.view==TABS);
+    habitat_touch(false,233,100,1550); assert(s.view==VOICE && starts==1);
     focus_setup(); hold_at(233,100,1000,1700); assert(s.view==NF_HUB);
     habitat_touch(false,233,100,1750); assert(s.view==NF_HUB);
     // THE COLLISION FRED HIT (2026-10-01, "starts talking when I'm trying to go to the menu"): a hold on the
@@ -1476,12 +1494,12 @@ static void smartnav_checks(const char *dir) {
     hub_tap(2,3000); assert(s.view==MACHINES);
     habitat_touch(true,30,233,4000); habitat_touch(true,90,236,4060); habitat_touch(true,150,238,4120); habitat_touch(false,160,238,4140); scene_take();
     assert(s.view==HOME && !starts);
-    focus_setup(); tap(1000,233,180); assert(s.view==AGENTS);
+    focus_setup(); tap(1000,233,30); assert(s.view==AGENTS);   // upstream moved the name to the top arc
     shade_pull(233,20,110,2000,true); hub_tap(3,3000); assert(s.view==TABS);
     habitat_touch(true,30,233,4000); habitat_touch(true,150,238,4120); habitat_touch(false,160,238,4140); scene_take(); assert(s.view==AGENTS);
     habitat_touch(true,30,233,5000); habitat_touch(true,150,238,5120); habitat_touch(false,160,238,5140); scene_take(); assert(s.view==HOME);
     // On a list, a plain swipe right is back too (left is still home).
-    focus_setup(); tap(1000,233,180); view(SETTINGS); scene_take();
+    focus_setup(); tap(1000,233,30); view(SETTINGS); scene_take();
     habitat_touch(true,150,233,2000); habitat_touch(true,300,236,2100); habitat_touch(false,320,236,2120); scene_take(); assert(s.view==AGENTS);
 
     // THE CARD: a tapped card about one agent opens that agent's recap, not the inbox list.
@@ -2128,22 +2146,58 @@ int main(int argc, char **argv) {
      */
     // The Focus SKIN's home face, footer and all — the "focus" portrait above is the legacy
     // focus-face option on the default character, which draws no microphone.
-    reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take(); portrait(dir, "focus-skin");
-    // THE TWO DOORS on Focus: the tab pill opens the tab list, the agent's name the pane list —
-    // pressed and released like the microphone, so a thumb that drifts or lingers still opens them.
+    reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take(); portrait_focus(dir,"focus-skin");
+    /*
+     * THE DOORS on Focus (owner, 2026-10-01), laid out like the octopus: a tap on the curved name opens
+     * the pane list, a hold on the face the tab list, and a tap anywhere else talks. There is no tab
+     * pill and no microphone any more.
+     */
+    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+    ui_project_emit(s.agents[0].id, "sess", "summary", "Flashed 0.0.91 to both dials and verified the image on each. All 44 host checks pass.",
+                    "Flashed 0.0.91 to both dials and verified the image on each. All 44 host checks pass.");
+    scene_take(); portrait_focus(dir,"focus-recap");
+    assert(!action_enabled(A_TAB_LIST));
+    for (int i = 0; i < scene.count; i++) assert(scene.runs[i].sprite.pixels != ht_icon_mic.px);
+    tap(1000, 233, 30); assert(s.view == AGENTS && !starts);
+    // The hold: on the recap, past 650 ms. Upstream opens the tab list here; the nixfred fork's slice 6
+    // hold opens the hub instead (the tab list is one of its wedges), and it never talks.
+    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+    ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
+    scene_take();
+    habitat_touch(true, 233, 300, 2000); habitat_touch(true, 233, 300, 2700);
+    assert(s.view == NF_HUB && !starts);
+    habitat_touch(false, 233, 300, 2800); assert(s.view == NF_HUB && !starts);
+    // A tap ANYWHERE on the face below the name talks (owner, 2026-10-01): the recap, the mark, the
+    // empty glass around them, and the bottom edge where the microphone used to be.
+    {
+        const int at[][2] = {{233, 110}, {233, 260}, {120, 300}, {346, 200}, {233, 360}, {233, 410}, {233, 440}};
+        for (unsigned k = 0; k < sizeof at / sizeof at[0]; k++) {
+            workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+            ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
+            scene_take(); tap(1000, at[k][0], at[k][1]); assert(starts == 1 && s.view == VOICE);
+            assert(!strcmp(target, s.agents[0].id));   // to the agent on the face: none is dropped on glass
+        }
+    }
+    // And on a face with nothing yet to say.
     workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-    tap(1000, 233, 80); assert(s.view == TABS);
+    tap(1000, 233, 233); assert(starts == 1);
+    /*
+     * A THUMB, not an idealised tap: it drifts 10 px and stays down up to 600 ms, which
+     * ht_gesture_end() calls no tap at all. On the Focus face it still talks. A contact that travels
+     * 20 px up or down has scrolled the terminal, and belongs to the scroll.
+     */
+    for (int drift = 0; drift <= 10; drift += 5) for (int held = 120; held <= 600; held += 240) {
+        workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+        ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
+        scene_take();
+        habitat_touch(true, 233, 260, 1000);
+        habitat_touch(true, 233 + drift / 2, 260 + drift, 1000 + held / 2);
+        habitat_touch(false, 233 + drift / 2, 260 + drift, 1000 + held);
+        assert(starts == 1 && s.view == VOICE && !strcmp(target, s.agents[0].id));
+    }
     workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-    tap(1000, 233, 142); assert(s.view == AGENTS && !starts);
-    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-    habitat_touch(true, 233, 80, 1000); habitat_touch(true, 247, 90, 1400); habitat_touch(false, 247, 90, 1900);
-    assert(s.view == TABS);
-    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-    habitat_touch(true, 233, 142, 1000); habitat_touch(true, 247, 152, 1400); habitat_touch(false, 247, 152, 1900);
-    assert(s.view == AGENTS);
-    // No pane arrows beside the microphone (the owner took them out): a tap there is nothing.
-    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-    tap(1000, 98, 388); tap(1200, 368, 388); assert(!switches && !starts);
+    habitat_touch(true, 233, 260, 1000); habitat_touch(true, 233, 300, 1100); habitat_touch(false, 233, 300, 1200);
+    assert(!starts);   // 40 px is a drag, not a touch
     /*
      * THE BELL DOES NOT COUNT THE AGENT ON THE FACE. Standing on "a", its question arrives: it shows in
      * the recap's place and the bell stays dark — a +1 there read as another agent asking. Move to
@@ -2163,12 +2217,38 @@ int main(int argc, char **argv) {
         assert(bell && one);
         s.active=0; scene_take(); assert(!action_enabled(A_INBOX));
     }
+    // THE PETS (claude, codex): the face publishes when the pet next changes (s.pet_next_ms);
+    // surface_tick asks for a redraw then and not before. Other things may ask on their own clocks,
+    // so the same ticks are replayed for a Cursor agent (no pet) and the pet's requests are the difference.
+    for (unsigned pe = 0; pe < ht_pet_count; pe++) {
+        const char *pet_engine = ht_pets[pe].engine;
+        unsigned seen[2][2]; uint32_t due = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
+            strcpy(s.agents[0].engine, pass ? pet_engine : "cursor");
+            fake_ms = 1200; scene_take();
+            if (!pass) assert(!s.pet_next_ms);
+            else { due = s.pet_next_ms; assert(due > 1200); }
+            if (pass) { for (int k = 0; k < 2; k++) {
+                s.pet_next_ms = due; changes = 0; surface_tick(k ? due : due - 1); seen[1][k] = changes; } }
+        }
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "cursor");
+        fake_ms = 1200; scene_take();
+        for (int k = 0; k < 2; k++) { changes = 0; surface_tick(k ? due : due - 1); seen[0][k] = changes; }
+        assert(seen[1][0] == seen[0][0] && seen[1][1] == seen[0][1] + 1);
+        // A finger down pauses it, and so does the VOICE view.
+        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, pet_engine);
+        fake_ms = 1200; scene_take(); assert(s.pet_next_ms == due);
+        s.touch_down = true; changes = 0; surface_tick(due); assert(s.pet_next_ms == due);
+        s.touch_down = false;
+        s.view = VOICE; surface_tick(due); assert(s.pet_next_ms == due); s.view = HOME;   // not consumed
+    }
     // THE FOCUS INBOX: the close pill, then a column of cards — machine, mark or dot + agent, message.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
     {
         cable_notif_t rows[2]={{.agent_id="a",.name="Payments refactor",.machine="MacBook",.summary="Retry queue shipped."},
                                {.agent_id="b",.name="Landing page",.machine="Studio Mac",.summary="Hero and pricing are in."}};
-        ui_notif_replace(rows,2); ui_notif_open(); scene_take(); portrait(dir, "focus-inbox");
+        ui_notif_replace(rows,2); ui_notif_open(); scene_take(); portrait_focus(dir,"focus-inbox");
         assert(s.view == INBOX && scene.background == BG);   // black, like the face
         int cards = 0;
         for (int i = 0; i < s.hit_count; i++) cards += s.hits[i].action == A_NOTICE;
@@ -2179,79 +2259,44 @@ int main(int argc, char **argv) {
     // An open question on Focus: shown on the home face, in the recap's place, and nowhere else.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
     {
-        // The question on the face, and another agent's news so the bell is up: the tab pill sits
-        // under the blue bell, as on glass, and the two must not touch.
+        // The question on the face, and another agent's news so the bell is up — at the bottom, under
+        // the question, where the microphone was.
         cable_notif_t asked[2]={{.question=true,.summary="Which database should the retry queue use?"},
                                 {.agent_id="b",.name="Website",.summary="The site is deployed."}};
         COPY(asked[0].agent_id, s.agents[0].id); COPY(asked[0].name, s.agents[0].name);
         s.tab_count=1; COPY(s.tabs[0].id,"tab-0"); COPY(s.tabs[0].name,"Daily life"); COPY(s.selected_tab,"tab-0");
-        ui_notif_replace(asked,2); scene_take(); portrait(dir, "focus-question");
+        ui_notif_replace(asked,2); scene_take(); portrait_focus(dir,"focus-question");
         assert(s.view == HOME && action_enabled(A_INBOX));
-        uint16_t gap[HT_WIDTH];
-        for (int y = 55; y < 68; y++) {   // the bell pill ends at 54, the tab pill starts at 68
-            ht_raster(&scene, (ht_rect_t){0, y, HT_WIDTH, 1}, gap);
-            // Between the pills, not out at the glass: the nixfred fleet rim crosses these rows at x < 100
-            // and x > 366, which is the rim and not the gap this checks.
-            for (int x = 100; x < HT_WIDTH - 100; x++) assert(gap[x] == 0);
+        int last_text = 0, bell_top = HT_HEIGHT;
+        for (int i = 0; i < scene.count; i++) {
+            const ht_run_t *r = &scene.runs[i];
+            if (r->font == &ht_lv_geist_med_30.base && r->text[0]) last_text = r->y + r->font->height;
+            if (r->box.h && r->box.fill == color(0x006fff) && r->y < bell_top) bell_top = r->y;
         }
+        assert(last_text && bell_top < HT_HEIGHT && last_text <= bell_top);
+        tap(3000, 233, 416); assert(s.view == INBOX);
+        ui_notif_replace(asked,2); s.view = HOME; scene_take();
         bool shown = false;
         for (int i = 0; i < scene.count; i++) if (strstr(scene.runs[i].text, "retry queue")) shown = true;
         assert(shown);
     }
-    for (int y = 386; y < HT_HEIGHT; y += 4) {
-        // Inside the round glass only: a target row whose centre is off the panel is not a row.
-        if ((y - 233) * (y - 233) >= 230 * 230) continue;
-        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-        tap(1000, 233, y);
-        assert(starts == 1);
-    }
-    /*
-     * AND THE ROLL DOWNWARD, which is how this button was actually failing.
-     *
-     * The drift case below moves down by half its drift from y 410 and so never leaves the old
-     * 389..439 rect. A thumb pressing the LOWER half of the mark on a circle held in the hand rolls
-     * further than that, and the old rect ended one pixel above the mark's own last row — so the
-     * contact left the target with nothing below it to land on. It is the press that matters, not
-     * just the release: pressed_action is read from the first sample, so a DOWN one row low turned
-     * the whole contact into a terminal scroll.
-     */
-    // nixfred slice 6: a slow press is under 650 ms now; at 650 ms a still finger opens the hub instead (the
-    // hold is armed on the microphone), so the roll is replayed inside a 600 ms press.
-    for (int y = 424; y <= 448; y += 8) for (int roll = 0; roll <= 16; roll += 8) {
-        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-        habitat_touch(true, 233, y, 1000);
-        habitat_touch(true, 233, y + roll, 1300);
-        habitat_touch(false, 233, y + roll, 1600);
-        assert(starts == 1);
-    }
-    /*
-     * A THUMB, not an idealised tap. 12 px is 1.20 mm and 350 ms is quick; a real press on a circle
-     * held in the hand drifts past both. A footer button answers a press that comes back up inside
-     * its own rect — and still refuses one dragged off it.
-     */
-    for (int drift = 0; drift <= 24; drift += 8) for (int ms = 120; ms <= 1500; ms += 460) {
+    // nixfred slice 6, on upstream's touch-anywhere Focus face: a press under 650 ms still talks, and
+    // a still press past 650 ms opens the hub instead and NEVER starts voice. Drift stays inside the
+    // 24 px the face allows a thumb.
+    for (int drift = 0; drift <= 16; drift += 8) for (int ms = 120; ms <= 1500; ms += 460) {
         reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
         habitat_touch(true, 233, 410, 1000);
         habitat_touch(true, 233 + drift, 410 + drift / 2, 1000 + ms / 2);
         habitat_touch(false, 233 + drift, 410 + drift / 2, 1000 + ms);
-        // slice 6: still past 650 ms is the hold, and the hold NEVER starts voice: the hub opens instead.
         bool still = drift <= 8;
         if (ms >= 650 && still) assert(!starts && s.view == NF_HUB && !recording);
-        else assert(starts == 1);
+        else if (ms < 650) assert(starts == 1);
     }
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
     habitat_touch(true, 233, 410, 1000);
     habitat_touch(true, 233, 300, 1100);
     habitat_touch(false, 233, 300, 1200);
-    assert(!starts);   // dragged off the button; a press that leaves is not a press
-
-    // And NOT the middle of the glass. The creature skins start speech from anywhere on the creature;
-    // Focus has a button for it, and the middle is the recap being read.
-    for (int y = 120; y <= 340; y += 40) {   // the microphone's 80 px button starts at 353
-        reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
-        tap(1000, 233, y);
-        assert(!starts);
-    }
+    assert(!starts);   // dragged off: a contact that scrolls is not a press
     reset(); s.straight_title=true; scene_take(); portrait(dir,"straight-title");
     reset(); s.nap=true; scene_take(); portrait(dir,"asleep");
     reset(); s.pet_pose=3; scene_take(); portrait(dir,"done");
@@ -2381,26 +2426,30 @@ int main(int argc, char **argv) {
     habitat_touch(false,233,100,1375); scene_take();
     assert(s.offset==4 && !strcmp(make_action(s.hits[4]).id,"pane-7"));
     portrait(dir,"panes-last");
-    // FOCUS'S PANES: every pane at once, still, in full ink; only the pane on the face is green.
+    // FOCUS'S PANES, in the LVGL TABS picker: the close pill, "PANES", one card a pane with its name
+    // alone; the pane on the face is the card with the accent rim.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); s.count=3; s.active=0;
     {
         const char *names[3]={"claude - Harness","Energy","Opencode"};
         for(int i=0;i<3;i++) { snprintf(s.agents[i].id,sizeof s.agents[i].id,"pane-%d",i); COPY(s.agents[i].name,names[i]); }
-        view(AGENTS); scene_take(); portrait(dir,"focus-panes");
-        int rows=0; bool green_one=false;
-        for(int i=0;i<scene.count;i++) for(int k=0;k<3;k++) if(!strcmp(scene.runs[i].text,names[k])) {
-            rows++;
-            assert(scene.runs[i].fg == (k==0 ? color(HT_THEME_VOICE) : FG));   // no fade, one green
-            assert(scene.runs[i].font == &ht_lv_geist_med_32.base);             // the tab names' type and size
-            if (k==1) assert(scene.runs[i].y + ht_lv_geist_med_32.base.height/2 == 233);   // centred as a block
-            if (k==0) green_one=true;
+        view(AGENTS); scene_take(); portrait_focus(dir,"focus-panes");
+        int rows=0, rims=0;
+        for(int i=0;i<scene.count;i++) {
+            if (scene.runs[i].box.h == 58 && scene.runs[i].box.border == color(HT_THEME_VOICE)) {
+                rims++; assert(scene.runs[i].y + 29 < 233);                     // the first card, above the middle
+            }
+            for(int k=0;k<3;k++) if(!strcmp(scene.runs[i].text,names[k])) {
+                rows++;
+                assert(scene.runs[i].font == &ht_lv_geist_med_28.base && scene.runs[i].fg == color(0xeaeaf0));
+            }
         }
-        assert(rows==3 && green_one);
+        assert(rows==3 && rims==1);
         habitat_touch(true,233,300,1000); habitat_touch(true,233,200,1100); habitat_touch(false,233,200,1200);
-        assert(s.offset==0 && !switches);   // six or fewer: nothing moves
+        assert(s.offset==0 && !switches);   // four or fewer: nothing moves
         tap(2000,233,233); assert(switches==1 && s.view==AGENT);
+        view(AGENTS); scene_take(); tap(3000,233,30); assert(s.view==HOME);   // the cross goes back
     }
-    // Past six the list scrolls a row per pitch, and a long name ends in "...".
+    // Past four the list scrolls a card per pitch, and a long name ends in "...".
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); s.count=9; s.active=0;
     {
         for(int i=0;i<9;i++) { snprintf(s.agents[i].id,sizeof s.agents[i].id,"pane-%d",i); snprintf(s.agents[i].name,sizeof s.agents[i].name,"Pane %d",i); }
@@ -2408,23 +2457,29 @@ int main(int argc, char **argv) {
         view(AGENTS); scene_take(); assert(s.hit_count==PANE_ROWS+1);
         habitat_touch(true,233,340,1000); habitat_touch(true,233,240,1100); habitat_touch(true,233,120,1200);
         habitat_touch(false,233,120,1300); scene_take();
-        assert(s.offset==3 && !switches);   // 220 px: four rows' travel, clamped at the last page
+        assert(s.offset==3 && !switches);   // 220 px: three cards' travel
+        s.offset=5; scene_take();           // the last page
         bool cut=false;
         for(int i=0;i<scene.count;i++) { const char *t=scene.runs[i].text; size_t n=strlen(t);
             if(!strncmp(t,"Payments",8) && n>3 && !strcmp(t+n-3,"...")) cut=true; }
         assert(cut);
-        portrait(dir,"focus-panes-scrolled");
+        portrait_focus(dir,"focus-panes-scrolled");
     }
     // And its tabs: the same carousel, the tab you are in green.
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS);
     s.tab_count=3; COPY(s.tabs[0].id,"t0"); COPY(s.tabs[0].name,"Harness repo"); COPY(s.tabs[1].id,"t1"); COPY(s.tabs[1].name,"Doi");
     COPY(s.tabs[2].id,"t2"); COPY(s.tabs[2].name,"Research"); COPY(s.selected_tab,"t0");
-    dispatch((action_t){.kind=A_TABS}); scene_take(); portrait(dir,"focus-tabs");
+    dispatch((action_t){.kind=A_TABS}); scene_take(); portrait_focus(dir,"focus-tabs");
     {
         bool green=false;
         for(int i=0;i<scene.count;i++) if(strstr(scene.runs[i].text,"Harness") && scene.runs[i].fg==color(HT_THEME_VOICE) &&
                                           scene.runs[i].font==&ht_lv_geist_med_32.base) green=true;
         assert(green);
+        bool title=false, arrow=false;   // the close pill and "TABS" on top; no ← at the bottom
+        for(int i=0;i<scene.count;i++) { title |= !strcmp(scene.runs[i].text,"T") && scene.runs[i].y==62;
+                                         arrow |= !strcmp(scene.runs[i].text,"\xe2\x86\x90"); }
+        assert(title && !arrow);
+        tap(3000,233,30); assert(s.view==HOME);   // the cross goes back
     }
     // Every advertised optional control is present, none appear for a legacy host.
     reset(); host_features=0; view(SETTINGS); scene_take();
@@ -2463,7 +2518,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-O1','-g',
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
-                    str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'terminal.c'),
+                    str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'terminal.c'),
                     str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),str(native/'nixfred_art.c'),str(native/'nixfred_logo.c'),'-o',str(out/'touch_ui'),'-lm'],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):

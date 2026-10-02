@@ -9,12 +9,13 @@ import { checkSessionRuntime, clearPaneRemainOnExit, resolvePaneEngineProcess, t
 import { listTmuxPanes } from './tmuxAgentDiscovery.js'
 import { enginePathOverride } from './engineBin.js'
 import { engineInstallRecipe } from './engineInstall.js'
-import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported } from './engineLaunch.js'
+import { buildEngineLaunchArgv, dropPermissionFlagIfUnsupported, permissionModeApproves, permissionModeFlags, refusePermissionFlagIfUnsupported } from './engineLaunch.js'
 import { workspaceMissing } from './workspaceCheck.js'
 import { buildHarnessSessionLabel } from './harnessSessionLabel.js'
 import { createAndRegisterPane, type CreateAgentPaneDeps } from './createAgentPane.js'
 import type { LaunchOverrides, LaunchOverridesResult } from './launchOverrides.js'
 import type { AgentRestartCoordinator } from './restartAgent.js'
+import { harnessPermissionEnvironment } from './harnessDefaults.js'
 
 export interface ResumeAgentServiceDeps {
   registry: Pick<typeof liveRegistry, 'byAgent' | 'bySession' | 'resumePendingAgent' | 'setLaunch' | 'updateProcessIdentity'>
@@ -124,7 +125,7 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     return result
   }
 
-  const resumeStopped = (agentId: string, current: () => boolean) => resumeStoppedAgent({
+  const resumeStopped = (agentId: string, current: () => boolean, permissionMode?: string) => resumeStoppedAgent({
     live: () => registry.byAgent(agentId),
     saved: () => stoppedAgents.get(agentId),
     current,
@@ -155,6 +156,16 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     },
     launch: async (saved, resumeSessionId) => {
       if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
+      // An explicit change is checked before allocating anything, and is persisted with the
+      // resumed row. Ordinary Open keeps the saved mode, including the older-engine fallback.
+      if (permissionMode !== undefined) {
+        if (!permissionModeFlags(saved.engine, permissionMode)) return { ok: false, error: 'INVALID_PERMISSION_MODE' }
+        const choice = { permissionMode, bypassPermission: permissionModeApproves(permissionMode) }
+        const refusal = await refusePermissionFlagIfUnsupported(saved.engine, choice)
+        if (refusal) return { ok: false, ...refusal }
+        if (!current()) return resumeChanged
+        saved = { ...saved, ...choice }
+      }
       if (saved.grid && !saved.gridLaunch) return { ok: false, error: 'GRID_CREDENTIAL_REQUIRED', detail: 'The saved provider configuration is unavailable.' }
       if (saved.dsh && !installedDsh(saved.dsh)) return { ok: false, error: 'INVALID_DSH', detail: 'Install this harness from the Harness Store before resuming it.' }
       if (!saved.cwd) return { ok: false, error: 'CWD_NOT_FOUND', detail: 'The saved project folder is no longer available.' }
@@ -188,14 +199,19 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
           }
         }
         if (saved.sessionId && registry.bySession(saved.sessionId)) return { ok: false, error: 'AGENT_BUSY' }
-        const { env: launchEnv, extraArgs, clearEnv } = built.overrides
+        const { extraArgs, clearEnv } = built.overrides
+        const launchEnv = permissionMode === undefined ? built.overrides.env
+          : harnessPermissionEnvironment(saved.engine, built.overrides.env, permissionMode)
         // The engine may have been downgraded since this harness was paused. Nobody is waiting on
         // the mode the way they are waiting on the harness, so the flag goes and the launch stays
         // (openharness#285). The row keeps its recorded mode; discovery re-derives the live one.
-        const { choice: permission, droppedFlag } = await dropPermissionFlagIfUnsupported(saved.engine, {
+        const savedPermission = {
           permissionMode: saved.permissionMode ?? null,
           bypassPermission: saved.bypassPermission === true,
-        })
+        }
+        const { choice: permission, droppedFlag } = permissionMode === undefined
+          ? await dropPermissionFlagIfUnsupported(saved.engine, savedPermission)
+          : { choice: savedPermission, droppedFlag: null }
         if (droppedFlag) {
           console.warn(`[resume] ${sid(saved.agentId)} · ${saved.engine} does not take ${droppedFlag}`
             + ` · resuming in Ask · update ${saved.engine} to get ${saved.permissionMode ?? 'Auto'} back`)
@@ -259,11 +275,17 @@ export function createResumeAgentService(deps: ResumeAgentServiceDeps) {
     },
   })
 
-  return (agentId: string) => restartJobs.run(agentId, async current => {
+  return (agentId: string, permissionMode?: string) => restartJobs.run(agentId, async current => {
     await stopJobs.get(agentId)
     if (!current()) return resumeChanged
     if (pinnedControls.has(agentId)) return { ok: false, error: 'AGENT_BUSY' }
-    return resumeStopped(agentId, current)
-  }, 'resume')
+    const result = await resumeStopped(agentId, current, permissionMode)
+    // Open may attach to an already running session. It must never claim to have changed that
+    // process's permissions, including when another client started it during this request.
+    if (result.ok && permissionMode !== undefined && result.session.permissionMode !== permissionMode) {
+      return { ok: false, error: 'PERMISSION_CHANGE_REQUIRES_STOP', detail: 'Stop this harness before changing its permission mode.' }
+    }
+    return result
+  }, permissionMode === undefined ? 'resume' : `resume:${permissionMode}`)
 
 }

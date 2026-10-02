@@ -365,6 +365,35 @@ class SystemNotifications {
     );
   }
 
+  /// What a device notice puts in the `machineId` slot of a click. The slots carry an agent's address
+  /// and the native side hands them back unchanged, so this marks "not an agent" without a new field
+  /// in the Swift code; [postNotice] puts the device's key in the `agentId` slot.
+  static const deviceNoticeMachine = '@device';
+
+  /// News about the ACCOUNT rather than an agent — a device joined it. The same switch and the same
+  /// rules as [post]; a click on it opens that device ([devicePub]) when given, else nothing.
+  void postNotice({required String id, required String title, required String body, String? devicePub}) {
+    if (!store.value || !supported) return;
+    if (permission.value == NotificationPermission.unavailable) return;
+    _ordered(
+      id,
+      () => notifier
+          .show(
+            id: id,
+            title: title,
+            body: body,
+            machineId: devicePub == null ? '' : deviceNoticeMachine,
+            agentId: devicePub ?? '',
+          )
+          .then((answer) {
+            if (answer != NotificationPermission.unknown) {
+              permission.value = answer;
+            }
+          })
+          .catchError((_) {}),
+    );
+  }
+
   /// The person got to this agent some other way. Its notification is old news.
   void withdraw(String machineId, String agentId) {
     if (!supported) return;

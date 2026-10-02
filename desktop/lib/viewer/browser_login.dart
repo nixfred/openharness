@@ -2,8 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../auth/cli_login.dart' show CliAuthStatus;
+import '../auth/phone_sign_in.dart';
 import '../auth/sign_in_client.dart';
+import '../auth/sign_in_provider.dart';
+import '../core/browser_label.dart';
 import 'direct_auth.dart';
+import 'qr_sign_in.dart';
 import 'direct_auth_api.dart';
 import '../sharing/shared_agent_location.dart';
 import 'viewer_location.dart';
@@ -20,7 +24,7 @@ abstract interface class LoginBrowser {
 /// Same-tab OAuth using the backend's existing PKCE transaction endpoints.
 /// The callback must match the attempt started in this tab. Neither tokens nor
 /// transaction identifiers are placed in a public workspace URL.
-class BrowserLogin implements SignInClient {
+class BrowserLogin implements SignInClient, PhoneSignInClient {
   BrowserLogin({
     required this.auth,
     required this.browser,
@@ -105,8 +109,28 @@ class BrowserLogin implements SignInClient {
   }
 
   @override
+  Future<void> loginWithPhone({
+    required void Function(String link, int expiresIn) onQr,
+    required Future<bool> Function(String email) onConfirm,
+  }) async {
+    cancel();
+    final revision = _revision;
+    final tokens = await viewerQrSignIn(
+      api: auth.api,
+      label: browserLabel(),
+      onQr: onQr,
+      onConfirm: onConfirm,
+      stillCurrent: () => revision == _revision,
+    );
+    _requireCurrent(revision);
+    await auth.signIn(tokens, stillCurrent: () => revision == _revision);
+    _requireCurrent(revision);
+  }
+
+  @override
   Future<void> login({
     required void Function(String url) onAuthorizeUrl,
+    SignInProvider? provider,
   }) async {
     cancel();
     final revision = _revision;
@@ -117,8 +141,8 @@ class BrowserLogin implements SignInClient {
     // loopback listener. The hosted web endpoint only accepts configured
     // origins and otherwise returns the production site's callback.
     final start = await (_isLoopback(location)
-        ? auth.api.authorizeNative('$origin$callbackPath')
-        : auth.api.authorizeWeb(origin));
+        ? auth.api.authorizeNative('$origin$callbackPath', provider: provider)
+        : auth.api.authorizeWeb(origin, provider: provider));
     _requireCurrent(revision);
     final authorize = Uri.tryParse(start.authorizeUrl);
     final redirect = Uri.tryParse(

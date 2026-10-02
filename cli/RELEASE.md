@@ -34,6 +34,14 @@ just needs to outrank what's live.
 `package.json`'s `version` field is never touched by this script; the published version is baked into
 the bundle via `ADAPTER_VERSION` at build time (see "The publishing step" below).
 
+Core app DSHs ship inside that same release: Harness Monitor, Devices and Model Manager are
+materialized at daemon startup before viewer restoration. Official older Store installations
+migrate automatically, retaining their prior files, workspaces and conversations. Companions
+refresh their generated package when the existing collection identity returns. No separate
+`harness dsh update` is required for these core tools. Other Store apps retain user-driven updates.
+Before uploading, the release script runs `scripts/test-core-harness-upgrade.mjs` against the
+compiled bundle to verify existing-install migration, package assets and the Monitor viewer.
+
 ## The publishing step
 
 `cli/scripts/upload-cli.sh` is the publishing step, and CI is its only caller: `release.yml` runs it

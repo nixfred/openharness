@@ -62,41 +62,40 @@ void main() {
     );
   });
 
-  test(
-    'waits while a new CLI is still performing initial terminal discovery',
-    () async {
-      const computerId = '0123456789abcdef0123456789abcdef';
-      final identityFile = File('${scratch.path}/computer-id')
-        ..writeAsStringSync(computerId);
-      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server!.listen((request) async {
-        request.response.headers.contentType = ContentType.json;
-        request.response.write(
-          jsonEncode({
-            'computerId': computerId,
-            'discoveryReady': false,
-            'localWs': {
-              'path': '/api/local-ws',
-              'protocolVersion': 1,
-              'terminalProtocolVersion': 3,
-              'e2ee': false,
-            },
-          }),
-        );
-        await request.response.close();
-      });
+  test('a CLI still on its initial terminal discovery is usable, and says it is scanning', () async {
+    const computerId = '0123456789abcdef0123456789abcdef';
+    final identityFile = File('${scratch.path}/computer-id')
+      ..writeAsStringSync(computerId);
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server!.listen((request) async {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'computerId': computerId,
+          'discoveryReady': false,
+          'localWs': {
+            'path': '/api/local-ws',
+            'protocolVersion': 1,
+            'terminalProtocolVersion': 3,
+            'e2ee': false,
+          },
+        }),
+      );
+      await request.response.close();
+    });
 
-      final endpoint = await LocalCliDiscovery(
-        config: AppConfig(
-          apiBaseUrl: 'https://harness-api.autonomous.ai',
-          localCliBaseUrl: 'http://127.0.0.1:${server!.port}',
-        ),
-        identity: LocalMachineIdentity(computerIdFile: identityFile),
-      ).discover();
+    final endpoint = await LocalCliDiscovery(
+      config: AppConfig(
+        apiBaseUrl: 'https://harness-api.autonomous.ai',
+        localCliBaseUrl: 'http://127.0.0.1:${server!.port}',
+      ),
+      identity: LocalMachineIdentity(computerIdFile: identityFile),
+    ).discover();
 
-      expect(endpoint, isNull);
-    },
-  );
+    // Not a reason to hold the window: tiles wait as intent and attach as agents arrive.
+    expect(endpoint, isNotNull);
+    expect(endpoint!.scanning, isTrue);
+  });
 
   test('rejects non-loopback and mismatched status endpoints', () async {
     const computerId = 'abcdef0123456789abcdef0123456789';
@@ -214,7 +213,8 @@ void main() {
     const computerId = '0123456789abcdef0123456789abcdef';
     final identityFile = File('${scratch.path}/computer-id')
       ..writeAsStringSync(computerId);
-    var status = readyStatus(computerId, extra: {'discoveryReady': false});
+    // Not ready: a daemon answering for another computer.
+    var status = readyStatus('fedcba9876543210fedcba9876543210');
     server = await serveStatus(await freePort(), () => status);
     final checked = <int>[];
     final discovery = discoveryFor(
@@ -435,30 +435,32 @@ void main() {
     );
 
     test(
-      'a daemon still scanning for agents is NOT READY, and says so',
+      'a daemon still scanning for agents is READY, marked scanning',
       () async {
         server = await serveStatus(
           0,
           () => readyStatus(computerId, extra: {'discoveryReady': false}),
         );
         final probe = await discoveryFor(server!.port, identityFile).probe();
-        expect(probe.state, LocalCliProbeState.notReady);
-        expect(probe.reason, 'still scanning for agents');
+        expect(probe.state, LocalCliProbeState.ready);
+        expect(probe.endpoint!.scanning, isTrue);
         expect(probe.pid, 4242);
         expect(probe.version, '9.9.9');
-        expect(probe.endpoint, isNull);
       },
     );
 
-    test('a daemon still scanning for agents is NOT READY', () async {
-      server = await serveStatus(
-        0,
-        () => readyStatus(computerId, extra: {'discoveryReady': false}),
-      );
-      final probe = await discoveryFor(server!.port, identityFile).probe();
-      expect(probe.state, LocalCliProbeState.notReady);
-      expect(probe.reason, 'still scanning for agents');
-    });
+    test(
+      'a daemon that has finished scanning is not marked scanning',
+      () async {
+        server = await serveStatus(
+          0,
+          () => readyStatus(computerId, extra: {'discoveryReady': true}),
+        );
+        final probe = await discoveryFor(server!.port, identityFile).probe();
+        expect(probe.state, LocalCliProbeState.ready);
+        expect(probe.endpoint!.scanning, isFalse);
+      },
+    );
 
     test('a daemon for another computer is NOT READY, not down', () async {
       server = await serveStatus(
@@ -502,14 +504,35 @@ void main() {
     expect(spawned, isFalse);
   });
 
+  test('ensureRunning does not wait for a daemon that is still scanning for agents', () async {
+    const computerId = '0123456789abcdef0123456789abcdef';
+    final identityFile = File('${scratch.path}/computer-id')
+      ..writeAsStringSync(computerId);
+    server = await serveStatus(
+      0,
+      () => readyStatus(computerId, extra: {'discoveryReady': false}),
+    );
+    final watch = Stopwatch()..start();
+    final probe = await discoveryFor(
+      server!.port,
+      identityFile,
+    ).ensureRunning(readyTimeout: const Duration(seconds: 5));
+    expect(probe.state, LocalCliProbeState.ready);
+    expect(probe.endpoint!.scanning, isTrue);
+    expect(watch.elapsedMilliseconds, lessThan(1000));
+  });
+
   test('ensureRunning waits for a daemon that answers but is not ready, without spawning', () async {
     const computerId = '0123456789abcdef0123456789abcdef';
     final identityFile = File('${scratch.path}/computer-id')
       ..writeAsStringSync(computerId);
     var scanned = false;
+    // Answers, but not ready yet: for another computer until it flips.
     server = await serveStatus(
       0,
-      () => readyStatus(computerId, extra: {'discoveryReady': scanned}),
+      () => readyStatus(
+        scanned ? computerId : 'fedcba9876543210fedcba9876543210',
+      ),
     );
     var spawned = false;
     final discovery = discoveryFor(
@@ -533,7 +556,7 @@ void main() {
       ..writeAsStringSync(computerId);
     server = await serveStatus(
       0,
-      () => readyStatus(computerId, extra: {'discoveryReady': false}),
+      () => readyStatus('fedcba9876543210fedcba9876543210'),
     );
     var spawned = false;
     final probe = await discoveryFor(
@@ -544,7 +567,7 @@ void main() {
       },
     ).ensureRunning(readyTimeout: const Duration(milliseconds: 600));
     expect(probe.state, LocalCliProbeState.notReady);
-    expect(probe.reason, 'still scanning for agents');
+    expect(probe.reason, 'a daemon for a different computer');
     expect(spawned, isFalse);
   });
 

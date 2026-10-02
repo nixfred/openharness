@@ -180,7 +180,9 @@ export interface TerminalStreamManagerDeps {
 function sizeFrom(payload: FramePayload): TerminalStreamSize | null {
   const cols = Number(payload.cols)
   const rows = Number(payload.rows)
-  if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 40 || cols > 300 || rows < 12 || rows > 120) return null
+  // Split TUI panes can be smaller than a desktop terminal. Preserve their actual size so
+  // opening a third pane or shrinking the window does not reject the stream or crop its output.
+  if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 1 || cols > 300 || rows < 1 || rows > 120) return null
   return { cols, rows }
 }
 

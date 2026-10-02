@@ -1,3 +1,4 @@
+import type { ActivityFrame } from './turnActivity.js'
 /**
  * The one shape an agent takes on the wire.
  *
@@ -59,6 +60,9 @@ export type AgentFrame = {
    */
   title: string | null
   status: string
+  activity: ActivityFrame | null
+  closePlan: { state: 'waiting' | 'failed'; detail?: string } | null
+  closeSupported: boolean
   launch: NonNullable<RegisteredSession['launch']>
   createdAt: string
   updatedAt: string
@@ -137,6 +141,8 @@ export interface AgentDshContext {
 
 /** What the caller knows and this module deliberately does not look up for itself. */
 export interface AgentFrameContext {
+  /** Evaluated after asynchronous projection, so old snapshots cannot revive work. */
+  activity?: () => ActivityFrame | null
   /** The runtime profile's answer for this session, or null when there is none. */
   selectedModel: string | null
   /** `registry.terminalAvailable(agentId)` — the caller already holds the registry. */
@@ -150,8 +156,8 @@ export interface AgentFrameContext {
  * When the conversation last moved, in epoch ms: dated work in the transcript, else the last time the engine
  * reported in (a hook, or a session bind — the agent's creation at the latest).
  *
- * ⚠️ Never the registry row's `touchedAt`. That is bookkeeping: discovery rewrites it on every pass
- * (`updateRuntimes`), so falling back to it stamped every agent without a readable transcript "now"
+ * ⚠️ Never the registry row's `touchedAt`. That is bookkeeping: discovery used to rewrite it on every
+ * pass, so falling back to it stamped every agent without a readable transcript "now"
  * — and a client sorting by recency put exactly those agents above the ones just used. File mtime is
  * bookkeeping too: an idle transcript can be rewritten without a new conversation event.
  *
@@ -184,7 +190,7 @@ const gitContexts = new SessionGitContextReader()
 
 export async function agentFrame(
   s: RegisteredSession,
-  { selectedModel, terminalAvailable, dsh, tokenUsage }: AgentFrameContext,
+  { selectedModel, terminalAvailable, dsh, tokenUsage, activity: contextActivity }: AgentFrameContext,
 ): Promise<AgentFrame> {
   const home = agentProject(s.cwd)
   const context = gitContexts.read(JSON.stringify([s.agentId, s.sessionId, s.engine, s.codexHome, s.registeredAt]), async () => {
@@ -201,6 +207,9 @@ export async function agentFrame(
     name: projectDisplayName(s),
     title: frameTitle(s),
     status: s.active ? 'active' : 'offline',
+    activity: contextActivity?.() ?? null,
+    closePlan: s.closePlan ? { state: s.closePlan.state, ...(s.closePlan.detail ? { detail: s.closePlan.detail } : {}) } : null,
+    closeSupported: true,
     launch: s.launch ?? { state: 'ready' },
     createdAt: new Date(s.registeredAt).toISOString(),
     updatedAt: new Date(updatedAt).toISOString(),
@@ -208,7 +217,11 @@ export async function agentFrame(
     // the open an earlier frame had reported.
     lastOpenedAt: s.lastOpenedAt ? new Date(s.lastOpenedAt).toISOString() : null,
     tokenUsage: tokenUsage?.totalTokens != null
-      ? { totalTokens: tokenUsage.totalTokens, updatedAt: tokenUsage.updatedAt } : null,
+      ? { totalTokens: tokenUsage.totalTokens, updatedAt: tokenUsage.updatedAt,
+        ...(tokenUsage.inputTokens == null ? {} : { inputTokens: tokenUsage.inputTokens }),
+        ...(tokenUsage.outputTokens == null ? {} : { outputTokens: tokenUsage.outputTokens }),
+        ...(tokenUsage.cachedTokens == null ? {} : { cachedTokens: tokenUsage.cachedTokens }),
+      } : null,
     outputStats: tokenUsage?.output ? { ...tokenUsage.output, updatedAt: tokenUsage.updatedAt } : null,
     tmuxPane: s.tmuxPane || null,
     terminal: { available: terminalAvailable, primary: s.primaryRuntimeKey, runtimes: s.runtimes },

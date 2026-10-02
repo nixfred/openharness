@@ -98,7 +98,6 @@ abstract final class AppIcons {
   static const listFilter = LucideIcons.listFilter400;
   static const loaderCircle = LucideIcons.loaderCircle400;
   static const lock = LucideIcons.lock400;
-  static const logIn = LucideIcons.logIn400;
   static const logOut = LucideIcons.logOut400;
   static const maximize = LucideIcons.maximize400;
   static const menu = LucideIcons.menu400;

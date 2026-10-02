@@ -23,8 +23,17 @@ String? runtimeModelName(
   }
   try {
     if (Uri.decodeComponent(match[1]!) != agentId) return null;
-    final model = Uri.decodeComponent(match[3]!).trim();
+    var model = Uri.decodeComponent(match[3]!).trim();
+    // Older daemons included the adjacent path column from OpenCode's footer.
+    // Keep provider/model IDs intact; only strip an explicitly padded path.
+    if (engine?.toLowerCase() == 'opencode') {
+      model = model
+          .split(RegExp(r' {3,}(?=/|~/|[A-Za-z]:[\\/])'))
+          .first
+          .trimRight();
+    }
     if (model.isEmpty ||
+        model == '<synthetic>' ||
         model.length > 256 ||
         RegExp(r'[\x00-\x1f\x7f]').hasMatch(model)) {
       return null;

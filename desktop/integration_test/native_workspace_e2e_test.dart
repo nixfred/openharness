@@ -568,7 +568,7 @@ void main() {
       await app.expire();
       await tester.pumpAndSettle();
       expect(app.allPanes, isEmpty);
-      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
       expect(find.text('Could not sign in'), findsNothing);
       await key(tester, LogicalKeyboardKey.enter);
       // Restored panes wait for their machines with an indeterminate spinner.
@@ -633,7 +633,7 @@ void main() {
     expect(cli.attempts, hasLength(2));
     cli.attempts.last.complete();
     await tester.pumpAndSettle();
-    expect(find.text('Sign in'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
     await key(tester, LogicalKeyboardKey.enter);
     expect(cli.logins, 1);
     expect(tester.takeException(), isNull);

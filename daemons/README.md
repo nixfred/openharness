@@ -217,7 +217,10 @@ Deploy the backend settings routes and CLI proxy before the desktop update that 
 - **What harnessd answers while off.** A window's `/api/zoo` and `/api/zoo/ops`: the server's 404, or —
   killed locally — `404 { error: { code: 'DAEMONS_OFF' } }` without asking. `daemon_act`, `daemon_confirm`,
   `daemon_talk`: `{ ok: false, error: 'DAEMONS_OFF' }`. The `pair` request (`harness pair`, the MCP server):
-  `{ error: 'DAEMONS_OFF' }`. `daemon_shown` and `daemon_presence` are dropped (but a guest's consent), and
+  `{ error: 'DAEMONS_OFF' }`, except `memory { action: experiment | configure_experiment }`: the
+  verified local owner can read or clear the Coding memory opt-in without turning companions on.
+  This only changes a local account setting; memory access, capture, learning and recall remain off.
+  `daemon_shown` and `daemon_presence` are dropped (but a guest's consent), and
   no `daemon_*` frame is sent. Another machine's `pair_*`: `PAIR_OFF`. `GET /api/status` says
   `daemons: { on, server, killed }`.
 - **What every client does** (desktop, phone, `hn`, web). A 404 from `GET /api/zoo`, or a `DAEMONS_OFF`

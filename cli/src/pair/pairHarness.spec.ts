@@ -1,7 +1,7 @@
 /**
  * P4 — the pair harness (pair/pairHarness.ts): a built-in `autonomous/pair` package with the harnessd MCP
  * server injected the way gridWebMcp.ts injects one (Claude `--mcp-config`, Codex `-c`), the paired
- * daemon's voice and the floor in its instructions, mode ask pinned; started, resumed and paused on
+ * daemon's voice and the floor in its instructions, automatic approvals; started, resumed and paused on
  * demand; hidden from the catalog.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -37,19 +37,19 @@ afterEach(() => {
 const MCP = ['/usr/local/bin/node', '/opt/harness/cli.js']
 
 describe('the package', () => {
-  it('is a spec-1 harness pinned to mode ask, with the harnessd MCP server and only its read tools pre-approved', () => {
+  it('is a spec-1 harness using automatic approvals with the scoped harnessd MCP server', () => {
     expect(PAIR_HARNESS_ID).toBe(PAIR_HARNESS_DSH)
     const files = pairPackage({ daemonId: 'tim', engine: 'claude', mcpCommand: MCP, tokenFile: '/data/pair/token' })
     const parsed = parseDshManifest(files['harness.json']!.content)
     expect(parsed.ok).toBe(true)
     const manifest = parsed.ok ? parsed.manifest : null
     expect(manifest).toMatchObject({ id: 'autonomous/pair', engine: 'claude', agent: { instructions: 'AGENTS.md',
-      env: { DSH_PERMISSION_MODE: 'ask', HARNESSD_PAIR_TOKEN_FILE: '/data/pair/token' } } })
+      env: { DSH_PERMISSION_MODE: 'auto', HARNESSD_PAIR_TOKEN_FILE: '/data/pair/token' } } })
     const args = manifest!.agent!.args!
     expect(args[0]).toBe('--mcp-config')
     expect(JSON.parse(args[1]!)).toEqual({ mcpServers: { harnessd: { type: 'stdio', command: '/usr/local/bin/node',
       args: ['/opt/harness/cli.js', 'pair', 'mcp', '--token-file', '/data/pair/token'] } } })
-    expect(args[2]).toBe('--allowedTools=mcp__harnessd__list_machines,mcp__harnessd__list_harnesses,mcp__harnessd__read_harness,mcp__harnessd__brief,mcp__harnessd__say')
+    expect(args[2]).toBe('--allowedTools=mcp__harnessd__list_machines,mcp__harnessd__list_harnesses,mcp__harnessd__read_harness,mcp__harnessd__brief,mcp__harnessd__recall_memory,mcp__harnessd__say')
     expect(args.join(' ')).not.toMatch(/dangerously|bypass|--permission-mode/)
   })
 
@@ -61,6 +61,18 @@ describe('the package', () => {
       '-c', 'mcp_servers.harnessd.command="/bin/harness"',
       '-c', 'mcp_servers.harnessd.args=["pair","mcp","--token-file","/data/pair/token"]',
     ])
+  })
+
+  it('gives OpenCode Muse Spark 1.3 and the same scoped MCP tools', () => {
+    const files = pairPackage({ daemonId: 'tim', engine: 'opencode', mcpCommand: MCP, tokenFile: '/data/pair/token' })
+    const manifest = JSON.parse(files['harness.json']!.content)
+    const config = JSON.parse(manifest.agent.env.OPENCODE_CONFIG_CONTENT)
+    expect(config.model).toBe('opencode/muse-spark-1.3-contributor-free')
+    expect(config.permission).toBe('allow')
+    expect(config.provider.opencode.models['muse-spark-1.3-contributor-free'].options.reasoningEffort).toBe('xhigh')
+    expect(config.agent.build.variant).toBe('xhigh')
+    expect(config.mcp.harnessd.command).toEqual([...MCP, 'pair', 'mcp', '--token-file', '/data/pair/token'])
+    expect(manifest.agent.args).toEqual([])
   })
 
   it('speaks as the paired daemon: its lore, first words and lines, and the floor', () => {
@@ -86,13 +98,13 @@ describe('the package', () => {
     const launch = prepareHarnessLaunch(installed, workspace, 'claude', 'harness-claude-x')
     expect(launch.args.slice(0, 3)).toEqual(JSON.parse(files['harness.json']!.content).agent.args)
     expect(launch.args).toContain('--append-system-prompt')
-    expect(launch.env).toMatchObject({ HARNESS_DSH: PAIR_HARNESS_ID, DSH_PERMISSION_MODE: 'ask', HARNESSD_PAIR_TOKEN_FILE: '/t' })
+    expect(launch.env).toMatchObject({ HARNESS_DSH: PAIR_HARNESS_ID, DSH_PERMISSION_MODE: 'auto', HARNESSD_PAIR_TOKEN_FILE: '/t' })
     expect(readFileSync(launch.env.HARNESS_CONTEXT_FILE!, 'utf8')).toContain('You are **tim**')
   })
 })
 
 describe('talking to it', () => {
-  function world(opts: { engine?: 'claude' | 'codex' | null; pair?: string | null } = {}) {
+  function world(opts: { engine?: 'claude' | 'codex' | 'opencode' | null; pair?: string | null } = {}) {
     let pair = opts.pair === undefined ? 'tim' : opts.pair
     const rows: PairHarnessRow[] = []
     let working = false
@@ -100,7 +112,7 @@ describe('talking to it', () => {
     const token = new PairToken(join(dir, 'pair', 'token'))
     const deps = {
       pairedDaemon: () => pair,
-      engine: async () => opts.engine === undefined ? 'claude' as const : opts.engine,
+      engine: async () => opts.engine === undefined ? 'opencode' as const : opts.engine,
       mcpCommand: () => MCP,
       token,
       workspace: join(dir, 'pair', 'workspace'),
@@ -118,17 +130,47 @@ describe('talking to it', () => {
     return { harness, deps, rows, token, setPair: (p: string | null) => { pair = p }, setWorking: (w: boolean) => { working = w } }
   }
 
-  it('starts it on the first words, mode ask, with a fresh token; sends to it after that', async () => {
+  it('starts it on the first words with a fresh token; sends to it after that', async () => {
     const w = world()
     expect(w.token.launched).toBe(false)
     expect(await w.harness.talk('what needs me?')).toEqual({ ok: true, agentId: 'pair-1', started: true })
-    expect(w.deps.create).toHaveBeenCalledWith({ engine: 'claude', cwd: join(dir, 'pair', 'workspace'), prompt: 'what needs me?', name: 'companions' })
+    expect(w.deps.create).toHaveBeenCalledWith({ engine: 'opencode', cwd: join(dir, 'pair', 'workspace'), prompt: 'what needs me?', name: 'companions' })
     expect(w.token.launched).toBe(true)
     const token = readFileSync(join(dir, 'pair', 'token'), 'utf8')
     expect(await w.harness.talk('and on the laptop?')).toEqual({ ok: true, agentId: 'pair-1', sent: true })
     expect(w.deps.send).toHaveBeenCalledWith('pair-1', 'and on the laptop?')
     expect(readFileSync(join(dir, 'pair', 'token'), 'utf8')).toBe(token)   // no new launch, no new token
     expect(w.deps.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes an existing companion package on restart without sending, resuming, or rotating its token', async () => {
+    const w = world()
+    await w.harness.open()
+    const saved = readFileSync(w.deps.stateFile, 'utf8')
+    const token = readFileSync(w.token.file, 'utf8')
+    w.deps.install.mockClear(); w.deps.create.mockClear()
+    const restarted = new PairHarness(w.deps)
+    expect(restarted.refreshPackage()).toBe(true)
+    expect(w.deps.install).toHaveBeenCalledOnce()
+    expect(w.deps.create).not.toHaveBeenCalled()
+    expect(w.deps.resume).not.toHaveBeenCalled()
+    expect(w.deps.send).not.toHaveBeenCalled()
+    expect(w.deps.stop).not.toHaveBeenCalled()
+    expect(readFileSync(w.deps.stateFile, 'utf8')).toBe(saved)
+    expect(readFileSync(w.token.file, 'utf8')).toBe(token)
+    expect(restarted.agentId()).toBe('pair-1')
+  })
+
+  it('refreshing release files never creates a companion when none was opened or pairing is off', async () => {
+    const fresh = world()
+    expect(fresh.harness.refreshPackage()).toBe(true)
+    expect(fresh.deps.install).not.toHaveBeenCalled()
+    expect(fresh.deps.create).not.toHaveBeenCalled()
+    await fresh.harness.open()
+    fresh.deps.install.mockClear()
+    fresh.setPair(null)
+    expect(fresh.harness.refreshPackage()).toBe(true)
+    expect(fresh.deps.install).not.toHaveBeenCalled()
   })
 
   it('two quick talks start one harness', async () => {
@@ -222,7 +264,7 @@ describe('talking to it', () => {
 
   it('says why it cannot: nothing paired, no engine, nothing said', async () => {
     expect(await world({ pair: null }).harness.talk('hi')).toMatchObject({ ok: false, error: 'PAIR_OFF' })
-    expect(await world({ engine: null }).harness.talk('hi')).toMatchObject({ ok: false, error: 'ENGINE_REQUIRED' })
+    expect(await world({ engine: null }).harness.talk('hi')).toMatchObject({ ok: false, error: 'NO_ENGINE' })
     expect(await world().harness.talk('   ')).toMatchObject({ ok: false, error: 'EMPTY' })
   })
 })

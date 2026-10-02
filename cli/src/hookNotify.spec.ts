@@ -138,13 +138,37 @@ async function collect(response: Record<string, unknown> = {}): Promise<{ port: 
     })
   })
   servers.push(server)
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('test server did not bind a TCP port')
   return { port: address.port, requests }
 }
 
 describe('hook notify terminal scope', () => {
+  it.each(['claude', 'codex'] as const)('acknowledges an emitted %s memory packet without copying the prompt or claim into the receipt', async engine => {
+    const additionalContext = 'Historical coding memory: keep review changes small.'
+    const memoryReceiptId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const { port, requests } = await collect({ ok: true, additionalContext, memoryReceiptId })
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    const input = recordings[engine].input
+    const stdout = await runHook({ port, engine, tmuxPane: '%42', input })
+    expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } })
+    expect(requests.map(request => request.url)).toEqual(['/api/hook/session-start', '/api/hook/memory-emitted'])
+    expect(requests[1].body).toMatchObject({ engine, sessionId: input.session_id, memoryReceiptId })
+    expect(requests[1].body).not.toHaveProperty('prompt')
+    expect(requests[1].body).not.toHaveProperty('additionalContext')
+  })
+
+  it('never acknowledges a receipt without emitted user-turn context', async () => {
+    const { port, requests } = await collect({ ok: true, memoryReceiptId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    expect(await runHook({ port, engine: 'claude', tmuxPane: '%42', input: recordings.claude.input })).toBe('')
+    expect(requests.map(request => request.url)).toEqual(['/api/hook/session-start'])
+  })
+
   it.each(['claude', 'codex'] as const)('adds daemon-verified companion context to the actual %s user turn', async engine => {
     const additionalContext = 'Companions collection context: selected GNU; retain this conversation.'
     const { port, requests } = await collect({ ok: true, additionalContext })

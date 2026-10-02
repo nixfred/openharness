@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  defaultRoots, joinedGrids, modelFamily, parseListDevices, parseListeningPorts, parseMeminfo, parseNetstatListening,
+  defaultRoots, joinedGrids, startWith, modelFamily, parseListDevices, parseListeningPorts, parseMeminfo, parseNetstatListening,
   parseProcNetTcp, parseSwapUsage, parseVmStat,
   probeEngines, readGguf, scanModels, summarize, summarizeGguf,
 } from '../lib/inventory.mjs';
@@ -75,10 +75,15 @@ test('scan finds models other apps downloaded, names them, and reports one entry
   await put(join(home, 'models', 'plain', 'config.json'), JSON.stringify({ architectures: ['LlamaForCausalLM'], max_position_embeddings: 8192 }));
   await put(join(home, 'models', 'plain', 'model-00001-of-00001.safetensors'), 'weights');
   await put(join(home, 'Downloads', 'notes.txt'), 'not a model');
+  // `llama-server -hf org/repo` before llama.cpp moved its downloads into the Hugging Face cache.
+  await put(join(home, 'Library', 'Caches', 'llama.cpp', 'org_Widget-3B-GGUF_Widget-3B-Q4_K_M.gguf'), tiny('llama'));
+  await put(join(home, 'Library', 'Caches', 'llama.cpp', 'org_Widget-3B-GGUF_Widget-3B-Q4_K_M.gguf.json'), '{}');
 
   const { models } = await scanModels({ roots: defaultRoots({}, home).filter(root => root.path.startsWith(home)), minBytes: 0 });
   const byName = Object.fromEntries(models.map(model => [model.name, model]));
-  assert.equal(models.length, 4);
+  assert.equal(models.length, 5);
+  assert.equal(byName['org_Widget-3B-GGUF_Widget-3B-Q4_K_M'].source, 'llama.cpp');
+  assert.ok(byName['org_Widget-3B-GGUF_Widget-3B-Q4_K_M'].readableBy.includes('llama.cpp'));
   assert.equal(byName['qwen2.5-0.5b'].source, 'grid');
   assert.deepEqual(byName['qwen2.5-0.5b'].alsoAt.map(seen => [seen.source, seen.name]), [['ollama', 'qwen2.5:0.5b']]);
   assert.equal(byName['Model-7B-Q4_K_M'].quant, 'Q4_K_M');
@@ -234,4 +239,56 @@ test('a model no engine on this machine can run says so, instead of looking usab
   });
   assert.match(text, /org\/Model-4bit .*! no engine this machine can run reads mlx \(Apple silicon only\)/);
   assert.doesNotMatch(text, /model-q4 .*no engine/);
+});
+
+test('llama.cpp downloads are looked for where llama.cpp keeps them: LLAMA_CACHE, else its cache folder', () => {
+  const home = '/home/me';
+  const llama = env => defaultRoots(env, home).filter(root => root.source === 'llama.cpp').map(root => root.path);
+  assert.deepEqual(llama({}), ['/home/me/Library/Caches/llama.cpp', '/home/me/.cache/llama.cpp']);
+  assert.deepEqual(llama({ LLAMA_CACHE: '/data/llama', XDG_CACHE_HOME: '/xdg' }), ['/data/llama', '/home/me/Library/Caches/llama.cpp', '/xdg/llama.cpp']);
+});
+
+test('a model starts with the app whose folder holds it, and moves to Grid\'s engine only when that app is gone', () => {
+  const grid = { kind: 'llama.cpp', path: '/home/me/.grid/bin/llama-server', version: 'version: 10369', note: "Grid's own engine" };
+  const mac = (...engines) => ({ engines: [grid, ...engines], canRun: ['llama.cpp', 'mlx-lm', 'ollama', 'lm-studio'] });
+  const ollama = { kind: 'ollama', path: '/usr/local/bin/ollama', version: '0.32.5' };
+  const studio = { kind: 'lm-studio', path: '/home/me/.lmstudio/bin/lms', version: null };
+  const yours = { kind: 'llama.cpp', path: '/opt/homebrew/bin/llama-server', version: 'version: 9000' };
+  const model = (source, format = 'gguf') => ({ source, format });
+  // Ollama's store: Ollama, said running or not, so a stopped Ollama is started rather than skipped.
+  assert.deepEqual(startWith(model('ollama'), mac(ollama)), { engine: 'ollama', label: 'ollama', running: false });
+  assert.equal(startWith(model('ollama'), mac(ollama), [{ kind: 'ollama', url: 'http://127.0.0.1:11434/v1' }]).running, true);
+  assert.equal(startWith(model('ollama'), mac()).label, "Grid's llama.cpp", 'Ollama uninstalled: its blob is still a GGUF');
+  // LM Studio's folder, GGUF or MLX: LM Studio; without it, by format.
+  assert.equal(startWith(model('lm-studio'), mac(studio)).engine, 'lm-studio');
+  assert.equal(startWith(model('lm-studio', 'mlx'), mac(studio, { kind: 'mlx-lm', path: '/x/mlx_lm.server', version: '0.31' })).engine, 'lm-studio');
+  assert.equal(startWith(model('lm-studio'), mac()).label, "Grid's llama.cpp");
+  // llama.cpp's cache: the person's own llama-server, which downloaded it; Grid's when they have none.
+  assert.deepEqual(startWith(model('llama.cpp'), mac(yours)), { engine: 'llama.cpp', label: 'your llama.cpp', path: '/opt/homebrew/bin/llama-server' });
+  assert.equal(startWith(model('llama.cpp'), mac()).label, "Grid's llama.cpp");
+  // Busy serving, it answered `--version` past the deadline: still theirs, not Grid's.
+  assert.equal(startWith(model('llama.cpp'), mac({ ...yours, version: null, note: 'on PATH but did not answer --version' })).label, 'your llama.cpp');
+  // Newer llama.cpp saves `-hf` downloads in the Hugging Face cache: a GGUF there is the person's llama.cpp's
+  // to start when they have one, Grid's otherwise. Other formats there keep their own engines.
+  assert.equal(startWith(model('huggingface'), mac(yours)).label, 'your llama.cpp');
+  assert.equal(startWith(model('huggingface'), mac()).label, "Grid's llama.cpp");
+  assert.equal(startWith(model('huggingface', 'mlx'), mac(yours, { kind: 'mlx-lm', path: '/x', version: '0.31' })).engine, 'mlx-lm');
+  // ~/.grid/models stays Grid's, whatever else is installed.
+  assert.equal(startWith(model('grid'), mac(ollama, studio, yours)).label, "Grid's llama.cpp");
+  // No app of its own: by format. Safetensors go to vLLM or SGLang where they run, and to nothing on a Mac.
+  const gpuBox = { engines: [grid, { kind: 'vllm', path: '/x/vllm', version: '0.12' }], canRun: ['llama.cpp', 'ollama', 'vllm', 'sglang'] };
+  assert.equal(startWith(model('huggingface', 'safetensors'), gpuBox).label, 'vllm');
+  assert.equal(startWith(model('folder', 'safetensors'), { ...gpuBox, engines: [grid] }).label, 'vllm or sglang (not installed)');
+  assert.equal(startWith(model('huggingface', 'safetensors'), mac()), null);
+  assert.equal(startWith(model('huggingface', 'mlx'), mac({ kind: 'mlx-lm', path: '/x', version: '0.31' })).engine, 'mlx-lm');
+});
+
+test('the table names the engine each model starts with, and whether it must be started first', () => {
+  const machine = { platform: 'darwin', arch: 'arm64', accelerators: [], listeningPorts: [], canRun: ['llama.cpp', 'mlx-lm', 'ollama', 'lm-studio'],
+    engines: [{ kind: 'llama.cpp', path: '/g/llama-server', version: 'v', note: "Grid's own engine" }, { kind: 'ollama', path: '/o', version: '0.32.5' }] };
+  const row = { format: 'gguf', bytes: 2e9, gguf: { contextLength: 131072, toolCalls: true }, readableBy: ['llama.cpp', 'ollama', 'lm-studio'], alsoAt: [], projector: null };
+  const text = summarize({ machine, engines: [], models: [{ ...row, name: 'llama3.2:3b', source: 'ollama' }, { ...row, name: 'Widget-Q4_K_M', source: 'grid' }] });
+  assert.match(text, /START WITH/);
+  assert.match(text, /ollama \(start it\)\s+llama3\.2:3b \(ollama\)/);
+  assert.match(text, /Grid's llama\.cpp\s+Widget-Q4_K_M \(grid\)/);
 });

@@ -18,11 +18,14 @@ Tags: `[doc]` official page above, `[run]` seen on the tested machine, `[?]` unv
 
 ## When to use it
 
-- **Its server is answering** (`fleet models` → `kind: lm-studio`): adopt it, but load the model
-  yourself with a 64K+ context (below) — a model it loads on demand gets 8192 [run], too small for an agent.
-- **An MLX model sits in LM Studio's folder and mlx-lm is not installed**: LM Studio runs MLX on Apple
-  silicon (its structured output uses Outlines for MLX [doc]), so use it instead of installing anything.
-- **A GGUF in LM Studio's folder**: Grid's own engine serves it in place; LM Studio need not run.
+- **A model in LM Studio's folder**, GGUF or MLX (`fleet models` → START WITH `lm-studio`): LM Studio runs
+  it, because it downloaded it and loads it.
+  - **Its server answering**: adopt it, but load the model yourself with a 64K+ context (below) — a model
+    it loads on demand gets 8192 [run], too small for an agent.
+  - **`(start it)`**: start its server yourself (below); an LM Studio that is off is the normal case, not
+    a reason to switch engines.
+- **An MLX model elsewhere and mlx-lm not installed**: LM Studio runs MLX on Apple silicon (its
+  structured output uses Outlines for MLX [doc]), so use it instead of installing anything.
 - Never install LM Studio just to serve a model: Grid's engine covers GGUF, mlx-lm covers MLX.
 
 ## Where its models live / how to list them
@@ -63,7 +66,7 @@ Run `"$GRID_FLEET" verify --at http://127.0.0.1:P/v1 --model <id> --kind lm-stud
 request checks with deadlines and prints each one. Also:
 
 1. `lms server status` shows port P [run]. 2. `GET http://127.0.0.1:P/v1/models` lists `<id>` [doc][run].
-3. `lms ps` shows `<id>` with CONTEXT ≥ 65536 [run]. 4. One bounded `/v1/chat/completions` request with
+3. LM Studio reports `<id>` loaded with ≥ 65536 (`/api/v0/models`, the CONTEXT `lms ps` shows) [run]. 4. One bounded `/v1/chat/completions` request with
 `model: <id>`, `max_tokens` 16 → non-empty `content` [run].
 A 401 means the person turned on "Require Authentication" [doc]: do not change their setting; say so and
 serve the file with Grid's engine instead.

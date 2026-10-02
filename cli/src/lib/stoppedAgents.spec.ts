@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chmodSync, constants, openSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, constants, openSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { RegisteredSession } from './registry.js'
 
-vi.mock('node:fs', async original => { const fs = await original<typeof import('node:fs')>(); return { ...fs, openSync: vi.fn(fs.openSync) } })
+vi.mock('node:fs', async original => { const fs = await original<typeof import('node:fs')>(); return { ...fs, openSync: vi.fn(fs.openSync), readFileSync: vi.fn(fs.readFileSync) } })
 
 let directory = ''
 beforeEach(() => {
@@ -14,8 +14,164 @@ beforeEach(() => {
 })
 afterEach(() => {
   vi.mocked(openSync).mockRestore()
+  vi.mocked(readFileSync).mockRestore()
   vi.unstubAllEnvs()
   rmSync(directory, { recursive: true, force: true })
+})
+
+describe('saved catalog reads', () => {
+  it('does not reread unchanged records for status snapshots, but resume still reads the file', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const first = store.list()
+    vi.mocked(readFileSync).mockClear()
+    for (let i = 0; i < 20; i++) expect(store.available([])).toEqual(first)
+    expect(readFileSync).not.toHaveBeenCalled()
+    expect(store.get(saved.agentId)).toEqual(first[0])
+    expect(readFileSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps cached records private and filters the current live inventory on every call', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const [first] = store.list()
+    first.title = 'A caller changed this'
+    first.runtimes[0].paneId = '%999'
+    first.processIdentity!.pid = 1
+    expect(store.list()[0]).toMatchObject({ title: saved.title, runtimes: saved.runtimes, processIdentity: saved.processIdentity })
+    expect(store.available([saved])).toEqual([])
+    expect(store.available([])).toHaveLength(1)
+  })
+
+  it('periodically revalidates file contents and refreshes after a backwards clock change', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      store.list()
+      vi.mocked(readFileSync).mockClear()
+      clock.mockReturnValue(now + 30_000)
+      expect(store.list()).toHaveLength(1)
+      expect(readFileSync).toHaveBeenCalledTimes(1)
+      vi.mocked(readFileSync).mockClear()
+      clock.mockReturnValue(now - 1)
+      expect(store.list()).toHaveLength(1)
+      expect(readFileSync).toHaveBeenCalledTimes(1)
+    } finally { clock.mockRestore() }
+  })
+
+  it('sees saves, patches, external replacements, in-place edits and deletion immediately', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    store.list()
+    store.patch(saved.agentId, { cwd: '/changed' })
+    expect(store.list()[0].cwd).toBe('/changed')
+    store.save({ ...saved, title: 'Updated title' })
+    expect(store.list()[0].title).toBe('Updated title')
+    const file = join(directory, 'stopped-agents', `${saved.agentId}.json`)
+    const replacement = `${file}.tmp`
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    raw.session.title = 'External edit'
+    writeFileSync(replacement, JSON.stringify(raw), { mode: 0o600 })
+    renameSync(replacement, file)
+    expect(store.list()[0].title).toBe('External edit')
+    const before = statSync(file)
+    raw.session.title = 'External next' // Same length; restoring mtime must not conceal the edit.
+    writeFileSync(file, JSON.stringify(raw))
+    utimesSync(file, before.atime, before.mtime)
+    expect(store.list()[0].title).toBe('External next')
+    rmSync(file)
+    expect(store.list()).toEqual([])
+    store.save(saved)
+    expect(store.list()[0].sessionId).toBe(saved.sessionId)
+  })
+
+  it('drops a warmed record when corrupted, unsafe, or replaced by a symlink', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const file = join(directory, 'stopped-agents', `${saved.agentId}.json`)
+    const raw = readFileSync(file, 'utf8')
+    store.list()
+    writeFileSync(file, '{')
+    expect(store.list()).toEqual([])
+    writeFileSync(file, raw)
+    expect(store.list()).toHaveLength(1)
+    chmodSync(file, 0o666)
+    expect(store.list()).toEqual([])
+    expect(() => store.get(saved.agentId)).toThrow()
+    chmodSync(file, 0o600)
+    expect(store.list()).toHaveLength(1)
+    rmSync(file)
+    const target = join(directory, 'other.json')
+    writeFileSync(target, raw, { mode: 0o600 })
+    symlinkSync(target, file)
+    expect(store.list()).toEqual([])
+    expect(() => store.get(saved.agentId)).toThrow()
+    expect(readFileSync(target, 'utf8')).toBe(raw)
+    chmodSync(join(directory, 'stopped-agents'), 0o777)
+    expect(() => store.list()).toThrow()
+  })
+
+  it('does not cache a read under the identity of a replacement made during that read', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const file = join(directory, 'stopped-agents', `${saved.agentId}.json`)
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    raw.session.title = 'Replacement'
+    const replacement = `${file}.tmp`
+    writeFileSync(replacement, JSON.stringify(raw), { mode: 0o600 })
+    const real = await vi.importActual<typeof import('node:fs')>('node:fs')
+    vi.mocked(readFileSync).mockImplementationOnce((...args: any[]) => {
+      const value = (real.readFileSync as (...args: any[]) => any)(...args)
+      renameSync(replacement, file)
+      return value
+    })
+    expect(store.list()[0].title).toBe(saved.title)
+    expect(store.list()[0].title).toBe('Replacement')
+  })
+
+  it('bounds retained bytes while keeping every large record visible and fresh', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const base = join(directory, 'stopped-agents')
+    rmSync(join(base, `${saved.agentId}.json`))
+    for (let i = 0; i < 10; i++) {
+      writeFileSync(join(base, `large-${i}.json`), JSON.stringify({ version: 1,
+        session: { ...saved, agentId: `large-${i}`, title: 'x'.repeat(512 * 1024) } }), { mode: 0o600 })
+    }
+    expect(store.list()).toHaveLength(10)
+    vi.mocked(readFileSync).mockClear()
+    expect(store.list()).toHaveLength(10)
+    // Ten half-megabyte files exceed the cache's byte budget; some must stay on disk.
+    expect(vi.mocked(readFileSync).mock.calls.length).toBeGreaterThan(0)
+    expect(vi.mocked(readFileSync).mock.calls.length).toBeLessThan(10)
+    for (let i = 0; i < 10; i++) rmSync(join(base, `large-${i}.json`))
+    expect(store.list()).toEqual([])
+    store.save(saved)
+    store.list()
+    vi.mocked(readFileSync).mockClear()
+    expect(store.list()).toHaveLength(1)
+    expect(readFileSync).not.toHaveBeenCalled()
+  })
+
+  it('bounds cached record count without thrashing or hiding a larger catalog', async () => {
+    const { saved, store } = await fixture()
+    store.save(saved)
+    const base = join(directory, 'stopped-agents')
+    rmSync(join(base, `${saved.agentId}.json`))
+    for (let i = 0; i < 2050; i++) {
+      const agentId = `bounded-${String(i).padStart(4, '0')}`
+      writeFileSync(join(base, `${agentId}.json`), JSON.stringify({ version: 1,
+        session: { ...saved, agentId } }), { mode: 0o600 })
+    }
+    expect(store.list()).toHaveLength(2050)
+    for (let pass = 0; pass < 2; pass++) {
+      vi.mocked(readFileSync).mockClear()
+      expect(store.list()).toHaveLength(2050)
+      expect(readFileSync).toHaveBeenCalledTimes(2)
+    }
+  })
 })
 
 async function fixture() {

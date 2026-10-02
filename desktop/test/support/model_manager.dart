@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:harness/auth/auth_session.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/dsh_catalog.dart';
 import 'package:harness/core/models.dart';
@@ -155,7 +156,7 @@ class ModelManagerTestApp extends AppNotifier {
   bool loginLands = true;
 
   @override
-  Future<void> login() async {
+  Future<void> login([SignInProvider? provider]) async {
     logins++;
     signingIn = true;
     notifyListeners();

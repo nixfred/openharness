@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { stopSharedCodexSession } from './codexSessionLifecycle.js'
 import { captureResumeIdentity } from './captureResumeIdentity.js'
 import { createStopAgentService, type StopAgentServiceDeps } from './stopAgentService.js'
 import { registry, type RegisteredSession } from './registry.js'
 import { stoppedAgents } from './stoppedAgents.js'
 import { AgentRestartCoordinator } from './restartAgent.js'
 import { checkPidRuntime, terminateDeletedAgent } from './deleteAgentFallback.js'
+vi.mock('./codexSessionLifecycle.js', () => ({ stopSharedCodexSession: vi.fn(async () => {}) }))
 vi.mock('./captureResumeIdentity.js', () => ({ captureResumeIdentity: vi.fn(async session => session) }))
 vi.mock('./deleteAgentFallback.js', () => ({ checkPidRuntime: vi.fn(), terminateDeletedAgent: vi.fn() }))
 let row: RegisteredSession
@@ -40,6 +42,23 @@ it('storage failure leaves the live process and registry untouched', async () =>
   await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('disk full')
   expect(registry.byAgent(row.agentId)).toBe(row); expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled(); expect(deps.markDeleted).not.toHaveBeenCalled()
 })
+it.each(['before', 'after'] as const)('honors cancellation at the %s checkpoint before retiring the terminal', async phase => {
+  let current = true
+  await expect(createStopAgentService(deps)(row.agentId, {
+    current: () => current,
+    checkpoint: async (_, at) => { if (at === phase) current = false },
+  })).rejects.toThrow('changed')
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
+  expect(deps.forgetSession).not.toHaveBeenCalled()
+  if (phase === 'before') expect(terminateDeletedAgent).not.toHaveBeenCalled()
+})
+it('backs up final flushed history after graceful exit and before closing the pane', async () => {
+  const order: string[] = []
+  vi.mocked(terminateDeletedAgent).mockImplementation(async () => { order.push('exit'); return 'terminated' })
+  vi.mocked(deps.tmuxBackend!.kill).mockImplementation(async () => { order.push('pane'); return { state: 'succeeded', dispatch: 'executed' } })
+  await createStopAgentService(deps)(row.agentId, { checkpoint: async (_, phase) => { order.push(phase) } })
+  expect(order).toEqual(['before', 'exit', 'after', 'pane'])
+})
 it.each(['terminal', 'without tmux', 'failed process', 'failed tmux'] as const)('retains work when stopping %s', async mode => {
   stoppedAgents.beginResume(row.agentId)
   if (mode === 'terminal') Object.assign(row, { engine: 'terminal', sessionId: '', processIdentity: null })
@@ -67,11 +86,12 @@ it('does not publish a stopped row until the exact process and terminal have bot
   await vi.waitFor(() => expect(finishProcess).toBeTypeOf('function'))
   expect(registry.byAgent(row.agentId)).toBe(row)
   expect(deps.forgetSession).not.toHaveBeenCalled()
-  finishPane()
-  await Promise.resolve()
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
+  finishProcess()
+  await vi.waitFor(() => expect(finishPane).toBeTypeOf('function'))
   expect(deps.forgetSession).not.toHaveBeenCalled()
   expect(stop(row.agentId)).toBe(stopping)
-  finishProcess()
+  finishPane()
   await stopping
   expect(deps.forgetSession).toHaveBeenCalledOnce()
   expect(deps.agentReconciler.holdRoute).toHaveBeenCalledOnce()
@@ -108,6 +128,7 @@ it.each(['removed', 'replaced', 'conversation', 'route'] as const)('does not rem
     return 'terminated'
   })
   await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('changed while pausing')
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
   expect(deps.forgetSession).not.toHaveBeenCalled()
 })
 it.each(['capture', 'termination'] as const)('accepts a hook rebuilding the same process during %s', async stage => {
@@ -165,4 +186,33 @@ it('keeps the newer hook binding that arrives during capture', async () => {
   })
   await createStopAgentService(deps)(row.agentId)
   expect(stoppedAgents.get(row.agentId)?.sessionId).toBe('latest')
+})
+
+it('checks cancellation at the shared-server boundary and never signals after a failure there', async () => {
+  let current = true
+  vi.mocked(stopSharedCodexSession).mockImplementationOnce(async (_row, guard) => {
+    expect(guard()).toBe(true); current = false; expect(guard()).toBe(false)
+    throw new Error('shared server could not stop')
+  })
+  await expect(createStopAgentService(deps)(row.agentId, { current: () => current })).rejects.toThrow('shared server')
+  expect(terminateDeletedAgent).not.toHaveBeenCalled()
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
+  expect(deps.clearDeleted).toHaveBeenCalledWith(row.agentId)
+})
+it('does not signal a process replaced at the actual kill boundary', async () => {
+  vi.mocked(terminateDeletedAgent).mockImplementationOnce(async (_row, actions) => {
+    row.processIdentity!.startMarker = 'replacement'
+    actions.kill(77, 'SIGTERM')
+    return 'gone'
+  })
+  await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('Could not confirm')
+  expect(deps.tmuxBackend!.kill).not.toHaveBeenCalled()
+})
+it('does not forget a new agent published while its old pane was being retired', async () => {
+  vi.mocked(deps.tmuxBackend!.kill).mockImplementationOnce(async () => {
+    row.processIdentity!.startMarker = 'replacement'
+    return { state: 'succeeded', dispatch: 'executed' }
+  })
+  await expect(createStopAgentService(deps)(row.agentId)).rejects.toThrow('changed while pausing')
+  expect(deps.forgetSession).not.toHaveBeenCalled()
 })

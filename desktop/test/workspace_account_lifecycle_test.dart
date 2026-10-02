@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/state/app_state.dart';
@@ -25,7 +26,10 @@ class WorkspaceAccountLogin extends CliLogin {
   @override
   Future<void> logout() async {}
   @override
-  Future<void> login({required void Function(String) onAuthorizeUrl}) async {
+  Future<void> login({
+    required void Function(String) onAuthorizeUrl,
+    SignInProvider? provider,
+  }) async {
     logins++;
   }
 

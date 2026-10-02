@@ -1,7 +1,30 @@
 //! Terminal rendering of the compact desktop form.
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
-fn put(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
+// Keep the recovery instruction readable, including long project names and wide glyphs.
+fn error_lines(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        for glyph in word.graphemes(true) {
+            if !line.is_empty() && line.width() + glyph.width() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push_str(glyph);
+        }
+    }
+    lines.push(line);
+    lines
+}
+
+pub(super) fn put(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
     if width == 0 {
         return;
     }
@@ -23,22 +46,13 @@ fn put(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
     buf.set_stringn(x, y, out, width as usize, style);
 }
 
-fn panel(buf: &mut Buffer, r: Rect, title: &str, base: Style, border: Style) {
-    crate::term_out::clear_extras(r);
-    for y in r.y..r.bottom() {
-        for x in r.x..r.right() {
-            if let Some(c) = buf.cell_mut((x, y)) {
-                c.reset();
-                c.set_style(base);
-            }
-        }
-    }
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border)
-        .render(r, buf);
-    let _ = title;
+/// The form's height: enough rows for every agent's settings, the same whatever is open, so
+/// changing agents or opening an editor never moves it.
+pub(super) const HEIGHT: u16 = 17;
+
+/// The form's surface, as the settings panel draws its own: filled, no border.
+fn panel(buf: &mut Buffer, r: Rect, base: Style) {
+    crate::settings::fill(buf, r, base)
 }
 
 pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
@@ -56,86 +70,65 @@ pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
         );
         return None;
     }
-    let (_, foreground, light) = theme::palette();
-    let base = if theme::no_color() {
-        Style::default()
-    } else {
-        theme::fg(foreground).bg(theme::depth_fit(if light {
-            Color::Rgb(247, 247, 247)
-        } else {
-            Color::Rgb(25, 25, 25)
-        }))
-    };
-    let accent = base.patch(theme::bold(theme::accent()));
-    let muted = base.patch(theme::fg(if light {
-        Color::Rgb(92, 98, 104)
-    } else {
-        Color::Rgb(167, 173, 180)
-    }));
-    let border = base.patch(theme::fg(theme::pane_palette().active_foreground));
-    // Keep the working panes visible under the form, with a quiet backdrop.
-    crate::term_out::clear_extras(body);
-    let backdrop = if theme::no_color() {
-        Style::default().add_modifier(Modifier::DIM)
-    } else {
-        theme::fg(if light {
-            Color::Rgb(185, 185, 185)
-        } else {
-            Color::Rgb(32, 32, 32)
-        })
-        .bg(theme::depth_fit(if light {
-            Color::Rgb(230, 230, 230)
-        } else {
-            Color::Rgb(4, 4, 4)
-        }))
-        .remove_modifier(Modifier::BOLD | Modifier::REVERSED | Modifier::DIM | Modifier::UNDERLINED)
-    };
-    for y in body.y..body.bottom() {
-        for x in body.x..body.right() {
-            if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_style(backdrop);
-            }
-        }
-    }
-    // Center the compact form itself. Options grow down and choosers open in
-    // the remaining space to its right, without moving the form's anchor.
-    let form_w = body.width.saturating_sub(4).min(52);
-    let compact_h = 11.min(body.height.saturating_sub(2).max(5));
-    let x = body.x + (body.width - form_w) / 2;
-    let y = body.y + (body.height - compact_h) / 2;
-    let side_w = body
-        .right()
-        .saturating_sub(x + form_w)
-        .saturating_sub(4)
-        .min(60);
+    // The settings panel's colours, and its quiet backdrop over the working panes.
+    let crate::settings::Chrome {
+        base,
+        muted,
+        accent,
+        backdrop,
+        ..
+    } = crate::settings::chrome();
+    crate::settings::backdrop(buf, body, backdrop);
+    // The form is a Form panel (settings::area): centred — the form, not the form and its chooser —
+    // and as tall as every agent's settings need, so changing agents or opening an editor never
+    // moves it. A chooser opens beside it where there is room, else in its place.
+    let r = crate::settings::area(body, crate::settings::PanelSize::Form, HEIGHT);
+    let (x, y, form_w, form_h) = (r.x, r.y, r.width, r.height);
+    let side_w = body.right().saturating_sub(r.right() + 4).min(60);
     let side = side_w >= 32;
     let child_w = if side { side_w } else { form_w };
+    let child_h = if side {
+        body.bottom().saturating_sub(y + 1).min(22).max(form_h)
+    } else {
+        form_h
+    };
     let fields = form.fields();
-    let height = body.bottom().saturating_sub(y + 1).max(5);
-    let form_h = (fields.len() as u16 * 2 + 3).min(height);
-    let child_h = form
-        .child
-        .as_ref()
-        .map(|c| if c.kind.editing() { 8 } else { 22 })
-        .unwrap_or(0)
-        .min(height);
-    let r = Rect::new(x, y, form_w, form_h);
+    let fields_y = y + if form_h >= 9 { 3 } else { 1 };
+    let errors = error_lines(&form.error, form_w.saturating_sub(4) as usize);
+    // Even a long error in a tiny terminal leaves one field (the focused action) visible.
+    let error_h = errors.len().min(r.bottom().saturating_sub(fields_y + 2).max(1) as usize) as u16;
     form.area = r;
     if form.child.is_none() || side || !form.child_active {
-        panel(buf, r, "New Harness", base, border);
-        let gap = if form_h >= fields.len() as u16 * 2 + 3 {
-            2
-        } else {
-            1
-        };
-        let capacity = ((form_h.saturating_sub(5) / gap) + 1) as usize;
-        let focus = fields.iter().position(|f| *f == form.focus).unwrap_or(0);
-        let skip = focus.saturating_sub(capacity - 1);
-        for (row, field) in fields.iter().skip(skip).take(capacity).enumerate() {
-            let fy = r.y + 2 + row as u16 * gap;
-            if fy >= r.bottom() - 2 {
-                break;
-            }
+        panel(buf, r, base);
+        if form_h >= 9 {
+            put(buf, x + 3, y + 1, form_w - 6, "New Harness", base.add_modifier(Modifier::BOLD));
+        }
+        let error_y = r.bottom() - 1 - error_h;
+        let capacity = error_y.saturating_sub(fields_y);
+        let mut row: u16 = 0;
+        let rows: Vec<_> = fields
+            .iter()
+            .map(|field| {
+                // One blank line between the task and settings, and before the launch action.
+                if matches!(field, Field::Branch | Field::Create) {
+                    row += 1;
+                }
+                let at = row;
+                row += 1;
+                (at, field)
+            })
+            .collect();
+        let focus = rows
+            .iter()
+            .find(|(_, field)| **field == form.focus)
+            .map(|(row, _)| *row)
+            .unwrap_or(0);
+        let skip = focus.saturating_sub(capacity.saturating_sub(1));
+        for (row, field) in rows
+            .into_iter()
+            .filter(|(row, _)| *row >= skip && *row < skip + capacity)
+        {
+            let fy = fields_y + row - skip;
             let active = *field == form.focus;
             let st = if form.blocked(*field).is_some() {
                 muted
@@ -151,37 +144,70 @@ pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
                 buf,
                 r.x + 3,
                 fy,
-                label_w,
-                label,
+                if *field == Field::Create {
+                    r.width.saturating_sub(6)
+                } else {
+                    label_w
+                },
+                &label,
                 if *field == Field::Create {
                     st.add_modifier(Modifier::BOLD)
                 } else {
                     muted
                 },
             );
-            put(
-                buf,
-                r.x + 3 + label_w,
-                fy,
-                r.width.saturating_sub(6 + label_w),
-                &value,
-                st,
-            );
+            let value_width = r.width.saturating_sub(6 + label_w);
+            let value_x = r.x + 3 + label_w;
+            if *field == Field::Project {
+                // Keep the destination visible even when the project name must be shortened.
+                let suffix = format!(" @ {}", form.machine_label);
+                let suffix_width = suffix.width() as u16;
+                if value_width > suffix_width + 2 {
+                    let name = form.project_name();
+                    let name_width = (name.width() as u16).min(value_width - suffix_width);
+                    put(buf, value_x, fy, name_width, &name, st);
+                    put(buf, value_x + name_width, fy, suffix_width, &suffix, st);
+                } else {
+                    put(
+                        buf,
+                        value_x,
+                        fy,
+                        value_width,
+                        &format!("@ {}", form.machine_label),
+                        st,
+                    );
+                }
+            } else {
+                put(
+                    buf,
+                    value_x,
+                    fy,
+                    value_width,
+                    &value,
+                    if *field == Field::Task && form.draft.task.is_empty() && !active {
+                        muted
+                    } else {
+                        st
+                    },
+                );
+            }
             form.hits
                 .push((Rect::new(r.x + 1, fy, r.width - 2, 1), *field));
         }
-        put(
-            buf,
-            r.x + 2,
-            r.bottom() - 2,
-            r.width - 4,
-            &form.error,
-            if form.error.is_empty() {
-                muted
-            } else {
-                base.patch(theme::fg(theme::DANGER))
-            },
-        );
+        if form.error.is_empty() {
+            put(buf, r.x + 2, error_y, r.width - 4, &form.hint(), muted);
+        } else {
+            for (row, line) in errors.iter().take(error_h as usize).enumerate() {
+                put(
+                    buf,
+                    r.x + 2,
+                    error_y + row as u16,
+                    r.width - 4,
+                    line,
+                    base.patch(theme::fg(theme::DANGER)),
+                );
+            }
+        }
     }
     if !side && !form.child_active {
         return None;
@@ -191,7 +217,20 @@ pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
     };
     let r = Rect::new(if side { x + form_w + 2 } else { x }, y, child_w, child_h);
     form.child_area = r;
-    panel(buf, r, &c.picker.title, base, border);
+    panel(buf, r, base);
+    if c.kind == Choice::Task {
+        let cursor = task::draw(
+            buf,
+            r,
+            &mut c.picker,
+            &form.error,
+            form.child_active,
+            base,
+            muted,
+            accent,
+        );
+        return form.child_active.then_some(cursor);
+    }
     let query_x = r.x + 4;
     let query_y = r.y + 2;
     let query_w = r.width.saturating_sub(6) as usize;
@@ -219,7 +258,14 @@ pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
     );
     c.picker.row_at.clear();
     if !c.kind.editing() {
-        let rows = r.height.saturating_sub(6) as usize;
+        // Project's blank line between folder actions and recents occupies a display row too.
+        // Reserve it in the scroll window so the selected item cannot hide under the footer.
+        let separated = c.kind == Choice::Project && c.picker.query.is_empty()
+            && c.picker.visible.windows(2).any(|pair| {
+                !c.picker.rows[pair[0].0].id.starts_with("at:")
+                    && c.picker.rows[pair[1].0].id.starts_with("at:")
+            });
+        let rows = r.height.saturating_sub(6 + u16::from(separated)) as usize;
         c.picker.page_rows.set(rows as i64);
         c.picker.scroll = c
             .picker
@@ -296,7 +342,11 @@ pub fn draw(buf: &mut Buffer, body: Rect, form: &mut Form) -> Option<Position> {
     let hint = if !form.error.is_empty() {
         &form.error
     } else {
-        c.picker.busy.as_deref().unwrap_or("")
+        c.picker.busy.as_deref().unwrap_or(if form.child_active {
+            "Enter select · Esc back"
+        } else {
+            "Enter or → to choose"
+        })
     };
     put(buf, r.x + 2, r.bottom() - 2, r.width - 4, hint, muted);
     form.child_active.then(|| {

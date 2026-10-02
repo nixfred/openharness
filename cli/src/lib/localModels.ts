@@ -1,7 +1,7 @@
 /** The Models popover's local lifecycle. Grid remains the hardware, catalog,
  * download and process authority. A click is a durable daemon operation, never a chat task. */
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile, readdir, stat, mkdir, rename, writeFile, statfs } from 'node:fs/promises'
+import { readFile, readdir, stat, mkdir, rename, writeFile, statfs, symlink, lstat, readlink } from 'node:fs/promises'
 import { createServer, type AddressInfo } from 'node:net'
 import { basename, dirname, join } from 'node:path'
 import { GridFleetRpc, type GridFleetResult } from './gridFleetRpc.js'
@@ -11,6 +11,7 @@ import { processExists } from './processLiveness.js'
 import type { LocalRecord, PictureState } from './gridPicture.js'
 import { displayModelName } from './gridReader.js'
 import { readEnvExports } from './gridWake.js'
+import { APP_LABEL, AppStartError, GRID_LABEL, appContext, readAppRecords, writeAppRecords, type AppEngine, type AppEngineOps, type AppEngineRecord, type AppModel } from './appModels.js'
 
 const GiB = 1024 ** 3
 const obj = (v: unknown): Record<string, any> => v && typeof v === 'object' && !Array.isArray(v) ? v : {}
@@ -57,6 +58,8 @@ function freePort(): Promise<number> {
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+/** The longest a scan of other apps' models is waited for (`fleet models` alone has a 60s deadline). */
+export const APP_SCAN_MS = 90_000
 /** What llama.cpp answers once its GPU backend has failed an allocation — every request after. */
 const OUT_OF_MEMORY = /compute error|out of memory|insufficient memory|failed to allocate/i
 
@@ -71,6 +74,9 @@ export interface LocalModel {
   operation?: ModelOperation
   /** Running here, parked while its grid sleeps (additive: an older desktop reads plain `running`). */
   gridAsleep?: boolean
+  /** What it runs in: `Grid` for a model Grid's llama.cpp serves, or the app whose folder holds it
+   *  (`Ollama`, `LM Studio`, `llama.cpp`, [AppModel]). Absent for a catalog model not downloaded yet. */
+  app?: string
 }
 export interface ModelOperation {
   id: string; modelId: string; action: 'download' | 'start' | 'stop'; phase: 'running' | 'done' | 'failed'
@@ -97,6 +103,9 @@ export interface Candidate {
   aliases?: string[]
   /** The catalog's estimate for this machine, and the model's size in billions of parameters. */
   estTokS?: number; paramsB?: number
+  /** A file another app downloaded, served by Grid's llama.cpp because that app is not installed here:
+   *  `file` is the link to it in Grid's models folder, made at Start. */
+  appPath?: string
 }
 /** `live`: its heartbeat sidecar is fresh (the grid is hearing from it). `pidAlive`: the process its run
  *  record names exists — the only liveness that holds while the grid sleeps and the sidecar goes stale. */
@@ -120,6 +129,11 @@ interface Options {
   inventory: (grid: string, force: boolean) => Promise<GridInventory>
   /** Told when a start or stop has finished, so the model lists are read again. */
   onChanged?: () => void
+  /** Models other apps downloaded here ([scanAppModels]), and the engines that start them. Absent: none. */
+  appModels?: () => Promise<AppModel[]>
+  appEngines?: AppEngineOps
+  /** How long a scan is waited for ([APP_SCAN_MS]); a test shortens it. */
+  appScanMs?: number
 }
 
 /** One concrete, machine-fitted version per model. Non-chat and unprobed offline
@@ -293,6 +307,8 @@ export class LocalModels {
   private receiptScope?: string
   private knownByGrid = new Map<string, Candidate[]>()
   private blockers = new Map<string, string>()
+  private appsRead?: { at: number; value: AppModel[] }
+  private appsPending?: Promise<AppModel[]>
 
   constructor(private readonly options: Options) {
     this.processEnv = options.processEnv ?? process.env
@@ -376,6 +392,7 @@ export class LocalModels {
   }
 
   private async downloaded(candidate: Candidate): Promise<boolean> {
+    if (candidate.appPath) return stat(candidate.appPath).then(s => s.isFile() && s.size === candidate.size, () => false)
     const sizes = await Promise.all(candidate.files.map(file => stat(join(this.home, 'models', file)).then(s => s.isFile() ? s.size : 0).catch(() => 0)))
     return sizes.every(size => size > 0) && sizes.reduce((sum, size) => sum + size, 0) === candidate.size
   }
@@ -416,7 +433,7 @@ export class LocalModels {
   /** Keep models imported from an existing Grid setup after Stop removes its
    * run record. Only completed local files that this computer already served
    * become restartable; arbitrary downloaded GGUFs are not assumed compatible. */
-  private async known(grid: string, owned: Owned[]): Promise<Candidate[]> {
+  private async known(grid: string, owned: Owned[], apps: Candidate[] = []): Promise<Candidate[]> {
     const path = join(this.options.stateDir, `${key(grid)}.known.json`)
     let known = this.knownByGrid.get(grid)
     if (!known) {
@@ -438,7 +455,7 @@ export class LocalModels {
     }
     let changed = false
     for (const instance of owned) {
-      if (this.candidates.some(c => c.file === instance.file) || known.some(c => c.file === instance.file)) continue
+      if ([...this.candidates, ...apps].some(c => c.file === instance.file) || known.some(c => c.file === instance.file)) continue
       const file = await stat(join(this.home, 'models', instance.file)).catch(() => null)
       if (!file?.isFile() || !file.size) continue
       known.push({ id: `local:${instance.file}`, name: cleanName(instance.aliases[0]),
@@ -543,6 +560,64 @@ export class LocalModels {
     await rename(temp, file)
   }
 
+  /**
+   * Models other apps downloaded here, from the last scan: a scan walks their folders and asks every
+   * engine its version, which a llama-server busy serving answered in 11s [run], so nothing waits on
+   * one but the very first. Past 30s, or [force]d, a new scan starts and the list after it has it.
+   */
+  private async apps(force = false): Promise<AppModel[]> {
+    if (!this.options.appModels) return []
+    // A daemon just started answers from the scan it saved last time: a first scan while a llama-server
+    // was busy kept the picker without these models, and held a Stop two minutes [run].
+    this.appsRead ??= await this.savedApps()
+    if (force || !this.appsRead || Date.now() - this.appsRead.at >= 30_000) void this.scanApps()
+    return this.appsRead?.value ?? this.scanApps()
+  }
+
+  /** One scan at a time, and never one without an end: a scan that does not answer in [APP_SCAN_MS] is
+   *  given up and the last answer kept, so the next read starts afresh rather than waiting on it forever. */
+  private scanApps(): Promise<AppModel[]> {
+    return this.appsPending ??= Promise.race([this.options.appModels!(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('scan timed out')), this.options.appScanMs ?? APP_SCAN_MS).unref())])
+      .then(async value => {
+        this.appsRead = { at: Date.now(), value }
+        await this.saveApps(value).catch(() => {})
+        return value
+      }, () => this.appsRead?.value ?? [])
+      .finally(() => { this.appsPending = undefined })
+  }
+
+  private get appsFile(): string { return join(this.options.stateDir, 'app-models.json') }
+
+  /** The last scan, as saved: read as stale, so the next read scans again. */
+  private async savedApps(): Promise<{ at: number; value: AppModel[] } | undefined> {
+    try {
+      const value = rows(JSON.parse(await readFile(this.appsFile, 'utf8'))).filter(a =>
+        str(a.id).startsWith('app:') && str(a.name) && ['ollama', 'lm-studio', 'llama.cpp'].includes(a.app) &&
+        ['ollama', 'lm-studio', 'llama.cpp', 'grid'].includes(a.engine) && str(a.ref)) as AppModel[]
+      return { at: 0, value }
+    } catch { return undefined }
+  }
+
+  private async saveApps(value: AppModel[]): Promise<void> {
+    await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 })
+    const temp = `${this.appsFile}.${randomUUID()}.tmp`
+    await writeFile(temp, JSON.stringify(value), { mode: 0o600 })
+    await rename(temp, this.appsFile)
+  }
+
+  /** An app's model that Grid's llama.cpp serves (its app is not installed here), as a candidate whose
+   *  file is the link Start makes to it in Grid's models folder. */
+  private appCandidates(apps: AppModel[]): Candidate[] {
+    return apps.filter(app => app.engine === 'grid').map(app => {
+      const file = `${app.name.replace(/[^A-Za-z0-9._-]+/g, '-')}.gguf`
+      return { id: app.id, name: app.name, pull: '', file, files: [file], size: app.sizeBytes, quant: app.quant ?? '',
+        aliases: [app.name], appPath: app.ref }
+    })
+  }
+
+  private get appRecordsFile(): string { return join(this.options.stateDir, 'app-engines.json') }
+
   async list(grid: string | null, force = false): Promise<LocalModelsSnapshot> {
     if (!grid) return { models: [], notice: 'Sign in to find models for this computer.', observedAt: new Date().toISOString(), busy: false }
     if (!force && this.cached?.grid === grid && Date.now() - this.cached.at < 2500) return this.cached.value
@@ -568,7 +643,18 @@ export class LocalModels {
       nodes = inventory.state === 'awake' ? rows(inventory.nodes) : []
     } catch { inventoryError = 'Running models could not be checked. Try again.' }
     const operation = this.active?.grid === grid ? this.active.operation : this.receipt?.grid === grid ? this.receipt.operation : undefined
-    const choices = [...this.candidates, ...(await this.known(grid, owned)).filter(k => !this.candidates.some(c => c.file === k.file))]
+    const apps = await this.apps(force)
+    const records = (await readAppRecords(this.appRecordsFile)).filter(record => record.grid === grid)
+    // An engine this daemon started is read from its record, whatever a later scan makes of the model: a
+    // scan that missed the person's llama-server (busy serving, it answered `--version` late) once listed
+    // a running engine as Grid's, and Stop then had nothing to stop.
+    const recorded = (id: string) => records.some(record => record.modelId === id)
+    const appServed = this.appCandidates(apps.filter(app => !recorded(app.id)))
+    // One engine of this picker's at a time, as for Grid's own: an app's engine started here blocks the next.
+    for (const record of records) this.blockers.set(grid, `Stop ${cleanName(record.name)} first to start another local model.`)
+    const knownHere = (await this.known(grid, owned, appServed)).filter(k => !this.candidates.some(c => c.file === k.file))
+    const choices = [...this.candidates, ...knownHere,
+      ...appServed.filter(app => ![...this.candidates, ...knownHere].some(c => c.file === app.file))]
     const downloaded = await Promise.all(choices.map(candidate => this.downloaded(candidate)))
     // Different repositories can use the same filename for different weights.
     // Attribute the one local engine to the complete file that is actually here.
@@ -607,14 +693,35 @@ export class LocalModels {
         requests: running ? num(perModel?.requests) : undefined,
         windowSeconds: running ? num(answered.window_seconds) : undefined,
         operation: operation?.modelId === candidate.id ? operation : undefined,
-        ...(!node && parked(instance) ? { gridAsleep: true } : {}) }
+        ...(!node && parked(instance) ? { gridAsleep: true } : {}),
+        // Grid serves it — its own download, or another app's file linked in because that app is not here.
+        ...(running || available ? { app: GRID_LABEL } : {}) }
     })
     for (const instance of owned.filter(o => !choices.some(c => c.file === o.file))) {
       const serving = !!servingNode(instance)
       models.push({ id: `local:${instance.file}`, name: cleanName(instance.aliases[0]),
         state: serving || parked(instance) ? 'running' : 'available', canStart: false, canStop: !inventoryError,
         operation: operation?.modelId === `local:${instance.file}` ? operation : undefined,
-        ...(!serving && parked(instance) ? { gridAsleep: true } : {}) })
+        ...(!serving && parked(instance) ? { gridAsleep: true } : {}), app: GRID_LABEL })
+    }
+    // Models in their own apps, started there: running when that engine is up and the grid lists it (or
+    // the grid sleeps — parked, as above). A record whose model has since gone keeps a row to stop it by.
+    const listedHere = (alias: string) => nodes.some(n => n.online === true && (Array.isArray(n.models) ? n.models : [])
+      .some((m: unknown) => modelKey(str(typeof m === 'string' ? m : obj(m).model)) === modelKey(alias)))
+    const appRow = async (id: string, name: string, app: AppEngine, record: AppEngineRecord | undefined, extra: Partial<LocalModel>): Promise<LocalModel> => {
+      const alive = record && this.options.appEngines ? await this.options.appEngines.alive(record) : false
+      const listed = !!record && listedHere(record.alias)
+      const running = alive && (listed || asleep)
+      return { id, name, app: APP_LABEL[app], state: running ? 'running' : 'downloaded', ...extra,
+        canStart: !inventoryError && !record, canStop: !inventoryError && !!record,
+        operation: operation?.modelId === id ? operation : undefined, ...(running && !listed ? { gridAsleep: true } : {}) }
+    }
+    for (const app of apps.filter(a => a.engine !== 'grid' || recorded(a.id))) {
+      models.push(await appRow(app.id, app.name, app.app, records.find(r => r.modelId === app.id),
+        { sizeBytes: app.sizeBytes, ...(app.quant ? { quant: app.quant } : {}) }))
+    }
+    for (const record of records.filter(r => !apps.some(a => a.id === r.modelId))) {
+      models.push({ ...await appRow(record.modelId, record.name, record.engine, record, {}), canStart: false })
     }
     const freeDiskBytes = await statfs(join(this.home, 'models')).catch(() => statfs(this.home))
       .then(disk => disk.bavail * disk.bsize, () => undefined)
@@ -666,8 +773,18 @@ export class LocalModels {
       // account's existing grids before resolving ownership or joining again.
       await must(['--remote', 'sync'], 'Models could not be checked. Try again.')
     }
+    // The last scan has every model a person could have clicked; a model it lacks waits for a new one.
+    let apps = operation.modelId.startsWith('app:') ? await this.apps() : []
+    if (operation.modelId.startsWith('app:') && !apps.some(a => a.id === operation.modelId)) apps = await this.scanApps()
+    const app = apps.find(a => a.id === operation.modelId)
+    const started = (await readAppRecords(this.appRecordsFile)).some(r => r.modelId === operation.modelId && r.grid === grid)
+    if (operation.modelId.startsWith('app:') && (started || app?.engine !== 'grid')) {
+      return this.performApp(grid, operation, app?.engine === 'grid' ? undefined : app)
+    }
     const owned = await this.owned(grid)
-    const candidate = [...this.candidates, ...await this.known(grid, owned)].find(c => c.id === operation.modelId)
+    const appServed = this.appCandidates(apps)
+    const candidate = [...this.candidates, ...await this.known(grid, owned, appServed), ...appServed].find(c => c.id === operation.modelId)
+    if (candidate?.appPath && operation.action === 'start') await this.linkApp(candidate)
     const instance = owned.find(o => candidate ? o.file === candidate.file : operation.modelId === `local:${o.file}`)
     if (operation.action === 'stop') {
       if (instance) {
@@ -790,6 +907,76 @@ export class LocalModels {
     await this.save(grid, operation)
   }
 
+  /** Grid's models folder gets a link to an app's file, never a copy. A different file under the name is
+   *  never served in its place. */
+  private async linkApp(candidate: Candidate): Promise<void> {
+    const link = join(this.home, 'models', candidate.file)
+    const there = await lstat(link).catch(() => null)
+    if (there) {
+      if (there.isSymbolicLink() && await readlink(link).catch(() => '') === candidate.appPath) return
+      throw new ModelError('A different file has this name in Grid\'s models folder. Open Model Manager to start this model.')
+    }
+    await mkdir(join(this.home, 'models'), { recursive: true })
+    await symlink(candidate.appPath!, link)
+  }
+
+  /** Start or stop a model in its own app ([AppModel]): the app's engine, joined to [grid] at its own
+   *  address, answered through the grid, and held to the 64K floor by what the engine says it loaded. */
+  private async performApp(grid: string, operation: ModelOperation, app: AppModel | undefined): Promise<void> {
+    const ops = this.options.appEngines
+    const records = await readAppRecords(this.appRecordsFile)
+    const record = records.find(r => r.modelId === operation.modelId && r.grid === grid)
+    const without = (gone: AppEngineRecord) => writeAppRecords(this.appRecordsFile, records.filter(r => r !== gone))
+    const takeDown = async (started: AppEngineRecord) => {
+      await this.run(['--remote', 'leave', grid, '--engine', started.alias], undefined, 5 * 60_000)
+      await ops?.stop(started)
+    }
+    if (operation.action === 'stop') {
+      if (record) { await takeDown(record); await without(record) }
+    } else if (operation.action === 'start' && !record) {
+      if (!app || !ops) throw new ModelError('This model could not be checked. Refresh and try again.')
+      // Asked now, not taken from the last list: Use stops the model running and starts this one at
+      // once, and the list read before that stop still named it.
+      await this.owned(grid)
+      const running = records.find(r => r.grid === grid && r.modelId !== app.id)
+      if (running) throw new ModelError(`Stop ${cleanName(running.name)} first to start another local model.`)
+      if (this.blockers.has(grid)) throw new ModelError(this.blockers.get(grid)!)
+      const device = obj(await this.json(['device-info', '--json']))
+      const ctx = appContext(app, num(device.usable_bytes))
+      if (!ctx) throw new ModelError(`This computer does not have the memory to run ${app.name} with a 64K context. Close some apps, or choose a smaller model.`)
+      operation.stage = 'starting'; await this.save(grid, operation)
+      if (DOWN.has(await this.gridStatus(grid).catch(() => ''))) {
+        if (!(await this.run(['--remote', 'start', grid], undefined, 30 * 60_000)).ok) throw new ModelError('Your grid could not start. Try again.')
+      }
+      let started: AppEngineRecord
+      try {
+        started = { spec: 1, modelId: app.id, grid, name: app.name, ...await ops.start(app, ctx, join(this.options.stateDir, 'logs')) }
+      } catch (error) {
+        throw new ModelError(error instanceof AppStartError ? error.message : 'The model could not start. Try again.')
+      }
+      await writeAppRecords(this.appRecordsFile, [...records.filter(r => !(r.modelId === app.id && r.grid === grid)), started])
+      const failed = async (message: string): Promise<never> => {
+        await takeDown(started)
+        await writeAppRecords(this.appRecordsFile, (await readAppRecords(this.appRecordsFile)).filter(r => !(r.modelId === app.id && r.grid === grid)))
+        throw new ModelError(message)
+      }
+      const named = this.options.machineName?.()?.trim()
+      const joined = await this.run(['--remote', 'join', grid, '--at', `http://127.0.0.1:${started.port}/v1`, '-m', started.served,
+        '--advertise-as', started.alias, '--max-concurrency', '1', ...(named && validArg(named) ? ['--name', named] : [])], undefined, 10 * 60_000)
+      if (!joined.ok) await failed('The model could not join your grid. Try again.')
+      operation.stage = 'verifying'; await this.save(grid, operation)
+      try { await this.verify(grid, started.alias) } catch (error) {
+        await failed(error instanceof ModelError ? error.message : 'The model did not answer. Try again.')
+      }
+      const window = await ops.loadedContext(started)
+      if (window !== undefined && window < MIN_CODING_CONTEXT) {
+        await failed(`${app.name} could only get a ${Math.floor(window / 1024)}K context in ${APP_LABEL[app.engine as AppEngine]}. Coding agents need at least 64K. Close some apps, or choose a smaller model.`)
+      }
+    }
+    operation.phase = 'done'
+    await this.save(grid, operation)
+  }
+
   private async verify(grid: string, model: string): Promise<void> {
     const info = await this.run(['--remote', 'info', grid, '--env'])
     const { baseUrl, apiKey } = readEnvExports(info.stdout)
@@ -843,7 +1030,7 @@ export async function readRunRecords(home: string, gridId: string): Promise<Loca
     const advertised = strings(record.advertise_as)
     const ids = (advertised.length ? advertised : strings(record.models).map(displayModelName)).slice(0, MAX_RECORD_IDS)
     const pid = recordPid(record)
-    result.push({ name: str(record.meta_name), ids, pid, alive: pid !== null && processExists(pid) })
+    result.push({ name: str(record.meta_name), ids, pid, alive: pid !== null && processExists(pid), advertised: advertised.length > 0 })
   }
   return result
 }

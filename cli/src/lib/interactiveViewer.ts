@@ -8,6 +8,18 @@ const integer = (value: unknown, min: number, max: number): value is number =>
 const coordinate = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
 
+/** Viewers can request only navigation. Flutter additionally verifies the owning DSH and active tab. */
+export function monitorHostActions(value: unknown): Payload[] {
+  if (!Array.isArray(value) || value.length > 8) return []
+  const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 160
+  return value.flatMap<Payload>(action => {
+    if (!action || typeof action !== 'object') return []
+    if (action.action === 'assistant') return [{ action: 'assistant', chooseModel: action.chooseModel === true }]
+    if (action.action === 'open' && id(action.machineId) && id(action.agentId)) return [{ action: 'open', machineId: action.machineId, agentId: action.agentId }]
+    return []
+  })
+}
+
 /** Deliberately not a general CDP bridge: a browser can only send ordinary viewer input. */
 export function surfaceFrame(payload: Payload): Frame | null {
   if (!integer(payload.width, 160, 1920) || !integer(payload.height, 120, 1200)
@@ -50,6 +62,14 @@ export function surfaceFrame(payload: Payload): Frame | null {
 export class InteractiveViewerCapture extends ViewerCapture {
   private geometry = ''
   private dark: boolean | null = null
+  async takeHostActions(target: string): Promise<Payload[]> {
+    const origin = JSON.stringify(new URL(target).origin)
+    const reply = await this.call('Runtime.evaluate', { expression:
+      `location.origin === ${origin} ? (window.harnessEmbedded = true, Array.isArray(window.harnessHostQueue) ? window.harnessHostQueue.splice(0, 8) : []) : []`,
+      returnByValue: true })
+    const result = reply.result as { value?: unknown } | undefined
+    return monitorHostActions(result?.value)
+  }
   async frame(frame: Frame): Promise<string> {
     const geometry = `${frame.width}x${frame.height}`
     if (geometry !== this.geometry) {
@@ -114,8 +134,9 @@ export class InteractiveViewers {
       if (!surface.started) { await surface.capture.start(target); surface.started = true }
       if (this.surfaces.get(key) !== surface) return { error: 'VIEWER_CLOSED' }
       const data = await surface.capture.frame(frame)
+      const hostActions = await surface.capture.takeHostActions(target)
       if (this.surfaces.get(key) !== surface) return { error: 'VIEWER_CLOSED' }
-      return { data, mime: 'image/jpeg', width: frame.width, height: frame.height }
+      return { data, mime: 'image/jpeg', width: frame.width, height: frame.height, hostActions }
     } catch (error) {
       if (this.surfaces.get(key) === surface) this.remove(key)
       return { error: 'VIEWER_UNAVAILABLE', detail: error instanceof Error ? error.message : 'The viewer could not start.' }

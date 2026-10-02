@@ -1,4 +1,8 @@
 import 'package:harness/shared/theme/app_icons.dart';
+
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -12,6 +16,7 @@ import '../shared/theme/app_pane_icon.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
 import '../state/app_state.dart';
+import '../state/harness_monitor_controller.dart';
 import '../state/terminal_pane.dart';
 import '../theme/app_theme.dart';
 import '../viewer/interactive_viewer.dart';
@@ -85,6 +90,16 @@ class WebPanePanel extends StatefulWidget {
 }
 
 class _WebPanePanelState extends State<WebPanePanel> {
+  bool get _isMonitor =>
+      widget.notifier
+          .stateOf(widget.pane.machineId)
+          ?.agents
+          .any(
+            (agent) =>
+                agent.id == widget.pane.ownerAgentId &&
+                agent.dsh == harnessMonitorId,
+          ) ==
+      true;
   WebViewController? _controller;
   InteractiveViewerSession? _remote;
   String? _remoteIdentity;
@@ -99,11 +114,14 @@ class _WebPanePanelState extends State<WebPanePanel> {
   void initState() {
     super.initState();
     _mountRemote();
-    if (WebPanePanel.webviewAvailable) _mountController();
+    if (WebPanePanel.webviewAvailable) unawaited(_mountController());
   }
 
   void _mountRemote() {
-    if (!kIsWeb) return;
+    if (!kIsWeb &&
+        !(_isMonitor && !kUnderTest && !WebPanePanel.webviewAvailable)) {
+      return;
+    }
     final pane = widget.pane;
     final identity = '${pane.machineId}/${pane.ownerAgentId}/${pane.url}';
     if (_remoteIdentity == identity) return;
@@ -113,6 +131,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
     final machineId = pane.machineId, agentId = pane.ownerAgentId!;
     _remote = InteractiveViewerSession(
       (payload) => notifier.viewerSurface(machineId, agentId, payload),
+      onHostAction: (action) => unawaited(_hostAction(action)),
     );
     pane.focusViewerInput = _focusRemote;
   }
@@ -128,7 +147,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
     super.dispose();
   }
 
-  void _mountController() {
+  Future<void> _mountController() async {
     // WebKit's default media policy wants a click before any playback, which
     // leaves a viewer's muted video sitting at 00:00 with a play button; a
     // pane whose whole point is the render the harness just made autoplays it.
@@ -169,7 +188,47 @@ class _WebPanePanelState extends State<WebPanePanel> {
             ),
           );
     _controller = controller;
-    _load();
+    if (_isMonitor) {
+      await controller.addJavaScriptChannel(
+        'HarnessHost',
+        onMessageReceived: (message) async {
+          if (message.message.length > 2048) return;
+          final current = await controller.currentUrl();
+          try {
+            if (!mounted ||
+                current == null ||
+                Uri.tryParse(current)?.origin !=
+                    Uri.tryParse(widget.pane.url ?? '')?.origin) {
+              return;
+            }
+            final action = jsonDecode(message.message);
+            if (action is Map<String, dynamic>) await _hostAction(action);
+          } catch (_) {
+            /* malformed navigation request */
+          }
+        },
+      );
+    }
+    if (mounted) _load();
+  }
+
+  Future<void> _hostAction(Map<String, dynamic> action) async {
+    if (!mounted || !_isMonitor || !widget.visible) return;
+    final error = await widget.notifier.handleHarnessMonitorAction(
+      widget.pane,
+      action,
+    );
+    final guidance =
+        error ??
+        (action['action'] == 'assistant' && action['chooseModel'] == true
+            ? (widget.ownerEngine == 'opencode'
+                  ? 'Use /models in OpenCode to choose a model before sending your question.'
+                  : 'Choose a model from your assistant’s model menu before sending your question.')
+            : null);
+    if (mounted && guidance != null) {
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(SnackBar(content: Text(guidance)));
+    }
   }
 
   void _set(VoidCallback change) {
@@ -311,7 +370,8 @@ class _WebPanePanelState extends State<WebPanePanel> {
                         agentId: ownerId,
                         visible: widget.visible,
                       ),
-                    if (widget.verdict case final verdict?) ...[
+                    if (widget.verdict case final verdict?
+                        when !_isMonitor) ...[
                       Text(
                         '  ·  ',
                         style: grid.AppType.monoLabel(
@@ -343,9 +403,7 @@ class _WebPanePanelState extends State<WebPanePanel> {
               ),
             // coverage:ignore-end
             _ViewerActions(
-              zoomed: widget.zoomed,
               onReload: _controller == null && _remote == null ? null : _reload,
-              onZoom: widget.onToggleZoom,
               onClose: widget.onClose,
             ),
           ],
@@ -411,15 +469,9 @@ class _WebPanePanelState extends State<WebPanePanel> {
 
 /// Viewer navigation never stops the harness that owns it.
 class _ViewerActions extends StatelessWidget {
-  const _ViewerActions({
-    required this.zoomed,
-    this.onReload,
-    this.onZoom,
-    this.onClose,
-  });
+  const _ViewerActions({this.onReload, this.onClose});
 
-  final bool zoomed;
-  final VoidCallback? onReload, onZoom, onClose;
+  final VoidCallback? onReload, onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -430,12 +482,6 @@ class _ViewerActions extends StatelessWidget {
           label: 'Reload viewer',
           icon: AppPaneSymbol.reload,
           onPressed: onReload,
-        ),
-        PaneHeaderButton(
-          label: zoomed ? 'Restore harnesses' : 'Zoom viewer',
-          command: 'pane.zoom',
-          icon: zoomed ? AppPaneSymbol.restore : AppPaneSymbol.zoom,
-          onPressed: onZoom,
         ),
         PaneHeaderButton(
           label: 'Close viewer',

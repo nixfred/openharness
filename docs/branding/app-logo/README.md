@@ -70,6 +70,11 @@ every app icon from it:
 - Windows and Android: cropped to the tile, with the design's rounded corners.
 - iOS: cropped to the tile with square corners and no alpha, every slot listed in
   the asset catalog's `Contents.json`. iOS applies its own mask.
+- Web: the browser app's `favicon.ico` and 192/512 install icons in `desktop/web/`
+  with the tile's rounded corners, and its `apple-touch-icon.png` with square ones,
+  which iOS masks. The website gets the same favicon and its `public/icon.svg`.
+  Bump the `?v=` on their links (`desktop/web/index.html`,
+  `website/src/app/layout.tsx`) so browsers drop the cached icon.
 
 To adopt a new logo, add its untouched SVG here, put its 400x400 markup inside
 the `<g transform>` in `app_icon.svg`, and rerun the renderer.

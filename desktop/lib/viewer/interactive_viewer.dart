@@ -21,8 +21,9 @@ typedef ViewerSurfaceRequest = Future<Map<String, dynamic>> Function(
 /// Pulling the next frame only after the previous reply bounds both rendering and network work.
 /// Input is connection-local: a failed request is never replayed into a replacement viewer.
 class InteractiveViewerSession extends ChangeNotifier {
-  InteractiveViewerSession(this.request);
+  InteractiveViewerSession(this.request, {this.onHostAction});
   final ViewerSurfaceRequest request;
+  final void Function(Map<String, dynamic>)? onHostAction;
   final String id = hexOf(secureRandomBytes(16));
   Uint8List? image;
   String? error;
@@ -106,6 +107,12 @@ class InteractiveViewerSession extends ChangeNotifier {
         error = 'The viewer sent an invalid image.';
       } else {
         image = base64Decode(reply['data'] as String);
+        final actions = reply['hostActions'];
+        if (actions is List && actions.length <= 8) {
+          for (final action in actions) {
+            if (action is Map<String, dynamic>) onHostAction?.call(action);
+          }
+        }
       }
     } on WsRequestTimeout {
       if (!_disposed) {

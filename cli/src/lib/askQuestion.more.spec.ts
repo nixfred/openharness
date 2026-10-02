@@ -696,7 +696,7 @@ describe('QuestionWatcher — polling', () => {
 })
 
 describe('QuestionWatcher — what it announces', () => {
-  it('reads a session with no engine as Claude, a failed capture as an empty pane, and a dialog with no body as its question', async () => {
+  it('reads a session with no engine as Claude, ignores a failed capture, and uses a dialog with no body as its question', async () => {
     const captures: Array<string | null> = [null, fixture('grok')]
     let i = 0
     const seen: Array<{ id: string; detail?: { permission: boolean; dialog: string } }> = []

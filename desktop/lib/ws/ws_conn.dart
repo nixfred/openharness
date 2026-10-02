@@ -48,6 +48,7 @@ class WsRequestFailure implements Exception {
     required this.responseType,
     required this.code,
     this.detail,
+    this.payload = const {},
   });
 
   /// The frame that carried the refusal — `agent_create_result`, say.
@@ -59,6 +60,10 @@ class WsRequestFailure implements Exception {
   /// The underlying cause behind the code, when the peer sends one — the tmux message behind
   /// SPAWN_FAILED. Already reads as a sentence; prefer it to anything rewritten from [code].
   final String? detail;
+
+  /// Additional reply fields needed to handle a refusal, such as the activity
+  /// that made an idle Close unsafe. These must survive the error boundary.
+  final Map<String, dynamic> payload;
 
   @override
   String toString() => detail == null || detail!.isEmpty
@@ -92,6 +97,9 @@ class WsConn {
   final bool observerLink;
   bool get _directObserver => !isLocal && observerShareId != null;
   final int localProtocolVersion;
+
+  /// An auxiliary local client must not count as an active desktop window.
+  final bool localToolClient;
 
   /// A flat delay between reconnect attempts instead of the exponential backoff (1s→30s). Set for
   /// the socket to THIS computer's daemon: a refused connect on the loopback costs microseconds and
@@ -198,6 +206,7 @@ class WsConn {
     this.observerShareId,
     this.observerLink = false,
     this.localProtocolVersion = 1,
+    this.localToolClient = false,
     this.fixedReconnectDelay,
     this.relayCodecs,
     this.transportPlugins,
@@ -346,6 +355,7 @@ class WsConn {
             'machineId': machineId,
             if (observerShareId != null) 'shareId': observerShareId,
             if (isLocal) 'localProtocolVersion': localProtocolVersion,
+            if (isLocal && localToolClient) 'tool': true,
             if (isLocal && forceRelayReconnect) 'forceReconnect': true,
           },
         });
@@ -547,6 +557,7 @@ class WsConn {
             responseType: message['type'] as String? ?? 'unknown_result',
             code: '${payload['error']}',
             detail: detail is String && detail.isNotEmpty ? detail : null,
+            payload: Map.unmodifiable(payload),
           ),
         );
       } else {
@@ -606,6 +617,10 @@ class WsConn {
       !type.startsWith('command_bar') &&
       !type.startsWith('route_') &&
       !type.startsWith('harness_share_') &&
+      // Pair responses can contain retained memory quotations and one-use
+      // owner capabilities. Never copy them into a second log retention path.
+      type != 'pair' &&
+      type != 'pair_result' &&
       !type.startsWith('observer_');
 
   Future<Map<String, dynamic>> request(

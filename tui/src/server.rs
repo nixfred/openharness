@@ -107,6 +107,8 @@ fn keys_from(v: &Value, mut k: Keymap) -> Keymap {
     if let Some(c) = v.get("prefix").and_then(Value::as_str).and_then(|s| crate::keys::parse(s).ok()) { k.prefix = c }
     k.prefix2 = v.get("prefix2").and_then(Value::as_str).and_then(|s| crate::keys::parse(s).ok());
     k.prefix_table = bindings_from(&v["prefix-table"]);
+    // (Kept before a default changed: that default moves on with it.)
+    Keymap::migrate_defaults(&mut k.prefix_table);
     k.root_table = bindings_from(&v["root"]);
     k.copy_vi = bindings_from(&v["copy-mode-vi"]);
     k.copy_emacs = bindings_from(&v["copy-mode"]);

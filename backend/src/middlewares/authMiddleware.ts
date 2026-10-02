@@ -24,6 +24,13 @@ export function shouldSkipAuth(url: string): boolean {
     // (lib/harnessSession.ts). Revoke takes the refresh token, the same authority /refresh does.
     // `/api/auth/handoff` itself is NOT listed: minting a code needs the computer's sign-in.
     path === '/api/auth/handoff/redeem' ||
+    // A computer signing in by QR (routes/qrSignIn.ts) has no token yet: its poll token is the
+    // credential for what it may learn and claim. The phone's half (lookup/approve/deny) is NOT here.
+    path === '/api/auth/qr/start' ||
+    path === '/api/auth/qr/poll' ||
+    path === '/api/auth/qr/extend' ||
+    path === '/api/auth/qr/claim' ||
+    path === '/api/auth/qr/cancel' ||
     path === '/api/auth/revoke' ||
     path === '/api/auth/logout-url' ||
     // Public app-deploy registration — agent-key gated (x-api-key), self-validated in its

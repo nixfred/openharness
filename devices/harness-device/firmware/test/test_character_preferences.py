@@ -87,8 +87,8 @@ int main(void) {
     // Focus is what a dial shows before anybody has chosen (owner's decision, 2026-09-30).
     assert(ht_character_default() == HT_CHARACTER_FOCUS);
 #endif
-    // And at full brightness: no "bright" key is 255, a saved one is kept exactly.
-    bright_present = false; assert(config_load_brightness() == 255);
+    // And at 80%: no "bright" key is 204 (80 of 100 once the UI rounds it), a saved one is kept exactly.
+    bright_present = false; assert(config_load_brightness() == 204 && (204 * 100 + 127) / 255 == 80);
     bright_present = true; bright_stored = 102; assert(config_load_brightness() == 102);
     bright_present = false;
     home_caption.initialized=true;
@@ -116,7 +116,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='harness-character-pref-') as directory:
     out = Path(directory)
     (out / 'test.c').write_text(code)
-    sources = ['character.c', 'illustrated.c', 'character_motion.c', 'character_layout.c', 'tux.c', 'focus.c', 'lvgl_fonts.c', 'lvgl_icons.c',
+    sources = ['character.c', 'illustrated.c', 'character_motion.c', 'character_layout.c', 'tux.c', 'focus.c', 'lvgl_fonts.c', 'lvgl_icons.c', 'focus_marks.c', 'focus_faces.c', 'pets.c',
                'octopus.c', 'octopus_font.c', 'ascii_clip.c', 'terminal.c', 'fonts.c']
     for flags in ([], ['-DDEVICE_DEFAULT_CHARACTER_TUX=1']):
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',

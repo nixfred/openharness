@@ -21,6 +21,7 @@ class _Api extends DirectAuthApi {
   Future<IssuedTokens> refresh(
     String refreshToken, {
     required String autonomousEnv,
+    String? clientId,
   }) async {
     refreshCount++;
     expect(refreshToken, 'fixture-refresh');

@@ -67,6 +67,8 @@ void main() {
     );
   });
   test('the command catalog retains the current direct workspace keys', () {
+    expect(harnessCommandById['harnesses.list']!.label, 'Open Harness');
+    expect(harnessCommandById['agent.open']!.label, 'Open Project');
     String? command(
       String keys, [
       KeymapContext context = KeymapContext.terminal,
@@ -122,7 +124,10 @@ void main() {
     for (final retired in ['cmd+shift+h', 'cmd+shift+k', 'cmd+u', 'cmd+y']) {
       expect(command(retired), isNull, reason: retired);
     }
-    expect(command('cmd+alt+left'), isNull);
+    // ⌥⌘←/→ walk tabs, as in Safari and Chrome; ⇧⌘[ ] no longer do.
+    expect(command('cmd+alt+left'), 'swarm.previous');
+    expect(command('cmd+alt+right'), 'swarm.next');
+    expect(command('cmd+shift+['), isNull);
     expect(command('cmd+shift+enter'), isNull);
     expect(command('ctrl+n', KeymapContext.picker), 'picker.next');
     expect(command('cmd+t', KeymapContext.picker), 'swarm.new');

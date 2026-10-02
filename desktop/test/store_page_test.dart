@@ -296,7 +296,7 @@ void main() {
         );
         expect(find.text('Your projects and files are kept.'), findsOneWidget);
         expect(find.text('aaaaaaaa'), findsOneWidget);
-        expect(find.text('Resume Harness'), findsNothing);
+        expect(find.text('Open Harness'), findsNothing);
         expect(find.text('New Harness'), findsNothing);
         app.updateGate = Completer<String?>();
         await tester.tap(_key('store-primary-action'));
@@ -1453,7 +1453,7 @@ void main() {
           );
           void expectBrowseOnly() {
             expect(_key('store-card:$id'), findsOneWidget);
-            expect(find.text('Resume Harness'), findsNothing);
+            expect(find.text('Open Harness'), findsNothing);
             expect(find.text('New Harness'), findsNothing);
             expect(find.text('Get'), findsNothing);
           }

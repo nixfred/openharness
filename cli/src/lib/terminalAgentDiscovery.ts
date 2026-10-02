@@ -104,8 +104,7 @@ function childrenByParent(rows: readonly ProcessRow[]): Map<number, ProcessRow[]
   return children
 }
 
-function daemonDescendants(rows: readonly ProcessRow[], daemonPid: number): Set<number> {
-  const children = childrenByParent(rows)
+function daemonDescendants(children: ReadonlyMap<number, readonly ProcessRow[]>, daemonPid: number): Set<number> {
   const excluded = new Set<number>()
   const queue = [daemonPid]
   while (queue.length) {
@@ -119,13 +118,12 @@ function daemonDescendants(rows: readonly ProcessRow[], daemonPid: number): Set<
 
 function rootOwner(
   root: TerminalRootObservation,
-  rows: readonly ProcessRow[],
+  byPid: ReadonlyMap<number, ProcessRow>,
+  children: ReadonlyMap<number, readonly ProcessRow[]>,
   excluded: ReadonlySet<number>,
   ownership: AgentCommandOwnershipSnapshot,
   hintedEngine?: AgentEngine,
 ): RootOwner {
-  const byPid = new Map(rows.map((row) => [row.pid, row]))
-  const children = childrenByParent(rows)
   const queue: Array<{ pid: number; depth: number }> = [{ pid: root.rootPid, depth: 0 }]
   const matches: Array<{ row: ProcessRow; engine: AgentEngine; depth: number; score: number }> = []
   let unresolvedAliasDepth = Number.POSITIVE_INFINITY
@@ -187,7 +185,12 @@ export function discoverTerminalAgentsFromSnapshot(
   hints: ReadonlyMap<string, AgentEngine> = new Map(),
   ownership = agentCommandOwnershipSnapshot(),
 ): { agents: DiscoveredTerminalAgent[]; ambiguousPlacements: Set<string> } {
-  const excluded = daemonDescendants(rows, daemonPid)
+  // Every pane belongs to this same snapshot. Build the process indexes once per scan, rather
+  // than copying the whole machine's process table for every persistent pane. Keep them local:
+  // the next scan must see exits, execs and PID reuse without retaining stale process identities.
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  const children = childrenByParent(rows)
+  const excluded = daemonDescendants(children, daemonPid)
   const grouped = new Map<string, {
     agent: Omit<DiscoveredTerminalAgent, 'runtimes' | 'primaryRuntimeKey'>
     observations: Array<{ runtime: TerminalRuntimeRef; depth: number; cwd: string }>
@@ -195,7 +198,7 @@ export function discoverTerminalAgentsFromSnapshot(
   const ambiguousPlacements = new Set<string>()
 
   for (const root of roots) {
-    const owner = rootOwner(root, rows, excluded, ownership, hints.get(terminalRouteKey(root.runtime)))
+    const owner = rootOwner(root, byPid, children, excluded, ownership, hints.get(terminalRouteKey(root.runtime)))
     if (owner.ambiguous) {
       ambiguousPlacements.add(terminalPlacementKey(root.runtime))
       continue

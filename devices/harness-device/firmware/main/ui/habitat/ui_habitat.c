@@ -13,6 +13,7 @@
 #include "perf_bench.h"
 #include "command_face.h"
 #include "theme.h"
+#include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
 #include "creature_gallery.h"
 static ht_gallery_t gallery;
@@ -58,9 +59,9 @@ static ht_gallery_t gallery;
 #define TAB_ROWS 4
 #define TAB_ROW_HEIGHT 64
 #define TAB_TOP 112
-// Focus's pane list: six rows on a 48 px pitch.
-#define PANE_PITCH 48
-#define PANE_ROWS 6
+// Focus's pane list: four cards, 58 tall and 8 apart; a drag moves one per 66 px.
+#define PANE_PITCH 66
+#define PANE_ROWS 4
 #define LIST_HIT_X 59
 #define LIST_HIT_W 348
 #define LIST_TEXT_X 71
@@ -245,6 +246,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t coast_until;
     uint32_t character_activity;
     uint8_t status_phase;
+    uint32_t pet_next_ms;   // when the engine pet's drawn frame next changes (clock_ms), 0 = never
     int start_x, start_y, last_x, last_y;
     uint32_t touch_started;
     // nixfred graphics: the boot scanner's step, the firmware transfer's percent (-1 when none), and the
@@ -1099,6 +1101,8 @@ static void surface_tick(uint32_t now)
     }
     uint8_t phase = status_animated() ? ht_shimmer_phase(now * status_speed()) : 0;
     if (phase != s.status_phase) { s.status_phase = phase; change(); }
+    if (s.pet_next_ms && (s.view == HOME || s.view == AGENT) && !s.touch_down &&
+        (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
     bool main = s.view == HOME || s.view == AGENT;
     bool visible = !display_is_asleep() &&
         ((main && s.connected && !s.loading) || s.view == VOICE);
@@ -1158,30 +1162,29 @@ static void render_workspace_preview(ht_scene_t *f)
 }
 /*
  * THE BLUE BELL — the Focus skin's notification pill, as the LVGL firmware drew it: #006fff, fully
- * round, padded 13 x 4, at y 22: the bell in montserrat_14 and, 6 px on, the count in montserrat_22,
- * centred on each other in a 32 px row. Three runs: box, bell, count.
+ * round, padded 13 px, always 32 px tall: the bell in montserrat_14 and, 6 px on, the count in
+ * montserrat_22, each centred vertically in it. Three runs: box, bell, count. It sits at the bottom edge, where the
+ * microphone was: the top belongs to the curved name.
  */
 static void focus_bell(ht_scene_t *f, unsigned count)
 {
-    enum { BELL_Y = 22, BELL_PAD_H = 13, BELL_PAD_V = 4, BELL_GAP = 6 };
+    enum { BELL_Y = 400, BELL_H = 32, BELL_PAD_H = 13, BELL_GAP = 6 };
     const ht_font_t *bf = &ht_lv_montserrat_14.base, *cf = &ht_lv_montserrat_22.base;
     char text[16];
     snprintf(text, sizeof text, "%u", count);
     int bw = ht_measure(bf, HT_LV_BELL), cw = ht_measure(cf, text);
-    int h = cf->height + 2 * BELL_PAD_V, box_w = 2 * BELL_PAD_H + bw + BELL_GAP + cw;
+    int h = BELL_H, box_w = 2 * BELL_PAD_H + bw + BELL_GAP + cw;
     int x = (HT_WIDTH - box_w) / 2;
     uint16_t blue = color(0x006fff), ink = color(0xeaeaf0);
     ht_box(f, x, BELL_Y, box_w, h, h / 2, blue, blue);
-    ht_text(f, x + BELL_PAD_H, BELL_Y + BELL_PAD_V + (cf->height - bf->height) / 2, bw, bf, ink, blue,
+    ht_text(f, x + BELL_PAD_H, BELL_Y + (h - bf->height) / 2, bw, bf, ink, blue,
             HT_LV_BELL);
-    ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, BELL_Y + BELL_PAD_V, cw, cf, ink, blue, text);
+    ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, BELL_Y + (h - cf->height) / 2, cw, cf, ink, blue, text);
 }
 static void render_home(ht_scene_t *f)
 {
-    // Where the Focus face's microphone target begins: a little above the mark's ink at 397, so the
-    // top of the mark is not its edge. A_PET ends here on Focus.
-    enum { FOCUS_MIC_TOP = 353 };
     s.caption_arc = (ht_rect_t){0};
+    s.pet_next_ms = 0;
     if (!s.connected || s.loading) { render_brand(f); return; }
     if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
     uint32_t nf_now = ms();
@@ -1232,6 +1235,7 @@ static void render_home(ht_scene_t *f)
     // turn nobody is running any more.
     uint32_t since = a && a->busy && a->busy_ms && !is_question(a->id) ? (ms() - a->busy_ms) / 1000 : 0;
     int tab_index = workspace_index(s.selected_tab);
+    uint32_t clock = ms() | 1;
     ht_character_face_t f_ = {.recipient = caption, .status = bell ? "" : status,
         // The lower text seat belongs to notifications and useful status.
         // A companion's name lives in the desktop Zoo, not a permanent footer.
@@ -1242,6 +1246,8 @@ static void render_home(ht_scene_t *f)
         .elapsed = since > 65535 ? 65535 : (uint16_t)since,
         .detail = "",
         .mood = companion_celebrating ? HT_CHARACTER_DONE : character_mood(), .pose = character.motion.reaction.pose,
+        .asking = a && is_question(a->id),
+        .clock_ms = (s.quiet || display_is_asleep()) ? 0 : clock,   // the pet's loop
         .straight_title = s.straight_title,
         .footer_action = carry.active || carry.error[0] || visit.available,
         .ink = FG, .foreground = FG, .dim = DIM,
@@ -1264,8 +1270,9 @@ static void render_home(ht_scene_t *f)
         for (int i = nf_face; i < f->count; i++)
             if (!f->runs[i].arc && !f->runs[i].ring.outer && f->runs[i].y + dy < HT_HEIGHT - 40) f->runs[i].y += dy;
     }
+    s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
     if (bell) {
-        if (focus_face) focus_bell(f, unread);   // y 22..57, clear of the tab pill at 67
+        if (focus_face) focus_bell(f, unread);   // y 400..432, under the recap
         else ht_notification_bell(f, unread, f_.ink);
     }
     s.status_phase = status_animated() ? ht_shimmer_phase(ms()) : 0;
@@ -1285,103 +1292,44 @@ static void render_home(ht_scene_t *f)
     } else if (visit.available) {
         footer_control(f, 113, 240, "[ return ]", A_RETURN, s.connected && !visit.pending);
     }
-    /*
-     * A SKIN WITH NO COMPANION NEEDS SOMETHING TO PRESS.
-     *
-     * The centre rect below has always started voice, on every skin — but on a creature face the
-     * creature IS the affordance, and Focus has none. One footer label, and only when nothing else
-     * has claimed the footer. Artwork still owns no action: the hit rect is registered here.
-     */
-    /*
-     * THE MICROPHONE, drawn rather than labelled.
-     *
-     * `[ say ]` was a bracket label because bracket labels are what this firmware has; the device
-     * drew a mic here before habitat and a mic is what the thing is. It goes through ht_text with its
-     * own 26 px cell instead of footer_control's ht_mono_20, for the same reason the footer bell does
-     * — an icon routed into a text run has to match that run's cell exactly or the raster overreads.
-     * The hit rect is still registered here: artwork owns no action.
-     */
-    if (focus_face && !carry.active && !carry.error[0] && !visit.available) {
-        bool can_say = s.connected && !s.loading && a != NULL;
-        int n = s.hit_count++;
-        /*
-         * THE TARGET RUNS TO THE BOTTOM OF THE GLASS, and that is the whole point of it.
-         *
-         * It was {143, 389, 180, 50} — 50 px tall around a 48 px glyph drawn at y 392, so three
-         * pixels of slack above the mark and NONE below it. A thumb pressing the lower half of a
-         * circle held in the hand rolls downward, and the roll left the rect. That loses the entire
-         * contact rather than just the release: the press path records `pressed_action` from the
-         * FIRST sample, and both the scroll guard above and the release rule below ask
-         * home_footer(pressed_action.kind), so a DOWN one pixel low makes the contact a terminal
-         * scroll and nothing can recover it. Pressing the TOP of the mark worked immediately because
-         * the row above is A_PET, whose tap opens the microphone too.
-         *
-         * Nothing else on the Focus face claims this band — A_PET is cut short to end where it
-         * starts (see the bottom of this function), the bell sits at the top — so the rect takes it
-         * whole, down to the bottom edge. The corners fall outside the round glass, which costs
-         * nothing: a touch out there does not exist.
-         */
-        s.hits[n] = (hit_t){{143, FOCUS_MIC_TOP, 180, HT_HEIGHT - FOCUS_MIC_TOP}, A_VOICE, 0, can_say};
-        // The LVGL firmware's own icon_act_voice, 44 px in its #00ff2f, centred on (233, 393) as its
-        // 80 px button was. It is a picture, so it has no pressed or disabled ink of its own.
-        ht_icon(f, 233 - ht_icon_mic.w / 2, 393 - ht_icon_mic.h / 2, &ht_icon_mic);
-    }
     if (!carry.active && !carry.error[0] && !visit.available) {
-        /*
-         * Both phases of the caption open the pane picker on a creature skin. Focus has two doors
-         * where they have one: its tab pill opens the TAB list and its agent's name the PANE list.
-         * The pill's is A_TAB_LIST rather
-         * than A_TABS, because A_TABS on this surface is the slide-to-switch gesture and answers
-         * only a strict tap; a door is pressed and released, like the microphone.
-         */
-        if (focus_face) {
-            // Where ht_focus_face put them this frame: the pill and the name move with the layout.
-            ht_rect_t p = ht_focus_pill_target, t = ht_focus_name_target;
-            if (p.w) s.hits[s.hit_count++] = (hit_t){{83, p.y - 3, 300, p.h + 6}, A_TAB_LIST, 0, s.connected};
-            s.hits[s.hit_count++] = (hit_t){{83, t.y - 3, 300, t.h + 6}, A_AGENTS, 0, true};
-        } else s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+        // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
+        // curve. The tab list is a hold on the face (A_PET below), on every skin.
+        s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
         for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
             ht_rect_t r = ht_run_bounds(&f->runs[i]);
             s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
             break;
         }
     }
-    // The badge's own target follows it. On Focus that is the top strip, clear of the tab pill below.
-    if (bell)
-        s.hits[s.hit_count++] = focus_face ? (hit_t){{83, 10, 300, 55}, A_INBOX, 0, unread > 0}
-                                           : (hit_t){{83, 382, 300, 84}, A_INBOX, 0, unread > 0};
+    // The badge's own target follows it, at the bottom on every skin.
+    if (bell) s.hits[s.hit_count++] = (hit_t){{83, 382, 300, 84}, A_INBOX, 0, unread > 0};
     // The bell and the creature never share a target, even when the bell is
-    // hidden or its count changes under a finger. Centre always starts voice.
-    // On Focus it stops where the microphone's target starts; nothing is drawn between the last recap
-    // row (y 335) and the mic, so the band belongs to the button rather than to a tap-anywhere.
-    s.hits[s.hit_count++] = (hit_t){{33, 66, 400, focus_face ? FOCUS_MIC_TOP - 66 : 316}, A_PET, 0, true};
+    // hidden or its count changes under a finger. Centre always starts voice. On Focus the whole face
+    // below the name does, down to the bottom edge; the bell's target, registered above, wins there.
+    // nixfred slice 6: a still press past 650 ms on that face opens the hub instead (nf_hold_armed).
+    s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
+                                       : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
     // The fleet on the rim, last so the face keeps every run it needs. The summary sits in the empty
-    // band under the face: above the microphone on Focus, above the bell on a creature; not while a
-    // recap or a carried text owns that space.
-    nf_home_rim(f, nf_now, !recap && !carry.active && !carry.error[0] && !visit.available,
-                focus_face ? 318 : 350);
+    // band above the bell (Focus has no microphone button since upstream's touch-anywhere face); not
+    // while a recap or a carried text owns that space.
+    nf_home_rim(f, nf_now, !recap && !carry.active && !carry.error[0] && !visit.available, 350);
     // nixfred slice 6: the grab notch at 12 o'clock, the shade's affordance (pull down from here for the hub).
     if (focus_face) nixfred_notch(f, 0, DIM);
 }
 /*
- * FOCUS'S LISTS SPEAK THE AGENT SCREEN'S TYPE (owner, 2026-09-30): Geist and Montserrat from the
+ * FOCUS'S LISTS SPEAK THE AGENT SCREEN'S TYPE (owner, 2026-09-30): Geist from the
  * LVGL build, not the terminal skin's mono. The title is a grey Geist Regular 20 straight across the
  * top, a list row Geist Medium, and the one button the tab pill's own shape and face.
  */
-static void focus_title(ht_scene_t *f, const char *title)
+static void focus_centred(ht_scene_t *f, int y, int room, const ht_font_t *font, uint16_t ink,
+                          uint16_t bg, const char *text)
 {
-    const ht_font_t *font = &ht_lv_geist_reg_20.base;
-    int w = ht_measure(font, title);
-    ht_text(f, (HT_WIDTH - w) / 2, 24, w, font, DIM, BG, title);
-}
-static void focus_centred(ht_scene_t *f, int y, const ht_font_t *font, uint16_t ink, uint16_t bg,
-                          const char *text)
-{
-    // One line of at most 348 px: whole letters, then "..." when the name runs past it.
+    // One line of at most `room` px: whole letters, then "..." when the name runs past it.
     char line[HT_TEXT_BYTES];
     snprintf(line, sizeof line, "%s", text);
     int w = ht_measure(font, line);
-    if (w > 348) {
+    if (w > room) {
         size_t n = strlen(line);
         for (;;) {
             while (n && ((uint8_t)line[n - 1] & 0xc0) == 0x80) n--;   // back over a letter's tail
@@ -1390,7 +1338,7 @@ static void focus_centred(ht_scene_t *f, int y, const ht_font_t *font, uint16_t 
             if (n + 4 > sizeof line) continue;
             memcpy(line + n, "...", 4);
             w = ht_measure(font, line);
-            if (w <= 348 || !n) break;
+            if (w <= room || !n) break;
         }
     }
     if (w <= 0) w = 1;
@@ -1430,47 +1378,76 @@ static void focus_clipped(ht_scene_t *f, int x, int y, const ht_font_t *font, ui
     if (w > 0) ht_text(f, x, y, w, font, ink, BG, probe);
 }
 /*
- * FOCUS'S PANE LIST (owner, 2026-09-30): every pane at once, still, in full ink, centred as one block
- * about y 233 on a 48 px pitch — six fit between the title and the ←. Only the pane on the face is
- * green; a pressed row lights green on a dark-green band. Past six the list scrolls a row at a time
- * under a vertical drag, and nothing moves otherwise. Each row is its own tap.
+ * The top of Focus's two lists, as the LVGL TABS picker drew it: the 60 x 32 close pill at y 16 —
+ * the way back, in place of a ← — and the list's name in grey Geist 20, letter-spaced 2, at y 62.
+ */
+static void focus_header(ht_scene_t *f, const char *title)
+{
+    enum { CLOSE_X = 203, CLOSE_Y = 16, CLOSE_W = 60, CLOSE_H = 32, TITLE_Y = 62 };
+    const ht_font_t *small = &ht_lv_geist_reg_20.base, *cross = &ht_lv_montserrat_22.base;
+    uint16_t fg = color(0xeaeaf0), close = color(0x171718);
+    // make_close_pill: COL_FG at 10 % over black, the cross centred in it.
+    int cw = ht_measure(cross, HT_LV_CROSS);
+    ht_box(f, CLOSE_X, CLOSE_Y, CLOSE_W, CLOSE_H, CLOSE_H / 2, close, close);
+    ht_text(f, CLOSE_X + (CLOSE_W - cw) / 2, CLOSE_Y + (CLOSE_H - cross->height) / 2, cw, cross, fg,
+            close, HT_LV_CROSS);
+    s.hits[s.hit_count++] = (hit_t){{CLOSE_X - 40, 0, CLOSE_W + 80, CLOSE_Y + CLOSE_H + 12}, A_HOME, 0, true};
+    // A letter to a run, which is how the spacing is drawn.
+    int tw = 0;
+    for (const char *c = title; *c; c++) { char one[2] = {*c, 0}; tw += ht_measure(small, one) + 2; }
+    int tx = (HT_WIDTH - (tw - 2)) / 2;
+    for (const char *c = title; *c; c++) {
+        char one[2] = {*c, 0};
+        int w = ht_measure(small, one);
+        ht_text(f, tx, TITLE_Y, w, small, color(0x4c4c4c), BG, one);
+        tx += w + 2;
+    }
+}
+/*
+ * FOCUS'S PANE LIST, in the LVGL firmware's TABS picker (swarm_picker_build / _rebuild at
+ * e96fc50c^), one line to a row (owner, 2026-10-01): black, the 60 x 32 close pill at the top, a
+ * grey spaced "PANES" at y 62, then a column of cards 8 apart — Geist Medium 28 centred, padded
+ * 16 x 10, radius 16, #16161c at 60 % — the pane on the face at full fill with a 1 px Focus-green rim.
+ * The column is centred 10 px below the middle. Four rows is what a 360 px card keeps inside the
+ * round glass; past four the list scrolls a row at a time. Each card is its own tap; the cross, back.
  */
 static void render_focus_panes(ht_scene_t *f)
 {
-    focus_title(f, "panes");
-    const ht_font_t *font = &ht_lv_geist_med_32.base;   // the tab names' size
-    uint16_t green = color(HT_THEME_VOICE), band = color(0x0d3a18);
+    enum { CARD_X = 53, CARD_W = 360, CARD_H = 58, CARD_GAP = 8, CARD_R = 16 };
+    const ht_font_t *font = &ht_lv_geist_med_28.base;
+    // The cards wear the recap/inbox card's 0x23252f so they stand off the black (owner, 2026-10-02);
+    // the chosen one adds the green rim, a press lightens one step.
+    uint16_t fg = color(0xeaeaf0), card = color(0x23252f), rest = color(0x23252f),
+             pressed_fill = color(0x30333f), rim = color(HT_THEME_VOICE);   // Focus green (owner, 2026-10-01)
+    focus_header(f, "PANES");
     if (!s.count) {
-        focus_centred(f, 180, font, FG, BG, s.loading ? "Loading..." : "No panes in this tab.");
+        focus_centred(f, 180, 348, font, FG, BG, s.loading ? "Loading..." : "No panes in this tab.");
         // "Choose a tab", in the tab pill's shape and face: the door to the tab list looks like one.
         const ht_font_t *pf = &ht_lv_montserrat_24.base;
         int n = s.hit_count++, w = ht_measure(pf, "Choose a tab"), box = w + 2 * 12 + 2;
         int x = (HT_WIDTH - box) / 2, y = 250;
         s.hits[n] = (hit_t){{x - 20, y - 12, box + 40, 41 + 24}, A_TABS, 0, s.connected};
-        bool pressed = n == s.pressed;
-        uint16_t fill = pressed ? band : color(0x141519);
-        ht_box(f, x, y, box, 41, 20, fill, pressed ? band : color(0x3a3f4b));
-        ht_text(f, x + 13, y + 7, w, pf, !s.connected ? DIM : pressed ? green : FG, fill, "Choose a tab");
-    } else {
-        int last = s.count > PANE_ROWS ? s.count - PANE_ROWS : 0;
-        if (s.offset > last) s.offset = last;
-        if (s.offset < 0) s.offset = 0;
-        int rows = s.count - s.offset < PANE_ROWS ? s.count - s.offset : PANE_ROWS;
-        for (int row = 0; row < rows; row++) {
-            int i = s.offset + row, y = 233 + ((2 * row - (rows - 1)) * PANE_PITCH) / 2;
-            agent_t *a = &s.agents[i];
-            int hit = s.hit_count++;
-            s.hits[hit] = (hit_t){{59, y - PANE_PITCH / 2, 348, PANE_PITCH}, A_AGENT, i, s.connected};
-            bool pressed = hit == s.pressed;
-            uint16_t ink = !s.connected ? DIM : i == s.active || pressed ? green : FG;
-            if (pressed) ht_box(f, 59, y - PANE_PITCH / 2 + 2, 348, PANE_PITCH - 4, 6, band, band);
-            // One line, as wide as the circle holds at the top and bottom rows; longer ends in "...".
-            focus_centred(f, y - font->height / 2, font, ink, pressed ? band : BG,
-                          a->name[0] ? a->name : "Untitled");
-        }
+        uint16_t pill = n == s.pressed ? pressed_fill : color(0x141519);
+        ht_box(f, x, y, box, 41, 20, pill, color(0x3a3f4b));
+        ht_text(f, x + 13, y + (41 - pf->height) / 2, w, pf, s.connected ? fg : DIM, pill, "Choose a tab");
+        return;
     }
-    ht_text(f, 223, 400, 20, &ht_nav_32, DIM, BG, "\xe2\x86\x90");
-    s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_HOME, 0, true};
+    int last = s.count > PANE_ROWS ? s.count - PANE_ROWS : 0;
+    if (s.offset > last) s.offset = last;
+    if (s.offset < 0) s.offset = 0;
+    int rows = s.count - s.offset < PANE_ROWS ? s.count - s.offset : PANE_ROWS;
+    int h = rows * CARD_H + (rows - 1) * CARD_GAP, top = (HT_HEIGHT - h) / 2 + 10;
+    for (int row = 0; row < rows; row++) {
+        int i = s.offset + row, y = top + row * (CARD_H + CARD_GAP);
+        agent_t *a = &s.agents[i];
+        int hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{CARD_X, y, CARD_W, CARD_H}, A_AGENT, i, s.connected};
+        bool here = i == s.active, pressed = hit == s.pressed;
+        uint16_t fill = pressed ? pressed_fill : here ? card : rest;
+        ht_box(f, CARD_X, y, CARD_W, CARD_H, CARD_R, fill, here ? rim : fill);
+        focus_centred(f, y + (CARD_H - font->height) / 2, CARD_W - 2 - 32, font, s.connected ? fg : DIM, fill,
+                      a->name[0] ? a->name : "Untitled");
+    }
 }
 // A drag on the Focus pane list: a row per pitch travelled, and only when there are more than fit.
 static void panes_move(int dy)
@@ -1696,17 +1673,17 @@ static void tab_name(ht_scene_t *f, const char *name, int center_x, uint16_t ink
     }
 }
 /*
- * FOCUS'S TABS: the same carousel, in Geist Medium 32 — the name on at most two lines of 204 px, as
+ * FOCUS'S TABS: the close pill and "TABS" on top (focus_header), then the same carousel, in Geist Medium 32 — the name on at most two lines of 204 px, as
  * the mono version wrapped at twelve cells, ending in "..." past that; neighbours peek in at the
  * edges, cut to whole letters inside x 42..424. The tab you are in is green.
  */
 static void render_focus_tabs(ht_scene_t *f)
 {
-    focus_title(f, "tabs");
+    focus_header(f, "TABS");
     const ht_font_t *font = &ht_lv_geist_med_32.base;
     enum { SPAN = 204 };
     int current = ht_tab_carousel_index(&tab_carousel);
-    if (current < 0) focus_centred(f, 214, &ht_lv_geist_med_28.base, DIM, BG, "No tabs yet.");
+    if (current < 0) focus_centred(f, 214, 348, &ht_lv_geist_med_28.base, DIM, BG, "No tabs yet.");
     else {
         for (int i = current - 1; i <= current + 1; i++) {
             if (i < 0 || i >= s.tab_count) continue;
@@ -1736,8 +1713,6 @@ static void render_focus_tabs(ht_scene_t *f)
                 A_TAB, i, s.connected && !s.loading};
         }
     }
-    ht_text(f, 223, 400, 20, &ht_nav_32, DIM, BG, "\xe2\x86\x90");
-    s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_HOME, 0, true};
 }
 static void render_tabs(ht_scene_t *f)
 {
@@ -2203,11 +2178,19 @@ static void nf_home_extras(ht_scene_t *f, uint32_t now)
         if (nf_card_up()) nf_hit_first((hit_t){{NIXFRED_CARD_X, y, NIXFRED_CARD_W, NIXFRED_CARD_H}, A_NF_CARD, 0, true});
     }
 }
+// The machines screen's grey Geist 20 title at y 24 (upstream retired focus_title for focus_header,
+// whose close pill would sit where this screen's tiles and shade notch are).
+static void nf_title(ht_scene_t *f, const char *title)
+{
+    const ht_font_t *font = &ht_lv_geist_reg_20.base;
+    int w = ht_measure(font, title);
+    ht_text(f, (HT_WIDTH - w) / 2, 24, w > 0 ? w : 1, font, DIM, BG, title);
+}
 static void nf_render_machines(ht_scene_t *f)
 {
-    focus_title(f, "machines");
+    nf_title(f, "machines");
     int count = s.machine_count - s.offset;
-    if (count <= 0) { focus_centred(f, 214, &ht_lv_geist_med_28.base, DIM, BG, "Nothing here yet."); }
+    if (count <= 0) { focus_centred(f, 214, 348, &ht_lv_geist_med_28.base, DIM, BG, "Nothing here yet."); }
     if (count > 4) count = 4;
     static const int at[4][4][2] = {
         {{233, 200}}, {{150, 200}, {316, 200}}, {{150, 130}, {316, 130}, {233, 290}},
@@ -2272,7 +2255,7 @@ static bool nf_render_message(ht_scene_t *f, uint32_t now)
     nixfred_palette_t p = nf_palette();
     if (s.nf_msg_kind == 3) {
         nixfred_pair_hex(f, HT_WIDTH / 2, 226, now / 150, false, ACCENT);
-        focus_centred(f, 64, &ht_lv_geist_reg_20.base, DIM, BG, s.title);
+        focus_centred(f, 64, 348, &ht_lv_geist_reg_20.base, DIM, BG, s.title);
         const ht_font_t *code = ht_measure(&ht_pixel_40, s.message) <= 210 ? &ht_pixel_40 : &ht_mono_20;
         int w = ht_measure(code, s.message);
         ht_text(f, (HT_WIDTH - w) / 2, 226 - code->height / 2, w > 0 ? w : 1, code, FG, BG, s.message);
@@ -3754,6 +3737,23 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             if (result == HT_TOUCH_TAP || (on_target && now - s.touch_started < 1800))
                 dispatch(pressed_action);
             change();
+        } else if (surface && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_PET &&
+                   !gesture.guarded && dx * dx + dy * dy < 24 * 24 && now - s.touch_started < 650) {
+            /*
+             * ON FOCUS A TOUCH ANYWHERE ON THE FACE TALKS (owner, 2026-10-01), and it is a THUMB's
+             * touch, not an idealised tap. ht_gesture_end() calls a contact a tap only inside 12 px
+             * (1.20 mm on this glass) and 350 ms; a real press drifts past both, which is the fault
+             * the old microphone button had (21 presses in 49). So the face answers what a button
+             * answers: a contact that did not scroll, came up within 24 px of where it went down,
+             * and let go before the 650 ms that opens the tabs.
+             */
+            ht_gesture_guard(&gesture, now);
+            if (s.connected && !s.loading && active()) {
+                ESP_LOGI("habitat", "focus touch: start voice");
+                // Built as the old microphone's was: make_action names the agent on the face, and
+                // main-surface voice without a recipient is dropped.
+                dispatch(make_action((hit_t){.action = A_VOICE}));
+            }
         } else if (result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&
                    (surface || s.view == VOICE || s.view == SELECTION)) {
             ht_gesture_guard(&gesture, now);
@@ -3761,12 +3761,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 ESP_LOGI("habitat", "gesture tap: finish voice");
                 dispatch((action_t){.kind = A_VOICE_STOP});
             } else if (character.id == HT_CHARACTER_FOCUS && s.view != SELECTION) {
-                /*
-                 * On Focus the microphone starts speech and nothing else does. A creature skin has
-                 * no button — the creature IS the affordance, so the middle of the glass has to be
-                 * one. Focus draws its button, and the middle is the recap somebody is reading: a
-                 * tap there opening the mic surprised people, and the mic is right under it.
-                 */
+                // Focus's face answers its touches in the branch above; nothing more here.
             } else if (s.connected && !s.loading && pressed_action.id[0]) {
                 ESP_LOGI("habitat", "gesture tap: start voice");
                 pressed_action.kind = A_VOICE;
@@ -3893,6 +3888,11 @@ uint32_t habitat_next_wake_ms(void)
     }
     if (status_animated()) {
         uint32_t due = status_wake_ms(now);
+        if (due < delay) delay = due;
+    }
+    if (s.pet_next_ms && (s.view == HOME || s.view == AGENT) && !s.touch_down) {
+        int32_t left = (int32_t)(s.pet_next_ms - now);
+        uint32_t due = left < 1 ? 1 : (uint32_t)left;
         if (due < delay) delay = due;
     }
     if ((s.view == HOME || s.view == AGENT) && pressed_action.kind == A_PET && s.touch_down && !s.touch_cancelled &&
@@ -4034,6 +4034,9 @@ void ui_init(void)
     s.focus_face = (options & 1) != 0;
     s.quiet = (options & 4) != 0;
     s.straight_title = (options & 8) != 0;
+#ifdef HABITAT_FOCUS_ONLY
+    s.straight_title = true;   // the app no longer offers Edge text: straight across (owner, 2026-10-01)
+#endif
     s.ready = true;
 #ifdef DEVICE_CREATURE_GALLERY
     ht_gallery_init(&gallery, ms());
@@ -4112,7 +4115,7 @@ bool ui_settings_apply(const ui_settings_t *want, uint32_t fields, char *error, 
         display_set_brightness((uint8_t)((want->brightness * 255 + 50) / 100));
     }
 #ifdef HABITAT_FOCUS_ONLY
-    fields &= ~(uint32_t)(UI_SETTING_CHARACTER | UI_SETTING_FOLLOW_COMPANION);
+    fields &= ~(uint32_t)(UI_SETTING_CHARACTER | UI_SETTING_FOLLOW_COMPANION | UI_SETTING_STRAIGHT_TITLE);
 #endif
     if (fields & UI_SETTING_CHARACTER) device_skin = (ht_character_id_t)want->character;
     if (fields & UI_SETTING_FOLLOW_COMPANION) follow_companion = want->follow_companion;

@@ -73,6 +73,8 @@ function modelString(value: unknown): string | null {
 }
 
 export interface RegisteredSession {
+  /** An explicit Close-after-task intent. Never inferred from visibility or CPU use. */
+  closePlan?: import('./closeAgentService.js').AgentClosePlan
   /** Per-row marker; the top-level array is retained for backward-reader safety. */
   schemaVersion: 2
   /** Whether the supported engine process is currently identified; terminal liveness is tracked separately. */
@@ -569,10 +571,11 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   if (new Set(placements).size !== placements.length) return null
   // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
   // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
-  const { lastOpenedAt: rawOpenedAt, ...rest } = row
+  const { lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, ...rest } = row
   const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   return {
     ...rest,
+    ...(normalizedClosePlan(rawClosePlan) ? { closePlan: normalizedClosePlan(rawClosePlan)! } : {}),
     schemaVersion: 2,
     active,
     ...(launch ? { launch } : {}),
@@ -621,6 +624,17 @@ function normalizedLaunch(value: unknown): AgentLaunch | undefined {
     ? launch.detail.slice(0, 500)
     : undefined
   return { state: 'failed', error, ...(detail ? { detail } : {}) }
+}
+
+function normalizedClosePlan(value: unknown): RegisteredSession['closePlan'] {
+  if (!value || typeof value !== 'object') return undefined
+  const plan = value as Partial<NonNullable<RegisteredSession['closePlan']>>
+  if ((plan.state !== 'waiting' && plan.state !== 'failed') || typeof plan.id !== 'string' || !/^[a-f0-9-]{36}$/.test(plan.id)
+    || typeof plan.identity !== 'string'
+    || !plan.identity || plan.identity.length > 8192 || typeof plan.requestedAt !== 'number'
+    || !Number.isFinite(plan.requestedAt) || plan.requestedAt < 0) return undefined
+  return { id: plan.id, state: plan.state, identity: plan.identity, requestedAt: plan.requestedAt,
+    ...(typeof plan.detail === 'string' ? { detail: plan.detail.slice(0, 500) } : {}) }
 }
 
 function validatedRows(values: readonly unknown[]): RegisteredSession[] | null {
@@ -815,6 +829,8 @@ class Registry {
   private writeBlocked = false
   /** Last committed row bytes, used for a three-way merge with daemon-down hook writes. */
   private persistedBaseline = new Map<string, string>()
+  /** Exact bytes of our last durable save; checked against the file, never just its mtime. */
+  private persistedContents: string | null = null
   private rebooted = false
 
   /** True when the last `load()` found the machine had rebooted since the previous daemon run. */
@@ -870,6 +886,7 @@ class Registry {
     this.writeBlocked = false
     this.rebooted = false
     this.persistedBaseline.clear()
+    this.persistedContents = null
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
     } catch (error) {
@@ -1034,6 +1051,7 @@ class Registry {
           // Rehydrated explicitly for the reason the ⚠️ above gives. A reboot keeps it: it is when a
           // person last looked, which no reboot changes.
           ...(normalizedOpenedAt(raw.lastOpenedAt) !== undefined ? { lastOpenedAt: normalizedOpenedAt(raw.lastOpenedAt) } : {}),
+          ...(!rebooted && normalizedClosePlan(raw.closePlan) ? { closePlan: normalizedClosePlan(raw.closePlan)! } : {}),
         }
         if (
           raw.engine !== engine
@@ -1146,6 +1164,7 @@ class Registry {
       ))
     const existing = processAgent ?? routeAgent
     if (existing) {
+      const before = rowFingerprint(persistedRow(existing))
       this.drop(existing)
       existing.runtimes = mergeTerminalRuntimes(existing.runtimes, runtimes)
       existing.tmuxPane = tmuxProjection(existing.runtimes)
@@ -1173,7 +1192,7 @@ class Registry {
       if (input.codexHome && !existing.codexHome) existing.codexHome = input.codexHome
       if (input.hermesHome && !existing.hermesHome) existing.hermesHome = input.hermesHome
       if (input.dsh && !existing.dsh) existing.dsh = input.dsh
-      existing.touchedAt = Date.now()
+      if (rowFingerprint(persistedRow(existing)) !== before) existing.touchedAt = Date.now()
       this.index(existing)
       this.terminalAvailableAgents.add(existing.agentId)
       this.save()
@@ -1573,6 +1592,7 @@ class Registry {
       // the first hook after an open — the next prompt, a `/clear` — erases it from memory, the next
       // save writes that to disk, and every app's "last used" order forgets the open ever happened.
       ...(existing?.lastOpenedAt ? { lastOpenedAt: existing.lastOpenedAt } : {}),
+      ...(existing?.closePlan ? { closePlan: existing.closePlan } : {}),
     }
     entry.tmuxPane = tmuxProjection(entry.runtimes)
     entry.primaryRuntimeKey = selectedRuntimeKey(entry.runtimes, input.primaryRuntimeKey || existing?.primaryRuntimeKey)
@@ -1724,12 +1744,13 @@ class Registry {
     const entry = this.agents.get(agentId)
     const normalized = normalizedRuntimes(runtimes)
     if (!entry || !normalized.length) return false
+    const before = rowFingerprint(persistedRow(entry))
     this.drop(entry)
     entry.runtimes = normalized
     entry.tmuxPane = tmuxProjection(normalized)
     entry.primaryRuntimeKey = selectedRuntimeKey(normalized, primaryRuntimeKey)
     entry.active = true
-    entry.touchedAt = Date.now()
+    if (rowFingerprint(persistedRow(entry)) !== before) entry.touchedAt = Date.now()
     this.index(entry)
     this.terminalAvailableAgents.add(entry.agentId)
     this.save()
@@ -1773,6 +1794,20 @@ class Registry {
     return entry
   }
 
+  setClosePlan(agentId: string, plan: RegisteredSession['closePlan'] | null): RegisteredSession | null {
+    const entry = this.agents.get(agentId)
+    if (!entry) return null
+    const previous = entry.closePlan
+    if (plan) entry.closePlan = normalizedClosePlan(plan)
+    else delete entry.closePlan
+    try { this.save(true) } catch (error) {
+      if (previous) entry.closePlan = previous
+      else delete entry.closePlan
+      throw error
+    }
+    return entry
+  }
+
   /** Mark whether at least one backend placement was verified by this daemon process. */
   setTerminalAvailable(agentId: string, available: boolean): boolean {
     if (!this.agents.has(agentId)) return false
@@ -1803,6 +1838,7 @@ class Registry {
   ): boolean {
     const session = this.resolve(sessionId)
     if (!session || !validProcessIdentity(processIdentity)) return false
+    const before = rowFingerprint(persistedRow(session))
     this.drop(session)
     session.processIdentity = processIdentity
     // A record written before gateways existed, or by a pass whose probe failed, learns it here — the
@@ -1811,7 +1847,7 @@ class Registry {
     // The grid is read from the same environment and follows the same rule. It matters most right
     // after a retarget: the respawned pane is a new pid, and this is where its new grid lands.
     if (grid !== undefined) session.grid = grid
-    session.touchedAt = Date.now()
+    if (rowFingerprint(persistedRow(session)) !== before) session.touchedAt = Date.now()
     this.index(session)
     this.save()
     return true
@@ -2162,24 +2198,34 @@ class Registry {
     this.saveNames()
   }
 
-  private save(): void {
+  private save(strict = false): void {
     if (this.transactionDepth > 0) {
+      if (strict) throw new Error('Cannot acknowledge a close intent inside an uncommitted registry transaction')
       this.savePending = true
       return
     }
     if (this.writeBlocked) {
+      if (strict) throw new Error('The saved session registry is unavailable')
       console.error('[registry] save skipped because the loaded registry requires operator repair')
       return
     }
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
+      // nixfred: hosted rows (Hermes, watch-mode external) are memory-only and never persisted.
+      const currentRows = new Map(this.list().filter((entry) => !entry.hosted).map((entry) => {
+        const row = persistedRow(entry) as unknown as Record<string, unknown>
+        return [entry.agentId, row] as const
+      }))
+      // Discovery still calls save on an unchanged observation so a daemon-down hook's commit is
+      // noticed. If neither side changed, avoid the lock's process probe and all three fsyncs.
+      // Read through the normal ownership/mode/no-symlink checks; timestamps cannot prove equality.
+      // A concurrent commit after this read is picked up on the next pass, as after a locked save.
+      // Close intents always take the durable path, even when an identical request is retried.
+      if (!strict && this.persistedContents !== null
+        && currentRows.size === this.persistedBaseline.size
+        && [...currentRows].every(([id, row]) => this.persistedBaseline.get(id) === rowFingerprint(row))
+        && existsSync(FILE) && readPrivateStateFile(FILE) === this.persistedContents) return
       withRegistryFileLock(() => {
-        // Hosted rows are memory-only: they have no runtime, so the persisted-row invariants would
-        // refuse them, and their backend re-finds them within seconds of a boot anyway.
-        const currentRows = new Map(this.list().filter((entry) => !entry.hosted).map((entry) => {
-          const row = persistedRow(entry) as unknown as Record<string, unknown>
-          return [entry.agentId, row] as const
-        }))
         const latestValues: unknown[] = (() => {
           if (!existsSync(FILE)) return []
           const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
@@ -2248,6 +2294,7 @@ class Registry {
         if (!rows) throw new Error('registry transaction would violate global identity invariants')
         const serialized = rows.map(persistedRow)
         atomicWriteJson(FILE, serialized)
+        this.persistedContents = JSON.stringify(serialized, null, 2)
 
         // Refresh external daemon-down writes into the in-memory revision without replacing object
         // identities already held by controllers.
@@ -2258,7 +2305,14 @@ class Registry {
         this.processIndex.clear()
         for (const row of rows) {
           const entry = previous.get(row.agentId) ?? row
-          if (entry !== row) Object.assign(entry, row)
+          if (entry !== row) {
+            // External deletions count too: retaining a cancelled closePlan here would make the
+            // next observation write it back and turn a cancelled close into pending work again.
+            for (const key of Object.keys(entry)) {
+              if (!Object.hasOwn(row, key)) delete (entry as unknown as Record<string, unknown>)[key]
+            }
+            Object.assign(entry, row)
+          }
           this.index(entry)
         }
         // Hosted rows are never persisted, so the rebuild above cannot see them. Without this every
@@ -2270,6 +2324,7 @@ class Registry {
         this.persistedBaseline = new Map(serialized.map((row) => [rowId(row), rowFingerprint(row)]))
       })
     } catch (err) {
+      if (strict) throw err
       console.error('[registry] save failed:', err)
     }
   }

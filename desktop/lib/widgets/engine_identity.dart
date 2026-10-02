@@ -607,6 +607,17 @@ const _harnesses = <String, EngineIdentity>{
     color: Color(0xffb5d9ae),
     asset: 'assets/engine-icons/godogen.png',
   ),
+  // An original package mark (a shield with code under a lens), not Trail of
+  // Bits' own logo: the wrapper loads their plugins, it does not wear their brand.
+  'autonomous/trailofbits-skills': EngineIdentity(
+    id: 'autonomous/trailofbits-skills',
+    label: 'Trail of Bits Skills',
+    category: 'Security',
+    tagline: 'Skills to enhance AI-assisted security analysis and testing',
+    creator: 'Trail of Bits',
+    color: Color(0xff7fd1c7),
+    asset: 'assets/engine-icons/trailofbits-skills.png',
+  ),
   // Of the eight studios of 2026-09-18, three wear their project's own mark —
   // Comfy's `assets/logo.svg`, Dimensional's favicon, Bonsai's desktop icon
   // from IfcOpenShell. The other five (Ableton AI, autoresearch-mlx,
@@ -791,6 +802,7 @@ const knownHarnessBase = <String, String>{
   'autonomous/roundtable': 'claude',
   'autonomous/jev-browser': 'claude',
   'autonomous/godogen': 'claude',
+  'autonomous/trailofbits-skills': 'claude',
   'autonomous/ollama': 'codex',
   'autonomous/mlx-lm': 'codex',
   'autonomous/vllm': 'codex',

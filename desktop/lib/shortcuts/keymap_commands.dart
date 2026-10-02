@@ -329,12 +329,13 @@ final harnessCommands = <HarnessCommand>[
     repeatable: true,
   ),
   const HarnessCommand(
+    // Keep this existing command ID for saved keybindings; it opens # Projects.
     'agent.open',
-    'Open Harness',
+    'Open Project',
     ShortcutGroup.actions,
     action: ShortcutAction.addAgent,
     nativeAction: 'addAgent',
-    keywords: ['resume', 'existing', 'pane'],
+    keywords: ['project', 'folder', 'repository', 'pane'],
   ),
   const HarnessCommand('agent.add', 'New Pane', ShortcutGroup.actions),
   const HarnessCommand(
@@ -433,11 +434,11 @@ final harnessCommands = <HarnessCommand>[
   ),
   const HarnessCommand(
     'harnesses.list',
-    'Harnesses',
+    'Open Harness',
     ShortcutGroup.actions,
     nativeAction: 'sessions',
     extraKeys: ['cmd+p'],
-    keywords: ['manage', 'running', 'paused', 'sessions'],
+    keywords: ['open', 'resume', 'existing', 'running', 'paused', 'sessions'],
   ),
   const HarnessCommand(
     'project.add',
@@ -703,7 +704,7 @@ final harnessCommands = <HarnessCommand>[
       context: KeymapContext.picker,
     ),
   for (final (name, key, label) in [
-    ('toggle', 'ctrl+s', 'Pause or resume the selected harness or model'),
+    ('toggle', 'ctrl+s', 'Stop the selected harness or start/stop a model'),
     ('more', 'ctrl+period', 'Search actions for the selected resource'),
     ('rename', 'ctrl+shift+r', 'Rename the selected machine'),
     ('settings', 'ctrl+l', 'Open the selected machine’s connection settings'),

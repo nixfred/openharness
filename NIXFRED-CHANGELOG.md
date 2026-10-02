@@ -5,6 +5,46 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Upstream sync: 164 commits from autonomous-ai/openharness main (c43b0186), 2026-10-02
+
+Merges upstream/main c43b01863 into nixfred/main 6c92df3e. Firmware `0.0.86-nixfred.7`, ESP-IDF v5.5.0,
+2,141,552 B against an 8 MB slot (74% free); the growth is upstream's Geist faces and engine pets.
+
+- Upstream brought: coding memory across Claude, Codex and OpenCode (prompt recall hooks, feedback,
+  notebooks), Harness Monitor and a live resource footer, session close and save across workspaces, local
+  model switching ("Use"), Google and Apple sign-in, hn 0.1.9/0.1.10, a Devices DSH, a CPU spin fix for a
+  stale attach entry, steadier machine connections across restarts, and on the dial a new Focus face:
+  agent name on the top arc (tap: pane list), a tap anywhere on the face talks (no microphone button, no
+  tab pill), a recap card in Geist Medium 30, the bell at the bottom, animated engine pets.
+- Conflicts and how they were resolved (both sides kept everywhere):
+  - cli/src/cli.ts: upstream's DialVerdicts import next to the nixfred withPermissionFlag and orcaWatch
+    imports; the hook server gets the nixfred onExternalHook plus upstream's new onPromptContext (persona
+    plus memory recall), onMemoryContext, onMemoryContextEmitted and onOpenCodeMemoryRuntime.
+  - cli/src/hookServer.ts: the nixfred /api/hook/external route and upstream's three memory routes.
+  - cli/src/lib/e2ee/applicationFrames.ts: upstream's agents_cleanup_preview and agent_close plus nixfred
+    clip_push in the sealed machine requests.
+  - cli/src/lib/registry.ts: upstream moved the row snapshot ahead of the lock to skip unchanged saves; the
+    nixfred filter that keeps hosted rows (Hermes, watch-mode external) out of the file moved with it, and
+    the hosted-row reindex after a save stays.
+  - desktop terminal_panel.dart: upstream's showIdentityMark gate, with the nixfred SpendRing around the mark.
+  - firmware terminal.c: ht_ring and ht_mask kept, arc_text takes upstream's face argument.
+  - firmware ui_habitat.c: the done motion and upstream's pet frame clock both run; Focus's A_PET target is
+    upstream's whole face, the fleet rim summary sits at y 350 on every skin (the mic it sat above is gone),
+    the notch stays. The nixfred machines screen used upstream's removed focus_title and the old
+    focus_centred: a local nf_title and the new `room` argument (348) fix it.
+  - DELIBERATE CHOICE: upstream opens the tab list on a hold of the Focus face; the nixfred slice 6 hold
+    opens the hub instead (the tab list is a hub wedge), and a press under 650 ms now talks, as upstream
+    intends. test_touch_ui updated to say so; the name tap moved to y 30.
+  - test/run.sh: the nixfred host tests link focus_marks.c, focus_faces.c and pets.c.
+- Verified: cli npm ci, tsc clean; vitest 8842 passed, 4 failed, 56 skipped (pre-merge baseline 7624
+  passed, 4 failed, 37 skipped). Failures after: dsh shell and engineLaunch DSH PATH specs (fail before
+  too: node lives in /usr/bin here), tmuxPaneInfo (flaky, fails in the baseline checkout on rerun),
+  tmuxStream.decode buffer retention (new upstream spec, file identical to upstream; 65599 > 64000 on
+  Node 26). nixfredWiring and e2ee manager failures seen once in the baseline pass on rerun. Desktop:
+  flutter analyze no errors or warnings, nixfred/attention_glow/settings tests 116 passed, release build.
+  Firmware: idf.py build, full test/run.sh with the slice 2 cc wrapper passes.
+- Not verified: the new Focus face and the hold-to-hub by a finger on the glass; coding memory end to end.
+
 ## Device firmware: smart navigation, a shade that never talks, 2026-10-01 (branch nixfred/firmware-smartnav)
 
 Sits on nixfred/main 98da920e. Firmware `0.0.86-nixfred.6`, ESP-IDF v5.5.0, 1,737,115 B against an 8 MB slot

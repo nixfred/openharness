@@ -332,19 +332,8 @@ class _Rows extends StatelessWidget {
               detail: 'Stops the artwork animating. Nothing else changes.',
               control: toggle('quiet', settings.quiet, 'Still companion'),
             ),
-            // Round only. A square face has no arc to bend a title along, so the row is not drawn at
-            // all — a greyed control still claims the setting is there. It is the last of these: rim
-            // scrolling was the other, and it was removed from the device entirely.
-            if (settings.round)
-              SettingRow(
-                title: 'Edge text',
-                detail:
-                    "Names and status on the rim's curve, or straight across.",
-                control: field(settings.straightTitle, const [
-                  SelectOption(value: false, label: 'Curved'),
-                  SelectOption(value: true, label: 'Straight'),
-                ], (v) => set({'straightTitle': v})),
-              ),
+            // No Edge text row: the robot draws its titles straight across (owner, 2026-10-01), and
+            // a Focus-only firmware ignores the field — a choice here would change nothing.
           ],
         ),
         _Group(

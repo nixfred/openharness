@@ -94,6 +94,8 @@ class HarnessStats extends ChangeNotifier {
   /// later turn into a multi-day "turn".
   final Map<String, DateTime> _live = {};
 
+  DateTime? turnStartedAt(String key) => _live[key];
+
   Timer? _writeTimer;
   bool _disposed = false;
 

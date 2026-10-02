@@ -19,7 +19,8 @@ const NO_NODE = '__GRID_FINDER_NO_NODE__';
 // in kilobytes: BusyBox `find` (Alpine) has no `M` suffix [run].
 const FALLBACK = [
   'for d in ~/.grid/models ~/.ollama/models /usr/share/ollama/.ollama/models ~/.lmstudio/models',
-  '~/.cache/lm-studio/models "${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}" ~/models ~/Models ~/Downloads;',
+  '~/.cache/lm-studio/models "${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"',
+  '"${LLAMA_CACHE:-$HOME/Library/Caches/llama.cpp}" "${XDG_CACHE_HOME:-$HOME/.cache}/llama.cpp" ~/models ~/Models ~/Downloads;',
   'do [ -d "$d" ] && find -L "$d" -maxdepth 8 \\( -iname "*.gguf" -size +51200k -o -name config.json',
   '-o -path "*/manifests/*" -type f \\) 2>/dev/null; done | head -300',
 ].join(' ');

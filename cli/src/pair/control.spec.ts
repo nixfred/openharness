@@ -91,11 +91,26 @@ describe('each tool maps to the right call', () => {
     expect(w.said).toEqual([expect.objectContaining({ line: 'A little story.', reply: reply.trim(), companionUid: 'tim-one', actions: [], from: 'pair', mood: 'say' })])
   })
   it('lists the BRAIN.md table, and nothing that deletes, restarts, forks or bypasses', () => {
-    expect(CONTROL_TOOLS.map((t) => t.name)).toEqual(['list_machines', 'list_harnesses', 'read_harness', 'brief', 'answer_question',
+    expect(CONTROL_TOOLS.map((t) => t.name)).toEqual(['list_machines', 'list_harnesses', 'read_harness', 'brief', 'recall_memory', 'answer_question',
       'send_prompt', 'stop_turn', 'start_harness', 'pause_harness', 'resume_harness', 'say'])
     expect(CONTROL_TOOLS.map((t) => t.name).join(' ')).not.toMatch(/delete|restart|fork|bypass/i)
     const start = CONTROL_TOOLS.find((t) => t.name === 'start_harness')!
     expect(Object.keys((start.input as { properties: object }).properties)).not.toContain('bypassPermission')
+  })
+
+  it('allows collection recall only with its launch token and routes owner controls separately', async () => {
+    const w = world({ autonomy: 'watch' })
+    w.deps.recallMemory = vi.fn(async () => ({ ok: true, context: 'personal preference' }))
+    w.deps.memory = vi.fn(async () => ({ ok: false, error: 'PERSON_ONLY' }))
+    expect(await w.call('recall_memory', { query: 'tests' }, false)).toMatchObject({ error: 'TOKEN_REQUIRED' })
+    expect(w.deps.recallMemory).not.toHaveBeenCalled()
+    expect(await w.call('recall_memory', { query: 'tests', requestId: 'request' })).toMatchObject({ context: 'personal preference' })
+    expect(w.deps.recallMemory).toHaveBeenCalledWith({ query: 'tests' })
+    const conditions = { taskType: 'debugging', productionIncident: false }
+    await w.call('recall_memory', { query: 'tests', conditions, requestId: 'next' })
+    expect(w.deps.recallMemory).toHaveBeenLastCalledWith({ query: 'tests', conditions })
+    expect(await w.call('memory', { action: 'list' })).toMatchObject({ error: 'PERSON_ONLY' })
+    expect(w.deps.memory).toHaveBeenCalledWith(expect.objectContaining({ action: 'list' }), '')
   })
 
   it('reads: this machine from its owner, another over sealed pair_list / pair_read', async () => {

@@ -1671,8 +1671,8 @@ async function main() {
   }
 
   // SessionStart or UserPromptSubmit (the catch hook) → register the session. Registration is
-  // idempotent, so re-registering on every prompt is cheap. Ordinary agents receive no context.
-  // Only the daemon's verified collection agent receives its current companion persona.
+  // idempotent, so re-registering on every prompt is cheap. The daemon verifies the process before
+  // supplying the collection persona or optional, scope-checked coding memory.
   // Command Code fires SessionStart BEFORE it writes the transcript, and the daemon validates the path
   // (realpath) — sending one that isn't on disk yet gets the whole registration rejected. Announce
   // without it; the session is registered again with the real path on the first Stop. Scoped to
@@ -1705,11 +1705,17 @@ async function main() {
     hookOutput = JSON.stringify({ hookSpecificOutput: {
       hookEventName: 'UserPromptSubmit', additionalContext: response.additionalContext,
     } })
+    if (typeof response.memoryReceiptId === 'string' && /^[a-f0-9-]{36}$/.test(response.memoryReceiptId)) {
+      acknowledgeMemoryOutput = () => post(port, '/api/hook/memory-emitted', {
+        engine, sessionId: body.sessionId, ...terminalHookFields(tmuxPane), memoryReceiptId: response.memoryReceiptId,
+      })
+    }
   })
   if (!ok) await fallbackRegister(input, engine, tmuxPane)
 }
 
 let hookOutput = null
+let acknowledgeMemoryOutput = null
 main()
   .catch(() => {})
   .finally(() => {
@@ -1721,7 +1727,11 @@ main()
     // — there `decision` is required, and `{}` reads as a denial (measured: every tool call of the turn
     // came back "Tool call denied by pre-tool hook").
     // Copilot parses stdout as JSON too; `{}` is the documented no-op for every event installed here.
-    if (hookOutput) process.stdout.write(`${hookOutput}\n`, () => process.exit(0))
+    if (hookOutput) process.stdout.write(`${hookOutput}\n`, (error) => {
+      // This proves only the pipe write. It does not prove native ingestion, model use or usefulness.
+      if (error || !acknowledgeMemoryOutput || remainingBudget() <= 0) { process.exit(0); return }
+      Promise.resolve(acknowledgeMemoryOutput()).catch(() => {}).finally(() => process.exit(0))
+    })
     else if (e === 'cursor' || e === 'hermes' || e === 'agy' || e === 'copilot') process.stdout.write('{}\n', () => process.exit(0))
     else if (gateOutput) process.stdout.write(gateOutput + '\n', () => process.exit(0)) // claude PreToolUse gate verdict
     else process.exit(0)

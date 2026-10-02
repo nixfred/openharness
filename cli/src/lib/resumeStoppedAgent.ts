@@ -1,3 +1,4 @@
+import { terminalRouteKey } from './terminalRuntime.js'
 import { isTerminalEngine } from '../engines/types.js'
 import type { RegisteredSession, ProcessIdentity } from './registry.js'
 import { resumesConversation } from './resumeCapability.js'
@@ -24,6 +25,12 @@ export const resumeChanged = { ok: false, error: 'AGENT_CHANGED', detail: 'The h
 export const resumeUnconfirmed = { ok: false, error: 'RESUME_UNCONFIRMED', detail: 'The saved conversation has not been confirmed yet. Check the terminal, then select the harness again to check its status.' } as const
 
 /** Enter means attach or exact resume. A route, shell or allocated pane alone is not success. */
+const liveIdentity = (row: RegisteredSession | undefined) => row ? JSON.stringify([
+  row.agentId, row.engine, row.sessionId, row.registeredAt, row.codexHome,
+  row.processIdentity?.pid, row.processIdentity?.startMarker, row.processIdentity?.executable,
+  row.runtimes?.map(terminalRouteKey).sort(), row.tmuxPane,
+]) : null
+
 export async function resumeStoppedAgent(deps: ResumeStoppedDeps): Promise<RestartAgentReply> {
   if (!deps.current()) return resumeChanged
   const existing = deps.live()
@@ -35,23 +42,28 @@ export async function resumeStoppedAgent(deps: ResumeStoppedDeps): Promise<Resta
     } else if (existing.resumeOnly && existing.launch?.state === 'starting') {
       return deps.waitForReady(existing)
     } else {
+      // Hooks replace registry objects while retaining the exact same process.
+      // Capture values before awaiting; object identity both rejects harmless
+      // hooks and misses an in-place PID/session replacement.
+      const identity = liveIdentity(existing)
       const runtime = await deps.checkLive(existing)
-      if (!deps.current() || deps.live() !== existing) return resumeChanged
+      const latest = deps.live()
+      if (!deps.current() || liveIdentity(latest) !== identity) return resumeChanged
       if (runtime.state === 'unknown') return resumeUnconfirmed
       if (runtime.state === 'alive') {
-        if (existing.resumeOnly && existing.launch?.state === 'failed') {
+        if (latest!.resumeOnly && latest!.launch?.state === 'failed') {
           // Never confirmed is not the same as disproved: the engine is running, so ask for
           // confirmation again rather than repeating the old verdict.
-          if (existing.launch.error === 'RESUME_UNCONFIRMED') return deps.waitForReady(existing)
+          if (latest!.launch.error === 'RESUME_UNCONFIRMED') return deps.waitForReady(latest!)
           // Any other verdict is reported as ITSELF. Relabelling them all "not confirmed yet" told
           // somebody whose resume had reopened the wrong conversation to go and check the terminal,
           // and hid the one fact that would have explained what they were looking at.
-          return { ok: false, error: existing.launch.error, detail: existing.launch.detail }
+          return { ok: false, error: latest!.launch.error, detail: latest!.launch.detail }
         }
-        return { ok: true, session: existing, resumed: true }
+        return { ok: true, session: latest!, resumed: true }
       }
-      saved = { ...existing }
-      await deps.retain(existing)
+      saved = { ...latest! }
+      await deps.retain(latest!)
     }
   }
   if (!deps.current()) return resumeChanged

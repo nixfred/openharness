@@ -1,6 +1,6 @@
 [package]
 name = "harness-tui"
-version = "0.1.5"
+version = "0.1.10"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,12 @@ unicode-width = "0.2.2"
 unicode-segmentation = "1.13"
 libc = "0.2"
 uuid = { version = "1.26.1", features = ["v4"] }
+# Add phone: the pairing link as a QR code, drawn with half-block characters.
+qrcodegen = "1.8"
+
+[dev-dependencies]
+# Reads the drawn QR code back, so a test proves the phone would get the exact link.
+rqrr = { version = "0.9", default-features = false }
 
 # Retain tmux pane attributes unsupported by the upstream renderer.
 [patch.crates-io]

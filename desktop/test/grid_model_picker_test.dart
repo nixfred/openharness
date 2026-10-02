@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:harness/shared/theme/workspace_bar_style.dart';
 import 'package:harness/widgets/transient_menus.dart';
@@ -81,6 +82,7 @@ class _DelayedConn extends _Conn {
   _DelayedConn() : super([]);
   final reply = Completer<Map<String, dynamic>>();
   int reads = 0;
+  bool readDuringBuild = false;
   @override
   Future<Map<String, dynamic>> request(
     String type, {
@@ -88,6 +90,9 @@ class _DelayedConn extends _Conn {
     Duration timeout = const Duration(seconds: 20),
   }) {
     reads++;
+    readDuringBuild |=
+        SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks;
     return reply.future;
   }
 }
@@ -151,6 +156,11 @@ void main() {
       await tester.tap(find.byType(GridModelPicker));
       await tester.pump();
       expect(connection.reads, 1);
+      expect(
+        connection.readDuringBuild,
+        isFalse,
+        reason: 'model warm-up also notifies the workspace subscription footer',
+      );
       await mount(false);
       connection.reply.complete({'models': [], 'gridName': null});
       await tester.pumpAndSettle();
@@ -242,7 +252,7 @@ void main() {
       await mount(true);
       expect(
         tester.widget<Tooltip>(find.byType(Tooltip)).message,
-        'a-very-long-local-model-name\nSwitch model · Subscription or local models',
+        'a-very-long-local-model-name\nChange model · Subscription or local models',
       );
       await tester.tap(find.byType(GridModelPicker));
       await tester.pumpAndSettle();
@@ -276,6 +286,7 @@ void main() {
           );
       await mount('GPT-6 Astra');
       expect(find.text('GPT-6 Astra'), findsOneWidget);
+      final restingStyle = tester.widget<Text>(find.text('GPT-6 Astra')).style!;
       final hover = await tester.createGesture(kind: PointerDeviceKind.mouse);
       await hover.addPointer(location: Offset.zero);
       addTearDown(hover.removePointer);
@@ -283,7 +294,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pump(const Duration(milliseconds: 200));
       expect(
-        find.text('Switch model · Subscription or local models'),
+        find.text('Change model · Subscription or local models'),
         findsOneWidget,
       );
       final control = find.byType(WorkspaceBarControl);
@@ -305,7 +316,11 @@ void main() {
       );
       expect(
         tester.widget<Text>(find.text('GPT-6 Astra')).style!.fontWeight,
-        FontWeight.bold,
+        FontWeight.normal,
+      );
+      expect(
+        tester.widget<Text>(find.text('GPT-6 Astra')).style!.color!.a,
+        greaterThan(restingStyle.color!.a),
       );
       expect(tester.getSize(control).height, 28);
       await hover.moveTo(Offset.zero);

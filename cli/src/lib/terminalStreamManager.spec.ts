@@ -264,6 +264,43 @@ describe('TerminalStreamManager', () => {
     expect(stream.sizes.at(-1)).toEqual({ cols: 140, rows: 50 })
   })
 
+  it.each([[1, 1], [30, 30], [80, 8], [300, 120]])(
+    'opens and resizes a terminal at its actual %i×%i pane size', async (cols, rows) => {
+      const open = vi.spyOn(terminals, 'openStream')
+      await manager.handleFrame('web-1', 'terminal_open', {
+        requestId: 'small', protocolVersion: 3, agentId: 'agent-1', cols, rows,
+      })
+      expect(sent[0].type).toBe('terminal_ready')
+      expect(open.mock.calls[0][1]).toEqual({ cols, rows })
+      const streamId = sent[0].payload.streamId
+      await manager.handleFrame('web-1', 'terminal_resize', {
+        streamId, resizeSeq: 0, cols: 120, rows: 40,
+      })
+      await manager.handleFrame('web-1', 'terminal_resize', {
+        streamId, resizeSeq: 1, cols, rows,
+      })
+      expect(stream.sizes).toEqual([{ cols: 120, rows: 40 }, { cols, rows }])
+    },
+  )
+
+  it.each([[0, 20], [80, 0], [-1, 20], [80, -1], [1.5, 20], [80, 1.5], [301, 20], [80, 121]])(
+    'rejects invalid %i×%i dimensions on open and resize', async (cols, rows) => {
+      await manager.handleFrame('web-1', 'terminal_open', {
+        requestId: 'invalid', protocolVersion: 3, agentId: 'agent-1', cols, rows,
+      })
+      expect(sent.at(-1)?.payload.code).toBe('TERMINAL_OPEN_INVALID')
+      await manager.handleFrame('web-1', 'terminal_open', {
+        requestId: 'valid', protocolVersion: 3, agentId: 'agent-1', cols: 80, rows: 24,
+      })
+      const streamId = sent.at(-1)!.payload.streamId
+      await manager.handleFrame('web-1', 'terminal_resize', { streamId, resizeSeq: 0, cols, rows })
+      expect(stream.sizes).toEqual([])
+      // A bad size must not consume the sequence number or prevent a later valid resize.
+      await manager.handleFrame('web-1', 'terminal_resize', { streamId, resizeSeq: 0, cols: 80, rows: 24 })
+      expect(stream.sizes).toEqual([{ cols: 80, rows: 24 }])
+    },
+  )
+
   it('routes terminal_scroll to the stream handle, and rejects a malformed one', async () => {
     await manager.handleFrame('web-1', 'terminal_open', {
       requestId: 'open-scroll', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40,

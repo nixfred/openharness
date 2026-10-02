@@ -64,6 +64,11 @@ pub struct Event {
     /// The status line's first row (-1: none) and how many rows it has.
     pub statusat: i32,
     pub statuslines: u16,
+    // ── status bar ──
+    /// Where the window starts past the bar down a side (0, 0 without it):
+    /// taken off the event's column and row wherever the window's cells are meant.
+    pub ox: u16,
+    pub oy: u16,
 }
 
 /// Who takes a drag's motion (tty->mouse_drag_update and _release).
@@ -226,6 +231,7 @@ fn check(app: &mut App, m: &mut Event, double: bool) -> Option<Key> {
     let lines = app.status_lines();
     m.statuslines = lines;
     m.statusat = if lines == 0 { -1 } else if app.status_top { 0 } else { app.size.1.saturating_sub(lines) as i32 };
+    (m.ox, m.oy) = app.bar_offset();
     let mut place = None;
     if m.statusat != -1 && (y as i32) >= m.statusat && (y as i32) < m.statusat + lines as i32 {
         let row = (y as i32 - m.statusat) as u16;
@@ -241,12 +247,20 @@ fn check(app: &mut App, m: &mut Event, double: bool) -> Option<Key> {
         });
     }
     if place.is_none() {
-        let (px, py) = (x as u32, body_y(m, y) as u32);
+        let (px, py) = (body_x(m, x) as u32, body_y(m, y) as u32);
         let body = app.body();
         if px > body.width as u32 || py > body.height as u32 { return None }
         let geoms = app.visible_layout_geoms();
+        // A top pane's title, on the window's first row (tmux's pane status line there), is the
+        // pane's in hn's boxes and surfaces: a click focuses it and reaches no program.
+        if py == 0 && (app.options.box_panes() || app.options.pane_look()) {
+            if let Some((id, _)) = geoms.iter().find(|(_, g)| g.y == 1 && px >= g.x && px < g.x + g.w) {
+                m.wp = Some(*id);
+                place = Some(keys::PANE);
+            }
+        }
         // A border (a zoomed window has none): the column after a pane or the row below it.
-        if !app.tab().zoomed {
+        if place.is_none() && !app.tab().zoomed {
             if let Some((id, _)) = geoms.iter().find(|(_, g)| (g.x + g.w == px && g.y <= 1 + py && g.y + g.h >= py) || (g.y + g.h == py && g.x <= 1 + px && g.x + g.w >= px)) {
                 m.wp = Some(*id);
                 place = Some(keys::BORDER);
@@ -302,8 +316,11 @@ fn check(app: &mut App, m: &mut Event, double: bool) -> Option<Key> {
 fn body_y(m: &Event, y: u16) -> u16 {
     if m.statusat == 0 && y >= m.statuslines { y - m.statuslines }
     else if m.statusat > 0 && y as i32 >= m.statusat { (m.statusat - 1) as u16 }
-    else { y }
+    else { y.saturating_sub(m.oy) }
 }
+
+/// A column counted in the window: past the bar when it is down the left.
+fn body_x(m: &Event, x: u16) -> u16 { x.saturating_sub(m.ox) }
 
 /// cmd_mouse_window: the window a mouse event was for — a status range's, else the current one.
 pub fn mouse_window(app: &App, m: &Event) -> Option<usize> {
@@ -325,7 +342,8 @@ pub fn mouse_at(app: &App, pane: u64, m: &Event, last: bool) -> Option<(u16, u16
     let (x, mut y) = if last { (m.lx, m.ly) } else { (m.x, m.y) };
     if m.statusat == 0 && y >= m.statuslines { y -= m.statuslines }
     let (_, g) = app.visible_geoms().into_iter().find(|(id, _)| *id == pane)?;
-    let (x, y) = (x as u32, y as u32);
+    // (Over the bar down a side: not in any pane.)
+    let (x, y) = (x.checked_sub(m.ox)? as u32, y.checked_sub(m.oy)? as u32);
     if x < g.x || x >= g.x + g.w || y < g.y || y >= g.y + g.h { return None }
     Some(((x - g.x) as u16, (y - g.y) as u16))
 }
@@ -386,7 +404,7 @@ pub fn resize_begin(app: &mut App, m: &Event) {
 
 fn resize_update(app: &mut App, m: &Event) {
     let Some(w) = mouse_window(app, m) else { app.mouse_state.drag = None; return };
-    let (x, y, lx, ly) = (m.x as u32, body_y(m, m.y) as u32, m.lx as u32, body_y(m, m.ly) as u32);
+    let (x, y, lx, ly) = (body_x(m, m.x) as u32, body_y(m, m.y) as u32, body_x(m, m.lx) as u32, body_y(m, m.ly) as u32);
     app.drag_border(w, lx, ly, x, y);
 }
 

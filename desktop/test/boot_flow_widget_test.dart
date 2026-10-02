@@ -2,7 +2,6 @@ import 'support/resource_picker.dart';
 import 'support/workspace_tools.dart';
 import 'swarm_interactions_test.dart' show chord;
 
-import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/services.dart';
 
 import 'dart:async';
@@ -546,8 +545,8 @@ void main() {
     // The card leads with what the app does for you, not with its own name —
     // the wordmark left when the screen stopped being a logo over a button.
     expect(find.text('Your agents, wherever they run'), findsOneWidget);
-    expect(find.text('Sign in'), findsOneWidget);
-    expect(find.byIcon(AppIcons.logIn), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.text('Continue with Apple'), findsOneWidget);
   });
 
   testWidgets('bootstrapping shows branded startup screen (pre-login)', (
@@ -569,7 +568,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.text('Opening your workspace'), findsOneWidget);
     expect(find.text('Opening Harness…'), findsOneWidget);
-    expect(find.text('Sign in'), findsNothing);
+    expect(find.text('Continue with Google'), findsNothing);
   });
 
   testWidgets('live pre-flight has its own quiet screen', (tester) async {
@@ -629,7 +628,7 @@ void main() {
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       // …and the desk is what is on screen, not the sign-in.
-      expect(find.text('Sign in'), findsNothing);
+      expect(find.text('Continue with Google'), findsNothing);
       app.dispose();
     },
   );
@@ -745,7 +744,7 @@ void main() {
       expect(app.status, AppStatus.authenticated);
       expect(app.isGuest, isTrue);
       // …on the desk, not in front of it.
-      expect(find.text('Sign in'), findsNothing);
+      expect(find.text('Continue with Google'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       app.dispose();
     },
@@ -871,14 +870,14 @@ void main() {
     );
     await tester.pump();
     expect(find.byType(BootstrappingScreen), findsOneWidget);
-    expect(find.text('Sign in'), findsNothing);
+    expect(find.text('Continue with Google'), findsNothing);
 
     app.status = AppStatus.unauthenticated;
     app.notifyListeners();
     await tester.pump();
 
     expect(find.byType(BootstrappingScreen), findsNothing);
-    expect(find.text('Sign in'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
   });
 
   testWidgets(

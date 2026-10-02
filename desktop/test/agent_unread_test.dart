@@ -42,6 +42,32 @@ void main() {
     expect(unread.count, 1);
   });
 
+  test('preview and time belong to the unread receipt and leave with it', () {
+    final first = DateTime(2026, 9, 30, 12);
+    unread.mark('m1', 'a1', AlertKind.done, message: 'First result', at: first);
+    unread.mark(
+      'm1',
+      'a1',
+      AlertKind.done,
+      message: 'Duplicate',
+      at: first.add(const Duration(minutes: 1)),
+    );
+    expect(unread.messageFor('m1', 'a1'), 'First result');
+    expect(unread.receivedAtFor('m1', 'a1'), first);
+    unread.mark('m1', 'a1', AlertKind.done, fresh: true);
+    expect(
+      unread.messageFor('m1', 'a1'),
+      isNull,
+      reason: 'Never reuse a previous turn\'s message',
+    );
+    unread.clear('m1', 'a1');
+    expect(unread.receivedAtFor('m1', 'a1'), isNull);
+    unread.mark('m1', 'a1', AlertKind.done, message: 'New result');
+    unread.clearAll();
+    expect(unread.messageFor('m1', 'a1'), isNull);
+    expect(unread.receivedAtFor('m1', 'a1'), isNull);
+  });
+
   test('the newest kind wins — a finished agent that then asks is waiting', () {
     // Which is the mark worth showing: one of these is work you can read later, the other is work
     // that has stopped until somebody answers.
@@ -105,12 +131,15 @@ void main() {
 
     test('evicts the oldest entry only at the desktop capacity', () {
       for (var i = 0; i < AgentUnread.capacity + 3; i++) {
-        unread.mark('m1', 'a$i', AlertKind.done);
+        unread.mark('m1', 'a$i', AlertKind.done, message: 'Result $i');
       }
 
       expect(unread.count, AgentUnread.capacity);
       expect(unread.kindFor('m1', 'a0'), isNull, reason: 'the oldest went');
       expect(unread.kindFor('m1', 'a2'), isNull);
+      expect(unread.messageFor('m1', 'a2'), isNull);
+      expect(unread.receivedAtFor('m1', 'a2'), isNull);
+      expect(unread.messageFor('m1', 'a3'), 'Result 3');
       expect(unread.kindFor('m1', 'a3'), isNotNull, reason: 'the rest stayed');
     });
 

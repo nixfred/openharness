@@ -48,6 +48,12 @@ typedef struct {
      * WORKING means "an agent is busy" at home and "your words are on their way" here.
      */
     bool voice;
+    /*
+     * Focus only, for the engine pets: this agent has an open question, and the clock its loop reads.
+     * clock_ms 0 holds the pet still (quiet motion, asleep display); ui_habitat.c never sends 0 otherwise.
+     */
+    bool asking;
+    uint32_t clock_ms;
     uint16_t ink, foreground, dim;
 } ht_character_face_t;
 

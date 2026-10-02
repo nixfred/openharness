@@ -291,6 +291,20 @@ describe('RuntimeProfileManager', () => {
     })
   })
 
+  it('ignores Claude synthetic error models without losing the observed model', () => {
+    const manager = new RuntimeProfileManager()
+    const value = session('claude')
+    const error = JSON.stringify({ type: 'assistant', message: { model: '<synthetic>', content: 'Quota exceeded' } })
+    manager.hydrate(value, [error])
+    expect(manager.selectedModel(value)).toBeNull()
+
+    manager.ingestPane(value, 'Opus 4.8 with high effort\n❯ ')
+    const observed = manager.selectedModel(value)
+    expect(observed).not.toBeNull()
+    manager.ingest(value, error)
+    expect(manager.selectedModel(value)).toBe(observed)
+  })
+
   it('hydrates Claude effort from effective settings and backfills the transcript CLI version', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'machine-runtime-'))
     cleanup.push(cwd)

@@ -475,7 +475,8 @@ describe('E2eeManager persistent remote-password pairing', () => {
       mgr.handleFrame(conn, joiner.onPake(takeLast('e2e_pw_pake'))!)
       expect(mgr.listPaired().find((p) => p.fingerprint === C.fingerprint(joiner.identity.pub))?.label).toBe(shown)
     }
-  })
+    // Four real password handshakes need the same scrypt budget as the lockout cases.
+  }, PW_SCRYPT_TEST_TIMEOUT_MS)
 
   it('a wrong password fails the confirmation MAC at round 2 and pins nobody', async () => {
     const { mgr, takeLast } = machine()

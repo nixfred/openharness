@@ -83,8 +83,12 @@ def lv_font(src):
                          r'\.type = (\w+)', src):
         start, length, gid, ulist, ofs, count, kind = m.groups()
         start, length, gid = int(start), int(length), int(gid)
-        assert ofs == 'NULL'
-        if kind.endswith('FORMAT0_TINY'):
+        assert ofs == 'NULL' or kind.endswith('FORMAT0_FULL')
+        if kind.endswith('FORMAT0_FULL'):
+            # lv_font_conv shares one glyph between codepoints that draw alike: an offset per codepoint.
+            for i, d in enumerate(array(src, ofs)):
+                cmap[start + i] = gid + d
+        elif kind.endswith('FORMAT0_TINY'):
             for i in range(length):
                 cmap[start + i] = gid + i
         elif kind.endswith('SPARSE_TINY'):

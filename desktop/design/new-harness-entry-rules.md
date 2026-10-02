@@ -40,7 +40,7 @@ Opening, searching, and cancelling never send input to an existing harness.
 | Cmd-T, then Cmd-N | Last explicit agent, local machine, last selected project on that machine | The blank tab opened by Cmd-T |
 | Cmd-Shift-P → New Harness | Last explicit agent, local machine, last selected project on that machine | Current tab |
 | Cmd-N or the New Harness command | Last explicit agent, local machine, last selected project on that machine; retain explicit task and destination | Current tab unless its source requests a new tab |
-| Pane-header split, Split Right/Down command, or shortcut | Opens creation directly with the clicked/focused pane's agent, machine, and project | Requested split in that tab after submission |
+| Pane-edge split, Split Right/Down command, menu, or shortcut | Opens creation directly with the clicked/focused pane's agent, machine, and project | Requested split in that tab after submission |
 | Store New Harness, or a product's Open action in the pane or native Models menu | Explicit product and machine; suggested project named for that product | New tab |
 | Store Resume Harness | Existing harness and its machine; choose from a menu when several match | Focus its existing tab or reopen a view of the same harness |
 | Store Try this prompt | Same as Open, with the example as the editable task | New tab |
@@ -73,6 +73,20 @@ agents. There is no separate Coding category. A specialized harness asks which c
 coding agent should run it, preselecting its remembered choice. The form's value
 then reads `Blender · Codex`. Choosing a direct agent removes the package choice
 and sends no `dsh`; it does not remove project instructions or skills.
+
+Fresh harnesses use OpenCode with Muse Spark 1.3, xhigh effort and Auto-approve when compatible. Explicit and
+remembered agent choices are retained; reopening a session keeps its saved agent
+and model. A package's declared agent is a compatibility fallback, not a global default.
+
+The running pane header shows the agent name as plain text beside the model,
+with the same type, padding and hover/focus treatment and no pill or chevron.
+Clicking it opens the shared Cmd-P picker in `&` Agents mode. All agents are
+listed; unsupported choices explain why they cannot be selected. Selecting a
+supported agent saves and stops the current session, starts a fresh conversation
+in the same folder, and replaces its references in every pane without changing
+tab positions or layout. The previous saved conversation stays in history. No
+confirmation dialog is shown. Failed saves do not start a replacement; uncertain
+creation replies retain one receipt for retry.
 
 Explicit entry choices and pending receipts win over remembered defaults. A
 remembered agent, package, project, or profile that is unavailable requires an
@@ -114,7 +128,7 @@ management and preserves the launch draft. Choosing Terminal clears model routin
 its Model row is omitted.
 
 An explicit model survives draft dismissal/restoration and uncertain creation
-receipts. A new session starts with the selected engine's default subscription;
+receipts. A new OpenCode session starts with Muse Spark 1.3; other engines use their default subscription;
 model routing is not persisted as a global preference. Start refreshes availability
 and sends only `gridModel` and `gridName`; the selected machine resolves the endpoint
 and credentials. Older daemons without `supportsModelLaunch` explain that an update

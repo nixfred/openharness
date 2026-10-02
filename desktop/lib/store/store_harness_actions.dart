@@ -206,7 +206,7 @@ class _StoreHarnessActionsState extends State<StoreHarnessActions> {
       // Measure the longer label at the user's text size. Matching fixed widths
       // keep the pair balanced, while Wrap stacks them on narrow pages.
       final label = TextPainter(
-        text: TextSpan(text: 'Resume Harness', style: textStyle),
+        text: TextSpan(text: 'Open Harness', style: textStyle),
         textDirection: Directionality.of(context),
         textScaler: MediaQuery.textScalerOf(context),
       )..layout();
@@ -321,7 +321,7 @@ class _StoreHarnessActionsState extends State<StoreHarnessActions> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Flexible(child: Text('Resume Harness')),
+                            const Flexible(child: Text('Open Harness')),
                             if (multiple) ...[
                               const SizedBox(width: 6),
                               Icon(

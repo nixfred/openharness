@@ -147,7 +147,7 @@ pub fn project_payload(d: &Draft, info: &Value) -> Result<(Option<String>, Value
     let worktree = d.worktree.unwrap_or(true);
     let reference = branch_ref(d, info);
     if worktree && reference.is_none() {
-        return Err("Choose a branch under Options, or turn Worktree off".into());
+        return Err("Choose a branch, or turn Worktree off".into());
     }
     let Some(reference) = reference else {
         return Ok((Some(folder.clone()), extra));
@@ -250,6 +250,7 @@ mod tests {
                 label: "Codex".into(),
             },
             project: Project::Folder("/home/dev/repo".into()),
+            task: String::new(),
             permission: "auto".into(),
             worktree: None,
             branch: None,

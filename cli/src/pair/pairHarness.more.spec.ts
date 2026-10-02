@@ -27,7 +27,7 @@ function world(over: Partial<PairHarnessDeps> = {}) {
   const token = new PairToken(join(dir, 'pair', 'token'))
   const deps: PairHarnessDeps = {
     pairedDaemon: () => 'tim',
-    engine: async () => 'claude',
+    engine: async preferred => preferred ?? 'opencode',
     mcpCommand: () => ['/bin/harness'],
     token,
     workspace: join(dir, 'pair', 'workspace'),
@@ -89,7 +89,7 @@ describe('the instructions and the package', () => {
     let uid = 'tim-one'
     let release!: () => void
     const ready = new Promise<void>(resolve => { release = resolve })
-    const w = world({ pairedUid: () => uid, engine: async () => { await ready; return 'claude' } })
+    const w = world({ pairedUid: () => uid, engine: async () => { await ready; return 'opencode' } })
     expect(await w.harness.talk('for a different friend', 'tim-other')).toMatchObject({ error: 'STALE_COMPANION' })
     const pending = w.harness.talk('for Tim', 'tim-one')
     await Promise.resolve()
@@ -154,7 +154,7 @@ describe('the instructions and the package', () => {
   it('keeps the package name within 40 characters', () => {
     const manifest = JSON.parse(pairPackage({ daemonId: 'x'.repeat(60), engine: 'codex', mcpCommand: ['h'], tokenFile: '/t' })['harness.json']!.content)
     expect(manifest.name).toBe('Companions')
-    expect(manifest.agent.env.DSH_PERMISSION_MODE).toBe('ask')
+    expect(manifest.agent.env.DSH_PERMISSION_MODE).toBe('auto')
   })
 })
 
@@ -201,7 +201,7 @@ describe('talk, when something fails', () => {
   })
 
   it('discovering another engine does not replace a paused collection', async () => {
-    let engine: 'claude' | 'codex' = 'claude'
+    let engine: 'opencode' | 'codex' = 'opencode'
     const w = world({ engine: async () => engine })
     await w.harness.talk('hi')
     w.rows[0].status = 'stopped'
@@ -212,7 +212,7 @@ describe('talk, when something fails', () => {
   })
 
   it('a package revision does not attempt to stop or replace a live collection', async () => {
-    let engine: 'claude' | 'codex' = 'claude'
+    let engine: 'opencode' | 'codex' = 'opencode'
     const w = world({ engine: async () => engine, stop: vi.fn(async () => { throw new Error('busy') }) })
     await w.harness.talk('hi')
     engine = 'codex'

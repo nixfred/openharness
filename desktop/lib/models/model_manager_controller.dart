@@ -429,11 +429,15 @@ class ModelManagerController extends ChangeNotifier {
     _panelVisible = visible;
   }
 
-  Future<void> refresh({bool force = false}) {
+  /// [local] false reads only the grid's models — what a harness can be moved onto — and not this
+  /// machine's own list, which a forced read rebuilds from every app's folders (16s once [run]).
+  Future<void> refresh({bool force = false, bool local = true}) {
     final owner = machine;
-    return _refreshing ??= _refresh(force: force).whenComplete(() {
-      if (identical(machine, owner)) _refreshing = null;
-    });
+    return _refreshing ??= _refresh(force: force, local: local).whenComplete(
+      () {
+        if (identical(machine, owner)) _refreshing = null;
+      },
+    );
   }
 
   /// Sets grid up on this machine — `grid` installed, signed in with this Harness account (its token:
@@ -476,7 +480,11 @@ class ModelManagerController extends ChangeNotifier {
     }
   }
 
-  Future<void> _refresh({required bool force, bool setup = false}) async {
+  Future<void> _refresh({
+    required bool force,
+    bool setup = false,
+    bool local = true,
+  }) async {
     final owner = machine;
     if (owner == null ||
         owner.connectionStatus != ConnectionStatus.connected ||
@@ -510,6 +518,7 @@ class ModelManagerController extends ChangeNotifier {
           }
         }),
       (() async {
+        if (!local) return;
         final revision = _actionRevision;
         try {
           final answer = await app.localModels(

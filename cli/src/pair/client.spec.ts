@@ -126,6 +126,17 @@ describe('pairRequest: one request, settled once', () => {
 })
 
 describe('parsePairArgs: words to the payload', () => {
+  it('parses owner-library reads separately from token-bound companion recall', () => {
+    expect(parsePairArgs('memory', ['show', 'memory-id', '--json'])).toMatchObject({ json: true, payload: { verb: 'memory', action: 'show', id: 'memory-id' } })
+    expect(parsePairArgs('memory', []).payload).toEqual({ verb: 'memory', action: 'list' })
+    expect(parsePairArgs('memory', ['list', '--scope', 'project', '--project', 'project-a', '--limit', '10', '--cursor', 'next']).payload)
+      .toEqual({ verb: 'memory', action: 'list', query: { scope: 'project', projectId: 'project-a', limit: 10, cursor: 'next' } })
+    expect(() => parsePairArgs('memory', ['list', '--limit', 'NaN'])).toThrow('--limit takes a whole number')
+    expect(() => parsePairArgs('memory', ['show'])).toThrow('memory show needs a memory id')
+    expect(() => parsePairArgs('memory', ['list', '--machine', 'elsewhere'])).toThrow('Unexpected memory arguments')
+    expect(() => parsePairArgs('memory', ['forget', 'id'])).toThrow('memory supports list, status and show')
+    expect(parsePairArgs('recall_memory', ['how', 'I', 'debug']).payload).toEqual({ verb: 'recall_memory', query: 'how I debug' })
+  })
   it('reads with no arguments, and list_harnesses with or without a machine', () => {
     for (const verb of ['status', 'list_machines', 'journal']) expect(parsePairArgs(verb, ['--machine', 'mb']).payload).toEqual({ verb })
     expect(parsePairArgs('list_harnesses', []).payload).toEqual({ verb: 'list_harnesses' })
@@ -170,6 +181,19 @@ describe('parsePairArgs: words to the payload', () => {
     expect(parsePairArgs('say', ['hello', '--json', 'there'])).toEqual({ payload: { verb: 'say', line: 'hello there' }, json: true })
     // --create and --dry-run belong to lessons: anywhere else they are words.
     expect(parsePairArgs('say', ['--create', '--dry-run']).payload).toEqual({ verb: 'say', line: '--create --dry-run' })
+  })
+
+  it('passes typed, explicit recall conditions through the CLI without adding unknown context', () => {
+    expect(parsePairArgs('recall_memory', ['failing', 'test', '--conditions', '{"taskType":"debugging","productionIncident":false}', '--json']))
+      .toEqual({ json: true, payload: { verb: 'recall_memory', query: 'failing test', conditions: { taskType: 'debugging', productionIncident: false } } })
+    expect(parsePairArgs('recall_memory', ['database', '--conditions={"language":["TypeScript","Rust"]}']).payload)
+      .toEqual({ verb: 'recall_memory', query: 'database', conditions: { language: ['TypeScript', 'Rust'] } })
+    expect(parsePairArgs('recall_memory', ['database']).payload).toEqual({ verb: 'recall_memory', query: 'database' })
+  })
+
+  it.each(['not json', '[]', 'null', '{"taskType":{"guessed":"debugging"}}', '{"invalid-key":true}'])
+  ('rejects malformed recall context before contacting the daemon: %s', value => {
+    expect(() => parsePairArgs('recall_memory', ['test', '--conditions', value])).toThrow(PairUsageError)
   })
 
   it('lessons: an unknown action, a missing id; --create only on approve, --dry-run only on export, no id on export', () => {

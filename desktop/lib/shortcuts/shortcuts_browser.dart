@@ -12,6 +12,7 @@ import 'key_cap.dart';
 import 'keymap_commands.dart';
 import 'keymap_settings.dart';
 import 'keyboard_practice.dart';
+import 'shortcut_recorder.dart';
 
 /// Searchable help built from the same resolved bindings that handle input.
 /// Shared by the shortcut dialog and Settings; no separate shortcut catalog.
@@ -123,12 +124,57 @@ class _ShortcutsBrowserState extends State<ShortcutsBrowser> {
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
-  Widget _lessonRow(KeyboardLesson lesson) => _ShortcutBrowserRow(
-    key: _rowKeys.putIfAbsent(lesson.id, GlobalKey.new),
-    lesson: lesson,
-    selected: _cursor >= 0 && _visible[_cursor].id == lesson.id,
-    onTap: () => _practice(lesson),
-  );
+  /// The row whose key is being changed, by command and context — not by
+  /// [KeyboardLesson.id], which spells the keys and so changes on save.
+  String? _editing;
+
+  String _editKey(KeyboardLesson lesson) =>
+      '${lesson.context.name}:${lesson.command}';
+
+  void _closeEditor() {
+    setState(() => _editing = null);
+    _input.requestFocus();
+  }
+
+  Future<void> _resetAll() async {
+    final store = _keymap.store;
+    if (store == null || !await confirmResetAllShortcuts(context)) return;
+    if (!mounted) return;
+    setState(() => _editing = null);
+    try {
+      await store.resetAll();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text('Couldn’t reset shortcuts. $error')),
+        );
+      }
+    }
+    if (mounted) _input.requestFocus();
+  }
+
+  Widget _lessonRow(KeyboardLesson lesson) {
+    final keymap = _keymap;
+    final editable =
+        keymap.store != null && harnessCommandById.containsKey(lesson.command);
+    if (editable && _editing == _editKey(lesson)) {
+      return ShortcutRecorder(
+        key: _rowKeys.putIfAbsent(lesson.id, GlobalKey.new),
+        keymap: keymap,
+        lesson: lesson,
+        onClose: _closeEditor,
+      );
+    }
+    return _ShortcutBrowserRow(
+      key: _rowKeys.putIfAbsent(lesson.id, GlobalKey.new),
+      lesson: lesson,
+      selected: _cursor >= 0 && _visible[_cursor].id == lesson.id,
+      onTap: () => _practice(lesson),
+      onEdit: editable
+          ? () => setState(() => _editing = _editKey(lesson))
+          : null,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -187,6 +233,13 @@ class _ShortcutsBrowserState extends State<ShortcutsBrowser> {
                             ),
                           ),
                         ),
+                        if (keymap.store case final store?
+                            when store.hasOverrides || keymap.error != null)
+                          TextButton(
+                            key: const ValueKey('shortcuts-reset-all'),
+                            onPressed: _resetAll,
+                            child: const Text('Reset all'),
+                          ),
                         if (keymap.store != null)
                           IconButton(
                             tooltip: 'Edit keyboard shortcuts',
@@ -386,13 +439,37 @@ class _ShortcutBrowserRow extends StatelessWidget {
     required this.lesson,
     required this.selected,
     required this.onTap,
+    this.onEdit,
   });
   final KeyboardLesson lesson;
   final bool selected;
   final VoidCallback onTap;
 
+  /// Null where keys cannot be changed from here: the browser build, and the
+  /// practice-only rows that are not app commands.
+  final VoidCallback? onEdit;
+
   @override
   Widget build(BuildContext context) {
+    final row = _practiceButton(context);
+    final edit = onEdit;
+    if (edit == null) return row;
+    return Row(
+      children: [
+        Expanded(child: row),
+        IconButton(
+          key: ValueKey(
+            'shortcut-edit-${lesson.context.name}:${lesson.command}',
+          ),
+          tooltip: 'Change shortcut',
+          icon: Icon(AppIcons.pencil, size: 16, color: DesktopChrome.muted),
+          onPressed: edit,
+        ),
+      ],
+    );
+  }
+
+  Widget _practiceButton(BuildContext context) {
     final chords = [
       for (final binding in lesson.bindings)
         binding.keys.length == 1

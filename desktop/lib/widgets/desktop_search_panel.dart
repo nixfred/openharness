@@ -26,7 +26,7 @@ class DesktopSearchPanel extends StatelessWidget {
     required this.onClose,
     required this.onRefocus,
     required this.previewBuilder,
-    this.hostBar,
+    this.showsBack = false,
   });
 
   final SwarmSearchController search;
@@ -35,7 +35,10 @@ class DesktopSearchPanel extends StatelessWidget {
   final ValueChanged<SwarmSearchSelection> onChoose;
   final VoidCallback onClose, onRefocus;
   final Widget Function() previewBuilder;
-  final Widget? hostBar;
+
+  /// True puts a clickable Back before the scopes while a machine or project
+  /// is open — the click for what Escape does.
+  final bool showsBack;
 
   static const maxWidth = 1120.0;
   static const maxHeight = 680.0;
@@ -44,12 +47,15 @@ class DesktopSearchPanel extends StatelessWidget {
     ('Harnesses', ''),
     ('Machines', '@'),
     ('Projects', '#'),
+    ('Agents', '&'),
     ('Models', ':'),
     ('Store', '*'),
     ('Commands', '>'),
   ];
 
-  String get _prefix => search.isProjectMode
+  String get _prefix => search.isAgentMode
+      ? '&'
+      : search.isProjectMode
       ? '#'
       : search.isMachineMode
       ? '@'
@@ -78,7 +84,6 @@ class DesktopSearchPanel extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                ?hostBar,
                 if (search.split != null)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
@@ -154,37 +159,51 @@ class DesktopSearchPanel extends StatelessWidget {
                           ),
                         ),
                       ),
-                      if (hostBar == null)
-                        _toolbarButton(
-                          context,
-                          key: const ValueKey('search-close'),
-                          tooltip: 'Close search',
-                          onPressed: onClose,
-                          icon: const Icon(AppIcons.close, size: 18),
-                        ),
+                      _toolbarButton(
+                        context,
+                        key: const ValueKey('search-close'),
+                        tooltip: 'Close search',
+                        onPressed: onClose,
+                        icon: const Icon(AppIcons.close, size: 18),
+                      ),
                     ],
                   ),
                 ),
-                if (hostBar == null)
-                  ListenableBuilder(
-                    listenable: search,
-                    builder: (context, _) => SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.fromLTRB(20, 2, 20, 14),
-                      child: _SearchScopes(
-                        selected: _prefix,
-                        onRefocus: onRefocus,
-                        onChanged: (prefix) {
-                          final words = search.wordsQuery;
-                          search.setQuery(
-                            prefix.isEmpty
-                                ? words
-                                : '$prefix $words'.trimRight(),
-                          );
-                        },
-                      ),
+                ListenableBuilder(
+                  listenable: search,
+                  builder: (context, _) => SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.fromLTRB(20, 2, 20, 14),
+                    child: Row(
+                      spacing: 6,
+                      children: [
+                        if (showsBack && search.canGoBack)
+                          DesktopPill(
+                            key: const ValueKey('search-back'),
+                            label: 'Back',
+                            leading: const Icon(AppIcons.chevronLeft, size: 14),
+                            capsule: true,
+                            quiet: true,
+                            onPressed: () {
+                              if (search.back()) onRefocus();
+                            },
+                          ),
+                        _SearchScopes(
+                          selected: _prefix,
+                          onRefocus: onRefocus,
+                          onChanged: (prefix) {
+                            final words = search.wordsQuery;
+                            search.setQuery(
+                              prefix.isEmpty
+                                  ? words
+                                  : '$prefix $words'.trimRight(),
+                            );
+                          },
+                        ),
+                      ],
                     ),
                   ),
+                ),
                 Flexible(
                   child: ListenableBuilder(
                     listenable: search,

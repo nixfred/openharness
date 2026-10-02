@@ -74,6 +74,8 @@ class WebAppMenuButton extends StatelessWidget {
     );
     final chosen = await showPaneMenu<String>(
       context: context,
+      // Opened by a click: no row is lit until the pointer picks one.
+      focusFirst: false,
       position: RelativeRect.fromLTRB(
         origin.dx,
         origin.dy + box.size.height + 6,

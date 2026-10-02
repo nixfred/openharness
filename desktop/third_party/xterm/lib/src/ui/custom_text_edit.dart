@@ -161,6 +161,27 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     _connection?.setEditingState(value);
   }
 
+  /// Types [text] at the cursor without going through the platform's input
+  /// method: the native buffer is updated to match and the terminal receives
+  /// it, exactly as if the input client had inserted it.
+  ///
+  /// For a key the terminal must not let the input method see — on macOS the
+  /// space bar, whose second press "Add period with double-space" turns into
+  /// a REPLACEMENT of the first space with ". " (`TerminalView`). Never call
+  /// while composing: marked text belongs to the IME.
+  void insertTyped(String text) {
+    final value = _currentEditingState;
+    final selection = value.selection.isValid
+        ? value.selection
+        : TextSelection.collapsed(offset: value.text.length);
+    final next = value.replaced(selection, text);
+    _cancelPendingDeletes();
+    _currentEditingState = next;
+    _semanticEditingState.value = next;
+    _connection?.setEditingState(next);
+    _syncTerminalText(next.text);
+  }
+
   /// Clears the native input buffer after the terminal accepts a command.
   /// It intentionally stays intact between ordinary key presses: Vietnamese
   /// Telex needs the preceding `u` available to convert it into `ư`.
@@ -236,7 +257,9 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         // letters instead of `hôm`; a CJK candidate window dies the same way.
         // A desktop IME composes through marked text, which neither flag
         // touches, so those platforms keep the strict config — a terminal has
-        // no business autocorrecting a command.
+        // no business autocorrecting a command. ⚠️ Flutter's macOS input plugin
+        // reads none of these flags, so on macOS they protect nothing; see
+        // [insertTyped] for the one substitution that is kept away instead.
         //
         // iOS has no finer knob: that one `autocorrect` gates its autocorrection
         // AND its Telex conversion. Android's composing hangs off
@@ -341,8 +364,13 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     _pendingActionEcho = null;
     if (submitted == null) return false;
     // The newline either lands on the buffer the action was performed on, or
-    // after this side's reset has already emptied it — whichever wins the race.
-    if (value.text != '$submitted\n' && value.text != '\n') return false;
+    // after this side's reset has already emptied it (back to the delete pad,
+    // when there is one) — whichever wins the race. A browser's <textarea>
+    // does the same as iOS: Return reports the action, then types its newline.
+    if (value.text != '$submitted\n' &&
+        value.text != '${_initEditingState.text}\n') {
+      return false;
+    }
     _connection?.setEditingState(_currentEditingState);
     return true;
   }

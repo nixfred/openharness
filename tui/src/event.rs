@@ -22,6 +22,4 @@ pub enum Event {
     /// The result of background work, applied on the app loop.
     Apply(Box<dyn FnOnce(&mut App) + Send>),
     Tick,
-    /// Repaint moving indicators without running the maintenance timers.
-    Animate,
 }

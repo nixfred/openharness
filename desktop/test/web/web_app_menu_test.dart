@@ -62,15 +62,30 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('web-menu:web.sign_out')), findsOneWidget);
-    // An empty tab has no pane to split, zoom or close.
-    expect(find.byKey(const ValueKey('web-menu:pane.close')), findsNothing);
-    expect(
-      find.byKey(const ValueKey('web-menu:pane.split_right')),
-      findsNothing,
-    );
     await tester.tap(find.byKey(const ValueKey('web-menu:app.settings')));
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.byType(SettingsScreen), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('the menu opens with no row lit; keys still walk and close it', (
+    tester,
+  ) async {
+    final app = await _mount(tester);
+    await _openMenu(tester);
+    bool lit(String id) =>
+        Focus.of(tester.element(find.byKey(ValueKey('web-menu:$id'))))
+            .hasPrimaryFocus;
+    // Opened by a click: the pointer picks the row, so none starts lit.
+    expect(lit('machines.list'), isFalse);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(lit('machines.list'), isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const ValueKey('web-menu:machines.list')), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     app.dispose();
@@ -92,7 +107,7 @@ void main() {
     await tester.pump();
     expect(find.byType(WorkspaceMachinePrompt), findsNothing);
     expect(find.byType(NewHarnessForm), findsOneWidget);
-    // The browser attaches files to a new harness; desktop's box has no 📎.
+    // A new harness takes files: 📎 and drops on its box.
     expect(find.byKey(const ValueKey('new-harness-attach')), findsOneWidget);
     expect(find.byKey(const ValueKey('new-harness-drop')), findsOneWidget);
     expect(tester.takeException(), isNull);

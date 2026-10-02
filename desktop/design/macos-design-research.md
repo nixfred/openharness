@@ -14,6 +14,23 @@ Award references below describe the named reference apps only.
 
 ## What Apple recommends
 
+### Notification menu refinement — 2026-10-01
+
+Apple's [notification guidance](https://developer.apple.com/design/human-interface-guidelines/notifications?changes=_4)
+prioritizes a recognizable title or sender and concise, informative content.
+The [Mac Notification Center guide](https://support.apple.com/en-euro/guide/mac-help/mchl2fb1258f/mac)
+documents opening the associated item, expanding groups and clearing notifications.
+
+Our application of these patterns: a semibold harness name followed directly
+by its message; quiet timestamps; secondary tab/machine context on hover;
+and one small clear control beside the heading. Working is visible by default
+as compact rows. Status marks reuse the tab/pane activity vocabulary, as the
+user requested. This is an AppKit menu, not a replica of Notification Center:
+the system owns its material, placement, keyboard navigation and dismissal.
+Row measurements and the five-item limits are Harness design choices.
+
+### Broader desktop guidance
+
 These are paraphrases of primary sources. The numerical proposals later in this
 note are our choices, not Apple requirements.
 

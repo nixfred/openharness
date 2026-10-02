@@ -37,4 +37,52 @@ describe('process discovery', () => {
     )
     expect(result.agents[0].primaryRuntimeKey).toBe(terminalRouteKey(tmux.runtime))
   })
+
+  it('keeps independent, nested, ambiguous and daemon-owned panes separate in one scan', () => {
+    const root = (pid: number): TerminalRootObservation => ({
+      runtime: { backend: 'tmux', paneId: `%${pid}` }, rootPid: pid, cwd: `/work/${pid}`,
+    })
+    const result = discoverTerminalAgentsFromSnapshot(
+      [root(10), root(20), root(21), root(30), root(40)],
+      [
+        shell(10, 1), claude(11, 10),
+        shell(20, 1), shell(21, 20), claude(22, 21),
+        shell(30, 1), shell(999, 30), claude(1000, 999),
+        shell(40, 1), claude(41, 40), claude(42, 40),
+      ],
+      999,
+      ['tmux'],
+    )
+
+    expect(result.agents.map(agent => ({
+      pid: agent.processIdentity.pid,
+      cwd: agent.cwd,
+      runtimes: agent.runtimes,
+    }))).toEqual([
+      { pid: 11, cwd: '/work/10', runtimes: [root(10).runtime] },
+      { pid: 22, cwd: '/work/21', runtimes: [root(21).runtime, root(20).runtime] },
+    ])
+    expect(result.ambiguousPlacements).toEqual(new Set([terminalRouteKey(root(40).runtime)]))
+  })
+
+  it('sees exits and reused PIDs on the next snapshot', () => {
+    const roots = [tmux, nested]
+    const before = discoverTerminalAgentsFromSnapshot(
+      roots, [shell(10, 1), claude(11, 10), shell(20, 1), claude(21, 20)], 999, ['tmux'],
+    )
+    const replacement: ProcessRow = {
+      pid: 11, parentPid: 20, executable: 'codex', args: 'codex', startMarker: 'Sat Aug 15 11:00:00 2026',
+    }
+    const after = discoverTerminalAgentsFromSnapshot(
+      roots, [shell(10, 1), shell(20, 1), replacement], 999, ['tmux'],
+    )
+
+    expect(before.agents.map(agent => agent.processIdentity.pid)).toEqual([11, 21])
+    expect(after.agents).toHaveLength(1)
+    expect(after.agents[0]).toMatchObject({
+      engine: 'codex',
+      processIdentity: { pid: 11, startMarker: replacement.startMarker },
+      runtimes: [nested.runtime],
+    })
+  })
 })

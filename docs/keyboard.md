@@ -10,8 +10,8 @@ The defaults, in the workspace:
 | Keys | Action |
 |---|---|
 | ⌘T | New Swarm — opens the same quiet welcome page shown at startup. Use ⌘N to create a harness, ⌘P to open one, or ⌘S for the store |
-| ⌘O / Ctrl+O (Linux) | Open projects — the unified picker starts in projects (`#`), with projects containing open panes first and alphabetical order within each group |
-| ⌘P / Ctrl+P (Linux) | Search harnesses — the unified picker for harnesses, machines (`@`), projects (`#`), models (`:`), and Store (`*`). Opens in the current swarm and tiles its panes, or focuses the harness if already here |
+| ⌘O / Ctrl+O (Linux) | Open Project — the unified picker starts in projects (`#`), with projects containing open panes first and alphabetical order within each group |
+| ⌘P / Ctrl+P (Linux) | Open Harness — the unified picker for harnesses, machines (`@`), projects (`#`), agents (`&`), models (`:`), and Store (`*`). Opens in the current tab and tiles its panes, or focuses the harness if already here |
 | ⇧⌘P / Ctrl+Shift+P (Linux) | Search commands; from a selected picker result, search actions for that item |
 | ⌘R / ⌘D | Split right / down — open the New Pane picker with the requested direction, then choose an existing harness or create one |
 | ⌘N | New Harness — choose an Agent or Harness, Project, and Options, then activate New Harness. Lists filter as you type; Return chooses and Escape returns to the form. Project accepts a folder, a new project name, or a repository. Options include model, permissions, agent profile, branch, and worktree |
@@ -42,6 +42,7 @@ A harness can have views in several swarms, with one view per swarm; closing a p
 The view closes immediately, without a minimize animation.
 
 Cmd-P opens an empty search field. Cmd-O inserts an editable `#` for projects.
+Type `&` to choose a different agent for the focused harness. The pane header's agent name opens the same picker. Switching saves the old session, keeps the project and pane in place, and passes recent requests and saved answers to agents that accept an initial message (OpenCode, Codex, Claude Code and Hermes). This is a bounded handoff, not the full original transcript; the original session remains saved.
 Delete the prefix to return to harness search. These fields use a thin caret and
 no separate prompt character.
 

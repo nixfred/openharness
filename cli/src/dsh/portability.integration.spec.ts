@@ -71,6 +71,7 @@ describe('the whole store × engine matrix', () => {
         expect(launch.args).toEqual([
           ...packageArgs.map(arg => expandDshValue(arg, { dsh: dir, workspace })),
           ...(harnessAdapter(engine).contextArgs?.(launch.env.HARNESS_CONTEXT_FILE!) ?? []),
+          ...(harnessAdapter(engine).envArgs?.(launch.env) ?? []),
         ])
         expect(launch.env.HARNESS_DSH).toBe(pkg.id)
         const context = readFileSync(launch.env.HARNESS_CONTEXT_FILE!, 'utf8')

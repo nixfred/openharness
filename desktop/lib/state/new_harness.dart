@@ -1,3 +1,5 @@
+import '../core/harness_defaults.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -613,7 +615,9 @@ class NewHarnessController extends ChangeNotifier {
             ? app.agentPreference.value
             : null);
     if (remembered != null) return remembered;
-    final preferred = selectedHarness?.engine;
+    final preferred = allowed.contains(defaultHarnessEngine)
+        ? defaultHarnessEngine
+        : selectedHarness?.engine;
     if (preferred != null && allowed.contains(preferred)) return preferred;
     return allowed.first;
   }
@@ -888,6 +892,7 @@ class NewHarnessController extends ChangeNotifier {
   String get subscriptionLabel => switch (_engine) {
     'codex' => 'OpenAI',
     'claude' => 'Anthropic',
+    'opencode' => defaultHarnessModelLabel,
     _ => agentLabel,
   };
   String get modelLabel => _model == null

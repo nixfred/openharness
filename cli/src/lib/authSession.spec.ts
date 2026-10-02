@@ -37,6 +37,37 @@ afterAll(async () => {
 })
 
 describe('AuthSessionManager', () => {
+  it('binds the memory owner to a verified sign-in, preserves it across refresh, and rejects stale responses', async () => {
+    writeAuthSession(baseSession())
+    const manager = new AuthSessionManager('https://api.example.test')
+    const owner = await manager.bindMemoryOwner('user-one', 'old-access', 'prod')
+    expect(owner).toMatch(/^[a-f0-9]{64}$/)
+    expect(readAuthSession()?.memoryOwner?.key).toBe(owner)
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: { token: 'refreshed-access', refreshToken: 'refreshed-refresh', expiresIn: 3600 },
+    }))))
+    await manager.accessToken()
+    expect(readAuthSession()?.memoryOwner?.key).toBe(owner)
+    expect(await manager.bindMemoryOwner('another-user', 'old-access', 'prod')).toBeNull()
+    expect(readAuthSession()?.memoryOwner?.key).toBe(owner)
+    const signedIn = readAuthSession()!
+    writeAuthSession({ ...signedIn, accessToken: 'different-login' })
+    expect(readAuthSession()?.memoryOwner).toBeUndefined()
+    expect(await manager.bindMemoryOwner('user-two', 'different-login', 'prod')).not.toBe(owner)
+  })
+
+  it('does not reuse the same memory owner across server environments or after sign-out', async () => {
+    writeAuthSession(baseSession())
+    const manager = new AuthSessionManager('https://api.example.test')
+    const owner = await manager.bindMemoryOwner('user-one', 'old-access', 'prod')
+    writeAuthSession({ ...readAuthSession()!, autonomousEnv: 'stag' })
+    expect(readAuthSession()?.memoryOwner).toBeUndefined()
+    expect(await manager.bindMemoryOwner('user-one', 'old-access', 'prod')).toBeNull()
+    expect(await manager.bindMemoryOwner('user-one', 'old-access', 'stag')).not.toBe(owner)
+    clearAuthSession()
+    expect(await manager.bindMemoryOwner('user-one', 'old-access', 'stag')).toBeNull()
+  })
+
   it('coalesces concurrent expired-token refreshes into one request and persists the rotated tokens', async () => {
     writeAuthSession(baseSession())
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
@@ -50,6 +81,31 @@ describe('AuthSessionManager', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(readAuthSession()).toMatchObject({ accessToken: 'new-access', refreshToken: 'refresh-2' })
     await expect(readFile(AUTH_SESSION_FILE, 'utf8')).resolves.toContain('new-access')
+  })
+
+  it('refreshes as the client the session was issued to, and names none for a session that kept none', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({
+      success: true,
+      data: { token: 'new-access', expiresIn: 3600 },
+    })))
+    vi.stubGlobal('fetch', fetchMock)
+    const manager = new AuthSessionManager('https://api.example.test')
+    const sent = (call: number) => JSON.parse(String(fetchMock.mock.calls[call]![1]?.body)) as Record<string, unknown>
+
+    writeAuthSession({ ...baseSession(), clientId: 'harness-desktop' })
+    await manager.accessToken()
+    expect(sent(0)).toEqual({ refreshToken: 'refresh-1', autonomousEnv: 'prod', clientId: 'harness-desktop' })
+    // The client outlives the refresh: the next one names it too.
+    expect(readAuthSession()).toMatchObject({ accessToken: 'new-access', clientId: 'harness-desktop' })
+
+    writeAuthSession(baseSession())
+    await manager.accessToken()
+    expect(sent(1)).toEqual({ refreshToken: 'refresh-1', autonomousEnv: 'prod' })
+  })
+
+  it('reads back only a client that is ours', async () => {
+    await writeFile(AUTH_SESSION_FILE, JSON.stringify({ ...baseSession(), clientId: 'someone-else' }))
+    expect(readAuthSession()).not.toHaveProperty('clientId')
   })
 
   // `process.exit` skips `finally`: a daemon that exited mid-refresh left the lock for the next

@@ -81,6 +81,11 @@ project on the machine where you installed it. Ask:
 The agent should change `index.html` to say `Hello, Ada!`. Watch it update in the viewer beside
 the terminal. You have now run an agent and a viewer together as your own harness.
 
+The workspace opens **70% viewer on the left, 30% agent chat on the right**.
+Both slots remain visible during loading and errors. See the
+[DSH workspace contract](desktop/design/dsh-workspace.md) before building a new
+dashboard or changing how a harness opens.
+
 `--link` keeps the installed package connected to your checkout. Edit the instructions and start
 a fresh harness in a new project to try them; instructions already copied into an existing
 project are preserved. You can remove this example with `harness dsh remove examples/hello-world`;
@@ -197,6 +202,11 @@ fail, which is also why forgetting them is easy:
 npm run test:tmux-real     # RUN_REAL_TMUX_DISCOVERY=1 — drives a real tmux server
 npm run test:cursor-e2e    # RUN_CURSOR_E2E=1 — needs a real cursor-agent CLI
 ```
+
+`test:tmux-real` owns its private tmux server and its cleanup. Run it directly; do not wrap it in
+a bare `tmux kill-server` trap. `TMUX_TMPDIR` alone does not isolate a test launched inside a tmux
+pane, because inherited `TMUX` takes precedence. New tmux fixtures must clear `TMUX` and
+`TMUX_PANE`, use a private socket, and explicitly target that socket with `-S` during cleanup.
 
 If your change touches how agents are discovered or driven, run the real multiplexer suite for the
 software available on your machine and say exactly which versions and engine rows ran. A missing

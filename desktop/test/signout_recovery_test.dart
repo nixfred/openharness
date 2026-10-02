@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_login.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/screens/login_screen.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
@@ -29,7 +30,10 @@ class SignOutFixture extends CliLogin {
   }
 
   @override
-  Future<void> login({required void Function(String) onAuthorizeUrl}) async {
+  Future<void> login({
+    required void Function(String) onAuthorizeUrl,
+    SignInProvider? provider,
+  }) async {
     logins++;
     throw StateError('Fixture login stopped before any external work.');
   }
@@ -211,7 +215,7 @@ void main() {
           );
           await tester.pump();
           expect(find.text('Signing out…'), findsOneWidget);
-          expect(find.text('Sign in'), findsNothing);
+          expect(find.text('Continue with Google'), findsNothing);
           expect(find.text('Cancel'), findsNothing);
           await capture('pending');
           await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -242,7 +246,7 @@ void main() {
           cli.attempts.last.complete();
           await tester.pump();
           await tester.pump();
-          expect(find.text('Sign in'), findsOneWidget);
+          expect(find.text('Continue with Google'), findsOneWidget);
           await capture('ready');
           await tester.sendKeyEvent(LogicalKeyboardKey.enter);
           await tester.pump();

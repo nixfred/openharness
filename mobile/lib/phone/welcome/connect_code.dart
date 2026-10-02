@@ -76,3 +76,41 @@ class ConnectCode {
     ].join('&'),
   ).toString();
 }
+
+/// What a computer signing in by QR shows — the desktop app's "Scan with your phone", or
+/// `harness login` choosing it (backend `routes/qrSignIn.ts`):
+///
+/// ```
+/// https://harness.autonomous.ai/signin#k=<code>
+/// ```
+///
+/// The code is in the fragment, like [ConnectCode]'s, so a Camera app that opens the link sends it
+/// nowhere. It is only an address: approving it takes this phone's own sign-in, and the computer
+/// still asks its person whose account it is joining before anything is created.
+class SignInCode {
+  const SignInCode(this.code);
+
+  final String code;
+
+  static const path = '/signin';
+  static final _shape = RegExp(r'^hnq_[A-Za-z0-9_-]{43}$');
+
+  static SignInCode? parse(String raw) {
+    final uri = Uri.tryParse(raw.trim());
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.host != ConnectCode.host ||
+        uri.path != path) {
+      return null;
+    }
+    final code = Uri.splitQueryString(uri.fragment)['k']?.trim() ?? '';
+    return _shape.hasMatch(code) ? SignInCode(code) : null;
+  }
+
+  static String link(String code) => Uri(
+    scheme: 'https',
+    host: ConnectCode.host,
+    path: path,
+    fragment: 'k=${Uri.encodeQueryComponent(code)}',
+  ).toString();
+}

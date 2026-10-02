@@ -177,6 +177,18 @@ String _storedWorktrees(Map<String, Map<String, Object?>> machines) =>
     });
 
 void main() {
+  test('new harnesses default to OpenCode and Muse without changing explicit choices', () async {
+    final fixture = _Fixture();
+    final fresh = fixture.open(engine: null);
+    expect(fresh.engine, 'opencode');
+    expect(fresh.modelLabel, 'Muse Spark 1.3');
+    final explicit = fixture.open(engine: 'claude');
+    expect(explicit.engine, 'claude');
+    await fixture.app.agentPreference.selectLaunch('codex');
+    final remembered = fixture.open(engine: null);
+    expect(remembered.engine, 'codex');
+  });
+
   test(
     'explicit agent defaults persist without inventing a recent launch',
     () async {

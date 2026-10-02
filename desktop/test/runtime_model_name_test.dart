@@ -25,6 +25,20 @@ void main() {
     }
   });
 
+  test('OpenCode labels exclude an adjacent padded project path', () {
+    for (final path in ['/private/tmp/work', '~/code/work', r'C:\work']) {
+      final model = 'Muse Spark 1.3 Free OpenCode Zen                 $path';
+      expect(
+        runtimeModelName(
+          'runtime-v1:a:opencode:${Uri.encodeComponent(model)}@auto',
+          agentId: 'a',
+          engine: 'opencode',
+        ),
+        'Muse Spark 1.3 Free OpenCode Zen',
+      );
+    }
+  });
+
   test('observed effort stays with the validated model', () {
     for (final (effort, label) in [
       ('low', 'Low'),
@@ -64,6 +78,7 @@ void main() {
       'runtime-v1:a:codex:%FF@high',
       'runtime-v1:a:codex:%C0%80@high',
       'runtime-v1:a:codex:%20@high',
+      'runtime-v1:a:codex:%3Csynthetic%3E@high',
       'runtime-v1:a:codex:model%0Aname@high',
       'runtime-v1:a:codex:${'x' * 257}@high',
     ]) {

@@ -12,6 +12,7 @@ import 'terminal_pane.dart';
 String tabHarnessType(AppNotifier app, Swarm tab) {
   if (tab.isStore) return 'store';
   if (tab.isCompanions) return 'companions';
+  if (tab.isDevices) return 'devices';
   if (tab.isOrchestrator) return 'orchestrator';
   final counts = <String, int>{};
   for (final pane in tab.panes) {
@@ -105,6 +106,8 @@ Map<String, String> workspaceTabNames(AppNotifier app) {
           ? 'store'
           : tab.isCompanions
           ? 'companions'
+          : tab.isDevices
+          ? Swarm.devicesName
           : tab.isOrchestrator
           ? 'orchestrator'
           : candidates[tab.id]!.isEmpty

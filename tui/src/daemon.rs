@@ -267,10 +267,16 @@ impl Link {
 // ── REST on the same port (machines, desk, status) ──────────────────────────────
 
 pub async fn http_json(port: u16, method: &str, path: &str, body: Option<&Value>) -> Result<Value, RpcError> {
-    http_json_at(port, &socket_path(port), method, path, body).await
+    http_json_for(port, method, path, body, Duration::from_secs(15)).await
 }
 
-async fn http_json_at(port: u16, socket: &Path, method: &str, path: &str, body: Option<&Value>) -> Result<Value, RpcError> {
+/// [http_json] with its own wait: a long poll (`POST /api/pair` holds the request for as long as a
+/// phone's handshake runs) needs more than the usual 15 s.
+pub async fn http_json_for(port: u16, method: &str, path: &str, body: Option<&Value>, wait: Duration) -> Result<Value, RpcError> {
+    http_json_at(port, &socket_path(port), method, path, body, wait).await
+}
+
+async fn http_json_at(port: u16, socket: &Path, method: &str, path: &str, body: Option<&Value>, wait: Duration) -> Result<Value, RpcError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let work = async {
         let mut stream = connect_owned(socket).await.map_err(|e| RpcError::new("DAEMON_UNREACHABLE", e.to_string()))?;
@@ -294,7 +300,7 @@ async fn http_json_at(port: u16, socket: &Path, method: &str, path: &str, body: 
         }
         Ok(if value.get("success").is_some() && value.get("data").is_some() { value["data"].clone() } else { value })
     };
-    tokio::time::timeout(Duration::from_secs(15), work).await.unwrap_or_else(|_| Err(RpcError::new("TIMEOUT", "the daemon did not answer")))
+    tokio::time::timeout(wait, work).await.unwrap_or_else(|_| Err(RpcError::new("TIMEOUT", "the daemon did not answer")))
 }
 
 fn dechunk(body: &[u8]) -> Vec<u8> {
@@ -339,11 +345,11 @@ mod recovery_tests {
             let body = r#"{"owner":"this-user","tabs":[]}"#;
             peer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
-        let desk = http_json_at(port, &socket.0, "GET", "/api/desk", None).await.unwrap();
+        let desk = http_json_at(port, &socket.0, "GET", "/api/desk", None, Duration::from_secs(15)).await.unwrap();
         assert_eq!(desk["owner"], "this-user");
         server.await.unwrap();
         std::fs::remove_file(&socket.0).unwrap();
-        assert!(http_json_at(port, &socket.0, "GET", "/api/desk", None).await.is_err());
+        assert!(http_json_at(port, &socket.0, "GET", "/api/desk", None, Duration::from_secs(15)).await.is_err());
         assert!(tokio::time::timeout(Duration::from_millis(50), foreign.accept()).await.is_err());
     }
 

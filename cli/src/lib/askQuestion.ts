@@ -279,7 +279,13 @@ function unframe(capture: string): string {
   // raw text silently never fired — hermes read as "no dialog open" with the dialog plainly on screen.
   return stripAnsi(capture)
     .split('\n')
-    .map((line) => line.replace(/^(\s*)[│┃|]\s?/, '$1').replace(/\s*[│┃|]\s*$/, ''))
+    .map((line) => {
+      const left = line.replace(/^(\s*)[│┃|]\s?/, '$1')
+      // An unanchored whitespace regex retries at every column on blank rows.
+      // Inspect the last non-space character once; keep unframed lines intact.
+      const right = left.trimEnd()
+      return /[│┃|]$/.test(right) ? right.slice(0, -1).trimEnd() : left
+    })
     .join('\n')
 }
 
@@ -290,7 +296,9 @@ function multiSubmitKey(engine: AgentEngine): string {
 }
 
 function parseRow(line: string): QuestionRow | null {
-  const m = /^\s*[❯›>]?\s*(\d+)\.\s+(.+?)\s*$/.exec(line)
+  // Consume indentation once: two adjacent whitespace runs backtrack across
+  // every possible split on the padded non-option lines in terminal captures.
+  const m = /^[❯›>]?\s*(\d+)\.\s+(.+?)\s*$/.exec(line.trimStart())
   if (!m) return null
   const raw = m[2]
   const box = /^\[([^\]])\]\s*(.*)$/.exec(raw)
@@ -1069,7 +1077,10 @@ export function pollsQuestions(engine: AgentEngine): boolean {
  * re-announces to a device that attaches mid-question — neither of which a one-shot event could do.
  */
 export class QuestionWatcher {
-  private timers = new Map<string, NodeJS.Timeout>()
+  private readonly watching = new Set<string>()
+  private timer: NodeJS.Timeout | undefined
+  private readonly pendingPolls = new Map<string, { cancelled: boolean }>()
+  private readonly pendingBaselines = new Map<string, { cancelled: boolean }>()
   private last = new Map<string, string>() // sessionId → fingerprint of the announced question
   private lastId = new Map<string, string>()  // sessionId → requestId of the announced question
   private misses = new Map<string, number>()  // sessionId → consecutive polls with no dialog
@@ -1101,27 +1112,44 @@ export class QuestionWatcher {
    */
   noteTurnStart(sessionId: string): void {
     this.preTurn.delete(sessionId)
+    this.cancelPending(sessionId)
+    const pending = { cancelled: false }
+    this.pendingBaselines.set(sessionId, pending)
     void (async () => {
-      const session = this.deps.getSession(sessionId)
-      const target = session?.agentId || session?.sessionId
-      if (!target) return
-      const view = parseEngineQuestionPane(session?.engine ?? 'claude', await this.deps.capture(target, CAPTURE_LINES) ?? '')
-      if (!view || view.kind !== 'question' || !view.question || view.rows.length === 0) return
-      // Only if nothing has been announced for this turn yet: the capture takes
-      // a moment, and a dialog that opened inside that window is this turn's.
-      if (this.lastId.has(sessionId)) return
-      this.preTurn.set(sessionId, fingerprintOf(view))
+      try {
+        const session = this.deps.getSession(sessionId)
+        const target = session?.agentId || session?.sessionId
+        if (!target || session?.active === false || (session?.engine && !pollsQuestions(session.engine))) return
+        const generation = questionCaptureGeneration(session)
+        const capture = await this.deps.capture(target, CAPTURE_LINES)
+        if (pending.cancelled || generation !== questionCaptureGeneration(this.deps.getSession(sessionId))) return
+        const view = parseEngineQuestionPane(session?.engine ?? 'claude', capture ?? '')
+        if (!view || view.kind !== 'question' || !view.question || view.rows.length === 0) return
+        // Only if nothing has been announced for this turn yet: the capture takes
+        // a moment, and a dialog that opened inside that window is this turn's.
+        if (this.lastId.has(sessionId)) return
+        this.preTurn.set(sessionId, fingerprintOf(view))
+      } catch {
+        // A failed read supplies no baseline. Keep watching for a fresh dialog.
+      } finally {
+        if (this.pendingBaselines.get(sessionId) === pending) this.pendingBaselines.delete(sessionId)
+      }
     })()
   }
 
   /** Poll this session's pane while its turn is open (called on turn_started). */
   start(sessionId: string): void {
-    if (this.timers.has(sessionId)) return
+    if (this.watching.has(sessionId)) return
     const session = this.deps.getSession(sessionId)
     // Only the engines that actually paint a question dialog: Claude and Command Code share one shape,
     // devin has its own (parseDevinQuestionPane). Polling any other pane would be pure waste.
     if (!session || session.active === false || !(session.agentId || session.sessionId) || !QUESTION_ENGINES.has(session.engine)) return
-    this.timers.set(sessionId, setInterval(() => { void this.tick(sessionId) }, POLL_MS))
+    this.watching.add(sessionId)
+    // One clock also starts the reads in one event-loop turn, allowing the tmux
+    // backend to batch them without delaying polls or caching terminal content.
+    this.timer ??= setInterval(() => {
+      for (const id of this.watching) void this.tick(id)
+    }, POLL_MS)
   }
 
   /**
@@ -1138,9 +1166,11 @@ export class QuestionWatcher {
    * was removed cannot answer either.
    */
   stop(sessionId: string): void {
+    this.cancelPending(sessionId)
     this.preTurn.delete(sessionId)
-    const timer = this.timers.get(sessionId)
-    if (timer) { clearInterval(timer); this.timers.delete(sessionId) }
+    this.blocked.delete(sessionId)
+    this.watching.delete(sessionId)
+    if (!this.watching.size && this.timer) { clearInterval(this.timer); this.timer = undefined }
     const requestId = this.lastId.get(sessionId)
     this.forget(sessionId)
     if (requestId) this.deps.onQuestionGone?.(sessionId, requestId)
@@ -1148,8 +1178,13 @@ export class QuestionWatcher {
 
 
   stopAll(): void {
-    for (const timer of this.timers.values()) clearInterval(timer)
-    this.timers.clear()
+    if (this.timer) clearInterval(this.timer)
+    this.timer = undefined
+    this.watching.clear()
+    for (const pending of this.pendingPolls.values()) pending.cancelled = true
+    for (const pending of this.pendingBaselines.values()) pending.cancelled = true
+    this.preTurn.clear()
+    this.blocked.clear()
     this.last.clear()
     this.lastId.clear()
     this.misses.clear()
@@ -1166,6 +1201,13 @@ export class QuestionWatcher {
     this.last.delete(sessionId)
     this.lastId.delete(sessionId)
     this.misses.delete(sessionId)
+  }
+
+  private cancelPending(sessionId: string): void {
+    const poll = this.pendingPolls.get(sessionId)
+    if (poll) poll.cancelled = true
+    const baseline = this.pendingBaselines.get(sessionId)
+    if (baseline) baseline.cancelled = true
   }
 
   /**
@@ -1186,9 +1228,12 @@ export class QuestionWatcher {
 
 
   private async tick(sessionId: string): Promise<void> {
+    // A capture can take longer than POLL_MS. Keep one outstanding poll per
+    // session, including a cancelled capture that has not returned yet.
+    if (this.pendingPolls.has(sessionId)) return
     const session = this.deps.getSession(sessionId)
     const terminalTarget = session?.agentId || session?.sessionId
-    if (!terminalTarget) { this.stop(sessionId); return }
+    if (!terminalTarget || session?.active === false || (session?.engine && !pollsQuestions(session.engine))) { this.stop(sessionId); return }
     // Both of these silently do nothing, which is how a live dialog can sit on the terminal with no trace
     // in the log. Say it once per transition rather than every 1.5s tick.
     const blocked = !this.deps.hasDevice() ? 'no device' : this.deps.isDriving?.(sessionId) ? 'driving an answer' : ''
@@ -1197,8 +1242,25 @@ export class QuestionWatcher {
       console.log(`[question] ${sessionId.slice(0, 8)} watcher ${blocked ? `paused · ${blocked}` : 'polling'}`)
     }
     if (blocked) return
-    const engine = this.deps.getSession(sessionId)?.engine ?? 'claude'
-    const view = parseEngineQuestionPane(engine, await this.deps.capture(terminalTarget, CAPTURE_LINES) ?? '')
+    const pending = { cancelled: false }
+    this.pendingPolls.set(sessionId, pending)
+    const generation = questionCaptureGeneration(session)
+    let capture: string | null
+    try {
+      capture = await this.deps.capture(terminalTarget, CAPTURE_LINES)
+    } catch {
+      capture = null
+    } finally {
+      if (this.pendingPolls.get(sessionId) === pending) this.pendingPolls.delete(sessionId)
+    }
+    if (pending.cancelled || generation !== questionCaptureGeneration(this.deps.getSession(sessionId))
+      || !this.deps.hasDevice() || this.deps.isDriving?.(sessionId)) return
+    if (capture === null) {
+      // Unavailable is not an empty pane, and breaks a run of confirmed misses.
+      this.misses.delete(sessionId)
+      return
+    }
+    const view = parseEngineQuestionPane(session?.engine ?? 'claude', capture)
     if (view?.kind === 'question' && view.partial) {
       // Scrolled so its top is out of the pane: still open, so the client showing it keeps showing it —
       // but there is no question text to announce, and the rows in view are whichever the scroll left.
@@ -1227,6 +1289,8 @@ export class QuestionWatcher {
     // means a different dialog, and the answer is refused (STALE_QUESTION) instead of keyed into it.
     const requestId = questionRequestId(sessionId, view)
     this.lastId.set(sessionId, requestId)
+    const baseline = this.pendingBaselines.get(sessionId)
+    if (baseline) baseline.cancelled = true
     this.deps.onQuestion(sessionId, requestId, [{
       key: view.question,
       q: view.question,
@@ -1236,6 +1300,13 @@ export class QuestionWatcher {
     }], { permission: isApprovalDialog(view), dialog: view.dialog ?? view.question })
 
   }
+}
+
+/** Snapshot scalar values before awaiting I/O: registry records can change in
+ * place when an engine exits, moves, or is replaced in the same pane. */
+function questionCaptureGeneration(session: RegisteredSession | undefined): string {
+  return session ? JSON.stringify([session.agentId, session.sessionId, session.engine, session.active,
+    session.tmuxPane, session.primaryRuntimeKey, session.runtimes, session.processIdentity]) : ''
 }
 
 /**

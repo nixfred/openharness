@@ -1,17 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLog, verifyEngine, verifyRelay } from '../lib/verify.mjs';
+import { createLog, relayOnlyRefusal, verifyEngine, verifyRelay } from '../lib/verify.mjs';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 const quiet = () => {};
 const instant = async () => {};
 
-function engine({ bootFailures = 1, content = 'ok', reasoning = '', toolCall = true, seen = [], thinksFirst = false } = {}) {
+function engine({ bootFailures = 1, content = 'ok', reasoning = '', toolCall = true, seen = [], thinksFirst = false, row = { id: 'widget' }, reports = {} } = {}) {
   let boots = 0;
   return async (url, init = {}) => {
     const body = init.body ? JSON.parse(init.body) : null;
     seen.push({ url, body });
-    if (url.endsWith('/models')) return boots++ < bootFailures ? new Response('loading', { status: 503 }) : json({ data: [{ id: 'widget' }] });
+    // An engine's own report of what it loaded (Ollama /api/ps, LM Studio /api/v0/models, llama.cpp /props).
+    const path = new URL(url).pathname;
+    if (path in reports) return json(reports[path]);
+    if (!path.startsWith('/v1/')) return new Response('not found', { status: 404 });
+    if (url.endsWith('/models')) return boots++ < bootFailures ? new Response('loading', { status: 503 }) : json({ data: [row] });
     if (body.tools) return json({ choices: [{ message: toolCall ? { tool_calls: [{ function: { name: 'read_file', arguments: '{"path":"README.md"}' } }] } : { content: 'I cannot' } }] });
     if (body.max_tokens === 128) return json({ usage: { completion_tokens: 128 }, timings: { predicted_per_second: 21.5 }, choices: [{ message: { content: 'one two' } }] });
     // A model an engine keeps thinking: 16 tokens are all reasoning, a larger budget reaches the answer.
@@ -24,7 +28,7 @@ test('an engine passes only after ready, listed, a real answer, a tool call and 
   const lines = [], seen = [];
   const result = await verifyEngine({ url: 'http://127.0.0.1:9/v1', model: 'widget', fetchImpl: engine({ seen }), log: createLog(line => lines.push(line)), sleep: instant });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.steps.map(step => step.name), ['ready', 'listed', 'answer', 'tool call', 'speed']);
+  assert.deepEqual(result.steps.map(step => step.name), ['ready', 'listed', 'answer', 'context', 'tool call', 'speed']);
   assert.equal(result.steps.at(-1).tokensPerSecond, 21.5);
   assert.ok(lines.some(line => /attempt 1: 503/.test(line)), 'a failed readiness attempt is shown, not hidden');
   assert.ok(lines.every(line => /^\[\+\s*\d+s\]/.test(line)), 'every line carries elapsed time');
@@ -98,4 +102,48 @@ test('an alias the relay lists in another case passes at once, and is asked by t
   assert.equal(result.ok, true);
   assert.equal(polls, 1);
   assert.equal(asked, 'LFM2.5-VL-3B');
+});
+
+test('an Ollama already running with a short window fails on context, with the fix, before anything is called working', async () => {
+  const lines = [];
+  const reports = { '/api/ps': { models: [{ name: 'llama3.2:3b', model: 'llama3.2:3b', context_length: 16384 }] } };
+  const result = await verifyEngine({ url: 'http://127.0.0.1:11434/v1', model: 'llama3.2:3b', kind: 'ollama', fetchImpl: engine({ bootFailures: 0, row: { id: 'llama3.2:3b' }, reports }), log: createLog(line => lines.push(line)), sleep: instant });
+  assert.equal(result.ok, false);
+  const context = result.steps.at(-1);
+  assert.equal(context.name, 'context');
+  assert.equal(context.contextTokens, 16384);
+  assert.match(context.note, /16384 tokens, under 65536: .*start a second Ollama with OLLAMA_CONTEXT_LENGTH/);
+  assert.ok(!result.steps.some(step => step.name === 'speed'), 'nothing after a failed step');
+  assert.ok(lines.some(line => /FAIL context/.test(line)));
+});
+
+test('each engine is read where it reports its window: Ollama by name or :latest, LM Studio, llama.cpp, vLLM', async () => {
+  const run = (kind, model, options) => verifyEngine({ url: 'http://127.0.0.1:9/v1', model, kind, fetchImpl: engine({ bootFailures: 0, row: { id: model }, ...options }), log: quiet, sleep: instant });
+  const ollama = await run('ollama', 'qwen3', { reports: { '/api/ps': { models: [{ name: 'qwen3:latest', context_length: 131072 }] } } });
+  assert.equal(ollama.steps.find(step => step.name === 'context').contextTokens, 131072);
+  assert.equal(ollama.ok, true);
+  const lmStudio = await run('lm-studio', 'google/gemma-4-e2b', { reports: { '/api/v0/models': { data: [{ id: 'google/gemma-4-e2b', state: 'loaded', max_context_length: 131072, loaded_context_length: 4096 }] } } });
+  assert.match(lmStudio.steps.at(-1).note, /4096 tokens, under 65536: load it again with `lms load MODEL --context-length 65536`/);
+  const llamaCpp = await run('llama.cpp', 'widget', { reports: { '/props': { default_generation_settings: { n_ctx: 32768 } } } });
+  assert.match(llamaCpp.steps.at(-1).note, /32768 tokens, under 65536: .*--ctx-size ÷ --parallel/);
+  const vllm = await run('vllm', 'org/model', { row: { id: 'org/model', max_model_len: 65536 } });
+  assert.equal(vllm.ok, true);
+  assert.equal(vllm.steps.find(step => step.name === 'context').note, '65536 tokens');
+});
+
+test('an engine that does not report its window is a skip, said as one, never a pass', async () => {
+  const lines = [];
+  const result = await verifyEngine({ url: 'http://127.0.0.1:9/v1', model: 'widget', kind: 'mlx-lm', fetchImpl: engine({ bootFailures: 0 }), log: createLog(line => lines.push(line)), sleep: instant });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.steps.find(step => step.name === 'context'), { name: 'context', ok: true, skipped: true, note: 'mlx-lm does not report it' });
+  assert.ok(lines.some(line => /SKIP context — mlx-lm does not report/.test(line)));
+  assert.ok(!lines.some(line => /PASS context/.test(line)));
+});
+
+test('the grid-only check refuses a model served from this computer, which has an engine to check', () => {
+  const rows = [{ model: 'gemma-4-e2b', engine: 'external', node: 'Studio Mac' }, { model: 'Big-Model', node: 'GPU rig' }];
+  assert.match(relayOnlyRefusal(rows, 'GEMMA-4-E2B', 'Studio Mac'), /served from this computer \(Studio Mac\): check its engine with --at/);
+  assert.equal(relayOnlyRefusal(rows, 'Big-Model', 'Studio Mac'), null, 'an engine on another machine is what --grid alone is for');
+  assert.equal(relayOnlyRefusal(rows, 'gemma-4-e2b', undefined), null, 'no name for this computer: nothing to compare');
+  assert.equal(relayOnlyRefusal({ error: 'not a list' }, 'gemma-4-e2b', 'Studio Mac'), null);
 });

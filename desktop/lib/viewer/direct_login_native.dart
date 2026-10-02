@@ -2,16 +2,20 @@ import 'dart:async';
 import 'dart:io';
 
 import '../auth/cli_login.dart';
+import '../auth/phone_sign_in.dart';
 import '../auth/sign_in_client.dart';
+import '../auth/sign_in_provider.dart';
+import '../core/local_hostname.dart';
 import 'direct_auth.dart';
 import 'direct_auth_api.dart';
+import 'qr_sign_in.dart';
 
 /// Signing in with no harness CLI — cli.ts `loginCommand`, run by the app: a loopback listener for
 /// the SSO redirect, `authorize-native` for the page to show, `exchange` for the tokens.
 ///
 /// It deliberately skips the CLI's closing `resolve-computer`, which registers the computer as a
 /// Harness machine. A viewer is not one.
-class DirectLogin implements SignInClient {
+class DirectLogin implements SignInClient, PhoneSignInClient {
   DirectLogin({required this.auth});
 
   final DirectAuth auth;
@@ -27,6 +31,7 @@ class DirectLogin implements SignInClient {
   @override
   Future<void> login({
     required void Function(String url) onAuthorizeUrl,
+    SignInProvider? provider,
   }) async {
     cancel();
     final revision = _loginRevision;
@@ -37,6 +42,7 @@ class DirectLogin implements SignInClient {
       callback = _pending = _LoopbackCallback(server);
       final start = await auth.api.authorizeNative(
         'http://127.0.0.1:${server.port}/callback',
+        provider: provider,
       );
       _requireCurrent(revision);
       onAuthorizeUrl(start.authorizeUrl);
@@ -59,6 +65,25 @@ class DirectLogin implements SignInClient {
       if (identical(_pending, callback)) _pending = null;
       await server.close(force: true);
     }
+  }
+
+  @override
+  Future<void> loginWithPhone({
+    required void Function(String link, int expiresIn) onQr,
+    required Future<bool> Function(String email) onConfirm,
+  }) async {
+    cancel();
+    final revision = _loginRevision;
+    final tokens = await viewerQrSignIn(
+      api: auth.api,
+      label: localHostnameOrNull() ?? 'Desktop app',
+      onQr: onQr,
+      onConfirm: onConfirm,
+      stillCurrent: () => revision == _loginRevision,
+    );
+    _requireCurrent(revision);
+    await auth.signIn(tokens, stillCurrent: () => revision == _loginRevision);
+    _requireCurrent(revision);
   }
 
   @override

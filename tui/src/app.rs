@@ -177,7 +177,16 @@ pub fn options_from(row: &Value) -> std::collections::BTreeMap<String, String> {
 /// Where a server name's (-L) sessions are kept between clients.
 pub fn sessions_path(name: Option<&str>) -> std::path::PathBuf {
     let name = name.map(str::to_string).or_else(|| std::env::var("HN_SOCKET_NAME").ok()).filter(|n| !n.is_empty()).unwrap_or_else(|| "default".into());
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".harness").join("tui").join(format!("sessions-{name}.json"))
+    state_dir().join(format!("sessions-{name}.json"))
+}
+
+/// Where hn keeps its state (~/.harness/tui). Tests never read or write the real one: theirs is
+/// a folder of their own.
+pub fn state_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("hn-test-{}", std::process::id())).join("tui");
+    #[allow(unreachable_code)]
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".harness").join("tui")
 }
 
 /// The agent a reply is about (`agentId`).
@@ -313,8 +322,8 @@ pub struct Tab {
     /// automatic-rename off: the window has had the name tmux gives one when it is made
     /// (default_window_name: a shell by its command), and keeps it.
     pub first_named: bool,
-    /// The desk's layout document for this tab, kept whole: a preset chosen here updates its entry
-    /// and leaves the sizes other windows saved alone.
+    /// The desk's complete layout document. An explicit edit replaces the
+    /// current count's normalized slots, retaining other counts' saved layouts.
     pub layout: Value,
     /// Last layout observed on the desk, separate from the local edit awaiting its reply.
     pub desk_layout: Value,
@@ -322,6 +331,9 @@ pub struct Tab {
     desk_panes: Vec<(String, String)>,
     /// A named choice awaiting publication, separate from the last observed desk document.
     desk_preset: Option<(usize, &'static str)>,
+    /// Unrounded shared slots and their local pane identities, independent of
+    /// tmux pane numbering and the current terminal dimensions.
+    shared_geometry: Option<crate::desk_layout::Geometry>,
 }
 
 impl Tab {
@@ -333,7 +345,23 @@ impl Tab {
     pub fn home() -> Tab { Tab::with_wid("home", NO_WID) }
     /// A window with the id it had (a session another client kept, the desk's).
     pub fn with_wid(name: &str, wid: u64) -> Tab {
-        Tab { id: Uuid::new_v4().simple().to_string(), wid: std::cell::Cell::new(wid), size: None, name: name.to_string(), named: false, home: false, root: None, focus: None, zoomed: false, last: Vec::new(), order: Vec::new(), points: HashMap::new(), alerts: 0, last_output: Instant::now(), activity: crate::format::now_secs(), layout_at: None, on_desk: false, sync: false, first_named: false, layout: json!({}), desk_layout: json!({}), desk_panes: Vec::new(), desk_preset: None }
+        Tab { id: Uuid::new_v4().simple().to_string(), wid: std::cell::Cell::new(wid), size: None, name: name.to_string(), named: false, home: false, root: None, focus: None, zoomed: false, last: Vec::new(), order: Vec::new(), points: HashMap::new(), alerts: 0, last_output: Instant::now(), activity: crate::format::now_secs(), layout_at: None, on_desk: false, sync: false, first_named: false, layout: json!({}), desk_layout: json!({}), desk_panes: Vec::new(), desk_preset: None, shared_geometry: None }
+    }
+    fn fit_layout(&mut self, size: (u16, u16), status: layout::Status) -> bool {
+        let Some(root) = self.root.as_mut() else { return false };
+        let changed = root.size() != size || root.status != status;
+        root.status = status;
+        if changed && !self.shared_geometry.as_mut().is_some_and(|g| g.fit(root, size.0, size.1, status)) {
+            root.resize(size.0, size.1);
+        }
+        changed
+    }
+
+    fn read_shared_layout(&mut self, ids: &[u64], w: u16, h: u16) {
+        let preset = preset_from_desk(crate::desk_layout::preset_id(&self.layout, ids.len()), ids.len());
+        let (root, geometry) = desk_geometry(&self.layout, preset, ids, w, h).unzip();
+        self.root = root;
+        self.shared_geometry = geometry;
     }
     /// Its @N, numbered now if it has none yet.
     pub fn wid(&self) -> u64 {
@@ -517,8 +545,8 @@ pub struct App {
     pub new_harness_draft: Option<Box<crate::new_harness::Form>>,
     /// Each harness's selectable models (`models_list`), for ⌥I.
     pub models: HashMap<(String, String), Vec<Value>>,
-    /// Each machine's local models (the grid): downloaded, running, available.
-    pub local_models: HashMap<String, Vec<Value>>,
+    /// ── models: the Models view's replies (local models, grids, APIs) and a Use under way ──
+    pub models_view: crate::models::Models,
     /// Each machine's last measured round trip (the live roster request), for `@`.
     pub rtt: HashMap<String, Duration>,
     pub homes: HashMap<String, String>,
@@ -769,6 +797,8 @@ pub struct App {
     pub mouse_changed: bool,
     /// Whether the terminal window has focus (focus reporting) — notifications go out when it does not.
     pub terminal_focused: bool,
+    /// Waiting for a key to become the prefix, or a command's key (settings.rs): the next key.
+    pub capturing: Option<crate::settings::Capture>,
     /// The Harness device on this desk, and hn's half of talking to it (dial.rs).
     pub dial: crate::dial::Dial,
     /// A key table of your own the next key is looked up in (`switch-client -T`).
@@ -780,6 +810,13 @@ pub struct App {
     /// `#()` commands in formats: their last output, run again every status-interval.
     pub jobs: std::cell::RefCell<std::collections::HashMap<String, crate::format::Job>>,
     pub fleet_marked: bool,
+    // ── status bar ──
+    /// The status bar down a side: where its entries were drawn (what a click there does), its
+    /// lists' scroll, and whether it is folded to a rail.
+    pub bar: crate::bar::State,
+    // ── machines & devices ──
+    /// The panel's machine and device views: what the CLI and the daemon last said (devices.rs).
+    pub devices: crate::devices::Devices,
 }
 
 impl App {
@@ -960,7 +997,7 @@ impl App {
             dsh: HashMap::new(),
             new_harness_draft: None,
             models: HashMap::new(),
-            local_models: HashMap::new(),
+            models_view: Default::default(),
             rtt: HashMap::new(),
             homes: HashMap::new(),
             last_focus_sent: None,
@@ -978,12 +1015,15 @@ impl App {
             desk_stale: false,
             lastw: Vec::new(),
             terminal_focused: true,
+            capturing: None,
             dial: Default::default(),
             options: Default::default(),
             jobs: Default::default(),
             key_table: None,
             key_table_until: None,
             fleet_marked: false,
+            bar: Default::default(),
+            devices: Default::default(),
         }
     }
 
@@ -1259,6 +1299,12 @@ impl App {
                 for id in ids { self.open_stream(id, false) }
             }
             MachineEvent::Failed(error) | MachineEvent::Closed(error) => {
+                for agent in self.fleet.agents.values_mut().filter(|a| a.machine_id == machine_id) {
+                    let unknown = agent.working || agent.activity.unknown;
+                    agent.working = false;
+                    agent.activity = crate::activity::Activity::default();
+                    agent.activity.unknown = unknown;
+                }
                 let needs_link = error.code == "NO_PEER_LINK";
                 if let Some(machine) = self.fleet.machine_mut(&machine_id) {
                     machine.reach = if needs_link { Reach::NeedsLink } else if machine.online() { Reach::Error(error.to_string()) } else { Reach::Offline };
@@ -1330,6 +1376,16 @@ impl App {
     fn on_frame(&mut self, machine_id: &str, ty: &str, payload: Value) {
         // The dial's frames come from this computer's daemon, to the windows on it.
         if machine_id == self.fleet.local_id && crate::dial::on_frame(self, ty, &payload) { return }
+        if payload.get("activity").is_some() {
+            if let Some(agent) = self.fleet.event_agent(machine_id, &payload) {
+                if let Some(working) = agent.activity.accept(&payload["activity"], Instant::now()) {
+                    agent.working = working;
+                } else if matches!(ty, "turn_ended" | "turn_started") { return }
+            }
+        }
+        if ty == "agent_activity" { return }
+        // ── models: a message to a resting model starts its pane's "Starting up…" ──
+        crate::models::watch_turn(self, machine_id, ty, &payload);
         match ty {
             "agent_synced" | "agent_created" | "agent_renamed" => {
                 let row = payload.get("agent").cloned().unwrap_or(payload.clone());
@@ -1352,7 +1408,7 @@ impl App {
                 let id = payload.get("agentId").or_else(|| payload.get("id")).and_then(Value::as_str).unwrap_or("");
                 if let Some(agent) = self.fleet.agents.get_mut(&(machine_id.to_string(), id.to_string())) {
                     agent.status = "stopped".into();
-                    agent.working = false;
+                    agent.working = false; agent.activity.unknown = false;
                     agent.question = None;
                 }
                 self.relist(machine_id);
@@ -1362,8 +1418,14 @@ impl App {
                     let now = fleet::now_ms();
                     // A turn begun (or found running): the state's clock starts, what it says anew.
                     if ty == "turn_started" || !agent.working { agent.since = now; agent.doing = None; agent.said.clear() }
-                    agent.working = true;
-                    agent.last_beat = Some(Instant::now());
+                    if !agent.activity.reported() && payload["replay"] != true {
+                        if ty != "turn_heartbeat" { agent.activity.legacy_heartbeat_seen = false; }
+                        if ty != "turn_heartbeat" || !agent.activity.legacy_heartbeat_seen {
+                            agent.working = true; agent.activity.unknown = false;
+                            agent.last_beat = Some(Instant::now());
+                            agent.activity.legacy_heartbeat_seen = ty == "turn_heartbeat";
+                        }
+                    }
                     agent.active_at = now;
                     if ty == "turn_started" {
                         agent.unread = false; agent.errored = false;
@@ -1402,7 +1464,7 @@ impl App {
                 let (replay, subagent) = (flag("replay"), flag("subagent"));
                 let aborted = payload.get("aborted").and_then(Value::as_bool).unwrap_or(false);
                 if let Some(agent) = self.fleet.event_agent(machine_id, &payload) {
-                    agent.working = false;
+                    agent.working = false; agent.activity.unknown = false; agent.activity.until = None;
                     if !subagent { agent.subagents.clear() }
                     agent.active_at = fleet::now_ms();
                     agent.since = agent.active_at;
@@ -1564,6 +1626,8 @@ impl App {
                     }
                 }
             }
+            // ── models: the daemon's picture of the grids changed — the whole list, pushed ──
+            "grid_models_changed" => crate::models::on_push(self, machine_id, &payload),
             _ => {}
         }
     }
@@ -1705,8 +1769,7 @@ impl App {
             return;
         };
         let (cols, rows) = content.unwrap_or((pane.cols, pane.rows));
-        // Below the daemon's 40×12 the far terminal stays 40×12 and the tile shows the part of it
-        // around the cursor, as tmux shows a window bigger than its client.
+        // The remote terminal follows the actual tile, including narrow or short split panes.
         let (cols, rows) = pane::stream_size(cols, rows);
         pane.opening = true;
         pane.want = (cols, rows);
@@ -1940,9 +2003,8 @@ impl App {
             if !own && tab.size.is_none() { return }
             let status = app.pane_status(tab);
             let size = tab.size.unwrap_or(default);
-            let Some(root) = tab.root.as_mut() else { return };
-            root.status = status;
-            if root.size() != size { root.resize(size.0, size.1) }
+            tab.fit_layout(size, status);
+            let Some(root) = tab.root.as_ref() else { return };
             let area = Rect::new(0, 0, size.0, size.1);
             let mut out = Vec::new();
             match tab.focus.filter(|_| tab.zoomed) { Some(f) => out.push((f, area)), None => root.rects(area, &mut out) }
@@ -1990,10 +2052,9 @@ impl App {
             let size = if manual { self.tabs[i].size.or_else(|| self.tabs[i].root.as_ref().map(|r| r.size())) }
                 else if creating && self.tabs[i].size.is_some() { self.tabs[i].size }
                 else { self.tabs[i].size = None; (onscreen && i == self.active).then_some((body.width, body.height)) };
-            if let Some(root) = self.tabs[i].root.as_mut() {
-                root.status = status;
-                if let Some(size) = size { if root.size() != size { root.resize(size.0, size.1); resized.push(i) } }
-            }
+            if let Some(size) = size {
+                if self.tabs[i].fit_layout(size, status) { resized.push(i) }
+            } else if let Some(root) = self.tabs[i].root.as_mut() { root.status = status; }
         }
         for i in resized {
             let id = self.tabs[i].id.clone();
@@ -3570,6 +3631,8 @@ impl App {
     /// the mouse opened is up (tmux's MODE_MOUSE_ALL).
     pub fn wants_motion(&self) -> bool {
         matches!(&self.modal, Some(crate::modal::Modal::Menu(m)) if !m.no_mouse)
+            // (A panel's list: the row under the mouse is the one chosen.)
+            || matches!(&self.modal, Some(crate::modal::Modal::Picker { kind, .. }) if crate::settings::is_panel(kind) && !crate::theme::fzf_opts().no_mouse)
             || self.rects.iter().any(|(id, _)| self.panes.get(id).map(|p| p.mode().contains(alacritty_terminal::term::TermMode::MOUSE_MOTION)).unwrap_or(false))
     }
 
@@ -3587,11 +3650,15 @@ impl App {
             let (w, h) = self.tabs.get(self.active).and_then(|t| t.root.as_ref().map(|r| r.size()).or(t.size)).unwrap_or_else(|| self.default_size());
             return Rect::new(0, 0, w, h);
         }
+        // The bar down a side takes its columns.
+        if let Some(bar) = self.bar_rect() { return Rect::new(if bar.x == 0 { bar.width } else { 0 }, 0, self.size.0.saturating_sub(bar.width), self.size.1) }
         Rect::new(0, if self.status_top { n } else { 0 }, self.size.0, self.size.1.saturating_sub(n))
     }
 
     /// tmux's status option: how many status lines (off, on, 2 … 5).
     pub fn status_lines(&self) -> u16 {
+        // (The bar down a side is the status line: none across the bottom as well.)
+        if self.bar_side().is_some() { return 0 }
         let lines = match self.options.get("status", "", None).as_deref() { Some("off") => 0, Some("2") => 2, Some("3") => 3, Some("4") => 4, Some("5") => 5, _ => 1 };
         // tmux's CLIENT_STATUSOFF: keep a pane row when the terminal cannot fit the status.
         if !self.headless && self.size.1 <= lines { 0 } else { lines }
@@ -3701,8 +3768,8 @@ impl App {
         self.options.get("mode-keys", &tab, self.focused()).as_deref() != Some("vi")
     }
 
-    /// A window's pane-border-status as it shows: hn's default (top) where it has several panes;
-    /// once you set it yourself, as tmux has it — on a lone pane too, and bottom or off.
+    /// A window's pane-border-status: the classic (default) look has none — a plain line
+    /// between panes; the opt-in "panes" look and tmux's own show pane titles instead.
     pub fn pane_status(&self, tab: &Tab) -> layout::Status {
         // (A window one row tall: no room for a title row — the row is the pane's, as tmux shows it.)
         if !self.headless && self.body().height < 2 { return layout::Status::Off }
@@ -3721,7 +3788,8 @@ impl App {
 
     /// The program's actual viewport, shared by drawing, PTY resizing and mouse coordinates.
     pub fn content_of(&self, tab: &Tab, r: Rect) -> Rect {
-        if self.options.pane_look() { crate::pane_frame::frame(r, self.window_area(tab), self.pane_status(tab)).content }
+        if self.options.pane_look() { crate::pane_frame::frame(r, self.window_area(tab), self.box_inner(tab), self.pane_status(tab)).content }
+        else if self.options.box_panes() { crate::pane_frame::boxed_in(r, self.window_area(tab), self.box_inner(tab), self.pane_status(tab)).content }
         else { self.layout_content_of(tab, r) }
     }
 
@@ -3783,6 +3851,14 @@ impl App {
         self.sync_titles();
         self.fit_panes();
         self.refresh_pane_info(pane);
+        self.take_if_watching(pane);
+    }
+
+    /// A pane you come to (a click, a key, the bar) that another window has the keyboard of is
+    /// yours at once — as typing in it would make it — not "Take control" first.
+    pub fn take_if_watching(&mut self, pane: u64) {
+        let Some(p) = self.panes.get(&pane) else { return };
+        if matches!(p.phase, Phase::Watching(_)) && !p.read_only && !p.opening { self.open_stream(pane, true) }
     }
 
     /// A machine's first roster since hn started, read against when you last looked at each of
@@ -3822,7 +3898,7 @@ impl App {
 
     /// seen.json's path.
     fn seen_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".harness").join("tui").join("seen.json")
+        state_dir().join("seen.json")
     }
 
     /// When you last looked at each harness, from the run before (the first run starts the clock).
@@ -4271,8 +4347,14 @@ impl App {
         placed
     }
 
-    /// Wide tiles split left|right, tall ones top/bottom — the way a tiling window manager does.
+    /// Wide tiles split left|right, tall ones top/bottom — the way a tiling window manager does —
+    /// unless `@hn-layout` (`[look].layout_orientation`) pins it to vertical or horizontal.
     pub fn smart_dir(&self) -> Dir {
+        match self.options.look_orientation() {
+            "vertical" => return Dir::Vertical,
+            "horizontal" => return Dir::Horizontal,
+            _ => {}
+        }
         let Some(focus) = self.focused() else { return Dir::Horizontal };
         let rect = self.rects.iter().find(|(id, _)| *id == focus).map(|(_, r)| *r).unwrap_or(self.body());
         if rect.width as f32 >= rect.height as f32 * 2.2 { Dir::Horizontal } else { Dir::Vertical }
@@ -4522,11 +4604,24 @@ impl App {
     pub fn layout_changed(&mut self, t: usize) {
         // A desk window's layout changed here: every terminal lays it out so (sent once the
         // loop comes round).
-        if self.session_desk { if let Some(tab) = self.tabs.get(t).filter(|t| t.on_desk) { self.desk_layouts.insert(tab.id.clone()); } }
+        if self.session_desk { if let Some(tab) = self.tabs.get_mut(t).filter(|t| t.on_desk) {
+            if let Some(root) = &tab.root {
+                if !tab.shared_geometry.as_ref().is_some_and(|g| g.matches(root)) {
+                    tab.shared_geometry = Some(crate::desk_layout::Geometry::capture(root));
+                }
+            }
+            self.desk_layouts.insert(tab.id.clone());
+        } }
+        self.view_layout_changed(t)
+    }
+
+    /// Zoom, theme and viewport dimensions affect this client only.
+    pub fn view_layout_changed(&mut self, t: usize) {
         crate::commands::notify(self, "window-layout-changed", Some(t), None)
     }
 
-    /// The desk windows whose layout changed here: their tmux layout to the desk (tab.layout).
+    /// Publish explicit geometry and its matching pane-reference order together.
+    /// The tmux string remains as a fallback for older hn clients.
     pub fn send_desk_layouts(&mut self) {
         if self.desk_layouts.is_empty() || !self.session_desk { return }
         let mut ops = Vec::new();
@@ -4536,6 +4631,11 @@ impl App {
             if !tab.layout.is_object() { tab.layout = json!({}) }
             let before = tab.layout.clone();
             tab.layout["tmux"] = json!(root.to_tmux());
+            let geometry = tab.shared_geometry.get_or_insert_with(|| crate::desk_layout::Geometry::capture(root));
+            // Shell panes are local; do not assign their slots to remote harnesses.
+            let shared = geometry.slots.iter().all(|(id, _)| self.panes.get(id)
+                .is_some_and(|p| !crate::local::is_local(&p.machine_id)));
+            if shared { geometry.write(&mut tab.layout); }
             // C-b Space and select-layout use this path too. Keep the desktop's
             // corresponding shape current, instead of leaving an older preset behind.
             if let Some((count, preset)) = tab.desk_preset.take() {
@@ -4543,9 +4643,9 @@ impl App {
                 tab.layout["presets"][count.to_string()] = json!(preset);
             }
             if tab.layout != before { ops.push(json!({ "op": "tab.layout", "id": tab.id, "layout": tab.layout })); }
-            // Desktop uses the shared list in screen order, not our stable pane numbers.
-            // Publish both together, including swaps, rotations and mirrored layouts.
-            let panes: Vec<_> = desk_pane_ids(root).iter().filter_map(|id| self.panes.get(id))
+            // The slot order and the shared reference order must agree, even
+            // for non-spatial desktop splits or mirrored tmux layouts.
+            let panes: Vec<_> = geometry.slots.iter().filter_map(|(id, _)| self.panes.get(id))
                 .filter(|p| !crate::local::is_local(&p.machine_id))
                 .map(|p| (p.machine_id.clone(), p.agent_id.clone())).collect();
             if panes != tab.desk_panes {
@@ -4748,6 +4848,7 @@ impl App {
             if changed { self.tabs[index].touch(); self.alert(index, ACTIVITY) }
             if let Some(f) = self.tabs[index].focus { self.seen(f) }
             self.fit_panes();
+            if let Some(f) = self.tabs[index].focus { self.take_if_watching(f) }
         }
     }
 
@@ -4892,10 +4993,9 @@ impl App {
     fn fit_panes_of(&mut self, tab: usize) -> bool {
         let body = self.body();
         let status = self.tabs.get(tab).map(|t| self.pane_status(t)).unwrap_or_default();
-        match self.tabs.get_mut(tab).and_then(|t| t.root.as_mut()) {
-            Some(root) => { root.status = status; if root.size() != (body.width, body.height) { root.resize(body.width, body.height) } true }
-            None => false,
-        }
+        let Some(tab) = self.tabs.get_mut(tab).filter(|t| t.root.is_some()) else { return false };
+        tab.fit_layout((body.width, body.height), status);
+        true
     }
 
     /// resize-pane -x/-y: the pane made that many cells wide or lines tall (its title row, when
@@ -5020,11 +5120,129 @@ impl App {
         self.arrange_tab(index, layout::Named::ALL[at]);
     }
 
-    pub fn apply_preset(&mut self, preset: Preset) { let i = self.active; self.apply_preset_at(i, preset) }
+    /// The same concrete choices as the desktop palette. Native select-layout
+    /// and C-b Space keep tmux's own catalogue and publish their exact geometry.
+    pub fn apply_shared_preset(&mut self, id: &str) {
+        let ids = self.tab().panes();
+        let Some(preset) = crate::desk_layout::choices(ids.len()).into_iter().find(|p| *p == id) else { return };
+        let Some(tiles) = crate::desk_layout::preset_tiles(preset, ids.len()) else { return };
+        let body = self.body();
+        let status = self.pane_status(self.tab());
+        let Some((root, geometry)) = crate::desk_layout::Geometry::from_tiles(tiles, &ids, body.width, body.height, status) else { return };
+        let tab = self.tab_mut();
+        tab.root = Some(root);
+        tab.shared_geometry = Some(geometry);
+        tab.zoomed = false;
+        tab.layout_at = None;
+        tab.desk_preset = Some((ids.len(), preset));
+        self.fit_panes();
+        self.layout_changed(self.active);
+    }
 
-    /// select-layout -t: that window's panes in that shape.
-    pub fn apply_preset_at(&mut self, index: usize, preset: Preset) {
-        self.arrange_tab(index, layout::Named::of(preset));
+    /// `tui.toml`'s `[look]` table: set each choice as a global option, so `hn show` reflects it
+    /// and the daemon (which reads options, not the file) keeps the running look. The file is a
+    /// startup default; `hn set -g` afterward still wins.
+    pub fn apply_look(&mut self, look: Option<&crate::config::Look>) {
+        let Some(look) = look else { return };
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        for (name, value) in look.assignments() {
+            let _ = self.options.set(&name, Some(value.as_str()), &global, "", 0);
+        }
+        // ── status bar ──
+        if let Some(b) = look.status_bar.as_deref().filter(|b| matches!(*b, "top" | "bottom")) { self.status_top = b == "top" }
+        self.sync_accent();
+    }
+
+    /// Push the `@hn-accent` option (as the look holds it) to the colour layer, so `theme::accent()`
+    /// draws chrome with it — and `@hn-theme`'s colours, so the status bar, the pane surfaces and
+    /// the panes the daemons paint take the theme's. Called whenever the look is applied or a knob
+    /// changes.
+    pub fn sync_accent(&mut self) {
+        crate::term_out::set_accent_override(self.options.get("@hn-accent", "", None));
+        crate::settings::set_fzf_lists(self.options.get("@hn-lists", "", None).as_deref() == Some("fzf"));
+        let hex = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        let theme = self.options.get("@hn-theme", "", None)
+            .and_then(|n| crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == n))
+            .map(|t| (hex(t.background), hex(t.foreground)));
+        if crate::term_out::set_theme_colours(theme) { self.push_theme() }
+    }
+
+    /// `hn theme`: a knob's new value from the picker. Applies it live (so the daemon, which reads
+    /// options, changes the running look) and writes the config file's `[look]` table. Returns the
+    /// confirmation shown in the picker.
+    pub fn set_look(&mut self, knob: &str, value: &str) -> String {
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        let (name, message) = match knob {
+            // A preset also sets its focus (line or surface), so choosing one resets any knob
+            // the user set earlier; they can override it again right after.
+            "preset" => {
+                let surface = crate::config::Look::look_preset(value).iter().any(|(_, v)| *v == "surface");
+                let _ = self.options.set("@hn-focus", Some(if surface { "surface" } else { "line" }), &global, "", 0);
+                ("@hn-look", format!("look: {value}"))
+            }
+            "focus" => ("@hn-focus", format!("focus: {value}")),
+            "border_lines" => ("pane-border-lines", format!("border: {value}")),
+            "border_indicators" => ("pane-border-indicators", format!("indicators: {value}")),
+            "border_status" => ("pane-border-status", format!("title row: {value}")),
+            "layout_orientation" => ("@hn-layout", format!("split: {value}")),
+            "layout_preset" => ("@hn-layout-preset", format!("layout: {value}")),
+            // A terminal theme only names the palette; hn keeps the choice recorded so it survives
+            // a restart, and the theme draws on the terminal (OSC 10/11). Its signature colour
+            // becomes the chrome accent so picking one visibly changes hn.
+            "theme" => {
+                // (None chosen: the terminal's own colours again, and hn's own accent.)
+                if value.is_empty() {
+                    let unset = crate::options::SetFlags { global: true, unset: true, ..Default::default() };
+                    let _ = self.options.set("@hn-accent", None, &unset, "", 0);
+                    let _ = self.options.set("@hn-theme", None, &unset, "", 0);
+                    self.sync_accent();
+                    let i = self.active;
+                    self.view_layout_changed(i);
+                    self.persist_look();
+                    return "theme: the terminal's own".into();
+                }
+                if let Some(a) = crate::theme::theme_accent_hex(value) {
+                    let _ = self.options.set("@hn-accent", Some(a.as_str()), &global, "", 0);
+                }
+                ("@hn-theme", format!("theme: {value}"))
+            }
+            // ── status bar ──
+            // (At the top or the bottom the bar is tmux's status line: status-position places it.)
+            "status_bar" => {
+                if matches!(value, "top" | "bottom") { let _ = self.options.set("status-position", Some(value), &global, "", 0); self.status_top = value == "top" }
+                ("@hn-status-bar", format!("status bar: {value}"))
+            }
+            "border_style" => ("@hn-border", format!("border style: {value}")),
+            "dim" => ("@hn-dim", format!("dim other panes: {value}")),
+            _ => return format!("unknown: {value}"),
+        };
+        let _ = self.options.set(name, Some(value), &global, "", 0);
+        self.sync_accent();
+        // (The bar and the frames change the panes' room: every program is told its size.)
+        if matches!(knob, "status_bar" | "border_style") { self.redraw_all = true; self.fit_panes() }
+        let i = self.active;
+        self.view_layout_changed(i);
+        self.persist_look();
+        message
+    }
+
+    /// Write the current look (as the options hold it) to tui.toml's `[look]`, best-effort.
+    pub fn persist_look(&mut self) {
+        let mut look = crate::config::Look::default();
+        look.preset = self.options.get("@hn-look", "", None);
+        look.focus = self.options.get("@hn-focus", "", None);
+        look.border_lines = self.options.get("pane-border-lines", "", None);
+        look.border_indicators = self.options.get("pane-border-indicators", "", None);
+        look.border_status = self.options.get("pane-border-status", "", None);
+        look.layout_orientation = self.options.get("@hn-layout", "", None);
+        look.layout_preset = self.options.get("@hn-layout-preset", "", None);
+        look.theme = self.options.get("@hn-theme", "", None);
+        // ── status bar ──
+        look.status_bar = self.options.get("@hn-status-bar", "", None);
+        look.border_style = self.options.get("@hn-border", "", None);
+        look.status_bar_width = self.options.get("@hn-status-bar-width", "", None);
+        look.dim = self.options.get("@hn-dim", "", None);
+        if let Err(e) = crate::config::write_look(&look) { self.say(format!("could not write tui.toml: {e}"), crate::theme::DANGER) }
     }
 
     // ── the desk: tabs shared with every window on the account ─────────────────
@@ -5098,7 +5316,6 @@ impl App {
             seen.push(id.clone());
             let name = row.get("name").and_then(Value::as_str).unwrap_or("tab").to_string();
             let named = row.get("nameIsCustom").and_then(Value::as_bool).unwrap_or(false);
-            let preset = preset_from_desk(row.pointer(&format!("/layout/presets/{}", panes.len())).and_then(Value::as_str).unwrap_or(""), panes.len());
             let layout_doc = row.get("layout").cloned().unwrap_or(json!({}));
             match self.tabs.iter().position(|t| t.id == id) {
                 Some(index) => {
@@ -5128,13 +5345,23 @@ impl App {
                         let ids: Vec<u64> = panes.iter().filter_map(|key| have.iter().find(|(_, k)| k == key).map(|(id, _)| *id)).collect();
                         if relayout {
                             let (w, h) = (self.size.0, self.size.1.saturating_sub(2));
-                            tab.root = desk_root(&tab.layout, preset, &ids, w, h);
+                            tab.read_shared_layout(&ids, w, h);
                             if reordered { tab.order = ids; }
                         } else if reordered {
                             // A desktop drag changes only the sequence. Keep our exact
                             // split sizes and the focused harness while changing places.
                             if let Some(root) = &mut tab.root {
-                                if desk_pane_ids(root) != ids { desk_reorder(root, &ids); tab.order = ids; }
+                                if let Some(tiles) = tab.shared_geometry.as_ref().map(|g| g.slots.iter().map(|(_, t)| *t).collect())
+                                    .or_else(|| crate::desk_layout::saved_tiles(&tab.layout, ids.len())) {
+                                    if let Some((next, geometry)) = crate::desk_layout::Geometry::from_tiles(tiles, &ids, root.size().0, root.size().1, root.status) {
+                                        *root = next;
+                                        tab.shared_geometry = Some(geometry);
+                                    }
+                                } else {
+                                    desk_reorder(root, &ids);
+                                    tab.shared_geometry = Some(crate::desk_layout::Geometry::capture(root));
+                                }
+                                tab.order = ids;
                             }
                         }
                         continue;
@@ -5152,7 +5379,7 @@ impl App {
                     }).collect();
                     let tab = &mut self.tabs[index];
                     let (w, h) = (self.size.0, self.size.1.saturating_sub(2));
-                    tab.root = desk_root(&tab.layout, preset, &ids, w, h);
+                    tab.read_shared_layout(&ids, w, h);
                     tab.order = ids.clone();
                     if tab.focus.map(|f| !ids.contains(&f)).unwrap_or(true) { tab.focus = ids.first().copied() }
                 }
@@ -5165,13 +5392,14 @@ impl App {
                     let have = tab.panes();
                     let ids: Vec<_> = panes.iter().filter_map(|(m, a)| have.iter().copied().find(|id|
                         self.panes.get(id).is_some_and(|p| &p.machine_id == m && &p.agent_id == a))).collect();
-                    if ids.len() == have.len() && ids.len() == panes.len() {
-                        if let Some(root) = &mut tab.root { desk_reorder(root, &ids); }
-                        tab.order = ids;
-                    }
                     tab.desk_panes = panes.clone();
                     tab.desk_layout = layout_doc.clone();
                     tab.layout = layout_doc;
+                    if ids.len() == have.len() && ids.len() == panes.len() {
+                        let (w, h) = tab.root.as_ref().unwrap().size();
+                        tab.read_shared_layout(&ids, w, h);
+                        tab.order = ids;
+                    }
                     if named { tab.name = name; tab.named = true }
                     let at = rows.iter().position(|r| r.get("id").and_then(Value::as_str) == Some(tab.id.as_str())).unwrap_or(self.tabs.len()).min(self.tabs.len());
                     self.tabs.insert(at, tab);
@@ -5188,7 +5416,7 @@ impl App {
                     tab.desk_layout = layout_doc.clone();
                     tab.layout = layout_doc;
                     let (w, h) = (self.size.0, self.size.1.saturating_sub(2));
-                    tab.root = desk_root(&tab.layout, preset, &ids, w, h);
+                    tab.read_shared_layout(&ids, w, h);
                     tab.order = ids.clone();
                     tab.focus = ids.first().copied();
                     let at = rows.iter().position(|r| r.get("id").and_then(Value::as_str) == Some(tab.id.as_str())).unwrap_or(self.tabs.len()).min(self.tabs.len());
@@ -5401,7 +5629,7 @@ impl App {
         true
     }
 
-    fn prs_path() -> std::path::PathBuf { std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".harness").join("tui").join("prs.json") }
+    fn prs_path() -> std::path::PathBuf { state_dir().join("prs.json") }
 
     /// prs.json as this computer's clients last wrote it (read again at most every ten seconds).
     fn read_prs(&mut self) {
@@ -5536,6 +5764,8 @@ impl App {
         // Since you were here: once every machine's harnesses are listed, so it counts them all.
         if self.back_from.is_some() && !self.headless && self.fleet_ready() { self.back_again() }
         self.enrich();
+        // ── models: this computer's models read as often as the Models view needs ──
+        crate::models::tick(self);
         self.maybe_start_shell();
         self.release_waiting();
         self.release_cli();
@@ -5563,7 +5793,10 @@ impl App {
         for pane in self.panes.values_mut() { pane.settle_predictions() }
         let now = Instant::now();
         for agent in self.fleet.agents.values_mut() {
-            if agent.working && agent.last_beat.map(|t| now.duration_since(t) > Duration::from_secs(90)).unwrap_or(true) { agent.working = false }
+            if agent.activity.expired(now) { agent.working = false; }
+            if !agent.activity.reported() && agent.working && agent.last_beat.map(|t| now.duration_since(t) > Duration::from_secs(30)).unwrap_or(true) {
+                agent.working = false; agent.activity.unknown = true;
+            }
         }
         let due: Vec<String> = self.links.iter().filter(|(_, s)| s.link.is_none() && s.retry_at.map(|t| t <= now).unwrap_or(false)).map(|(id, _)| id.clone()).collect();
         for id in due {
@@ -5590,13 +5823,29 @@ pub const DESK_MAIN: (&str, &str) = ("50%", "50%");
 
 /// A desk tab's panes laid out: as another terminal left them (its tmux layout, fitted to this
 /// one's size), else its preset for that many panes.
+#[cfg(test)]
 fn desk_root(doc: &Value, preset: Preset, ids: &[u64], w: u16, h: u16) -> Option<Node> {
-    let mut root = doc.get("tmux").and_then(Value::as_str).and_then(|l| Node::from_tmux(l, ids, w, h))
-        .or_else(|| layout::arrange(layout::Named::of(preset), ids, w, h, layout::Status::Top, DESK_MAIN, ("0", "0")))?;
+    desk_geometry(doc, preset, ids, w, h).map(|(root, _)| root)
+}
+
+fn desk_geometry(doc: &Value, preset: Preset, ids: &[u64], w: u16, h: u16) -> Option<(Node, crate::desk_layout::Geometry)> {
+    use crate::desk_layout::{self, Geometry};
+    let status = layout::Status::Top;
+    if let Some(geometry) = desk_layout::saved_tiles(doc, ids.len())
+        .and_then(|tiles| Geometry::from_tiles(tiles, ids, w, h, status)) { return Some(geometry) }
+    if let Some(mut root) = doc.get("tmux").and_then(Value::as_str).and_then(|l| Node::from_tmux(l, ids, w, h)) {
+        desk_reorder(&mut root, ids);
+        let geometry = Geometry::capture(&root);
+        return Some((root, geometry));
+    }
+    if let Some(geometry) = desk_layout::preset_tiles(desk_layout::preset_id(doc, ids.len()), ids.len())
+        .and_then(|tiles| Geometry::from_tiles(tiles, ids, w, h, status)) { return Some(geometry) }
+    let mut root = layout::arrange(layout::Named::of(preset), ids, w, h, status, DESK_MAIN, ("0", "0"))?;
     // Numeric pane IDs belong to one hn server. The desk's ordered identities are
     // authoritative even if a saved native layout has stale or coincidentally matching IDs.
     desk_reorder(&mut root, ids);
-    Some(root)
+    let geometry = Geometry::capture(&root);
+    Some((root, geometry))
 }
 
 /// Desktop numbers its tiles across the top, then down; tmux tree traversal and
@@ -5626,15 +5875,19 @@ fn preset_from_desk(id: &str, count: usize) -> Preset {
     }
 }
 
-/// Native layouts take precedence when present. Their omission by a desktop save
-/// is not an instruction to reset the terminal; only a changed current-count preset is.
+/// Compare only this pane count's consumed geometry. Normalized slots take
+/// precedence; native strings and presets support clients predating them.
 fn desk_layout_changed(before: &Value, after: &Value, count: usize) -> bool {
+    let tiles = |doc| crate::desk_layout::saved_tiles(doc, count);
+    if tiles(after).is_some() { return tiles(before) != tiles(after) }
     if let Some(native) = after.get("tmux").and_then(Value::as_str) {
         return before.get("tmux").and_then(Value::as_str) != Some(native);
     }
-    let path = format!("/presets/{count}");
-    let preset = |doc: &Value| preset_from_desk(doc.pointer(&path).and_then(Value::as_str).unwrap_or(""), count);
-    preset(before) != preset(after)
+    // Older desktop versions can omit sizes/tmux on an unrelated save. Only
+    // their changed preset is an edit; new clients send geometry for resets too.
+    let shape = |doc: &Value| doc.get("presets").and_then(|p| p.get(count.to_string()))
+        .and_then(Value::as_str).and_then(|id| crate::desk_layout::preset_tiles(id, count));
+    shape(before) != shape(after)
 }
 
 /// Desktop presets with the same split topology. Unsupported shapes retain their
@@ -6123,5 +6376,84 @@ mod desk_layout_tests {
         app.desk_layouts.clear();
         app.apply_desk(&desk(4, json!({"presets":{"3":"columns"}})));
         assert_ne!(geometry(&app), chosen);
+    }
+
+    #[test]
+    fn desktop_manual_slot_order_survives_resize_focus_zoom_and_remote_moves() {
+        let mut app = fixture();
+        app.tabs[0].focus = Some(2);
+        app.tabs[0].zoomed = true;
+        // Splitting the first column makes slots 1 and 2 vertical siblings;
+        // slot 3 is on the right. Index order is not screen reading order.
+        let tiles = json!([[0.0,0.0,0.3,0.7],[0.0,0.7,0.3,1.0],[0.3,0.0,1.0,1.0]]);
+        let layout = json!({"presets":{"3":"cols3"},"sizes":{"3:manual":tiles},"tmux":"obsolete"});
+        let mut update = desk(2, layout.clone());
+        app.apply_desk(&update);
+        let original = geometry(&app);
+        assert_eq!(desk_pane_ids(app.tabs[0].root.as_ref().unwrap()), [1, 3, 2]);
+        assert_eq!(app.tabs[0].focus, Some(2));
+        assert!(app.tabs[0].zoomed);
+        for size in [(80, 24), (240, 80), (100, 30), (120, 36)] {
+            app.size = size;
+            app.fit_panes();
+            app.notify_changes();
+        }
+        assert_eq!(geometry(&app), original);
+        assert!(app.desk_layouts.is_empty());
+        assert_eq!(app.tabs[0].layout, layout);
+        update["revision"] = json!(3);
+        update["tabs"][0]["panes"].as_array_mut().unwrap().swap(0, 1);
+        app.apply_desk(&update);
+        assert_eq!(desk_pane_ids(app.tabs[0].root.as_ref().unwrap()), [2, 3, 1]);
+        assert_eq!(app.tabs[0].focus, Some(2));
+        assert!(app.panes.values().all(|p| matches!(p.phase, Phase::Live)));
+    }
+
+    #[test]
+    fn exact_local_preset_survives_queued_resize_and_old_snapshot() {
+        let mut app = fixture();
+        app.desk_mode = DeskMode::Read;
+        app.apply_shared_preset("mainRight");
+        app.size = (83, 27);
+        app.fit_panes();
+        app.apply_desk(&desk(2, json!({"presets":{"3":"rows"}})));
+        app.send_desk_layouts();
+        assert_eq!(app.tabs[0].layout["presets"]["3"], "mainRight");
+        assert_eq!(crate::desk_layout::saved_tiles(&app.tabs[0].layout, 3), crate::desk_layout::preset_tiles("mainRight", 3));
+        assert_eq!(desk_pane_ids(app.tabs[0].root.as_ref().unwrap()), [1, 2, 3]);
+        let sent = app.tabs[0].layout.clone();
+        app.apply_desk(&desk(3, sent.clone()));
+        app.apply_desk(&desk(4, json!({"presets":{"3":"mainRight"},"sizes":{}})));
+        // Old desktop metadata cannot reset the exact cut. An explicit new
+        // desktop divider edit, even with the same preset, still applies.
+        let mut resized = sent;
+        resized["sizes"]["3:manual"] = json!([[0.0,0.0,0.2,0.6],[0.2,0.0,1.0,1.0],[0.0,0.6,0.2,1.0]]);
+        app.apply_desk(&desk(5, resized));
+        assert_eq!(app.tabs[0].shared_geometry.as_ref().unwrap().slots[0].1[2], 0.2);
+    }
+
+    #[test]
+    fn zoom_and_local_chrome_never_publish_layouts() {
+        let mut app = fixture();
+        crate::input::run(&mut app, "zoom");
+        assert!(app.tabs[0].zoomed);
+        app.view_layout_changed(0);
+        assert!(app.desk_layouts.is_empty());
+        crate::input::run(&mut app, "zoom");
+        assert!(!app.tabs[0].zoomed);
+        assert!(app.desk_layouts.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_remote_default_replaces_a_read_only_clients_local_choice() {
+        let mut app = fixture();
+        app.desk_mode = DeskMode::Read;
+        app.tabs[0].layout = json!({});
+        app.tabs[0].desk_layout = json!({});
+        app.apply_shared_preset("rows");
+        app.send_desk_layouts();
+        app.apply_desk(&desk(2, json!({"presets":{"3":"cols3"}})));
+        let slots = app.tabs[0].shared_geometry.as_ref().unwrap();
+        assert!(slots.slots.iter().all(|(_, tile)| tile[1] == 0.0 && tile[3] == 1.0));
     }
 }

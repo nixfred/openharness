@@ -1846,12 +1846,26 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        NewHarnessAttachButton(attachments: attachments, enabled: !box.locked),
-        const SizedBox(width: 6),
         Expanded(
-          child: NewHarnessAttachmentChips(
-            attachments: attachments,
-            enabled: !box.locked,
+          // Right after the task it sits under, so Start stays last.
+          child: FocusTraversalOrder(
+            order: const NumericFocusOrder(4.5),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                NewHarnessAttachButton(
+                  attachments: attachments,
+                  enabled: !box.locked,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: NewHarnessAttachmentChips(
+                    attachments: attachments,
+                    enabled: !box.locked,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(width: 12),

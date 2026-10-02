@@ -25,9 +25,12 @@ Closing a pane is a view operation; the agent keeps running. **Stop Harness** en
 and asks first. **Restart Harness** relaunches it in the same pane with the same id, resuming the
 conversation where the engine supports it.
 
-**Open Harness (⌘O)** is the search: harnesses, tabs, projects, machines, history and commands, fuzzy
+**Open Harness (⌘P)** is the search: harnesses, tabs, projects, machines, history and commands, fuzzy
 matched, with a session preview on the right built from cached recent turns. Type `>` for commands
 only (also ⇧⌘P).
+
+**Open Project (⌘O)** opens the same picker in Projects mode so you can choose a folder and its
+harnesses directly.
 
 The **Harness Store** keeps search at the top while you browse. Discover opens with three
 illustrated features, then icon collections for coding, new and updated harnesses in this

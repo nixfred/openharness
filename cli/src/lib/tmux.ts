@@ -16,6 +16,7 @@ import {
 } from './engineBin.js'
 import { BYPASS_PERMISSION_FLAGS, PERMISSION_MODES, permissionModeApproves } from './engineLaunch.js'
 import { psEnv } from './childLocale.js'
+export { captureTmuxPane, tmuxCaptureArgs } from './tmuxCapture.js'
 
 function cleanPaneTitle(title: string): string | null {
   const cleaned = title
@@ -54,12 +55,35 @@ export interface ProcessRow extends ProcessIdentity {
   entrypointFileKey?: string
 }
 
-export function argvTokens(args: string): string[] {
-  return (args.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => {
-    const quoted = (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
-    return quoted ? token.slice(1, -1) : token
-  })
+const ARGV_TOKEN = /"[^"]*"|'[^']*'|\S+/g
+
+function unquoteArgvToken(token: string): string {
+  const quoted = (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
+  return quoted ? token.slice(1, -1) : token
 }
+
+export function argvTokens(args: string): string[] {
+  return (args.match(ARGV_TOKEN) ?? []).map(unquoteArgvToken)
+}
+
+/** Discovery only needs a command prefix. Do not tokenize a shell script or
+ * prompt suffix once per candidate engine. Keep the same token grammar as
+ * argvTokens, but stop scanning as soon as the consumer has enough evidence. */
+function argvPrefix(args: string): () => string | undefined {
+  const pattern = new RegExp(ARGV_TOKEN)
+  let done = false
+  return () => {
+    if (done) return undefined
+    const match = pattern.exec(args)
+    if (match) return unquoteArgvToken(match[0])
+    done = true // RegExp.exec resets lastIndex at EOF; never restart the prefix.
+    return undefined
+  }
+}
+
+const ORI_FLAGS_WITH_VALUE = new Set(['--model', '--log-level', '--completions'])
+const INTERPRETER_OPTIONS_WITH_VALUE = new Set(['-r', '--require', '--loader', '--import', '--conditions', '--inspect-port'])
+const INLINE_CODE_OPTIONS = new Set(['-c', '--command', '-e', '--eval', '--print'])
 
 /**
  * Return only the executable/script portion of argv, never prompt text or later CLI arguments.
@@ -70,50 +94,51 @@ export function argvTokens(args: string): string[] {
  * prefixes are deliberately retained only for suffix/package-layout checks and are never hard-coded.
  */
 function processEntrypoint(args: string): string {
-  const tokens = argvTokens(args)
-  if (!tokens.length) return ''
-  let index = 0
-  let command = basename(tokens[index]).toLowerCase()
+  const next = argvPrefix(args)
+  let token = next() ?? ''
+  let command = basename(token).toLowerCase()
   if (command === 'env') {
-    index++
-    while (index < tokens.length && (tokens[index].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]))) index++
-    command = basename(tokens[index] ?? '').toLowerCase()
+    token = next() ?? ''
+    while (token.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) token = next() ?? ''
+    command = basename(token).toLowerCase()
   }
   // `ori <engine>` (OpenRouter's launcher) computes an environment and then `execve`s the vendor binary
   // away, so a pane running it looks exactly like a bare `claude`/`codex` for all but the ~100ms before
   // the exec. Reading through the wrapper covers that window — and keeps the pane resolvable if a future
   // ori ever spawns a child instead. Its own flags are skipped; everything after them is the engine.
   if (command === 'ori') {
-    index++
-    const oriFlagsWithValue = new Set(['--model', '--log-level', '--completions'])
-    while (index < tokens.length && tokens[index].startsWith('-')) {
-      index += oriFlagsWithValue.has(tokens[index]) && index + 1 < tokens.length ? 2 : 1
+    token = next() ?? ''
+    while (token.startsWith('-')) {
+      if (ORI_FLAGS_WITH_VALUE.has(token)) next()
+      token = next() ?? ''
     }
-    command = basename(tokens[index] ?? '').toLowerCase()
+    command = basename(token).toLowerCase()
   }
-  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)$/.test(command)) return tokens[index] ?? ''
+  if (!/^(?:node|nodejs|bun|deno|python(?:\d+(?:\.\d+)*)?|bash|zsh|sh)$/.test(command)) return token
 
-  index++
-  const optionsWithValue = new Set(['-r', '--require', '--loader', '--import', '--conditions', '--inspect-port'])
-  const inlineCodeOptions = new Set(['-c', '--command', '-e', '--eval', '--print'])
-  while (index < tokens.length) {
-    const token = tokens[index]
-    if (token === '--') { index++; break }
-    if (token === '-m' && index + 1 < tokens.length) return tokens[index + 1]
+  token = next() ?? ''
+  while (token) {
+    if (token === '--' || token === '-m') return next() ?? ''
     // Inline shell/Node/Python source is not an executable entrypoint. Its text can legitimately mention
     // an engine command; the real child process, if one is launched, will be discovered from its own row.
-    if (inlineCodeOptions.has(token)) return ''
+    if (INLINE_CODE_OPTIONS.has(token)) return ''
     if (!token.startsWith('-')) break
-    index += optionsWithValue.has(token) && index + 1 < tokens.length ? 2 : 1
+    if (INTERPRETER_OPTIONS_WITH_VALUE.has(token)) next()
+    token = next() ?? ''
   }
-  return tokens[index] ?? ''
+  return token
 }
 
 function hasCursorPackageEntrypoint(args: string): boolean {
   // Cursor's launcher uses `exec -a "$0" node .../index.js`, so argv[0] may stay `agent` instead of
   // `node`. Restrict this scan to the executable prefix: prompt text can appear later and is not proof.
-  return argvTokens(args).slice(0, 8).some((token) =>
-    /cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token))
+  const next = argvPrefix(args)
+  for (let seen = 0; seen < 8; seen++) {
+    const token = next()
+    if (token === undefined) break
+    if (/cursor-agent[\/\\]versions[\/\\][^/\\]+[\/\\]index\.js$/i.test(token)) return true
+  }
+  return false
 }
 
 /** Hermes' managed launchers exec Python -I -c with a path bootstrap, then either import main
@@ -122,7 +147,7 @@ function hasCursorPackageEntrypoint(args: string): boolean {
  * Keep the standalone hook's copy in sync. */
 function hermesInlineLauncher(row: Pick<ProcessRow, 'args'>): boolean {
   const args = row.args.trim()
-  if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvTokens(args)[0] ?? '').toLowerCase())) return false
+  if (!/^python(?:\d+(?:\.\d+)*)?$/.test(basename(argvPrefix(args)() ?? '').toLowerCase())) return false
   const prefix = /^(?:"[^"]+"|'[^']+'|\S+)(?:\s+-(?:I|E|s|S|u|B|O{1,2}|q))*\s+-c\s+/.exec(args)
   if (!prefix) return false
   const source = args.slice(prefix[0].length).replace(/^["']/, '')
@@ -1104,32 +1129,5 @@ export function pasteRawIntoTmux(pane: string, text: string): Promise<boolean> {
 export function sendKeyToTmux(pane: string, key: string): Promise<boolean> {
   return new Promise((resolve) => {
     execFile('tmux', ['send-keys', '-t', pane, key], { timeout: 2000 }, (err) => resolve(!err))
-  })
-}
-
-export function tmuxCaptureArgs(
-  pane: string,
-  historyLines = 100,
-  options: { visible?: boolean; ansi?: boolean } = {},
-): string[] {
-  const bounded = Math.max(20, Math.min(300, Math.floor(historyLines)))
-  const args = ['capture-pane', '-p']
-  if (options.ansi !== false) args.push('-e')
-  args.push('-J', '-t', pane)
-  if (!options.visible) args.push('-S', `-${bounded}`)
-  return args
-}
-
-/** Capture terminal text; SGR and bounded history are independently selectable by backend consumers. */
-export function captureTmuxPane(
-  pane: string,
-  historyLines = 100,
-  options: { visible?: boolean; ansi?: boolean } = {},
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('tmux', tmuxCaptureArgs(pane, historyLines, options), { timeout: 2000 }, (err, stdout) => {
-      if (err) { resolve(null); return }
-      resolve(stdout)
-    })
   })
 }

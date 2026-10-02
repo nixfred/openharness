@@ -12,7 +12,7 @@ works the same on a headless Linux server; the app is not required on a machine,
 
 | Command | What it does |
 |---|---|
-| `harness login [--force] [--json]` | Browser SSO; save this computer's session. `--force` signs in as a different account. `--json` emits NDJSON for GUI clients. |
+| `harness login [--google\|--apple\|--qr] [--force] [--json]` | Sign in and save this computer's session: Google or Apple in the browser, or a QR a signed-in phone scans. With no flag at a terminal it asks which. `--force` signs in as a different account. `--json` emits NDJSON for GUI clients. |
 | `harness start [-f] [--repair]` | Start the daemon from the saved session. `-f` runs in the foreground for a supervisor. `--repair` re-verifies the managed Node runtime. |
 | `harness stop` · `harness logout` · `harness reset` | Stop the daemon · stop and clear the SSO session · stop and clear all local state. |
 | `harness status` · `harness version` · `harness update [--force]` | Running, pid, machine id, session count · version · update now. |

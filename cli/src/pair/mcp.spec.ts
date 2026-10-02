@@ -48,7 +48,7 @@ describe('the harnessd MCP server', () => {
     expect(byId.get(1)).toEqual({ jsonrpc: '2.0', id: 1, result: expect.objectContaining({
       protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: false } }, serverInfo: { name: MCP_SERVER_NAME, version: '9.9.9' } }) })
     const tools = (byId.get(2)!.result as { tools: Array<{ name: string; inputSchema: Json; annotations: Json }> }).tools
-    expect(tools.map((t) => t.name)).toEqual(['list_machines', 'list_harnesses', 'read_harness', 'brief', 'answer_question',
+    expect(tools.map((t) => t.name)).toEqual(['list_machines', 'list_harnesses', 'read_harness', 'brief', 'recall_memory', 'answer_question',
       'send_prompt', 'stop_turn', 'start_harness', 'pause_harness', 'resume_harness', 'say'])
     expect(tools.find((t) => t.name === 'read_harness')!.annotations).toMatchObject({ readOnlyHint: true })
     expect(tools.find((t) => t.name === 'answer_question')!.inputSchema).toMatchObject({ required: ['agentId', 'requestId', 'choice'] })

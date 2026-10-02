@@ -12,6 +12,7 @@ import { CONTROL_TOOLS } from './control.js'
 import { harnessPaneEnv } from './learn/approval.js'
 import { presentedToken } from './token.js'
 import { HARNESS_SESSION_PREFIX } from '../lib/harnessSessionLabel.js'
+import { conditionsSchema } from '../memory/types.js'
 
 export interface PairSocket {
   send(data: string): void
@@ -70,7 +71,7 @@ export async function pairRequest(deps: PairClientDeps, payload: Record<string, 
 // ── `harness pair <verb>` ─────────────────────────────────────────────────────────────────────────────
 
 /** `talk` is not one: the person talks to their daemon from a window (`daemon_talk`), never from a tool. */
-export const PAIR_CLI_VERBS = new Set([...CONTROL_TOOLS.map((tool) => tool.name), 'status', 'journal', 'mcp', 'lessons'])
+export const PAIR_CLI_VERBS = new Set([...CONTROL_TOOLS.map((tool) => tool.name), 'status', 'journal', 'mcp', 'lessons', 'memory'])
 export const LESSON_ACTIONS = ['list', 'show', 'approve', 'skip', 'revert', 'restore', 'export', 'review_recent', 'cancel_review'] as const
 /** Lesson actions that need the person: a challenge, the daemon's one-time nonce, a yes at the terminal. */
 const PERSON_LESSON_ACTIONS = new Set(['approve', 'restore', 'export'])
@@ -90,6 +91,13 @@ export const PAIR_USAGE = [
   '    list_harnesses [--machine <id>]        every harness, its status and open question',
   '    read_harness <agentId> [--machine id]  one harness: question, options, recaps, asks',
   '    brief [--since <minutes>]              what happened since then, on every machine',
+  '',
+  '  Coding memory preview (HARNESS_CODING_MEMORY=1 on the daemon):',
+  '    memory [list|status|show <id>]         owner library; run outside Harness in your own terminal',
+  '      list [--scope all|personal|project] [--project id] [--state active|tentative|needs_verification|superseded|archived]',
+  '           [--limit 1..50] [--cursor value]  next page uses nextCursor from the previous response',
+  '    recall_memory <query…> [--conditions JSON]  personal coding preferences; companion token required',
+  '      Known context only, e.g. --conditions \'{"taskType":"debugging","productionIncident":false}\'',
   '',
   '  Writes (the pair harness only: HARNESSD_PAIR_TOKEN; the autonomy dial decides the rest):',
   '    answer_question <agentId> <requestId> <choice> [--machine id]',
@@ -133,6 +141,8 @@ export function parsePairArgs(verb: string, argv: string[]): { payload: Record<s
     if (word === '--create' && verb === 'lessons') { options.create = 'true'; continue }
     if (word === '--dry-run' && verb === 'lessons') { options.dryRun = 'true'; continue }
     const flag = /^--(machine|since|name|prompt|token-file|hours)(?:=(.*))?$/.exec(word)
+      ?? (verb === 'memory' ? /^--(scope|project|state|limit|cursor)(?:=(.*))?$/.exec(word) : null)
+      ?? (verb === 'recall_memory' ? /^--(conditions)(?:=(.*))?$/.exec(word) : null)
     if (flag) {
       const value = flag[2] ?? argv[++i]
       if (value === undefined) throw new PairUsageError(`--${flag[1]} needs a value.`)
@@ -154,6 +164,31 @@ export function parsePairArgs(verb: string, argv: string[]): { payload: Record<s
       const since = options.since !== undefined ? Number(options.since) : undefined
       if (since !== undefined && !Number.isFinite(since)) throw new PairUsageError('--since takes minutes.')
       payload = { verb, ...(since !== undefined ? { sinceMinutes: since } : {}) }
+      break
+    }
+    case 'recall_memory': {
+      need(1, 'a coding memory query')
+      let conditions: unknown
+      if (options.conditions !== undefined) {
+        try { conditions = JSON.parse(options.conditions) } catch { throw new PairUsageError('--conditions needs a JSON object of known task context.') }
+        const result = conditionsSchema.safeParse(conditions)
+        if (!result.success) throw new PairUsageError('--conditions needs a bounded JSON object of known task context.')
+        conditions = result.data
+      }
+      payload = { verb, query: rest(0), ...(conditions === undefined ? {} : { conditions }) }
+      break
+    }
+    case 'memory': {
+      const action = words[0] ?? 'list'
+      if (!['list', 'status', 'show'].includes(action)) throw new PairUsageError('memory supports list, status and show <id>. Changes use the owner viewer’s preview capability.')
+      if (action === 'show' && !words[1]) throw new PairUsageError('memory show needs a memory id.')
+      if (words.length > (action === 'show' ? 2 : 1) || tail?.length
+        || Object.keys(options).some(key => action !== 'list' || !['scope', 'project', 'state', 'limit', 'cursor'].includes(key))) throw new PairUsageError('Unexpected memory arguments.')
+      const limit = options.limit === undefined ? undefined : Number(options.limit)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) throw new PairUsageError('--limit takes a whole number from 1 to 50.')
+      const query = { ...(options.scope ? { scope: options.scope } : {}), ...(options.project ? { projectId: options.project } : {}),
+        ...(options.state ? { state: options.state } : {}), ...(options.cursor ? { cursor: options.cursor } : {}), ...(limit === undefined ? {} : { limit }) }
+      payload = { verb, action, ...(action === 'show' ? { id: words[1] } : {}), ...(Object.keys(query).length ? { query } : {}) }
       break
     }
     case 'answer_question':

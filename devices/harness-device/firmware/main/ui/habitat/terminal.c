@@ -49,12 +49,27 @@ static uint32_t cell_alias(uint32_t cp)
     uint32_t viet = viet_codepoint(cp);
     return viet ? viet : cp;
 }
+const ht_arc_face_t ht_arc_geist = {
+    &ht_mono_24, &ht_viet_24, &ht_open_24, &ht_right_24, &ht_bell_24,
+    ht_mono_24_ink, ht_open_24_ink, ht_right_24_ink, ht_bell_24_ink};
+const ht_arc_face_t ht_arc_roboto = {
+    &ht_rmono_24, &ht_rviet_24, &ht_open_24, &ht_right_24, &ht_bell_24,
+    ht_rmono_24_ink, ht_open_24_ink, ht_right_24_ink, ht_bell_24_ink};
+// The arc face whose mono atlas is `font`, or NULL. A curved run carries its face as that atlas
+// (run.font), so every font comparison in the damage code already tells two faces apart.
+static const ht_arc_face_t *arc_face_of(const ht_font_t *font)
+{
+    static const ht_arc_face_t *const faces[] = {&ht_arc_geist, &ht_arc_roboto};
+    for (unsigned i = 0; i < sizeof faces / sizeof faces[0]; i++) if (faces[i]->mono == font) return faces[i];
+    return NULL;
+}
 static const ht_font_t *glyph_font(const ht_font_t *font, uint32_t cp)
 {
-    if (font == &ht_mono_24) {
-        if (cp == 0x2197) return &ht_open_24;
-        if (cp == 0x2192) return &ht_right_24;
-        if (cp == 0xe000) return &ht_bell_24;
+    const ht_arc_face_t *face = arc_face_of(font);
+    if (face) {
+        if (cp == 0x2197) return face->open;
+        if (cp == 0x2192) return face->right;
+        if (cp == 0xe000) return face->bell;
     }
     if (font == &ht_mono_28) {
         if (cp == 0x2713) return &ht_done_28;
@@ -72,7 +87,7 @@ static const ht_font_t *glyph_font(const ht_font_t *font, uint32_t cp)
     if (viet_codepoint(cp)) {
         if (font == &ht_mono_16) return &ht_viet_16;
         if (font == &ht_mono_20) return &ht_viet_20;
-        if (font == &ht_mono_24) return &ht_viet_24;
+        if (face) return face->viet;
         if (font == &ht_mono_28) return &ht_viet_28;
     }
     return font;
@@ -554,13 +569,15 @@ bool ht_mask(ht_scene_t *s, int x, int y, int w, int h, const uint8_t *alpha, ui
     return true;
 }
 
-static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom)
+static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom,
+                     const ht_arc_face_t *face)
 {
     if (!text || !*text) return;
+    if (!face) face = &ht_arc_geist;
     char visible[HT_TEXT_BYTES];
-    bool complete = ht_display_text(visible,sizeof visible,text,&ht_mono_24);
-    if (!ht_text(s, HT_ARC_X, HT_ARC_Y, HT_ARC_COLS * ht_mono_24.width,
-                 &ht_mono_24, fg, s->background, visible)) return;
+    bool complete = ht_display_text(visible,sizeof visible,text,face->mono);
+    if (!ht_text(s, HT_ARC_X, HT_ARC_Y, HT_ARC_COLS * face->mono->width,
+                 face->mono, fg, s->background, visible)) return;
     ht_run_t *r = &s->runs[s->count - 1];
     // A long name ends at a word boundary; the pane list retains its full name.
     if (!complete || strlen(visible) > strlen(r->text)) {
@@ -571,8 +588,12 @@ static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom)
     r->y = bottom ? HT_HEIGHT - HT_ARC_Y - HT_ARC_HEIGHT : HT_ARC_Y;
     r->w = HT_ARC_WIDTH;
 }
-void ht_arc_title(ht_scene_t *s, uint16_t fg, const char *text) { arc_text(s, fg, text, false); }
-void ht_arc_status(ht_scene_t *s, uint16_t fg, const char *text) { arc_text(s, fg, text, true); }
+void ht_arc_title(ht_scene_t *s, uint16_t fg, const char *text) { arc_text(s, fg, text, false, &ht_arc_geist); }
+void ht_arc_title_face(ht_scene_t *s, uint16_t fg, const char *text, const ht_arc_face_t *face)
+{
+    arc_text(s, fg, text, false, face);
+}
+void ht_arc_status(ht_scene_t *s, uint16_t fg, const char *text) { arc_text(s, fg, text, true, &ht_arc_geist); }
 const char *ht_take_line(const char **cursor, int cols)
 {
     const char *p = *cursor, *start = p, *space = NULL, *end = p;
@@ -1016,7 +1037,7 @@ typedef struct {
     char text[HT_TEXT_BYTES];
     uint16_t mask_bytes;
     uint8_t columns;
-    bool valid;
+    const ht_arc_face_t *face; // the face the mask was built for; NULL = empty
 } arc_cache_t;
 _Static_assert(ARC_HALF <= UINT8_MAX, "arc span coordinates must fit in a byte");
 static arc_cache_t arc_caches[2];
@@ -1027,12 +1048,12 @@ static bool arc_fast = true, arc_tight = true;
 void ht_arc_tight_bounds(bool enabled)
 {
     arc_tight = enabled;
-    arc_caches[0].valid = arc_caches[1].valid = false;
+    arc_caches[0].face = arc_caches[1].face = NULL;
 }
 void ht_arc_fast_sampling(bool enabled)
 {
     arc_fast = enabled;
-    arc_caches[0].valid = arc_caches[1].valid = false;
+    arc_caches[0].face = arc_caches[1].face = NULL;
 }
 static unsigned glyph_alpha_reference(const uint8_t *glyph, int x, int y)
 {
@@ -1091,9 +1112,11 @@ static bool arc_pack_geometry(const ht_run_t *r, arc_cache_t *cache, int count)
 }
 static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
 {
-    if (cache->valid && !strcmp(cache->text, r->text)) return;
+    const ht_arc_face_t *face = arc_face_of(r->font);
+    if (!face) face = &ht_arc_geist;
+    if (cache->face == face && !strcmp(cache->text, r->text)) return;   // the same text in another face is another mask
     strcpy(cache->text, r->text);
-    cache->valid = true; arc_builds++;
+    cache->face = face; arc_builds++;
     uint32_t cp[HT_ARC_COLS];
     int count = 0;
     const char *p = r->text;
@@ -1106,9 +1129,9 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
     }
     uint8_t coverage[(HT_ARC_CELL_WIDTH + 2) * (HT_ARC_CELL_HEIGHT + 2)];
     for (int i = 0; i < count; i++) {
-        uint32_t c = font_codepoint(&ht_mono_24, cp[i]);
+        uint32_t c = font_codepoint(face->mono, cp[i]);
         if (c == ' ') continue;
-        const ht_font_t *f = glyph_font(&ht_mono_24, c);
+        const ht_font_t *f = glyph_font(face->mono, c);
         const uint8_t *glyph = f->pixels + (c - f->first) * ((HT_ARC_CELL_WIDTH * HT_ARC_CELL_HEIGHT + 3) / 4);
 #ifdef DEVICE_LAYOUT_BENCH
         if (arc_fast)
@@ -1130,9 +1153,9 @@ static void arc_prepare(const ht_run_t *r, arc_cache_t *cache)
 #endif
         {
             const uint8_t full_ink[] = {0, 0, HT_ARC_CELL_WIDTH, HT_ARC_CELL_HEIGHT};
-            const uint8_t *ink = f == &ht_viet_24 ? full_ink : f == &ht_open_24 ? ht_open_24_ink[0] :
-                f == &ht_right_24 ? ht_right_24_ink[0] :
-                f == &ht_bell_24 ? ht_bell_24_ink[0] : ht_mono_24_ink[c - f->first];
+            const uint8_t *ink = f == face->viet ? full_ink : f == face->open ? face->open_ink[0] :
+                f == face->right ? face->right_ink[0] :
+                f == face->bell ? face->bell_ink[0] : face->ink[c - f->first];
             // Source pixels outside this box are transparent. Include a full
             // bilinear halo and two destination pixels for fixed-point rounding.
             int ox = (ink[0] + ink[2]) * 128 - (HT_ARC_CELL_WIDTH * 128 - 128);

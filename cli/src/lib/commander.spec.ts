@@ -509,6 +509,23 @@ describe('CommanderMirror recap events', () => {
     ])
   })
 
+  it('withdraws unverified busy heartbeats without reporting a completed turn', () => {
+    const frames: CommanderFrame[] = []
+    let verified = false
+    const mirror = new CommanderMirror({ send: frame => frames.push(frame), sendWeb: () => {},
+      hasDevice: () => true, summarize: async () => null, dataDir,
+      verifiedWorking: () => verified })
+    mirror.ingest([{ type: 'turn_started', payload: { userMessage: 'old unfinished turn' } }] as LiveEvent[], 'stale')
+    frames.length = 0
+    expect(mirror.heartbeat('stale')).toBe(true)
+    mirror.replayAll()
+    expect(frames).toEqual([])
+    expect(mirror.isBusy('stale')).toBe(true)
+    verified = true
+    mirror.heartbeat('stale')
+    expect(frames[0].payload.kind).toBe('processing')
+  })
+
   it('heartbeat re-emits processing while a turn is open, nothing when idle', () => {
     const deviceFrames: CommanderFrame[] = []
     const mirror = new CommanderMirror({

@@ -20,7 +20,8 @@ void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, u
 void ht_focus_portrait(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
                        ht_character_size_t size, int y);
 
-/* One frame, no motion. The only thing that animates on this face is the compositor's own shimmer. */
+/* One frame, no motion. The home face's only motion is the engine's pet, which runs on clock_ms, not on
+ * these frames; the other thing that animates is the compositor's own shimmer. */
 bool ht_focus_motion_tick(ht_character_motion_t *m, uint32_t now, ht_character_mood_t mood,
                           bool quiet, bool visible, bool down, int x, unsigned level,
                           uint32_t activity);
@@ -31,7 +32,12 @@ bool ht_focus_motion_tick(ht_character_motion_t *m, uint32_t now, ht_character_m
  * this build has no mark for; an unknown engine gets no badge rather than a wrong one.
  */
 bool ht_focus_engine_mark(const char *engine, char out[4], uint32_t *ink);
-// Where the last home face drew its tab pill (w 0: none) and its name, for ui_habitat.c's targets.
-extern ht_rect_t ht_focus_pill_target, ht_focus_name_target;
 // The engine's index into ht_icon_engine20 / ht_icon_engine28 (the LVGL firmware's own marks), or -1.
 int ht_focus_engine_index(const char *engine);
+
+/*
+ * The clock_ms value (f->clock_ms's clock) at which the pet's visible frame or hop next differs
+ * from what this face draws, or 0 when no pet is drawn, it holds still, or its loop never changes.
+ * `recap` is the same text ht_focus_face() gets. The caller redraws then.
+ */
+uint32_t ht_focus_pet_next_ms(const ht_character_face_t *f, const char *recap);

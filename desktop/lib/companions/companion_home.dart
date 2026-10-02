@@ -21,6 +21,9 @@ import 'companion_dial.dart';
 import 'companion_engine_picker.dart';
 import 'companion_story.dart';
 import 'memory_review_text.dart';
+import 'coding_memory_connection.dart';
+import 'coding_memory_library.dart';
+import 'coding_memory_view.dart';
 
 /// The illustrated left viewer of the companion DSH. The shared workspace
 /// canvas owns its real agent terminal on the right.
@@ -39,6 +42,7 @@ class CompanionHome extends StatefulWidget {
     this.terminalStatus,
     this.dial,
     this.onDeviceSettings,
+    this.openMemoryConnection,
   });
   final DaemonFace face;
   final DaemonBrain brain;
@@ -50,6 +54,7 @@ class CompanionHome extends StatefulWidget {
   final String? terminalStatus;
   final DialState? dial;
   final void Function(String, Map<String, Object?>)? onDeviceSettings;
+  final CodingMemoryConnection? Function()? openMemoryConnection;
 
   @override
   State<CompanionHome> createState() => _CompanionHomeState();
@@ -66,6 +71,7 @@ class _CompanionHomeState extends State<CompanionHome> {
   final _memoryViewport = GlobalKey();
   late final _lessons = DaemonLessons(widget.brain)..addListener(_changed);
   Timer? _memoryRefresh;
+  CodingMemoryLibrary? _codingMemory;
   String? _lastPairEngine;
   ZooController get zoo => widget.face.zoo;
   ZooDaemon? get individual =>
@@ -119,11 +125,25 @@ class _CompanionHomeState extends State<CompanionHome> {
     _memoryRefresh?.cancel();
     _memoryRefresh = value == 'Memories'
         ? Timer.periodic(const Duration(seconds: 30), (_) {
+            if (_codingMemory?.valid == true) {
+              unawaited(_codingMemory!.refresh());
+            }
             if (widget.brain.active && !_lessons.busy) {
               unawaited(_lessons.refresh());
             }
           })
         : null;
+    if (value == 'Memories') {
+      if (_codingMemory == null || !_codingMemory!.valid) {
+        _codingMemory?.removeListener(_changed);
+        _codingMemory?.dispose();
+        final connection = widget.openMemoryConnection?.call();
+        _codingMemory = connection == null
+            ? null
+            : (CodingMemoryLibrary(connection)..addListener(_changed));
+      }
+      if (_codingMemory != null) unawaited(_codingMemory!.refresh());
+    }
     if (_scroll.hasClients) _scroll.jumpTo(0);
     if (value == 'Memories' && widget.brain.active && !_lessons.busy) {
       unawaited(_lessons.refresh());
@@ -820,7 +840,8 @@ class _CompanionHomeState extends State<CompanionHome> {
           style: ink(15, AppColors.textSoft),
         ),
         const SizedBox(height: 28),
-        if (widget.brain.active) ...[
+        if (_codingMemory != null) CodingMemoryView(library: _codingMemory!),
+        if (widget.brain.active && _codingMemory?.available != true) ...[
           _memoryCard(
             AppIcons.history,
             history?.title ?? 'A little time to look back',
@@ -1221,6 +1242,8 @@ class _CompanionHomeState extends State<CompanionHome> {
   @override
   void dispose() {
     _memoryRefresh?.cancel();
+    _codingMemory?.removeListener(_changed);
+    _codingMemory?.dispose();
     zoo.removeListener(_changed);
     widget.face.removeListener(_changed);
     widget.brain.removeListener(_changed);

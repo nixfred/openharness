@@ -16,19 +16,17 @@ Tags: `[doc]` official page above, `[run]` seen on the tested machine, `[?]` unv
 
 ## When to use it
 
-- **Ollama is already answering** (`fleet models` lists `kind: ollama`): adopt it as it is; it is the
-  person's app, so never restart or reconfigure it without asking.
-- **The person asked for Ollama and it is not running**: start it yourself (below) — it is theirs to
-  want, and an engine that is off is the normal case, not a reason to switch [run].
-- **Ollama is stopped and nobody asked for it**: leave it off. Its models are GGUF files that Grid's
-  engine serves in place — link the blob into `~/.grid/models` and `join --serve` [run], with the
-  context you choose instead of Ollama's default.
-- Start Ollama unasked only when Grid's engine refuses a blob Ollama runs (Ollama ships its own engine
-  for some new architectures [?]).
+- **A model in Ollama's store** (`fleet models` → START WITH `ollama`): Ollama runs it. It downloaded the
+  file and ships its own engine for new architectures, which Grid's engine can refuse [?].
+  - **Answering**: adopt it as it is; it is the person's app, so never restart or reconfigure it.
+  - **`(start it)`**: start one yourself (below). An Ollama that is off is the normal case, not a reason
+    to switch engines [run].
+- **Ollama not installed**: its blobs are GGUF files, so `fleet models` names Grid's llama.cpp — link the
+  blob into `~/.grid/models` and `join --serve` [run].
 - A GGUF from another app enters Ollama only by `ollama create` (a `Modelfile` with `FROM <file>`), and
   that **copies the whole file** into Ollama's store (+624 MB for a 640 MB GGUF) [run]. So never do it
   unasked; when the person wants Ollama and it has nothing suitable, offer it with the size it adds on
-  disk, beside the no-copy choice (the same file on Grid's engine). Never `ollama pull` without the
+  disk, beside the no-copy choice (the file with its own app). Never `ollama pull` without the
   go-ahead: it downloads.
 
 ## MLX inside Ollama (Apple silicon)
@@ -63,9 +61,10 @@ importing other MLX models is not yet documented [?].
   the Linux installer creates a systemd service `ollama` [doc].
 - Running: `fleet models` → `engines[]` with `kind: ollama`. Default bind is 127.0.0.1:11434 [doc].
 
-## Start an already-downloaded model (only when Grid's engine refused it)
+## Start an already-downloaded model (Ollama not running, or running with too small a window)
 
-Port P from outside `machine.listeningPorts`; the port is set only through `OLLAMA_HOST` (no `--port`) [doc]:
+Port P from outside `machine.listeningPorts`, and never 11434: that is the Ollama app's own, and it must
+still start when the person opens it [run]. The port is set only through `OLLAMA_HOST` (no `--port`) [doc]:
 
     "$GRID_FLEET" serve ollama-P --env OLLAMA_HOST=127.0.0.1:P --env OLLAMA_CONTEXT_LENGTH=65536 -- ollama serve
 
@@ -87,7 +86,9 @@ these checks with deadlines and prints each one. What it checks:
 1. The PID is alive. 2. `GET /` answers "Ollama is running" [run]. 3. `GET /api/version` → 200 [run].
 4. One bounded request through `/v1/chat/completions` with the model id, `max_tokens` 16 and
    `"reasoning_effort":"none"` for a thinking model → non-empty `content` [doc][run].
-Then `GET /api/ps` must show the model with `context_length` ≥ 65536 [doc]; less is not started.
+5. `GET /api/ps` shows the model with `context_length` ≥ 65536 [doc]. `FAIL context` means this Ollama
+   runs every model with that window [run]: `leave` the grid, then leave their Ollama as it is and start a
+   second one with `OLLAMA_CONTEXT_LENGTH` (above) [run].
 
 ## Join Harness Compute
 
@@ -130,7 +131,7 @@ records JSON output as unsupported without any error [run]. Grid's own detector 
 |---|---|
 | 404 on `/models` or `/chat/completions` | the URL lacks `/v1` [run] |
 | `content` empty, `thinking` full | add `reasoning_effort: "none"` [doc] |
-| `/api/ps` context below 65536 | the person's Ollama runs its default (4K or 32K); serve the blob with Grid's engine instead of changing their app |
+| `/api/ps` context below 65536 | the person's Ollama runs its default (4K or 32K); start a second Ollama with `OLLAMA_CONTEXT_LENGTH` instead of changing their app |
 | 503 "server is overloaded" | queue full (`OLLAMA_MAX_QUEUE`, default 512) [doc]; wait, do not retry in a loop |
 | `PROCESSOR` shows CPU share | model plus context does not fit the GPU; smaller context or model [doc] |
 | model not found | not downloaded; offer the download as a slow step, never pull silently |

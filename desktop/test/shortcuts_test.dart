@@ -241,10 +241,11 @@ void main() {
       expect(chordsFor(ShortcutAction.movePaneRight), ['⇧⌘→']);
     });
 
-    test('brackets walk agents, and Shift walks tabs', () {
+    test('brackets walk agents, and ⌥⌘ arrows walk tabs', () {
       // They used to carry three verbs told apart only by modifiers: ⌘[ ] walked
       // panes, ⇧⌘[ ] walked agents, ⌥⌘[ ] moved panes. Panes use arrows, so
-      // the brackets keep the one job a bracket is good at.
+      // the brackets keep the one job a bracket is good at. Tabs moved off
+      // ⇧⌘[ ] to ⌥⌘←/→, the key Safari and Chrome walk tabs with.
       final bracketed = <ShortcutAction>{};
       for (final s in appShortcuts()) {
         final chord = describeShortcut(s.activator);
@@ -253,9 +254,9 @@ void main() {
       expect(bracketed, {
         ShortcutAction.previousAgent,
         ShortcutAction.nextAgent,
-        ShortcutAction.previousSwarm,
-        ShortcutAction.nextSwarm,
       });
+      expect(chordsFor(ShortcutAction.nextSwarm), contains('⌥⌘→'));
+      expect(chordsFor(ShortcutAction.previousSwarm), contains('⌥⌘←'));
     });
 
     test('the terminal verbs tmux trained people on are all here', () {
@@ -300,7 +301,7 @@ void main() {
 
       final next = rows.firstWhere((row) => row.label == 'Next Tab');
       expect(next.chords, [
-        ['⇧', '⌘', ']'],
+        ['⌥', '⌘', '→'],
         ['⌃', '⇥'],
       ]);
     });

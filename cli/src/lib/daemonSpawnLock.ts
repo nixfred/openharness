@@ -94,6 +94,15 @@ export function describeSpawnLockOwner(owner: SpawnLockOwner): string {
   return `${verb[owner.purpose]} by pid ${owner.pid} for ${secs}s`
 }
 
+/** What Harness is still doing on this computer, by whoever holds the lock — in a person's words. */
+const STILL: Record<SpawnLockPurpose, string> = {
+  start: 'Harness is still starting on this computer',
+  update: 'Harness is still updating on this computer',
+  handoff: 'Harness is still restarting on this computer',
+  stop: 'Harness is still shutting down on this computer',
+  login: 'Another sign-in is already in progress on this computer',
+}
+
 /**
  * The same failure for a person who is not debugging anything — the desktop's sign-in screen shows
  * this verbatim. No pid, no lock, no seconds: what Harness is still doing on this computer, so that
@@ -103,14 +112,12 @@ export function describeSpawnLockOwner(owner: SpawnLockOwner): string {
  */
 export function describeSpawnLockBusyPlainly(error: SpawnLockBusyError): string {
   if (error.reason) return 'Harness cannot sign in on this computer right now. Run `harness login --force` in a terminal to see why.'
-  const still: Record<SpawnLockPurpose, string> = {
-    start: 'Harness is still starting on this computer',
-    update: 'Harness is still updating on this computer',
-    handoff: 'Harness is still restarting on this computer',
-    stop: 'Harness is still shutting down on this computer',
-    login: 'Another sign-in is already in progress on this computer',
-  }
-  return `${error.owner ? still[error.owner.purpose] : 'Harness is busy on this computer'}. Try again in a moment.`
+  return `${error.owner ? STILL[error.owner.purpose] : 'Harness is busy on this computer'}. Try again in a moment.`
+}
+
+/** For a sign-in waiting on the lock — the desktop shows it verbatim, so no pid. */
+export function describeSpawnLockWaitPlainly(owner: SpawnLockOwner): string {
+  return `${STILL[owner.purpose]} — waiting for it to finish…`
 }
 
 let held: { token: string; purpose: SpawnLockPurpose; depth: number } | null = null

@@ -90,7 +90,7 @@ void main() {
       await open(tester);
       expect(find.text('Stop Harness'), findsOneWidget);
       expect(
-        find.textContaining('Close Pane keeps it running.'),
+        find.textContaining('Switching tabs keeps it running.'),
         findsOneWidget,
       );
       // The default action must leave the agent running.
@@ -231,7 +231,7 @@ void main() {
         var i = 0;
         i < 12 &&
             find
-                .textContaining('Close Pane keeps it running.')
+                .textContaining('Switching tabs keeps it running.')
                 .hitTestable()
                 .evaluate()
                 .isEmpty;
@@ -240,7 +240,7 @@ void main() {
         await key(tester, LogicalKeyboardKey.pageDown);
       }
       expect(
-        find.textContaining('Close Pane keeps it running.').hitTestable(),
+        find.textContaining('Switching tabs keeps it running.').hitTestable(),
         findsOneWidget,
       );
       for (var i = 0; i < 12 && body.controller!.offset > 0; i++) {

@@ -110,10 +110,11 @@ desktop keeps in native menus or chords must be clickable. Keys keep working but
 advertised. Browser-only UI lives in `lib/web/` and is never imported by desktop code;
 it plugs into shared screens through additive seams whose default is today's desktop
 behavior (e.g. `SwarmScreen.chrome` / `WorkspaceChrome` in `state/workspace_chrome.dart`,
-which runs the same `_commands` table keys use, adds a bar over the picker, and turns off
+which runs the same `_commands` table keys use, gives the picker a clickable Back, and turns off
 `KeyHints` — `widgets/key_hints.dart`, absent means hints shown). Below
 `WorkspaceChrome.compactBelow` (web: 720px, a phone) the workspace goes compact: a tab
-switcher replaces the tab row and `PaneGrid.soloFocused` draws only the focused harness —
+switcher replaces the tab row, `WorkspaceChrome.compactFooter` replaces the status bar with one
+dropdown plus Share (hidden while the on-screen keyboard is up), and `PaneGrid.soloFocused` draws only the focused harness —
 without touching zoom or the synced layout, so the same desk keeps its grid on a computer. Do not change desktop behavior for the
 web, and do not copy shared screens into `lib/web/` — add a seam instead.
 
@@ -142,6 +143,17 @@ The native desktop target uses the CLI for cloud access and SSO tokens:
 
 - **Auth** lives in the CLI. `lib/auth/cli_login.dart` shells out to `harness auth status --json` and
   drives `harness login --json` (NDJSON event stream); `cli_link.dart` wraps `harness link create/import/list`.
+  The login screen's way in is two buttons, Continue with Google and Continue with Apple
+  (`widgets/sign_in_provider_button.dart`), on desktop and web alike: `AppNotifier.login(provider)`
+  hands a `SignInProvider` to the sign-in client — `--google`/`--apple` to the CLI, `provider` to the
+  backend's authorize routes in a viewer build — and auth-service opens that account's own sign-in.
+  A caller with no button of its own (`login()` with none) still gets the page's chooser.
+  Each surface signs in as its own auth-service client (backend `SSO_CLIENT_IDS`): the CLI as
+  `harness-cli`, or `harness-desktop` when this app runs it (`--entry-point=desktop`); a viewer
+  build as `auth/sso_client.dart` says (`harness-web` in the browser). ⚠️ A token belongs to the
+  client it was issued to, so the session keeps the client the backend's exchange REPORTS — never
+  the one it asked for, since an older backend exchanges as its configured client and names none
+  — and every refresh names it again (`AuthSession.ssoClientId`, the CLI's `session.json`).
   Sign-out owns its CLI process, checks its exit, and terminates it on timeout. `AppNotifier` joins
   repeated sign-out requests and blocks another sign-in until credential and connection cleanup
   finish; failure offers keyboard-focused Retry sign out. Development fixture disconnects never
@@ -250,6 +262,36 @@ Window-only preview collections are test/render fixtures, not a user setting.
 Per-machine runtime state is `MachineState` (connection status, transport mode, agents, `nodeOnline`
 from `node_status` pushes — distinct from our own socket status, pending offline agent, turn activity).
 
+Explicit pane/tab Close uses `requestClosePane` / `requestCloseSwarm` and closes the session across
+the global workspace. Harness Monitor is the exception: closing its reusable dashboard dismisses
+the view immediately, even offline, and keeps its assistant available for the next open.
+An owned idle session saves its native conversation and terminal snapshot
+before releasing its process, regardless of other viewers. A ready, unused Claude/Codex chat with
+an empty composer also closes directly, saving its terminal snapshot without requiring a native
+conversation. Missing activity evidence for an existing chat remains unknown. Working,
+waiting-for-input, draft, or unknown sessions show one short sentence with Cancel and Close;
+there is no title or deferred-close button. Cancel is the default. Previously queued daemon close
+plans remain compatible. Layout cleanup, moving panes, switching tabs, and sign-out retain their view-only behavior. A failed save
+or unconfirmed close keeps the pane. Older daemons retain their existing behavior until updated.
+
+`HarnessMonitor` supplies the global running-harness count without process sampling
+in the footer. Clicking it opens the reusable `autonomous/harness-monitor` DSH tab
+through `HarnessMonitorController`, with its viewer on the left at 70% and the assistant
+terminal on the right at 30%. Only the pane zoom action expands either pane. The DSH table shares the daemon's resource sampler
+and adds opt-in activity metadata to `agents_list`. RAM is process-tree RSS; CPU is
+interval use, with 100% representing one core. Unknown readings remain unknown.
+Shared Codex servers are listed separately and included once; token counts reuse
+existing agent data. The monitor never resumes sessions or scans transcripts.
+
+`MachineResourceMonitor` always scopes CPU/RAM/GPU to this computer, even when the
+focused pane is remote. Hardware is passive text, with no filter or popover. It
+samples only the local host every 15 seconds while foreground. Readings expire in
+45 seconds and clear on disconnect, replacement or hide. CPU is normalized host
+utilization; RAM excludes reclaimable cache where available. GPU is the busiest
+reported device. Missing telemetry is `-`. Additive `machine_resources` RPC fields
+allow mixed old/new CLIs. See `design/workspace-status-bar.md` for the complete
+scope and format contract.
+
 ### Command dock
 
 For app UI outside terminal panes, follow the [desktop design system](design/desktop-design-system.md).
@@ -308,11 +350,13 @@ its headless debug timings do not establish native display or network latency.
   Chrome widgets call `grid.AppTheme.watch(context)` at the top of `build` so `const` subtrees still
   repaint on a theme flip.
 - The [workspace status bar](design/workspace-status-bar.md) places system-font tabs and global actions at the top,
-  with subscription usage remaining at the bottom left and focused machine/repo/branch/PR at the bottom right.
+  with harness count, local hardware and subscription allowance used at the bottom left and focused machine/repo/branch/PR at the bottom right.
   Tabs center their name/status group without permanent number prefixes; Command replaces
   the status with the resolved shortcut beside the name. Tab and pane close marks are small
-  and quiet, with larger click targets. Each pane ends with model, split down,
-  split right, zoom, close. Split opens New Harness directly for the clicked pane.
+  and quiet, with larger click targets. Terminal panes end with matching
+  plain-text agent/model selectors and close at every width. Hovering the right
+  or bottom edge reveals its split icon; zoom stays in commands, menus and keyboard
+  shortcuts. Only distinct domain-harness icons stay on the left.
   Usage has no dot separators and colors only low/exhausted
   percentages. Automatic names use the strongest shared harness type,
   project, or machine, preferring traits that distinguish tabs and excluding dependent viewers.
@@ -352,7 +396,7 @@ its headless debug timings do not establish native display or network latency.
   have spent. Each account shows its `tightest` window, the limit that stops the work first.
   The shared controller reads ahead at startup and every five minutes; opening a menu requests
   a fresh reading, capped at once per minute. The footer uses these same deduplicated accounts
-  and freshness rules, displaying the remaining percentage rather than the amount spent.
+  and freshness rules, displaying whole allowance-used percentages (100 − remaining) in neutral ink.
   **Remote machines' accounts arrive through `usage_read`** (`AppNotifier.readRemoteUsage`,
   `usage/remote_usage.dart`, `usage/usage_accounts.dart`; CLI side `cli/src/lib/accountUsage.ts`).
   A remote machine may be signed in to a DIFFERENT subscription, and the only honest way to read
@@ -525,7 +569,11 @@ its headless debug timings do not establish native display or network latency.
   `redactSecretsInText` (`logging/redact.dart`, beside the frame-level `redactValue`) before
   anything is written. The Debug pane is a **mirror** of those sinks, not a second stream
   (`log_stream.dart` + `log_stream_sinks.dart`): a bounded ring of the last 500 entries that
-  `installFileLogs` tees into, so a line on screen is a line the file already has. It is developer
+  `installFileLogs` tees into. Routine DEBUG records use a one-second flush deadline,
+  256 entries or 64 Ki characters. INFO/WARN and admitted ERROR records flush their preceding context;
+  export, backgrounding, normal quit and updater handoff also flush. An abrupt process kill
+  can lose the pending DEBUG batch. CLI transcripts remain immediately
+  flushed. No timer runs with an empty buffer. It is developer
   furniture — `kDebugSurfaceEnabled` (`logging/debug_surface.dart`, `kDebugMode` or
   `--dart-define=HARNESS_DEBUG_SURFACE=true`) gates the rail row, the ⌘D shortcut
   (`kDebugShortcut`, in `appShortcuts()` rather than `kAppShortcuts`) and the ring itself; the log

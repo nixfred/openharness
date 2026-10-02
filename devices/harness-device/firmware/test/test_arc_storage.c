@@ -55,7 +55,7 @@ int main(void)
         memset(text,' ',count);compare(text,edge,false);
     }
     assert(peak==4538);
-    assert(sizeof arc_caches==12552);
+    assert(sizeof arc_caches==12576); // was 12552: the cache entry holds a face pointer (8-byte aligned on the host) instead of a byte
     for(unsigned glyph=32;glyph<=258;glyph++) {
         unsigned cp=glyph==258 ? 0x2192 : glyph==257 ? 0xe000 : glyph==256 ? 0x2197 : glyph;
         for(int length=HT_ARC_COLS-1;length<=HT_ARC_COLS;length++) for(int edge=0;edge<2;edge++) {

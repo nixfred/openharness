@@ -1,5 +1,3 @@
-import 'package:harness/shared/theme/app_icons.dart';
-
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -15,6 +13,7 @@ import '../../terminal/terminal_theme.dart';
 import '../../terminal/terminal_theme_store.dart';
 import '../../widgets/pane_menu.dart';
 import '../../widgets/pane_grid.dart' show soloPaneId;
+import '../shell/web_dropdown_control.dart';
 import 'web_tab_menu.dart';
 import '../../widgets/workspace_bar_control.dart';
 
@@ -58,41 +57,12 @@ class WebTabSwitcher extends StatelessWidget {
     String label,
     bool enabled,
     TerminalTheme theme,
-  ) => WorkspaceBarControl(
+  ) => WebDropdownControl(
     key: const ValueKey('web-tab-switcher'),
-    label: 'Tabs: $label',
+    label: label,
     tooltip: 'Tabs',
+    color: theme.foreground,
     onPressed: enabled ? () => _open(context) : null,
-    builder: (context, emphasized) => SizedBox(
-      height: workspaceBarControlHeight(context),
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: workspaceBarCellSizeOf(context).width,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: workspaceBarTextStyle(
-                  color: theme.foreground,
-                  emphasized: emphasized,
-                ),
-              ),
-            ),
-            // An icon, not "▾": the terminal face may have no such glyph.
-            Icon(
-              AppIcons.chevronDown,
-              size: 14,
-              color: theme.foreground.withValues(alpha: .75),
-            ),
-          ],
-        ),
-      ),
-    ),
   );
 
   /// Desktop's `+` beside the tabs: a new tab, which opens on "Start an agent".
@@ -118,19 +88,13 @@ class WebTabSwitcher extends StatelessWidget {
   );
 
   Future<void> _open(BuildContext context) async {
-    final box = context.findRenderObject() as RenderBox?;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox?;
-    if (box == null || overlay == null) return;
-    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final position = webMenuAnchor(context);
+    if (position == null) return;
     final choice = await showPaneMenu<WebTabChoice>(
       context: context,
-      position: RelativeRect.fromLTRB(
-        origin.dx,
-        origin.dy + box.size.height + 6,
-        overlay.size.width - origin.dx - box.size.width,
-        0,
-      ),
+      // Opened by a click: no row is lit until the pointer picks one.
+      focusFirst: false,
+      position: position,
       minWidth: 260,
       maxWidth: 360,
       children: (close) => webTabMenuRows(app, commands, close),
@@ -140,11 +104,11 @@ class WebTabSwitcher extends StatelessWidget {
       case WebFocusPane(:final paneId):
         app.focusPane(paneId, reveal: true);
       case WebClosePane(:final paneId):
-        unawaited(app.closePane(paneId));
+        unawaited(app.requestClosePane(paneId));
       case WebSelectTab(:final id):
         app.selectSwarm(id);
       case WebCloseTab(:final id):
-        unawaited(app.closeSwarm(id));
+        unawaited(app.requestCloseSwarm(id));
       case WebRunCommand(:final command):
         commands.run(command);
       case null:

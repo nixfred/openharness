@@ -1,6 +1,9 @@
 // The public character contract: reaction state, every mood/size, swapping, and
 // DMA damage replay. Uses the same immutable assets and renderer as the board.
 #include "../main/ui/habitat/character.h"
+#include "../main/ui/habitat/pets.h"
+#include "../main/ui/habitat/focus.h"
+#include "../main/ui/habitat/focus_faces.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -239,13 +242,44 @@ static void recap_budget(void)
  *  2. Nothing lands outside the bezel. Every width on that face is the chord at its row's BOTTOM
  *     edge, which is the measurement that is easy to take from the wrong edge.
  */
+static void squeeze(char *text)
+{
+    char *out = text;
+    for (const char *p = text; *p; p++) if (*p != ' ') *out++ = *p;
+    *out = 0;
+}
+// The pet registered for an engine, or NULL.
+static const ht_pet_t *pet_of(const char *engine)
+{
+    for (unsigned i = 0; i < ht_pet_count; i++) if (!strcmp(ht_pets[i].engine, engine)) return &ht_pets[i];
+    return NULL;
+}
+// The index of the pet's frame whose pixels these are (every frame is in some loop), or -1.
+static int pet_frame(const ht_pet_t *pet, const uint16_t *px)
+{
+    for (int s = 0; s < HT_PET_STATES; s++)
+        for (int k = 0; k < HT_PET_STEPS; k++)
+            if (pet->frames[pet->loops[s][k].frame].px == px) return pet->loops[s][k].frame;
+    return -1;
+}
+// Focus draws in Geist (owner, 2026-10-02): no run of the scene is one of the trial's Roboto faces.
+static void no_roboto(const ht_scene_t *scene)
+{
+    const ht_pfont_t *roboto[] = {&ht_lv_roboto_med_38, &ht_lv_roboto_med_32, &ht_lv_roboto_med_30,
+        &ht_lv_roboto_med_28, &ht_lv_roboto_med_24, &ht_lv_roboto_med_22, &ht_lv_roboto_reg_38,
+        &ht_lv_roboto_reg_25, &ht_lv_roboto_reg_20};
+    for (int i = 0; i < scene->count; i++) {
+        for (unsigned g = 0; g < sizeof roboto / sizeof roboto[0]; g++) assert(scene->runs[i].font != &roboto[g]->base);
+        assert(scene->runs[i].font != &ht_rmono_24);
+    }
+}
 static void focus_face(void)
 {
     ht_character_t c = {0};
     assert(ht_character_select(&c, HT_CHARACTER_FOCUS));
     assert(!strcmp(ht_character_name(HT_CHARACTER_FOCUS), "Focus"));
     const char *long_name = "A pane with a name far wider than the glass can hold";
-    const char *long_tab = "A workspace whose name also overruns the pill";
+    const char *long_tab = "A workspace whose name is no longer drawn on this face";
     const char *recap = "Shipped the retry queue and the webhook tests pass on the first run, "
                         "then tidied the parser.";
     struct { const char *tab, *name, *engine, *activity, *recap; ht_character_mood_t mood;
@@ -255,6 +289,10 @@ static void focus_face(void)
         {"Harness repo", "Payments refactor", "claude", "Coalescing", "", HT_CHARACTER_WORKING, 34, 0},
         {"Harness repo", "Payments refactor", "codex", "", "", HT_CHARACTER_LISTENING, 0, 4},
         {long_tab, long_name, "opencode", "Simmering", recap, HT_CHARACTER_WORKING, 65535, 2},
+        // The widest four lines the recap can hold: its fourth line sits lowest on the glass, where
+        // the circle is narrowest, and must still keep its ink inside it.
+        {"", "Wide", "codex", "", "MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW MW "
+         "MW MW MW MW MW MW MW", HT_CHARACTER_IDLE, 0, 0},
         {"Ti\u1ebfng Vi\u1ec7t", "\u0110\u00e3 s\u1eeda xong ph\u1ea7n flush", "claude", "",
          "L\u01b0\u1ee3ng b\u1ed9 nh\u1edb \u0111\u00e3 gi\u1ea3m v\u00e0 ki\u1ec3m tra l\u1ea1i.", HT_CHARACTER_IDLE, 0, 0},
     };
@@ -269,34 +307,73 @@ static void focus_face(void)
         ht_character_face(&scene, &c, &f, 0xffff, cases[i].recap);
         if (expected < 0) expected = scene.count;
         assert(scene.count == expected);   // property 1
+        no_roboto(&scene);
         ht_raster(&scene, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
         for (int y = 0; y < HT_HEIGHT; y++) for (int x = 0; x < HT_WIDTH; x++)
             if (full[y * HT_WIDTH + x])
                 assert((x - 233) * (x - 233) + (y - 233) * (y - 233) < 230 * 230);   // property 2
     }
     /*
-     * A NAME TOO LONG FOR ITS ROW ends in "...", as LVGL's LONG_DOT cut it, within its budget in
-     * PIXELS: the tab pill's name gets 314 (the widest a round pill this high can be inside r 230),
-     * the agent's name what the 384 px row leaves beside its mark. Cut by the raster instead, it
-     * reads as a typo.
+     * THE OCTOPUS'S LAYOUT (owner, 2026-10-01): the name on the top curve, the engine's 56 px mark,
+     * and a recap of up to four lines that ends in "…" once it is cut — at the octopus's ninety
+     * codepoints or at four lines, whichever comes first — every line within the card's 346 px, so the
+     * raster never cuts it.
      */
     {
+        const char *lengthy = "Flashed 0.0.91 to both dials and verified the image on each. All 44 host checks "
+                              "pass, including the new reader tests. Nothing is committed yet; say commit.";
         ht_character_face_t f = {.recipient = long_name, .tab = long_tab, .engine = "claude",
             .activity = "", .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_IDLE,
             .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
         ht_scene_t scene; ht_scene_clear(&scene, 0);
-        ht_character_face(&scene, &c, &f, 0xffff, "");
-        int found = 0;
+        ht_character_face(&scene, &c, &f, 0xffff, lengthy);
+        int arc = 0, mark = 0, lines = 0;
+        const ht_run_t *last = NULL;
         for (int i = 0; i < scene.count; i++) {
             const ht_run_t *r = &scene.runs[i];
-            size_t n = strlen(r->text);
-            if (n < 3 || strcmp(r->text + n - 3, "...")) continue;
-            int w = ht_measure(r->font, r->text);
-            assert(w <= r->w);   // the raster never cuts it
-            if (r->font == &ht_lv_montserrat_24.base) { assert(w <= 314); found |= 1; }
-            if (r->font == &ht_lv_geist_med_38.base) { assert(w <= 384 - 28 - 10); found |= 2; }
+            if (r->arc == 1) { arc++; assert(r->font == &ht_mono_24); }
+            if (r->sprite.width == 56 || r->sprite.width == pet_of("claude")->w) mark++;
+            if (r->font == &ht_lv_geist_med_30.base && r->text[0]) {
+                lines++; last = r;
+                // LVGL lets a wrapped line's trailing space run past the width; its ink may not.
+                char ink[HT_TEXT_BYTES];
+                snprintf(ink, sizeof ink, "%s", r->text);
+                for (size_t n = strlen(ink); n && ink[n - 1] == ' '; ) ink[--n] = 0;
+                assert(ht_measure(r->font, r->text) <= r->w && ht_measure(r->font, ink) <= 346);
+            }
         }
-        assert(found == 3);
+        assert(arc == 1 && mark == 1 && lines >= 3 && lines <= 4);
+        size_t n = strlen(last->text);
+        assert(n >= 3 && !strcmp(last->text + n - 3, "\xe2\x80\xa6"));
+        no_roboto(&scene);
+        // No tab pill and no name row: nothing in Montserrat or the 38 px name face is drawn.
+        for (int i = 0; i < scene.count; i++)
+            assert(scene.runs[i].font != &ht_lv_montserrat_24.base && scene.runs[i].font != &ht_lv_geist_med_38.base);
+    }
+
+    // The check and cross marks (U+2713 / U+2717) reach the glass: every Focus face holds them (the LVGL
+    // Geist faces, and geist_med_30 through gen_focus_faces.py's second --font); a missing glyph is "?".
+    {
+        const char *marks = "Tests \xe2\x9c\x93 pushed \xe2\x9c\x97";
+        ht_character_face_t f = {.recipient = "pane", .tab = "", .engine = "claude", .activity = "",
+            .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_IDLE,
+            .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
+        ht_scene_t scene; ht_scene_clear(&scene, 0);
+        ht_character_face(&scene, &c, &f, 0xffff, marks);
+        int found = 0;
+        for (int i = 0; i < scene.count; i++)
+            if (scene.runs[i].font == &ht_lv_geist_med_30.base && strstr(scene.runs[i].text, "\xe2\x9c\x93")) found++;
+        assert(found == 1);
+        const ht_pfont_t *faces[] = {&ht_lv_geist_med_38, &ht_lv_geist_med_32, &ht_lv_geist_med_30,
+            &ht_lv_geist_med_28, &ht_lv_geist_reg_38, &ht_lv_geist_reg_25, &ht_lv_geist_reg_20};
+        for (unsigned k = 0; k < sizeof faces / sizeof faces[0]; k++) {
+            int has[2] = {0, 0};   // the face itself holds both marks, not its "?" or a fallback
+            for (unsigned g = 0; g < faces[k]->count; g++) {
+                has[0] |= faces[k]->codes[g] == 0x2713;
+                has[1] |= faces[k]->codes[g] == 0x2717;
+            }
+            assert(has[0] && has[1]);
+        }
     }
 
     /*
@@ -335,43 +412,259 @@ static void focus_face(void)
     }
 
     /*
-     * WHERE THE LIVE FIRMWARE PUTS THEM (0.0.86, assets/lvgl/SPEC.md): the pill's box at y 68, 41
-     * tall; the name's line from 119; the recap card at 41,191, 384 x 119. Without a card the block
-     * is centred: a working name at 176, its pill at 125 and its status at 248; a resting one at 172.
-     * A drift here is a drift from the dial the owner compares this with.
+     * WHERE THEY STAND: the name on the arc. A recap sits in the fixed card at (41, 179), 384 x 192,
+     * centred in it whatever its length — the card and the mark stay put (owner, 2026-10-02); working or resting there is
+     * no card and the line is centred on the glass. The 56 px mark sits halfway between the foot of the
+     * arc's cells (y 44) and the card's top or the line: the gap above it equals the gap below.
      */
     {
+        enum { TITLE_BOTTOM = HT_ARC_Y + HT_ARC_CELL_HEIGHT };
         ht_character_face_t f = {.recipient = "Payments refactor", .tab = "Harness repo",
             .engine = "claude", .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_IDLE,
             .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff};
-        ht_scene_t scene; ht_scene_clear(&scene, 0);
-        ht_character_face(&scene, &c, &f, 0xffff, "Shipped the retry queue and the webhook tests.");
-        const ht_run_t *pill = &scene.runs[0], *name = &scene.runs[3], *card = &scene.runs[5];
-        assert(pill->box.h == 41 && pill->y == 68);
-        assert(name->font == &ht_lv_geist_med_38.base && name->y == 119 && !strcmp(name->text, "Payments refactor"));
-        assert(card->box.h == 119 && card->x == 41 && card->y == 191 && card->w == 384 && card->box.radius == 28);
-        // The mark: the 28 px box centred on the name's 51 px line, 10 px before the name.
-        assert(scene.runs[2].sprite.pixels == ht_icon_engine28[0].px && scene.runs[2].y == 119 + 11);
-        assert(name->x == scene.runs[2].x + 38);
+        const char *recaps[] = {"Done.", "Shipped the retry queue and the webhook tests.",
+            ("Flashed 0.0.91 to both dials and verified the image on each. All 44 host checks pass, "
+             "including the new reader tests. Nothing is committed yet.")};
+        for (unsigned k = 0; k < 3; k++) {
+            ht_scene_t scene; ht_scene_clear(&scene, 0);
+            ht_character_face(&scene, &c, &f, 0xffff, recaps[k]);
+            const ht_run_t *name = &scene.runs[0], *mark = &scene.runs[1];
+            assert(name->arc == 1 && !strcmp(name->text, "Payments refactor") && name->font == &ht_mono_24);
+            no_roboto(&scene);
+            // The Claude pet, still (clock 0), centred in the 56 px mark's box: 60 x 45 at its step 0.
+            const ht_pet_t *cp = pet_of("claude");
+            assert(cp && cp->w == 60 && cp->h == 45);
+            assert(pet_frame(cp, mark->sprite.pixels) == cp->loops[HT_PET_IDLE][0].frame &&
+                   mark->x == (466 - cp->w) / 2);
+            int mark_top = mark->y - (56 - cp->h) / 2;
+            const ht_run_t *card = &scene.runs[2];
+            assert(card->box.h == 192 && card->x == 41 && card->y == 179 && card->w == 384 && card->box.radius == 28);
+            int lines = 0;
+            for (int i = 3; i < 7; i++) if (scene.runs[i].text[0]) lines++;
+            assert(lines >= 1 && lines <= 4 && (k != 0 || lines == 1));
+            int h = lines * (ht_lv_geist_med_30.base.height + 1) - 1;
+            assert(scene.runs[3].y == 179 + (192 - h) / 2);   // centred in the card
+            for (int i = 0; i < lines; i++) assert(scene.runs[3 + i].y == scene.runs[3].y + i * (ht_lv_geist_med_30.base.height + 1));   // the line + 1 px
+            assert(scene.runs[3 + lines - 1].y + ht_lv_geist_med_30.base.height <= 179 + 192);   // inside the card
+            int above = mark_top - TITLE_BOTTOM, below = card->y - (mark_top + 56);
+            assert(above >= 0 && (below - above == 0 || below - above == 1));
+        }
 
         f.activity = "Working"; f.elapsed = 34;
-        ht_scene_clear(&scene, 0);
+        ht_scene_t scene; ht_scene_clear(&scene, 0);
         ht_character_face(&scene, &c, &f, 0xffff, "");
-        assert(scene.runs[0].y == 125 && scene.runs[3].y == 176);
-        assert(scene.runs[8].y == 248 && scene.runs[8].font == &ht_lv_geist_med_32.base &&
-               !strcmp(scene.runs[8].text, "Simmering\xe2\x80\xa6 34s"));   // the gerund for 30..35 s
+        no_roboto(&scene);
+        assert(scene.runs[7].y == 233 - ht_lv_geist_med_32.base.height / 2 && scene.runs[7].font == &ht_lv_geist_med_32.base &&
+               !strcmp(scene.runs[7].text, "Simmering\xe2\x80\xa6 34s"));   // the gerund for 30..35 s
+        {
+            int top = scene.runs[1].y - (56 - pet_of("claude")->h) / 2;
+            int above = top - TITLE_BOTTOM, below = scene.runs[7].y - (top + 56);
+            assert(above > 0 && (below - above == 0 || below - above == 1));
+        }
 
+        // Resting: one of the invitations, centred, holding still while the face stays up (both draws
+        // of an agent say the same), and picked afresh when the face comes back.
         f.activity = ""; f.elapsed = 0;
+        static const char *const resting[] = {"Let's build it", "Do anything", "What's next?",
+            "Ready when you are", "Tap to talk", "Say the word", "Make it happen", "Start something"};
+        char first[64] = "";
+        const char *names[] = {"Payments refactor", "Landing page", "Deploy firmware", "Docs sweep",
+                               "Bug triage", "Release notes"};
+        for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++) {
+            f.recipient = names[k];
+            for (int again = 0; again < 2; again++) {
+                ht_scene_clear(&scene, 0);
+                ht_character_face(&scene, &c, &f, 0xffff, "");
+                no_roboto(&scene);
+                const ht_run_t *l1 = &scene.runs[8], *l2 = &scene.runs[9];
+                // Compared without spaces: a wrapped line keeps the space LVGL broke it at.
+                char said[64], want[64];
+                snprintf(said, sizeof said, "%s%s", l1->text, l2->text);
+                squeeze(said);
+                bool known = false;
+                for (unsigned r = 0; r < sizeof resting / sizeof resting[0]; r++) {
+                    snprintf(want, sizeof want, "%s", resting[r]); squeeze(want);
+                    known |= !strcmp(said, want);
+                }
+                assert(known);
+                assert(l1->y == 233 - ht_lv_geist_med_32.base.height / 2);
+                int top = scene.runs[1].y - (56 - pet_of("claude")->h) / 2;
+                int above = top - TITLE_BOTTOM, below = l1->y - (top + 56);
+                assert(above > 0 && (below - above == 0 || below - above == 1));
+                if (!again) snprintf(first, sizeof first, "%s", said);
+                else assert(!strcmp(said, first));   // a redraw never swaps it
+            }
+        }
+        /*
+         * RANDOM WHEREVER IT SHOWS (owner, 2026-10-02): the same name every time — "Choose a pane",
+         * the face with no agent — still gets a new line each time the resting face returns, never
+         * the one it just showed, and over a few returns most of the list.
+         */
+        {
+            f.recipient = "Choose a pane";
+            char last[64] = "", seen[8][64];
+            int kinds = 0;
+            for (int visit = 0; visit < 24; visit++) {
+                f.activity = "Working"; f.elapsed = 3; f.clock_ms = 1000u + (uint32_t)visit * 977u;
+                ht_scene_clear(&scene, 0);
+                ht_character_face(&scene, &c, &f, 0xffff, "");   // away: the working line
+                f.activity = ""; f.elapsed = 0;
+                ht_scene_clear(&scene, 0);
+                ht_character_face(&scene, &c, &f, 0xffff, "");   // back to resting
+                char said[64];
+                snprintf(said, sizeof said, "%s%s", scene.runs[8].text, scene.runs[9].text);
+                squeeze(said);
+                assert(strcmp(said, last));
+                snprintf(last, sizeof last, "%s", said);
+                bool known = false;
+                for (int k = 0; k < kinds; k++) known |= !strcmp(seen[k], said);
+                if (!known && kinds < 8) snprintf(seen[kinds++], sizeof seen[0], "%s", said);
+            }
+            assert(kinds >= 5);
+            f.clock_ms = 0;
+        }
+        f.recipient = "Payments refactor";
+
+        // An engine this build has no mark for leaves the mark's place empty, not a wrong mark.
+        f.engine = "something-new";
         ht_scene_clear(&scene, 0);
         ht_character_face(&scene, &c, &f, 0xffff, "");
-        assert(scene.runs[3].y == 172 && scene.runs[9].y == 172 + 51 + 21 &&
-               !strcmp(scene.runs[9].text, "No activity yet"));
+        assert(!scene.runs[1].sprite.width && !scene.runs[1].text[0]);
     }
 
-    // Stated as its parts rather than as a number: the tab pill (its box and its name), the header
-    // (mark, two name lines), the recap card (its box and two lines), the live status and
-    // "No activity yet" (two lines). Each is emitted empty when it has nothing to say.
-    assert(expected == 2 + 3 + 3 + 1 + 2);
+    /*
+     * THE PETS (claude, codex): every state, every step. The pet takes the mark's run (the count never moves),
+     * its frame and hop follow the face's own state and clock_ms, it stays on the glass, and only an engine with a
+     * pet gets one.
+     */
+    assert(ht_pet_count > 0);
+    for (unsigned pe = 0; pe < ht_pet_count; pe++) {
+        const ht_pet_t *pet = &ht_pets[pe];
+        const char *eng = pet->engine;
+        assert(pet_of(eng) == pet && ht_focus_engine_index(eng) >= 0);   // a known engine, listed once
+        for (unsigned q = 0; q < pe; q++) assert(strcmp(ht_pets[q].engine, eng));
+        // Clear of the curved title: no layout, state or step puts ink above the foot of its cells.
+        for (int layout = 0; layout < 3; layout++)       // recap card, working line, resting line
+            for (int state = 0; state < HT_PET_STATES; state++)
+                for (int step = 0; step < HT_PET_STEPS; step++) {
+                    ht_character_face_t f = {.recipient = "Payments refactor", .engine = eng,
+                        .activity = layout == 1 ? "Working" : "", .elapsed = 5, .status = "", .hint = "",
+                        .detail = "", .mood = state == HT_PET_DONE ? HT_CHARACTER_DONE : HT_CHARACTER_IDLE,
+                        .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff, .asking = state == HT_PET_ASKING,
+                        .clock_ms = (uint32_t)step * pet->step_ms[state] + 1};
+                    if (state == HT_PET_WORKING && layout != 2) f.activity = "Working";
+                    ht_scene_t scene; ht_scene_clear(&scene, 0);
+                    ht_character_face(&scene, &c, &f, 0xffff, layout == 0 ? "Shipped the retry queue." : "");
+                    const ht_run_t *mark = &scene.runs[1];
+                    int fr = pet_frame(pet, mark->sprite.pixels);
+                    assert(fr >= 0);
+                    const ht_icon_t *ic = &pet->frames[fr];
+                    int row = 0;
+                    while (row < ic->h) {
+                        bool inked = false;
+                        for (int x = 0; x < ic->w; x++) inked |= ic->a[row * ic->w + x] != 0;
+                        if (inked) break;
+                        row++;
+                    }
+                    assert(row < ic->h && mark->y + row >= HT_ARC_Y + HT_ARC_CELL_HEIGHT);
+                }
+        int frame_at[HT_PET_STATES][HT_PET_STEPS];
+        for (int state = 0; state < HT_PET_STATES; state++)
+            for (int step = 0; step < HT_PET_STEPS; step++) {
+                ht_character_face_t f = {.recipient = "Payments refactor", .engine = eng,
+                    .activity = "", .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_IDLE,
+                    .foreground = 0xffff, .dim = 0x8410, .ink = 0xffff,
+                    .clock_ms = (uint32_t)step * pet->step_ms[state] + 1};
+                if (state == HT_PET_WORKING) { f.activity = "Working"; f.elapsed = 5; }
+                if (state == HT_PET_DONE) f.mood = HT_CHARACTER_DONE;
+                if (state == HT_PET_ASKING) f.asking = true;
+                ht_scene_t scene; ht_scene_clear(&scene, 0);
+                ht_character_face(&scene, &c, &f, 0xffff, state == HT_PET_DONE ? "Done." : "");
+                assert(scene.count == 1 + 1 + 1 + 4 + 1 + 2);
+                const ht_run_t *mark = &scene.runs[1];
+                int frame = pet_frame(pet, mark->sprite.pixels);
+                const ht_pet_step_t *want = &pet->loops[state][step];
+                assert(frame == want->frame && mark->sprite.width == pet->w && mark->sprite.height == pet->h);
+                assert(mark->x == (466 - pet->w) / 2);
+                // The 56 px box's top is where the same face with step 0 puts it: only dy moves the pet.
+                ht_character_face_t g = f; g.clock_ms = 1;
+                ht_scene_t rest; ht_scene_clear(&rest, 0);
+                ht_character_face(&rest, &c, &g, 0xffff, state == HT_PET_DONE ? "Done." : "");
+                assert(mark->y - rest.runs[1].y == want->dy - pet->loops[state][0].dy);
+                frame_at[state][step] = frame;
+                ht_raster(&scene, (ht_rect_t){0, 0, HT_WIDTH, HT_HEIGHT}, full);
+                int ink = 0;
+                for (int y = 0; y < HT_HEIGHT; y++) for (int x = 0; x < HT_WIDTH; x++)
+                    if (full[y * HT_WIDTH + x]) {
+                        ink++;
+                        assert((x - 233) * (x - 233) + (y - 233) * (y - 233) < 230 * 230);
+                    }
+                assert(ink > 0);
+            }
+        // Each state moves: more than one frame (or a hop) over its loop, and one step_ms changes it.
+        for (int state = 0; state < HT_PET_STATES; state++) {
+            bool moves = false;
+            for (int step = 0; step < HT_PET_STEPS; step++)
+                moves |= frame_at[state][step] != frame_at[state][0] ||
+                         pet->loops[state][step].dy != pet->loops[state][0].dy;
+            assert(moves);
+        }
+        // The working legs change on the next step: 90 ms later is a different frame.
+        assert(frame_at[HT_PET_WORKING][0] != frame_at[HT_PET_WORKING][3]);
+        assert(frame_at[HT_PET_IDLE][0] != frame_at[HT_PET_IDLE][20]);   // the blink
+
+        // clock_ms 0, and a sleeping or offline mood, hold idle step 0 whatever the state says.
+        ht_character_face_t held[3] = {
+            {.recipient = "x", .engine = eng, .activity = "Working", .elapsed = 5, .asking = true,
+             .mood = HT_CHARACTER_WORKING, .clock_ms = 0},
+            {.recipient = "x", .engine = eng, .activity = "", .mood = HT_CHARACTER_ASLEEP, .clock_ms = 5000},
+            {.recipient = "x", .engine = eng, .activity = "", .mood = HT_CHARACTER_OFFLINE, .clock_ms = 5000},
+        };
+        for (int k = 0; k < 3; k++) {
+            held[k].status = ""; held[k].hint = ""; held[k].detail = "";
+            ht_scene_t scene; ht_scene_clear(&scene, 0);
+            ht_character_face(&scene, &c, &held[k], 0xffff, "");
+            assert(scene.count == 1 + 1 + 1 + 4 + 1 + 2);
+            assert(pet_frame(pet, scene.runs[1].sprite.pixels) == pet->loops[HT_PET_IDLE][0].frame);
+            assert(!ht_focus_pet_next_ms(&held[k], ""));
+        }
+
+        // An engine without a pet keeps its own mark, in any state, and has no pet clock.
+        ht_character_face_t other = {.recipient = "x", .engine = "cursor", .activity = "Working",
+            .elapsed = 5, .status = "", .hint = "", .detail = "", .mood = HT_CHARACTER_WORKING,
+            .clock_ms = 4321};
+        ht_scene_t scene; ht_scene_clear(&scene, 0);
+        ht_character_face(&scene, &c, &other, 0xffff, "");
+        assert(scene.runs[1].sprite.pixels == ht_icon_engine56[2].px && scene.runs[1].sprite.width == 56);
+        assert(!ht_focus_pet_next_ms(&other, ""));
+
+        // The time the face next changes: a later clock, where the drawn frame or hop really differs,
+        // and nothing differs one ms before it.
+        ht_character_face_t w = {.recipient = "x", .engine = eng, .activity = "Working",
+            .status = "", .hint = "", .detail = "", .elapsed = 5, .mood = HT_CHARACTER_WORKING};
+        for (unsigned k = 0; k < 40; k++) {
+            w.clock_ms = k * 90 + 1;
+            uint32_t next = ht_focus_pet_next_ms(&w, "");
+            assert(next > w.clock_ms);
+            ht_character_face_t at = w, before = w;
+            at.clock_ms = next; before.clock_ms = next - 1;
+            ht_scene_t sa, sb, sw; ht_scene_clear(&sa, 0); ht_scene_clear(&sb, 0); ht_scene_clear(&sw, 0);
+            ht_character_face(&sa, &c, &at, 0xffff, "");
+            ht_character_face(&sb, &c, &before, 0xffff, "");
+            ht_character_face(&sw, &c, &w, 0xffff, "");
+            assert(sa.runs[1].sprite.pixels != sb.runs[1].sprite.pixels || sa.runs[1].y != sb.runs[1].y);
+            assert(sb.runs[1].sprite.pixels == sw.runs[1].sprite.pixels && sb.runs[1].y == sw.runs[1].y);
+        }
+        w.clock_ms = 1; w.mood = HT_CHARACTER_IDLE; w.activity = "";
+        assert(ht_focus_pet_next_ms(&w, "") > 1);
+        w.voice = true; assert(!ht_focus_pet_next_ms(&w, "")); w.voice = false;
+        w.clock_ms = 0; assert(!ht_focus_pet_next_ms(&w, ""));
+    }
+
+    // Stated as its parts rather than as a number: the curved name, the mark, the card, the recap
+    // (four lines), the live status and the resting line (two lines). Each is emitted empty when it
+    // has nothing to say.
+    assert(expected == 1 + 1 + 1 + 4 + 1 + 2);
 }
 
 static void footer_layout(void)

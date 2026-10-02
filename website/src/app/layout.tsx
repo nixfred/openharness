@@ -5,8 +5,8 @@ export const metadata: Metadata = {
   title: "Harness",
   description: "Describe it. Build it. Ship it.",
   icons: {
-    icon: '/icon.svg?v=4',
-    shortcut: '/icon.svg?v=4',
+    icon: '/icon.svg?v=5',
+    shortcut: '/icon.svg?v=5',
   },
   appleWebApp: {
     capable: true,

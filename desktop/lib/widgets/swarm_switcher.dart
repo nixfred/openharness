@@ -969,7 +969,8 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                       : desktop
                       ? row.isStore
                             ? StoreMark(size: 28, enabled: canSubmit)
-                            : row.agentId != null ||
+                            : row.isAgentChoice ||
+                                  row.agentId != null ||
                                   row.isStoreEntry ||
                                   (row.isSwarm && row.members.length == 1)
                             ? EngineMark(
@@ -1019,7 +1020,8 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                                   )
                                 : row.isStore
                                 ? StoreMark(size: 20, enabled: canSubmit)
-                                : row.agentId != null ||
+                                : row.isAgentChoice ||
+                                      row.agentId != null ||
                                       (row.isSwarm && row.members.length == 1)
                                 ? EngineMark(
                                     engine: row.engine,

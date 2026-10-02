@@ -64,6 +64,99 @@ void main() {
     }),
   );
 
+  group('macOS "Add period with double-space"', () {
+    Future<List<String>> mount(WidgetTester tester) async {
+      final terminal = Terminal(maxLines: 20)..resize(80, 4);
+      final output = <String>[];
+      terminal.onOutput = output.add;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 800,
+            height: 200,
+            child: TerminalView(terminal, autofocus: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      return output;
+    }
+
+    void native(WidgetTester tester, String text, {TextRange? composing}) {
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+          composing: composing ?? TextRange.empty,
+        ),
+      );
+    }
+
+    // The second press never arrives as a space: macOS asks the input client to replace the
+    // first one with ". ", which reached the pty as a Backspace and ". ". So the space bar is
+    // typed straight into the terminal and never reaches the input method.
+    testWidgets(
+      'the space bar is typed directly, so two presses stay two spaces',
+      (tester) async {
+        final output = await mount(tester);
+        native(tester, 'a');
+        await tester.pump();
+        for (var press = 0; press < 2; press++) {
+          expect(
+            await tester.sendKeyEvent(
+              LogicalKeyboardKey.space,
+              character: ' ',
+              platform: 'macos',
+            ),
+            isTrue,
+          );
+        }
+        // The native buffer follows, so the next letter the input method inserts diffs cleanly.
+        expect(tester.testTextInput.editingState?['text'], 'a  ');
+        native(tester, 'a  b');
+        await tester.pump();
+        expect(output.join(), 'a  b');
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'a space that commits a composition still goes to the input method',
+      (tester) async {
+        final output = await mount(tester);
+        native(tester, 'ni', composing: const TextRange(start: 0, end: 2));
+        await tester.pump();
+        expect(
+          await tester.sendKeyEvent(
+            LogicalKeyboardKey.space,
+            character: ' ',
+            platform: 'macos',
+          ),
+          isFalse,
+        );
+        expect(output, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'other platforms leave the space bar to the input method',
+      (tester) async {
+        final output = await mount(tester);
+        expect(
+          await tester.sendKeyEvent(
+            LogicalKeyboardKey.space,
+            character: ' ',
+            platform: 'linux',
+          ),
+          isFalse,
+        );
+        expect(output, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.linux),
+    );
+  });
+
   testWidgets(
     'an observed terminal exposes no accessibility editing action',
     (tester) async {

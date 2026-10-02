@@ -462,7 +462,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
             SessionFilter.all => 'Show all harnesses',
             SessionFilter.needsInput => 'Show harnesses needing input',
             SessionFilter.running => 'Show running harnesses',
-            SessionFilter.paused => 'Show paused harnesses',
+            SessionFilter.paused => 'Show stopped harnesses',
           },
           () => widget.search.setSessionFilter(filter),
           command: 'picker.filter.${filter.name}',
@@ -565,17 +565,15 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   void _toggleHarness() {
     final session = _session;
     if (session == null || !session.canControl) return;
+    if (session.agent.isStopped) {
+      _open();
+      return;
+    }
     final search = widget.search;
     search.holdRow(row!);
     unawaited(
       _run(() async {
         try {
-          if (session.agent.isStopped) {
-            return (await app.resumeAgent(
-              session.machineId,
-              session.agent.id,
-            )).error;
-          }
           return await app.pauseAgent(session.machineId, session.agent.id);
         } finally {
           search.releaseRow(session.id);
@@ -773,6 +771,15 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     final selected = row;
     if (selected == null) return const [];
     final busy = _pending.contains(selected.id);
+    if (selected.isAgentChoice) {
+      return [
+        _ResourceAction(
+          search.actionLabel(selected),
+          search.canAccept && !busy ? _open : null,
+          command: 'picker.accept',
+        ),
+      ];
+    }
     if (search.isModelDownloadsRow(selected)) {
       return [
         _ResourceAction(
@@ -961,19 +968,13 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
             ? 'Answer'
             : selected.isProject
             ? 'Harnesses'
-            : session?.agent.isStopped == true
-            ? 'Resume & open'
             : 'Open',
         search.canAccept && !busy && !pendingControl ? _open : null,
         command: 'picker.accept',
       ),
-      if (session != null)
+      if (session != null && !session.agent.isStopped)
         _ResourceAction(
-          busy || pendingControl
-              ? 'Working…'
-              : session.agent.isStopped
-              ? 'Resume'
-              : 'Pause',
+          busy || pendingControl ? 'Working…' : 'Stop',
           !busy && !pendingControl && session.canControl
               ? _toggleHarness
               : null,
@@ -981,7 +982,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           hint:
               session.controlUnavailable ??
               (session.agent.resumesFreshConversation
-                  ? 'Resumes as a new conversation.'
+                  ? 'Opens as a new conversation.'
                   : null),
         ),
     ];
@@ -1113,7 +1114,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
               SessionFilter.all => 'All',
               SessionFilter.needsInput => 'Needs input',
               SessionFilter.running => 'Running',
-              SessionFilter.paused => 'Paused',
+              SessionFilter.paused => 'Stopped',
             }}',
             () => search.setSessionFilter(
               SessionFilter.values[(search.sessionFilter.index + 1) %
@@ -1306,6 +1307,8 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           errorLine(widget.search.modelUseError!),
         SizedBox(height: cell.height),
         if (local != null) ...[
+          // A model another app downloaded starts in that app, joined to the grid from there.
+          if (local.app case final app?) labelValue('Runs in', app),
           // What decides between models: what it costs to get, whether it fits, how fast it answers.
           if (local.sizeBytes case final size?)
             labelValue(
@@ -1388,8 +1391,10 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           ],
           labelValue('Source', entry.source),
         ],
+        // While Use stops the model running there, the host is busy with that stop: the hint says so.
         if (widget.search.modelUseReason(row) case final reason?
-            when reason != 'No active harness' &&
+            when widget.search.usingModelId != row?.modelId &&
+                reason != 'No active harness' &&
                 reason != entry.status &&
                 reason != 'Tools only' &&
                 reason != 'Download first')
@@ -1423,10 +1428,12 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     final search = widget.search;
     final selected = row;
     if (selected == null || search.modelRowInUse(selected)) return null;
-    // One local model runs at a time: a second one waits for the first to stop.
+    // One local model runs at a time: Use and Get stop the one running, then start this one.
     final other = search.otherRunningModel(selected)?.name;
     if (search.canGetModelForUse(selected)) {
-      return 'Get downloads it, starts it, and moves this harness onto it.';
+      return other == null
+          ? 'Get downloads it, starts it, and moves this harness onto it.'
+          : 'Get downloads it, stops $other, starts it, and moves this harness onto it.';
     }
     if (search.canGetModel(selected)) {
       return other == null
@@ -1438,7 +1445,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           ? 'Use moves this harness onto it.'
           : other == null
           ? 'Use starts it and moves this harness onto it.'
-          : 'Stop $other first: one local model runs at a time.';
+          : 'Use stops $other, starts this one, and moves this harness onto it.';
     }
     return null;
   }
@@ -1761,6 +1768,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           grid.AppTheme.palette.value,
           terminalThemeStore.value,
         );
+        final showsHints = KeyHints.visibleOf(context);
         final actions = [
           if (desktop || !_isManagement)
             Padding(
@@ -1768,11 +1776,13 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                 cell.width * 2,
                 cell.height,
                 cell.width * 2,
-                0,
+                // The hints line is the gap under the buttons; without it
+                // they would sit on the panel's edge.
+                showsHints ? 0 : cell.height,
               ),
               child: _actionButtons(),
             ),
-          if (KeyHints.visibleOf(context)) _controlHints(),
+          if (showsHints) _controlHints(),
         ];
         return LayoutBuilder(
           builder: (context, constraints) => Column(
@@ -1855,6 +1865,15 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                       )
                     : widget.search.showsTypeHints
                     ? _typeHints()
+                    : row?.isAgentChoice == true
+                    ? _details([
+                        row!.title,
+                        row!.detail,
+                        if (widget.search.canAccept && !row!.current) ...[
+                          '',
+                          'Saves the current conversation, then starts a new one in the same folder. Your panes stay in place.',
+                        ],
+                      ])
                     : row?.isCreate == true
                     ? _details([
                         ...widget.search.createDescription.split('\n'),

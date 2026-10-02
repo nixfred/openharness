@@ -236,5 +236,5 @@ export function prepareHarnessLaunch(dsh: InstalledDsh, workspace: string, engin
   ].join('\n')
   writeManagedFile(env.HARNESS_CONTEXT_FILE!, context)
   if (!existsSync(file)) writeManagedFile(file, `${JSON.stringify(data, null, 2)}\n`)
-  return { env, args: [...data.args, ...(adapter.contextArgs?.(env.HARNESS_CONTEXT_FILE!) ?? [])] }
+  return { env, args: [...data.args, ...(adapter.contextArgs?.(env.HARNESS_CONTEXT_FILE!) ?? []), ...(adapter.envArgs?.(env) ?? [])] }
 }

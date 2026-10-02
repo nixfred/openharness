@@ -166,7 +166,11 @@ void main() {
     app.addListener(() => updates++);
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/');
     expect(_viewers(app).single.id, viewer.id);
-    expect(updates, 0, reason: 'an unchanged viewer must not repaint the workspace');
+    expect(
+      updates,
+      0,
+      reason: 'an unchanged viewer must not repaint the workspace',
+    );
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/?file=a.step');
     expect(_viewers(app).single.id, viewer.id);
     expect(_viewers(app).single.url, 'http://127.0.0.1:4179/?file=a.step');
@@ -178,7 +182,7 @@ void main() {
     expect(app.panes.map((p) => p.id), [first.id, second.id]);
   });
 
-  test('alone with its terminal, the viewer takes two thirds', () async {
+  test('alone with its terminal, the viewer takes 70 percent', () async {
     final app = createApp();
     addTearDown(app.dispose);
     final input = <TerminalBinaryFrame>[];
@@ -188,8 +192,8 @@ void main() {
     expect(app.panes.map((p) => p.id), [viewer.id, terminalPane.id]);
     final split = app.activeSwarm.paneSizes['2:manual'];
     expect(split, isNotNull);
-    expect(split!.tiles.map((t) => t.left), [0, 2 / 3]);
-    expect(split.tiles.map((t) => t.right), [2 / 3, 1]);
+    expect(split!.tiles.map((t) => t.left), [0, .7]);
+    expect(split.tiles.map((t) => t.right), [.7, 1]);
     expect(split.tiles.map((t) => t.height), [1, 1]);
     // The viewer going away takes the pair's layout with it, the way any
     // removal does; a new viewer starts the split afresh.
@@ -254,7 +258,11 @@ void main() {
     app.addListener(() => updates++);
     await _synced(app, 'a0', viewerUrl: 'http://127.0.0.1:4179/');
     expect(_viewers(app), hasLength(1));
-    expect(updates, greaterThan(0), reason: 'restoring a viewer is a visible change');
+    expect(
+      updates,
+      greaterThan(0),
+      reason: 'restoring a viewer is a visible change',
+    );
   });
 
   test('the header control hides the viewer and brings it back', () async {

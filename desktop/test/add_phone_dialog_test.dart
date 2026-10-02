@@ -5,7 +5,6 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:harness/api/api_client.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/auth/auth_session.dart';
@@ -71,8 +70,7 @@ Future<void> _open(
   PhonePairCall pair, {
   PhoneSignInCodeCall? signInCode,
   VoidCallback? onConnectMachine,
-  PairedDevicesCall? listDevices,
-  RemovePairedDeviceCall? removeDevice,
+  VoidCallback? onManageDevices,
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = const Size(1280, 800);
@@ -91,8 +89,7 @@ Future<void> _open(
       pair: pair,
       signInCode: signInCode ?? _FakeSignIn().call,
       onConnectMachine: onConnectMachine,
-      listDevices: listDevices ?? () async => null,
-      removeDevice: removeDevice ?? (_) async => false,
+      onManageDevices: onManageDevices,
     ),
   );
   await tester.pump();
@@ -308,129 +305,48 @@ void main() {
     });
   });
 
-  group('the devices already paired', () {
-    PairedDevice device(String id, String label, {bool online = false}) =>
-        PairedDevice(
-          fingerprint: id,
-          label: label,
-          pairedAt: DateTime.now().subtract(const Duration(days: 2)),
-          online: online,
+  group('the account\'s devices', () {
+    testWidgets(
+      'are one link away — Settings ▸ Your devices — not a list in here',
+      (tester) async {
+        final app = _signedInApp();
+        addTearDown(app.dispose);
+        var opened = 0;
+        await _open(
+          tester,
+          app,
+          _FakeDaemon(List.filled(20, _failed('NO_INTENT'))).call,
+          onManageDevices: () => opened++,
         );
+        await tester.pump();
+        final link = find.byKey(const ValueKey('add-phone-manage-devices'));
+        expect(link, findsOneWidget);
+        expect(find.text('Manage devices…'), findsOneWidget);
+        await tester.tap(link);
+        await tester.pump();
+        // The dialog makes way for Settings: one is open at a time.
+        expect(opened, 1);
+        expect(find.byType(AddPhoneDialog), findsNothing);
+        await tester.pump(const Duration(seconds: 10));
+      },
+    );
 
-    testWidgets('are listed under the QR, and one click takes one away', (
-      tester,
-    ) async {
-      final app = _signedInApp();
-      addTearDown(app.dispose);
-      final removed = <String>[];
-      await _open(
-        tester,
-        app,
-        _FakeDaemon(List.filled(20, _failed('NO_INTENT'))).call,
-        listDevices: () async => [
-          device('AAAA', "Dee's iPhone", online: true),
-          device('BBBB', 'harness link'),
-          device('CCCC', 'Old phone'),
-          device('DDDD', 'Older phone'),
-          device('EEEE', 'Oldest phone'),
-        ],
-        removeDevice: (id) async {
-          removed.add(id);
-          return true;
-        },
-      );
-      await tester.pump();
-      expect(find.byKey(const ValueKey('add-phone-devices')), findsOneWidget);
-      expect(find.text("Dee's iPhone"), findsOneWidget);
-      expect(find.text('Online'), findsOneWidget);
-      // A pairing that never said who it is says so in plain words.
-      expect(find.text('Linked device'), findsOneWidget);
-      expect(find.text('2d'), findsNWidgets(2));
-      // Three, then the rest on request: the list must not outweigh the QR.
-      expect(find.text('Older phone'), findsNothing);
-      await tester.tap(find.widgetWithText(TextButton, 'Show 2 more'));
-      await tester.pump();
-      expect(find.text('Oldest phone'), findsOneWidget);
-
-      await tester.tap(
-        find.descendant(
-          of: find.byKey(const ValueKey('add-phone-device-BBBB')),
-          matching: find.widgetWithText(TextButton, 'Remove'),
-        ),
-      );
-      await tester.pump();
-      await tester.pump();
-      expect(removed, ['BBBB']);
-      expect(find.text('Linked device'), findsNothing);
-
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 10));
-    });
-
-    testWidgets('a removal the daemon refuses keeps the row and says so', (
-      tester,
-    ) async {
+    testWidgets('no link when there is nowhere to send it', (tester) async {
       final app = _signedInApp();
       addTearDown(app.dispose);
       await _open(
         tester,
         app,
         _FakeDaemon(List.filled(20, _failed('NO_INTENT'))).call,
-        listDevices: () async => [device('AAAA', "Dee's iPhone")],
-        removeDevice: (_) async => false,
       );
       await tester.pump();
-      await tester.tap(find.widgetWithText(TextButton, 'Remove'));
-      await tester.pump();
-      await tester.pump();
-      expect(find.text("Dee's iPhone"), findsOneWidget);
-      expect(_status(tester), "Couldn't remove Dee's iPhone. Try again.");
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 10));
-    });
-
-    testWidgets('no list when nothing is paired, or the daemon cannot say', (
-      tester,
-    ) async {
-      final app = _signedInApp();
-      addTearDown(app.dispose);
-      await _open(
-        tester,
-        app,
-        _FakeDaemon(List.filled(20, _failed('NO_INTENT'))).call,
-        listDevices: () async => const [],
-      );
-      await tester.pump();
-      expect(find.byKey(const ValueKey('add-phone-devices')), findsNothing);
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 10));
-    });
-
-    test('reads the daemon\'s list: web pairings only, named plainly', () {
-      final phone = PairedDevice.fromJson({
-        'fingerprint': 'AB12',
-        'label': "Dee's iPhone",
-        'pairedAt': 1790523878148,
-        'online': true,
-        'role': 'web',
-        'current': false,
-      })!;
-      expect(phone.name, "Dee's iPhone");
-      expect(phone.online, isTrue);
       expect(
-        PairedDevice.fromJson({'fingerprint': 'X', 'role': 'device'}),
-        isNull,
-        reason: 'the dial is managed in Settings',
+        find.byKey(const ValueKey('add-phone-manage-devices')),
+        findsNothing,
       );
-      expect(PairedDevice.fromJson({'label': 'no id'}), isNull);
-      expect(
-        PairedDevice.fromJson({'fingerprint': 'X', 'label': 'harness link'})!
-            .name,
-        'Linked device',
-      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 10));
     });
   });
 
@@ -633,5 +549,35 @@ void main() {
       expect(find.byType(AddPhoneDialog), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
+
+    testWidgets(
+      'Manage devices… makes way for Settings ▸ Your devices, which opens',
+      (tester) async {
+        // The dialog is still this screen's open dialog while it pops, so a
+        // Settings asked for from the link itself was silently refused.
+        final app = _signedInApp();
+        addTearDown(app.dispose);
+        await mount(tester, app);
+        await chord(tester, LogicalKeyboardKey.keyP, shift: true);
+        await tester.enterText(
+          find.byKey(const ValueKey('swarm-search-input')),
+          '> add phone',
+        );
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        final link = find.byKey(const ValueKey('add-phone-manage-devices'));
+        expect(link, findsOneWidget);
+
+        await tester.tap(link);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(find.byType(AddPhoneDialog), findsNothing);
+        expect(find.text('Your devices'), findsWidgets);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump(const Duration(seconds: 10));
+      },
+    );
   });
 }

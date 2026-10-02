@@ -15,7 +15,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/harness_placement.dart';
 import 'package:harness/state/new_harness.dart';
 import 'package:harness/widgets/new_harness_form.dart';
-import 'package:harness/widgets/harness_session_manager.dart';
+import 'package:harness/state/harness_monitor_controller.dart';
 import 'package:harness/terminal/terminal_binary.dart';
 import 'package:xterm/xterm.dart';
 
@@ -24,6 +24,7 @@ import 'keymap_host_test.dart' show key;
 import 'swarm_screen_test.dart' show mount, terminal;
 import 'swarm_state_test.dart' show createApp;
 import 'support/model_manager.dart';
+import 'support/harness_monitor.dart';
 
 class _MachineApi extends ApiClient {
   _MachineApi() : super(config: AppConfig.dev, session: AuthSession());
@@ -41,8 +42,8 @@ class _MachineApi extends ApiClient {
   }
 }
 
-class _ToolbarApp extends ModelManagerTestApp {
-  _ToolbarApp() : super(ModelManagerConnection());
+class _ToolbarApp extends MonitorTestApp {
+  _ToolbarApp() : super(MonitorConnection());
 
   @override
   Future<RemotePasswordStatus> remotePasswordStatus() async =>
@@ -103,10 +104,10 @@ void main() {
 
         await openWorkspaceManagement(tester, 'harnesses');
         await tester.pumpAndSettle();
-        expect(find.byType(HarnessSessionManager), findsOneWidget);
+        expect(app.activeSwarm.name, harnessMonitorName);
         await openWorkspaceManagement(tester, 'machines');
         await tester.pumpAndSettle();
-        expect(find.byType(HarnessSessionManager), findsNothing);
+        expect(app.activeSwarm.name, harnessMonitorName);
         expect(resourceScope('@'), findsOneWidget);
         await openWorkspaceManagement(tester, 'models');
         await tester.pumpAndSettle();

@@ -14,6 +14,41 @@ Map<String, dynamic> picture() => {
 };
 
 void main() {
+  testWidgets('host navigation is delivered once and ignored after disposal', (
+    tester,
+  ) async {
+    final actions = <Map<String, dynamic>>[];
+    final replies = <Completer<Map<String, dynamic>>>[];
+    final session = InteractiveViewerSession((payload) {
+      if (payload['op'] == 'close') return Future.value({'closed': true});
+      final reply = Completer<Map<String, dynamic>>();
+      replies.add(reply);
+      return reply.future;
+    }, onHostAction: actions.add);
+    session.configure(const Size(800, 600), false);
+    await tester.pump(const Duration(milliseconds: 1));
+    replies.first.complete({
+      ...picture(),
+      'hostActions': [
+        {'action': 'assistant'},
+      ],
+    });
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(actions, [
+      {'action': 'assistant'},
+    ]);
+    session.input({'type': 'text', 'text': 'next'});
+    await tester.pump(const Duration(milliseconds: 1));
+    session.dispose();
+    replies.last.complete({
+      ...picture(),
+      'hostActions': [
+        {'action': 'assistant'},
+      ],
+    });
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(actions, hasLength(1));
+  });
   testWidgets('one frame in flight; queued input arrives once and in order', (
     tester,
   ) async {

@@ -191,6 +191,21 @@ describe('daemon spawn lock', () => {
       .toBe('Harness cannot sign in on this computer right now. Run `harness login --force` in a terminal to see why.')
   })
 
+  it('tells a sign-in that waits on the lock what it waits for, in a person\'s words', async () => {
+    // The desktop shows the waiting line verbatim while a sign-in sits behind the lock, so it names
+    // what Harness is doing — and, when the holder is another sign-in, says exactly that.
+    const lock = await loadLock()
+    const owner = (purpose: 'start' | 'update' | 'handoff' | 'stop' | 'login') =>
+      ({ pid: 4242, startMarker: '', token: 't', purpose, since: Date.now() })
+    for (const purpose of ['start', 'update', 'handoff', 'stop', 'login'] as const) {
+      const said = lock.describeSpawnLockWaitPlainly(owner(purpose))
+      expect(said).toMatch(/^[^.]+ — waiting for it to finish…$/)
+      expect(said).not.toMatch(/pid|4242|lock/)
+    }
+    expect(lock.describeSpawnLockWaitPlainly(owner('login'))).toMatch(/^Another sign-in/)
+    expect(lock.describeSpawnLockWaitPlainly(owner('update'))).toBe('Harness is still updating on this computer — waiting for it to finish…')
+  })
+
   it('serializes two real spawners racing for the lock', async () => {
     // Each child takes the lock, appends "<pid> in", sleeps, appends "<pid> out". Serialized, the
     // trace is in/out/in/out; a broken lock interleaves in/in.

@@ -460,12 +460,12 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         v
     } else if f.windows && es.session.is_some() {
         // format_loop_windows in a session not in front (a #{S:} loop's): its own windows.
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let sid = es.session.unwrap_or_default();
         let current = es.app.stash_value(sid, "window_index");
         let mut v = String::new();
         for (k, (num, _, _)) in es.app.session_windows(sid).into_iter().enumerate() {
-            let use_ = if Some(num.to_string()) == current { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(num.to_string()) == current { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, None);
             next.window_of = Some(k);
             next.format_type = Some(crate::tree::FORMAT_WINDOW);
@@ -473,10 +473,10 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         }
         v
     } else if f.windows {
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let mut v = String::new();
         for w in 0..es.app.tabs.len() {
-            let use_ = if w == es.app.active { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if w == es.app.active { active.unwrap_or(all) } else { all };
             let mut next = es.at(w, None);
             next.format_type = Some(crate::tree::FORMAT_WINDOW);
             v.push_str(&expand1(&mut next, use_));
@@ -484,23 +484,23 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         v
     } else if f.panes && es.session.and_then(|id| es.app.stash_panes(id, es.window_of)).is_some() {
         // format_loop_panes in a session not in front (a #{S:} loop's): its window's own panes.
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let (panes, focus, _) = es.session.and_then(|id| es.app.stash_panes(id, es.window_of)).unwrap_or_default();
         let mut v = String::new();
         for p in panes {
-            let use_ = if Some(p) == focus { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(p) == focus { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, Some(p));
             next.format_type = Some(crate::tree::FORMAT_PANE);
             v.push_str(&expand1(&mut next, use_));
         }
         v
     } else if f.panes {
-        let (all, active) = match choose(es, copy, false) { Some((a, b)) => (a, Some(b)), None => (copy.to_string(), None) };
+        let (all, active) = match choose(copy) { Some((a, b)) => (a, Some(b)), None => (copy, None) };
         let tab = es.app.tabs.get(es.window);
         let focus = tab.and_then(|t| t.focus);
         let mut v = String::new();
         for p in tab.map(|t| t.panes()).unwrap_or_default() {
-            let use_ = if Some(p) == focus { active.as_deref().unwrap_or(&all) } else { &all };
+            let use_ = if Some(p) == focus { active.unwrap_or(all) } else { all };
             let mut next = es.at(es.window, Some(p));
             next.format_type = Some(crate::tree::FORMAT_PANE);
             v.push_str(&expand1(&mut next, use_));
@@ -516,7 +516,7 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
         let term = expand1(es, copy);
         search_pane(es, fm, &term)
     } else if let Some(fm) = cmp {
-        let (left, right) = choose(es, copy, true)?;
+        let (left, right) = choose_expanded(es, copy)?;
         let t = |b: bool| if b { "1".to_string() } else { "0".to_string() };
         match fm.m.as_str() {
             "||" => t(truthy(&left) || truthy(&right)),
@@ -537,8 +537,8 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
             // Not a name: expanded; if that changes nothing, false.
             None => { let v = expand1(es, condition); if v == condition { String::new() } else { v } }
         };
-        let (left, right) = choose(es, &rest[k + 1..], false)?;
-        if truthy(&found) { expand1(es, &left) } else { expand1(es, &right) }
+        let (left, right) = choose(&rest[k + 1..])?;
+        if truthy(&found) { expand1(es, left) } else { expand1(es, right) }
     } else if let Some(fm) = mexp {
         expression(es, fm, copy).unwrap_or_default()
     } else if copy.contains("#{") {
@@ -569,11 +569,16 @@ fn replace(es: &mut Es, key: &str) -> Option<String> {
     Some(value)
 }
 
-/// `a,b`: the two sides at the first comma outside `#{…}`, expanded when asked (format_choose).
-fn choose(es: &mut Es, s: &str, expand: bool) -> Option<(String, String)> {
+/// `a,b`: borrow the two templates at the first comma outside `#{…}`. Conditions
+/// and loops expand only the selected template, without copying either side.
+fn choose(s: &str) -> Option<(&str, &str)> {
     let k = skip(s.as_bytes(), b",")?;
-    let (l, r) = (&s[..k], &s[k + 1..]);
-    Some(if expand { (expand1(es, l), expand1(es, r)) } else { (l.to_string(), r.to_string()) })
+    Some((&s[..k], &s[k + 1..]))
+}
+
+fn choose_expanded(es: &mut Es, s: &str) -> Option<(String, String)> {
+    let (l, r) = choose(s)?;
+    Some((expand1(es, l), expand1(es, r)))
 }
 
 fn truthy(v: &str) -> bool { !v.is_empty() && v != "0" }
@@ -741,7 +746,7 @@ fn expression(es: &mut Es, fm: &Mod, copy: &str) -> Option<String> {
     let fp = fm.argv.get(1).map(|a| a.contains('f')).unwrap_or(false);
     let mut prec: usize = if fp { 2 } else { 0 };
     if let Some(p) = fm.argv.get(2) { prec = p.trim().parse().ok()? }
-    let (l, r) = choose(es, copy, true)?;
+    let (l, r) = choose_expanded(es, copy)?;
     let num = |s: &str| -> Option<f64> { if s.is_empty() { Some(0.0) } else { s.trim_start().parse::<f64>().ok() } };
     let (mut a, mut b) = (num(&l)?, num(&r)?);
     if !fp { a = (a as i64) as f64; b = (b as i64) as f64 }
@@ -754,10 +759,41 @@ fn expression(es: &mut Es, fm: &Mod, copy: &str) -> Option<String> {
     Some(if fp { format!("{v:.prec$}") } else { format!("{:.prec$}", (v as i64) as f64) })
 }
 
+type Substitutions = std::collections::VecDeque<(String, bool, Option<Rc<regex::Regex>>)>;
+thread_local! {
+    static SUBSTITUTIONS: RefCell<Substitutions> = RefCell::new(Default::default());
+}
+
+/// Status formats reuse their patterns on every frame. Keep a small LRU of
+/// compiled expressions, never their match results. Larger expressions retain
+/// the original compiler limits and run uncached rather than growing the cache.
+fn substitution_regex(pattern: &str, icase: bool) -> Option<Rc<regex::Regex>> {
+    let uncached = || regex::RegexBuilder::new(pattern).case_insensitive(icase).build().ok().map(Rc::new);
+    if pattern.len() > 2048 { return uncached() }
+    SUBSTITUTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(at) = cache.iter().position(|(p, i, _)| p == pattern && *i == icase) {
+            let entry = cache.remove(at).unwrap();
+            let re = entry.2.clone();
+            cache.push_front(entry);
+            return re;
+        }
+        let re = match regex::RegexBuilder::new(pattern).case_insensitive(icase)
+            .size_limit(32 * 1024).dfa_size_limit(32 * 1024).build() {
+            Ok(re) => Some(Rc::new(re)),
+            Err(regex::Error::CompiledTooBig(_)) => return uncached(),
+            Err(_) => None,
+        };
+        if cache.len() == 8 { cache.pop_back(); }
+        cache.push_front((pattern.to_string(), icase, re.clone()));
+        re
+    })
+}
+
 /// tmux's regsub: every match replaced; `\0`–`\9` in the replacement are the groups.
 fn regsub(pattern: &str, with: &str, text: &str, icase: bool) -> Option<String> {
     if text.is_empty() { return Some(String::new()) }
-    let re = regex::RegexBuilder::new(pattern).case_insensitive(icase).build().ok()?;
+    let re = substitution_regex(pattern, icase)?;
     let (mut start, mut last, end) = (0usize, 0usize, text.len());
     let mut empty = false;
     let mut buf = String::new();
@@ -1024,7 +1060,7 @@ pub fn agent_mark(state: crate::fleet::State, tick: u64) -> String {
 /// One remaining figure per subscription, across every machine with a reading. The local
 /// reading wins when machines share an account; unnamed accounts cannot safely be merged.
 /// Machine labels distinguish additional subscriptions without repeating them for shared ones.
-fn quota_remaining<'a>(readings: impl Iterator<Item = (&'a str, &'a crate::fleet::Usage)>, local: &str, machine_name: impl Fn(&str) -> String, marked: bool) -> String {
+fn quota_remaining<'a>(readings: impl Iterator<Item = (&'a str, &'a crate::fleet::Usage)>, local: &str, machine_name: impl Fn(&str) -> String, marked: bool, icons: bool) -> String {
     let mut readings: Vec<_> = readings.filter(|(_, u)| !u.windows.is_empty()).collect();
     readings.sort_by(|(am, a), (bm, b)| (&a.provider, *am != local, machine_name(am), am).cmp(&(&b.provider, *bm != local, machine_name(bm), bm)));
     let mut seen = std::collections::HashSet::new();
@@ -1034,7 +1070,7 @@ fn quota_remaining<'a>(readings: impl Iterator<Item = (&'a str, &'a crate::fleet
         let remaining = 100.0 - used;
         // A little allowance remains: don't round it to a misleading exhausted 0%.
         let number = if remaining > 0.0 && remaining < 1.0 { "<1%".into() } else { format!("{remaining:.0}%") };
-        let mut label = quota_provider(&u.provider);
+        let mut label = if icons { quota_icon(&u.provider) } else { quota_provider(&u.provider) };
         if *machine != local && readings.iter().filter(|(_, other)| other.provider == u.provider).count() > 1 {
             label.push('@'); label.push_str(&clip_middle(&machine_name(machine), 12));
         }
@@ -1042,6 +1078,15 @@ fn quota_remaining<'a>(readings: impl Iterator<Item = (&'a str, &'a crate::fleet
             Some(format!("{label} #[fg={}]{number}#[fg=default]", quota_color(used)))
         } else { Some(format!("{label} {number}")) }
     }).collect::<Vec<_>>().join("  ")
+}
+
+/// A subscription's provider as its engine's icon, in the engine's colour (`✳` Claude, `◎`
+/// Codex/OpenAI…); a provider with no engine of its own, its name.
+fn quota_icon(provider: &str) -> String {
+    let engine = match provider.to_ascii_lowercase().as_str() { "anthropic" | "claude" => "claude", "openai" | "chatgpt" | "codex" => "codex", _ => return quota_provider(provider) };
+    let (mark, colour) = crate::theme::engine_mark(engine);
+    if crate::theme::no_color() { return mark.to_string() }
+    format!("#[fg={}]{mark}#[fg=default]", crate::tmuxconf::colour_name(crate::theme::paint(colour)))
 }
 
 fn quota_provider(provider: &str) -> String {
@@ -1114,7 +1159,7 @@ fn pane_heading_columns(app: &App, window: usize, pane: u64) -> usize {
     if app.options.pane_look() {
         let Some(tab) = app.tabs.get(window) else { return 0 };
         let Some(tile) = tab_rect(app, window, pane) else { return 0 };
-        crate::pane_frame::frame(tile, app.window_area(tab), app.pane_status(tab)).title
+        crate::pane_frame::frame(tile, app.window_area(tab), app.box_inner(tab), app.pane_status(tab)).title
             .map(|r| r.width.saturating_sub(2) as usize).unwrap_or(0)
     } else {
         content_rect(app, window, pane).map(|r| r.width.saturating_sub(4) as usize).unwrap_or(0)
@@ -1125,8 +1170,20 @@ fn pane_heading(app: &App, window: usize, pane: u64) -> String {
     let watcher = app.panes.get(&pane).and_then(|p| match &p.phase {
         crate::pane::Phase::Watching(who) => Some(who.as_str()), _ => None,
     });
-    compact_pane_heading(&pane_title(app, window, pane), app.pane_state(pane), watcher,
-        pane_heading_columns(app, window, pane).saturating_sub(1), app.tick)
+    let columns = pane_heading_columns(app, window, pane).saturating_sub(1);
+    let title = pane_title(app, window, pane);
+    // ── models: what its model says when it will not answer now (Starting up…, offline, not
+    // served), after the name — the name keeps a dozen columns, the note is cut to what is left ──
+    if let Some(note) = app.panes.get(&pane).and_then(|p| crate::models::pane_note(app, &p.machine_id, &p.agent_id)) {
+        use unicode_width::UnicodeWidthStr;
+        let keep = title.width().min(12) + 4;
+        if columns > keep + 12 {
+            let note = clip_middle(&note, (columns - keep - 1).min(note.width()));
+            let head = compact_pane_heading(&title, app.pane_state(pane), watcher, columns - note.width() - 1, app.tick);
+            return format!("{head} #[fg=yellow]{note}#[fg=default]");
+        }
+    }
+    compact_pane_heading(&title, app.pane_state(pane), watcher, columns, app.tick)
 }
 
 /// Keep state visible after the name. Watcher detail yields before the pane's identity;
@@ -1322,15 +1379,20 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
             let mut parts = Vec::new();
             let n = app.fleet.count(NeedsInput);
             if n > 0 { parts.push(format!("#[bold]?{n}#[nobold]")) }
-            for (state, glyph) in [(Failed, "✗"), (Done, "✓"), (Working, crate::theme::spinner(app.tick))] {
+            for state in [Failed, Done, Working] {
                 let n = app.fleet.count(state);
-                if n > 0 { parts.push(format!("{glyph}{n}")) }
+                if n > 0 {
+                    let glyph = match state { Failed => "✗", Done => "✓", _ => crate::theme::spinner(app.tick) };
+                    parts.push(format!("{glyph}{n}"));
+                }
             }
             parts.join(" ")
         }
         // The spinner's frame now, for a format of your own.
         "spinner" => crate::theme::spinner(app.tick).to_string(),
         "daemon_down" => app.daemon_down.then_some("1").unwrap_or("0").into(),
+        // A model being got for a harness, while it is: `↻ qwen3-coder 42%` (empty otherwise).
+        "model_progress" => crate::models::status_text(app).unwrap_or_default(),
         // The pane is another window's to type in (this one watches), when it is the only one.
         "pane_watching" => (pane.map(|p| matches!(p.phase, crate::pane::Phase::Watching(_))).unwrap_or(false) && tab.map(|t| t.panes().len() < 2).unwrap_or(false)).then_some("1").unwrap_or("0").into(),
         // However many panes the window has: whether another window has the pane to type in, and who.
@@ -1386,7 +1448,11 @@ fn table(app: &App, name: &str, window: usize, pane_id: Option<u64>) -> Option<V
         // Compact remaining allowance for every subscription, not just the one in danger.
         "usage_remaining" | "usage_remaining_mark" => quota_remaining(
             app.usage.iter().flat_map(|(machine, readings)| readings.iter().map(move |u| (machine.as_str(), u))),
-            &app.fleet.local_id, |id| app.fleet.machine_name(id), name == "usage_remaining_mark"),
+            &app.fleet.local_id, |id| app.fleet.machine_name(id), name == "usage_remaining_mark", false),
+        // The same, each subscription by its engine's icon (`✳ 43%  ◎ 80%`): the side bar's.
+        "usage_remaining_icons" => quota_remaining(
+            app.usage.iter().flat_map(|(machine, readings)| readings.iter().map(move |u| (machine.as_str(), u))),
+            &app.fleet.local_id, |id| app.fleet.machine_name(id), true, true),
         "usage_high" | "usage_high_mark" => quota_warning(app.usage.values().flatten(), name == "usage_high_mark"),
         "fleet_tokens" => { let t: u64 = app.fleet.agents.values().map(|a| a.tokens).sum(); if t > 0 { crate::fleet::compact(t) } else { String::new() } }
         "pane_branch" => agent.map(|a| a.branch.clone()).unwrap_or_default(),
@@ -1621,7 +1687,7 @@ fn harness_value(app: &App, machine: &str, id: &str, key: &str) -> Option<Val> {
 /// failed, paused, offline.
 fn state_word(s: crate::fleet::State) -> &'static str {
     use crate::fleet::State::*;
-    match s { NeedsInput => "needs", Working => "working", Done => "done", Ready => "idle", Starting => "starting", Failed => "failed", Paused => "paused", Offline => "offline" }
+    match s { NeedsInput => "needs", Working => "working", Done => "done", Unknown => "unknown", Ready => "idle", Starting => "starting", Failed => "failed", Paused => "paused", Offline => "offline" }
 }
 
 /// `#{window_raw_flags}`: `#` activity, `!` bell, `~` silence, `*` current, `-` last, `M` the
@@ -1685,6 +1751,21 @@ fn restyle(mut style: Style, base: Style, spec: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fleet_only_requests_animation_while_working_and_motion_is_enabled() {
+        let mut app = status_fixture(1, 1);
+        for working in [false, true, false] {
+            app.fleet.agents.values_mut().next().unwrap().working = working;
+            crate::theme::begin_animation_frame(true);
+            super::expand(&app, "#{fleet}/#{fleet}", 0, Some(1), false);
+            assert_eq!(crate::theme::needs_animation_frame(), working);
+        }
+        app.fleet.agents.values_mut().next().unwrap().working = true;
+        crate::theme::begin_animation_frame(false);
+        assert_eq!(super::expand(&app, "#{fleet}", 0, Some(1), false), "⠋1");
+        assert!(!crate::theme::needs_animation_frame());
+    }
+
     fn status_fixture(windows: usize, agents: usize) -> crate::app::App {
         let (sink, _) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(19789, sink, (200, 60));
@@ -1735,6 +1816,48 @@ mod tests {
             "Project 0=label-0/1/Project 0=label-0/0/1/%0;Project 1=label-1/1/Project 1=label-1/0/1/%1;");
         app.active = 1;
         assert_eq!(super::expand(&app, "#{window_name}/#{window_active}/#{pane_id}", 1, Some(2), false), "Project 1/1/%1");
+    }
+
+    #[test]
+    fn loop_alternatives_keep_nested_commas_and_only_expand_the_selected_branch() {
+        let mut app = status_fixture(2, 2);
+        app.options.global_session.insert("@selected".into(), "live,✓".into());
+        let fmt = "#{W:#{window_name},#{?window_active,#{@selected},#(printf unexpected)}}";
+        assert_eq!(super::expand(&app, fmt, 0, None, false), "live,✓Project 1");
+        app.active = 1;
+        app.options.global_session.insert("@selected".into(), "changed,✓".into());
+        assert_eq!(super::expand(&app, fmt, 0, None, false), "Project 0changed,✓");
+        assert!(app.jobs.borrow().is_empty(), "the untaken branch must not run its shell command");
+    }
+
+    #[test]
+    fn compiled_substitutions_keep_fresh_text_replacements_and_case_flags() {
+        assert_eq!(super::regsub("(foo)", "[\\1]", "foo FOO", false).as_deref(), Some("[foo] FOO"));
+        assert_eq!(super::regsub("(foo)", "new", "FOO foo", false).as_deref(), Some("FOO new"));
+        assert_eq!(super::regsub("(foo)", "new", "FOO foo", true).as_deref(), Some("new new"));
+        assert_eq!(super::regsub("^foo", "✓", "foo foo", false).as_deref(), Some("✓ foo"));
+        assert_eq!(super::regsub("(", "x", "text", false), None);
+        assert_eq!(super::regsub("(", "x", "", false).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn substitution_cache_stays_bounded_without_rejecting_larger_expressions() {
+        super::SUBSTITUTIONS.with(|cache| cache.borrow_mut().clear());
+        for n in 0..32 {
+            let pattern = format!("a{n}");
+            assert_eq!(super::regsub(&pattern, "hit", &pattern, false).as_deref(), Some("hit"));
+        }
+        assert_eq!(super::regsub("a0", "again", "a0", false).as_deref(), Some("again"));
+        super::SUBSTITUTIONS.with(|cache| assert!(cache.borrow().len() <= 8));
+        // Unicode word classes exceed the cache's small compiled-size budget.
+        assert_eq!(super::regsub(r"\w+", "word", "café 東京", false).as_deref(), Some("word word"));
+        let long = "a".repeat(2049);
+        assert_eq!(super::regsub(&long, "long", &long, false).as_deref(), Some("long"));
+        super::SUBSTITUTIONS.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.len() <= 8);
+            assert!(!cache.iter().any(|(pattern, _, _)| pattern == r"\w+" || pattern == &long));
+        });
     }
 
     #[test]
@@ -1811,8 +1934,8 @@ mod tests {
         let other = quota("other", Some("c"), &[30.0]);
         let empty = quota("missing", None, &[]);
         let readings = [("local", &other), ("local", &codex), ("local", &empty), ("local", &claude)];
-        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false), "Claude 58%  Codex 89%  Other 70%");
-        assert_eq!(super::quota_remaining(std::iter::empty(), "local", str::to_string, false), "");
+        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false, false), "Claude 58%  Codex 89%  Other 70%");
+        assert_eq!(super::quota_remaining(std::iter::empty(), "local", str::to_string, false, false), "");
         // The existing per-window format continues reporting used quota for custom configs.
         assert_eq!(claude.line(), "claude limit 42% limit 18%");
     }
@@ -1825,8 +1948,8 @@ mod tests {
         let unknown = quota("codex", None, &[11.0]);
         let readings = [("studio", &distinct), ("shared", &shared), ("local", &local), ("studio", &unknown), ("local", &unknown)];
         let expected = "Claude 58%  Claude@studio 20%  Codex 89%  Codex@studio 89%";
-        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false), expected);
-        assert_eq!(super::quota_remaining(readings.into_iter().rev(), "local", str::to_string, false), expected);
+        assert_eq!(super::quota_remaining(readings.into_iter(), "local", str::to_string, false, false), expected);
+        assert_eq!(super::quota_remaining(readings.into_iter().rev(), "local", str::to_string, false, false), expected);
     }
 
     #[test]
@@ -1834,8 +1957,8 @@ mod tests {
         for (used, number) in [(0.0, "100%"), (79.0, "21%"), (80.0, "20%"), (99.7, "<1%"), (100.0, "0%"), (120.0, "0%")] {
             let u = quota("claude", None, &[used]);
             let plain = format!("Claude {number}");
-            assert_eq!(super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, false), plain);
-            let styled = super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, true);
+            assert_eq!(super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, false, false), plain);
+            let styled = super::quota_remaining(std::iter::once(("local", &u)), "local", str::to_string, true, false);
             if used < 80.0 || crate::theme::no_color() { assert_eq!(styled, plain) }
             else { assert!(styled.starts_with("Claude #[fg=")); assert!(styled.ends_with(&format!("]{number}#[fg=default]"))); }
             assert!(!styled.contains("reverse") && !styled.contains("bg="));

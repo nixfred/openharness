@@ -42,6 +42,24 @@ void main() {
     }
     expect(output.join(), 'ab${'\x7f' * 4}');
   });
+
+  // iOS Safari types into a <textarea>: Return reports the action, then the
+  // textarea types its own newline onto the pad or the line just sent.
+  for (final (race, newline) in [
+    ('after the reset', (String line) => '  \n'),
+    ('before the reset', (String line) => '  $line\n'),
+  ]) {
+    testWidgets('Return submits once when its newline lands $race', (
+      tester,
+    ) async {
+      final (output, keyboard) = await mount(tester);
+      await keyboard.type('ls');
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      await keyboard._send(newline('ls'));
+      await keyboard.type('a');
+      expect(output.join(), 'ls\ra');
+    });
+  }
 }
 
 /// The on-screen keyboard's own copy of the buffer. `testTextInput` records

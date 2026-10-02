@@ -32,6 +32,8 @@ export type CommanderFrame = {
 }
 
 export interface CommanderMirrorOpts {
+  /** Presentation lease only. Unverified work stays open for its real completion. */
+  verifiedWorking?: (sessionId: string) => boolean
   /** Shared with QuestionWatcher; both screens receive this policy's decision. */
   notifications?: AgentNotifications
   /** Produce desktop results without a device, using a free local excerpt. */
@@ -824,6 +826,7 @@ export class CommanderMirror {
     const st = this.states.get(sessionId)
     if (!st) return false
     if (st.turnOpen) {
+      if (this.opts.verifiedWorking?.(sessionId) === false) return true
       this.emit(sessionId, st.lastTodos
         ? { kind: 'processing', text: 'Processing', todos: st.lastTodos }
         : { kind: 'processing', text: 'Processing' })

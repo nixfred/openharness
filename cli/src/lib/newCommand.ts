@@ -238,7 +238,7 @@ const ERRORS: Record<string, string> = {
 }
 
 /** One loopback session with the daemon: select the machine, then ask, one request at a time. */
-function daemonSession(deps: NewCommandDeps, machineId: string): Promise<{
+export function daemonSession(deps: Pick<NewCommandDeps, 'port' | 'connect' | 'timeoutMs'>, machineId: string): Promise<{
   request: (type: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>
   close: () => void
 }> {

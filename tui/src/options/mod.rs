@@ -93,17 +93,19 @@ pub fn defaults() -> &'static BTreeMap<String, String> {
     static D: OnceLock<BTreeMap<String, String>> = OnceLock::new();
     D.get_or_init(|| {
         let mut m = tmux_defaults().clone();
+        // (Each pane's title at its top by default — off and bottom are yours to choose, in
+        // Appearance → Pane titles.)
         m.insert("pane-border-status".into(), "top".into());
         // Each pane's title row: the harness's name, then its state symbol, [watching — who
         // has it] when another window has the pane to type in, and its project and branch
         // where there is room. Git context stays here; the status bar keeps the location cue.
         m.insert("pane-border-format".into(), " #{pane_heading}#{?pane_where,#[align=right] #[dim]#{pane_where} #[nodim],}".into());
-        // Window navigation on the left; connection, quota, fleet, machine and clock on the
-        // right. The quoted name is this computer's name in Harness, independent of focus.
+        // Window navigation on the left; connection, a model being got, quota, fleet, machine and
+        // clock on the right. The quoted name is this computer's name in Harness, independent of focus.
         // One cell at each outer edge aligns status text with the pane surfaces.
         // Two spaces separate the window list from the information on the right.
         m.insert("status-left".into(), " #{?client_prefix,#[bold]›#[nobold] ,}".into());
-        m.insert("status-right".into(), "  #{?daemon_down,#[bold]daemon down#[nobold]  ,}#{?usage_remaining,#{usage_remaining_mark}  ,}#{?fleet,#{s/ /  /:fleet}  ,}#{?pane_watching,[watching]  ,}\"#{=/21/…:local_machine}\"  %H:%M ".into());
+        m.insert("status-right".into(), "  #{?daemon_down,#[bold]daemon down#[nobold]  ,}#{?model_progress,#{model_progress}  ,}#{?usage_remaining,#{usage_remaining_mark}  ,}#{?fleet,#{s/ /  /:fleet}  ,}#{?pane_watching,[watching]  ,}\"#{=/21/…:local_machine}\"  %H:%M ".into());
         // Each window's most urgent harness at a glance (the symbol its pane titles show) and its
         // name in a few whole words (#{window_short_name}): a harness is named for its task.
         // Keep tmux's familiar current/previous markers beside the name, then any other
@@ -242,11 +244,61 @@ impl Store {
     /// panes' title rows), where you have not set them yourself.
     pub fn tmux_look(&self) -> bool { self.get("@hn-look", "", None).as_deref() == Some("tmux") }
 
+    /// How panes are drawn: `surface` (the "blur" look — the active pane's surface pops, the rest
+    /// are dimmed, no border line) or `line` (the classic highlighted border). Set directly by
+    /// `@hn-focus` (from the config's `[look].focus`) or, for the legacy `panes` preset, by
+    /// `@hn-look panes`.
+    pub fn focus_style(&self) -> &'static str {
+        match self.get("@hn-focus", "", None).as_deref() {
+            Some("surface") => "surface",
+            _ => "line",
+        }
+    }
+
     /// The normal hn presentation; classic keeps the earlier line borders.
-    pub fn pane_look(&self) -> bool { !matches!(self.get("@hn-look", "", None).as_deref(), Some("tmux" | "classic")) }
+    pub fn pane_look(&self) -> bool {
+        self.focus_style() == "surface" || self.get("@hn-look", "", None).as_deref() == Some("panes")
+    }
+
+    /// `@hn-layout`: the default split direction for a new harness/pane — `auto` (tmux-style, by
+    /// the shape of the pane being split), `vertical` or `horizontal`.
+    pub fn look_orientation(&self) -> &'static str {
+        match self.get("@hn-layout", "", None).as_deref() {
+            Some("vertical") => "vertical",
+            Some("horizontal") => "horizontal",
+            _ => "auto",
+        }
+    }
 
     /// Reduce motion independently of the status/pane appearance.
     pub fn animations(&self) -> bool { !matches!(self.get("@hn-animations", "", None).as_deref(), Some("off" | "0" | "no")) }
+
+    // ── status bar ──
+
+    /// `@hn-status-bar` (tui.toml `status_bar`): `bottom` or `top` (tmux's status line, where
+    /// status-position puts it), or `left`/`right` — the bar down that side.
+    pub fn status_bar(&self) -> &'static str {
+        match self.get("@hn-status-bar", "", None).as_deref() { Some("left") => "left", Some("right") => "right", Some("top") => "top", _ => "bottom" }
+    }
+
+    /// `@hn-border` box (the default): every pane its own frame, a cell apart. `line` is tmux's
+    /// shared lines; the blurred surfaces and `@hn-look tmux` draw as they always have.
+    pub fn box_panes(&self) -> bool {
+        !self.tmux_look() && !self.pane_look() && self.border_style() == "box"
+    }
+
+    /// `@hn-dim on` (tui.toml `dim`): the panes you are not in, a little quieter — with borders or
+    /// blurred surfaces alike. Off unless chosen.
+    pub fn dim_others(&self) -> bool { self.get("@hn-dim", "", None).as_deref() == Some("on") }
+
+    /// `@hn-border` as chosen — `box` unless it says `line`. (`@hn-look classic` is not a choice
+    /// of lines: hn wrote it into every `[look]` it saved, a theme picked or a status bar moved.)
+    pub fn border_style(&self) -> &'static str {
+        match self.get("@hn-border", "", None).as_deref() {
+            Some("line") => "line",
+            _ => "box",
+        }
+    }
 
     /// The default for a name: hn's, or tmux's under `@hn-look tmux`.
     fn default_of(&self, name: &str, inherit_window_style: bool) -> Option<String> {
@@ -256,6 +308,11 @@ impl Store {
             // set window-active-style. The automatic focus palette must not mask their colors.
             if name == "window-active-style" && inherit_window_style { Some("default".into()) }
             else { pane_default(name) }
+        }
+        else if name == "pane-border-status" && self.pane_look() {
+            // The opt-in "panes" look keeps each pane's title row; only the classic (default)
+            // look drops it, so panes are divided by a plain line.
+            Some("top".into())
         }
         else { defaults().get(name).cloned() }
     }
@@ -616,6 +673,8 @@ mod tests {
         let mut s = Store::default();
         let g = SetFlags { global: true, ..Default::default() };
         let gw = SetFlags { global: true, window: true, ..Default::default() };
+        assert!(!s.pane_look()); // the classic line-border look is the default
+        s.set("@hn-look", Some("panes"), &g, "", 0).unwrap();
         assert!(s.pane_look());
         assert!(s.get("window-style", "", None).unwrap().starts_with("fg=#"));
         s.set("window-style", Some("bg=blue"), &gw, "", 0).unwrap();
@@ -635,6 +694,7 @@ mod tests {
                   SetFlags { window: true, ..Default::default() },
                   SetFlags { pane: true, ..Default::default() }] {
             let mut s = Store::default();
+            s.set("@hn-look", Some("panes"), &SetFlags { global: true, ..Default::default() }, "w", 1).unwrap();
             assert_ne!(s.get("window-style", "w", Some(1)), s.get("window-active-style", "w", Some(1)));
             s.set("window-style", Some("fg=red,bg=blue"), &f, "w", 1).unwrap();
             assert_eq!(s.get("window-active-style", "w", Some(1)).as_deref(), Some("default"));

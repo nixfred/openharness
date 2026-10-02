@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
 import 'package:harness/notify/alert_sounds.dart';
 import 'package:harness/state/app_state.dart';
+import 'package:harness/state/harness_activity.dart';
 import 'package:harness/state/notification_inbox.dart';
 import 'package:harness/state/status_menu.dart';
 import 'package:harness/state/terminal_pane.dart';
@@ -45,53 +46,61 @@ void main() {
     );
   });
 
-  test('groups by tab identity across machines, in tab order with Other sessions last', () {
-    final app = createApp(connected: true);
-    addTearDown(app.dispose);
-    const remote = Machine(
-      machineId: 'remote',
-      name: 'Remote host',
-      authMode: MachineAuthMode.remote,
-    );
-    app.machineStates['remote'] = MachineState(remote)
-      ..agents = [Agent(id: 'a0', name: 'Remote result', engine: 'codex')];
-    final first = app.activeSwarm;
-    app.renameSwarm(first.id, 'Design');
-    first.panes.addAll([
-      TerminalPane(id: 1, machineId: 'm', agentId: 'a0'),
-      TerminalPane(id: 2, machineId: 'remote', agentId: 'a0'),
-    ]);
-    app.newSwarm(name: 'Design');
-    final second = app.activeSwarm;
-    second.panes.add(TerminalPane(id: 3, machineId: 'm', agentId: 'a1'));
-    app.agentUnread.mark('m', 'a0', AlertKind.done);
-    app.agentUnread.mark('m', 'a1', AlertKind.done);
-    app.agentUnread.mark('remote', 'a0', AlertKind.done);
-    app.agentUnread.mark('m', 'a9', AlertKind.done);
+  test(
+    'keeps tab destinations as context while sorting notifications across tabs',
+    () {
+      final app = createApp(connected: true);
+      addTearDown(app.dispose);
+      const remote = Machine(
+        machineId: 'remote',
+        name: 'Remote host',
+        authMode: MachineAuthMode.remote,
+      );
+      app.machineStates['remote'] = MachineState(remote)
+        ..agents = [Agent(id: 'a0', name: 'Remote result', engine: 'codex')];
+      final first = app.activeSwarm;
+      app.renameSwarm(first.id, 'Design');
+      first.panes.addAll([
+        TerminalPane(id: 1, machineId: 'm', agentId: 'a0'),
+        TerminalPane(id: 2, machineId: 'remote', agentId: 'a0'),
+      ]);
+      app.newSwarm(name: 'Design');
+      final second = app.activeSwarm;
+      second.panes.add(TerminalPane(id: 3, machineId: 'm', agentId: 'a1'));
+      app.agentUnread.mark('m', 'a0', AlertKind.done);
+      app.agentUnread.mark('m', 'a1', AlertKind.done);
+      app.agentUnread.mark('remote', 'a0', AlertKind.done);
+      app.agentUnread.mark('m', 'a9', AlertKind.done);
 
-    final rows = statusMenuEntries(app);
-    expect(rows.map((r) => (r['machineId'], r['agentId'])), [
-      ('remote', 'a0'),
-      ('m', 'a0'),
-      ('m', 'a1'),
-      ('m', 'a9'),
-    ]);
-    expect(rows.map((r) => r['tabId']), [first.id, first.id, second.id, null]);
-    expect(rows.map((r) => r['tabName']), [
-      'Design',
-      'Design',
-      'Design',
-      'Other sessions',
-    ]);
+      final rows = statusMenuEntries(app);
+      expect(rows.map((r) => (r['machineId'], r['agentId'])), [
+        ('m', 'a9'),
+        ('remote', 'a0'),
+        ('m', 'a1'),
+        ('m', 'a0'),
+      ]);
+      expect(rows.map((r) => r['tabId']), [
+        null,
+        first.id,
+        second.id,
+        first.id,
+      ]);
+      expect(rows.map((r) => r['tabName']), [
+        'Other sessions',
+        'Design',
+        'Design',
+        'Design',
+      ]);
 
-    app.renameSwarm(second.id, 'Review');
-    expect(statusMenuEntries(app)[2]['tabName'], 'Review');
-    expect(
-      statusMenuReceiptIsCurrent(app, rows[2]),
-      isTrue,
-      reason: 'renaming a tab does not replace its notification',
-    );
-  });
+      app.renameSwarm(second.id, 'Review');
+      expect(statusMenuEntries(app)[2]['tabName'], 'Review');
+      expect(
+        statusMenuReceiptIsCurrent(app, rows[2]),
+        isTrue,
+        reason: 'renaming a tab does not replace its notification',
+      );
+    },
+  );
 
   test(
     'a shared session counts once and follows tab membership and display names',
@@ -123,7 +132,7 @@ void main() {
   );
 
   test(
-    'machine profiles keep unread sessions grouped under their hidden tabs',
+    'machine profiles preserve unread sessions and their hidden tab context',
     () {
       final app = createApp(connected: true);
       addTearDown(app.dispose);
@@ -141,6 +150,160 @@ void main() {
       expect(statusMenuEntries(app).single['tabId'], hidden.id);
     },
   );
+
+  test(
+    'previews use the notified recap, with current questions first',
+    () async {
+      final app = createApp(connected: true)..watchedAgents = () => const [];
+      addTearDown(app.dispose);
+      final machine = app.stateOf('m')!;
+      machine.blockedAgents['a1'] = waitingQuestion(
+        'a1',
+        prompt: 'Keep the shell running?',
+      );
+      app.agentUnread.mark('m', 'a1', AlertKind.needsYou);
+      app.agentUnread.mark('m', 'a2', AlertKind.failed);
+      await app.handleEventForTest('m', {
+        'type': 'turn_summary',
+        'agentId': 'a0',
+        'payload': {
+          'notification': {'id': 'result-one', 'kind': 'done'},
+          'recap': '**Fixed reconnects** in `api_client.dart`.',
+          'text': 'A much longer explanation.',
+        },
+      });
+      var rows = statusMenuEntries(app);
+      expect(rows.map((r) => r['agentId']), ['a1', 'a2', 'a0']);
+      expect(rows.map((r) => (r['activity'] as Map)['mark']), ['?', '✗', '✓']);
+      expect(rows.first['message'], 'Keep the shell running?');
+      expect(
+        rows.first['receivedAt'],
+        machine.blockedAgents['a1']!.since.millisecondsSinceEpoch,
+      );
+      final done = rows.last;
+      expect(done['message'], 'Fixed reconnects in api_client.dart.');
+      expect(done['label'], 'Ready for review');
+      expect(done['receivedAt'], isA<int>());
+      await app.handleEventForTest('m', {
+        'type': 'turn_started',
+        'agentId': 'a0',
+        'payload': {'userMessage': 'Now fix something else'},
+      });
+      await app.handleEventForTest('m', {
+        'type': 'text_delta',
+        'agentId': 'a0',
+        'payload': {'content': 'Working on something else'},
+      });
+      rows = statusMenuEntries(app);
+      expect(
+        rows.last['message'],
+        done['message'],
+        reason: 'Live text cannot replace unread news',
+      );
+      expect(rows.last['readToken'], done['readToken']);
+      expect(
+        rows.last['activity'],
+        nativeActivityPayload(HarnessActivity.done),
+        reason:
+            'The mark describes the unread receipt, even during a newer turn',
+      );
+      await app.handleEventForTest('m', {
+        'type': 'turn_summary',
+        'agentId': 'a0',
+        'payload': {
+          'notification': {'id': 'result-two', 'kind': 'done'},
+          'text': 'The second fix is ready.',
+        },
+      });
+      expect(
+        statusMenuEntries(app).last['message'],
+        'The second fix is ready.',
+      );
+      expect(statusMenuReceiptIsCurrent(app, done), isFalse);
+      await app.handleEventForTest('m', {
+        'type': 'turn_ended',
+        'agentId': 'a0',
+        'payload': <String, dynamic>{},
+      });
+    },
+  );
+
+  test('working is unique, known, active work, never idle or unread sessions', () async {
+    final app = createApp(connected: true);
+    addTearDown(app.dispose);
+    final machine = app.stateOf('m')!;
+    for (var i = 0; i < 7; i++) {
+      app.rememberOpenedHarness('m', 'a$i');
+    }
+    machine.processingAgentIds.addAll([
+      'a0',
+      'a1',
+      'a3',
+      'a4',
+      'a5',
+      'a6',
+      'a7',
+    ]);
+    machine.blockedAgents['a1'] = waitingQuestion('a1');
+    app.agentUnread.mark('m', 'a3', AlertKind.done);
+    machine.agents[4] = machine.agents[4].copyWith(status: 'stopped');
+    machine.agents[5] = const Agent(
+      id: 'a5',
+      name: 'Shell',
+      engine: 'terminal',
+      terminalAvailable: true,
+    );
+    final pane = TerminalPane(id: 12, machineId: 'm', agentId: 'a0');
+    app.activeSwarm.panes.add(pane);
+    app.newSwarm(name: 'Build');
+    app.activeSwarm.panes.add(pane);
+    var working = statusMenuWorkingEntries(app);
+    expect(working.map((r) => r['agentId']), ['a0', 'a6']);
+    expect(working.first['tabId'], app.activeSwarmId);
+    expect(
+      working.first['startedAt'],
+      isNull,
+      reason: 'No invented elapsed time on reconnect',
+    );
+    expect(working.every((r) => r['unread'] == false), isTrue);
+    expect(
+      working.every((r) => (r['activity'] as Map)['working'] == true),
+      isTrue,
+    );
+    expect(statusMenuEntries(app).map((r) => r['agentId']), ['a1', 'a3']);
+    var changes = 0;
+    app.addListener(() => changes++);
+    await app.handleEventForTest('m', {
+      'type': 'turn_started',
+      'agentId': 'a0',
+      'payload': <String, dynamic>{},
+    });
+    working = statusMenuWorkingEntries(app);
+    expect(working.first['startedAt'], isA<int>());
+    expect(
+      changes,
+      greaterThan(0),
+      reason:
+          'A known start reaches the menu even after an earlier busy heartbeat',
+    );
+    await app.handleEventForTest('m', {
+      'type': 'turn_heartbeat',
+      'agentId': 'a0',
+      'payload': <String, dynamic>{},
+    });
+    expect(
+      statusMenuWorkingEntries(app).first['startedAt'],
+      working.first['startedAt'],
+    );
+    await app.handleEventForTest('m', {
+      'type': 'turn_ended',
+      'agentId': 'a0',
+      'payload': <String, dynamic>{},
+    });
+    expect(statusMenuWorkingEntries(app).map((r) => r['agentId']), ['a6']);
+    machine.connectionStatus = ConnectionStatus.disconnected;
+    expect(statusMenuWorkingEntries(app), isEmpty);
+  });
 
   test(
     'clear acknowledges displayed news, never answers or clears newer news',
@@ -230,6 +393,17 @@ void main() {
       );
       expect(rows(), hasLength(2));
       expect(updates.last['unread'], rows().length);
+      Map tabActivityFor(String id) =>
+          (updates.last['tabs'] as List).cast<Map>().singleWhere(
+                (tab) => tab['id'] == id,
+              )['activity']
+              as Map;
+      expect(
+        rows().singleWhere((row) => row['agentId'] == 'a8')['activity'],
+        tabActivityFor(resultTab),
+        reason:
+            'Menu and tab share the exact status glyph, label and theme ink',
+      );
       final stale = rows().singleWhere((r) => r['agentId'] == 'a8');
       app.agentUnread.mark('m', 'a8', AlertKind.failed, fresh: true);
       await tester.pump();
@@ -286,6 +460,29 @@ void main() {
       expect(rows(), isEmpty);
       expect(updates.last['unread'], 0);
 
+      // The working section uses the same destinations without acknowledging
+      // any newer question or completion that arrived after the menu opened.
+      app.stateOf('m')!.processingAgentIds.add('a8');
+      app.renameSwarm(originalTab, 'Working review');
+      await tester.pump();
+      final work = (updates.last['statusMenuWorkingEntries'] as List)
+          .cast<Map>()
+          .single;
+      expect(work['agentId'], 'a8');
+      expect(work['unread'], isFalse);
+      expect(work['activity'], tabActivityFor(originalTab));
+      expect(updates.last['unread'], 0);
+      await select('openStatusHarness', work);
+      expect(app.focusedPane, same(result));
+      expect(app.allPanes.where((p) => p.agentId == 'a8'), hasLength(1));
+      app.agentUnread.mark('m', 'a8', AlertKind.done, fresh: true);
+      await tester.pump();
+      await select('openStatusHarness', work);
+      expect(app.agentUnread.kindFor('m', 'a8'), AlertKind.done);
+      expect(updates.last['statusMenuWorkingEntries'], isEmpty);
+      await select('clearStatusNotifications', {'receipts': rows()});
+      app.stateOf('m')!.processingAgentIds.remove('a8');
+
       // Open Harness from an empty notification menu still opens the normal
       // picker, ready for typing, and selecting a session reuses its pane.
       await select('addAgent', {});
@@ -306,6 +503,7 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       expect(updates.last['enabled'], isFalse);
       expect(updates.last['statusMenuEntries'], isNull);
+      expect(updates.last['statusMenuWorkingEntries'], isNull);
       app.dispose();
     },
   );

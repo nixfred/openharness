@@ -7,6 +7,7 @@ import { rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { baseModel, compatibleModels, contextLadder, LocalModels, modelBudget, modelFamily, rankForCoding, readRunRecords, type GridInventory } from './localModels.js'
 import { GridFleetRpc, type GridFleetResult } from './gridFleetRpc.js'
+import type { AppEngineOps, AppEngineRecord, AppModel } from './appModels.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
 
 const card = (id = 'org/Small-GGUF') => ({ repo_id: id, runnable: true, task: 'text-generation', format: 'GGUF',
@@ -1038,9 +1039,10 @@ describe('readRunRecords — what servedHere knows about this computer', () => {
     const found = (await readRunRecords(home, 'grid-home')).sort((x, y) => x.ids.join().localeCompare(y.ids.join()))
 
     expect(found).toEqual([
-      { name: '', ids: [], pid: null, alive: false },
-      { name: 'mac', ids: ['Qwen3-8B-Q4_K_M', 'plain'], pid: expect.any(Number), alive: false },
-      { name: 'mac', ids: ['Team/Model'], pid: process.pid, alive: true },
+      { name: '', ids: [], pid: null, alive: false, advertised: false },
+      { name: 'mac', ids: ['Qwen3-8B-Q4_K_M', 'plain'], pid: expect.any(Number), alive: false, advertised: false },
+      // Its own aliases, as given: the one spelling that is the name served now.
+      { name: 'mac', ids: ['Team/Model'], pid: process.pid, alive: true, advertised: true },
     ])
   })
 
@@ -1266,5 +1268,179 @@ describe('download without starting', () => {
     await service.settled()
     expect(serving).toBe(true)
     expect(calls.filter(args => args[0] === 'pull')).toHaveLength(pulls)
+  })
+})
+
+describe('models other apps downloaded, started in their own app', () => {
+  const GiB = 1024 ** 3
+  const ollama: AppModel = { id: 'app:ollama:llama3.2:3b', name: 'llama3.2:3b', app: 'ollama', engine: 'ollama', ref: 'llama3.2:3b',
+    binary: '/usr/local/bin/ollama', sizeBytes: 2 * GiB, quant: 'Q4_K_M', contextLength: 131072, kvBytesPerToken: 112 * 1024 }
+  const studio: AppModel = { id: 'app:lm-studio:google/gemma-4-e2b', name: 'gemma-4-e2b', app: 'lm-studio', engine: 'lm-studio',
+    ref: 'google/gemma-4-e2b', binary: '/home/me/.lmstudio/bin/lms', sizeBytes: 4 * GiB, contextLength: 131072 }
+  let apps: AppModel[], up: Set<string>, joinedAliases: Set<string>, window: number | undefined
+  let ops: { [K in keyof AppEngineOps]: Mock<AppEngineOps[K]> }
+
+  /** The grid fake, with a `join --at` that lists the alias rather than writing a `--serve` run record. */
+  const appService = () => {
+    const base = run.getMockImplementation()!
+    run.mockImplementation(async (args, output) => {
+      if (args.includes('join') && args.includes('--at')) {
+        calls.push(args)
+        joinedAliases.add(args[args.indexOf('--advertise-as') + 1]!)
+        return ok()
+      }
+      if (args.includes('leave') && args.includes('--engine') && joinedAliases.has(args[args.indexOf('--engine') + 1]!)) {
+        calls.push(args)
+        joinedAliases.delete(args[args.indexOf('--engine') + 1]!)
+        return ok()
+      }
+      return base(args, output)
+    })
+    inventory.mockImplementation(async () => ({ state: 'awake', status: 'running',
+      nodes: [...joinedAliases].map(alias => ({ node_id: 'local-node', online: true, models: [alias] })) }))
+    return new LocalModels({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory,
+      appModels: async () => apps, appEngines: ops as unknown as AppEngineOps })
+  }
+  beforeEach(() => {
+    apps = [ollama, studio]; up = new Set(); joinedAliases = new Set(); window = 131072
+    ops = {
+      start: vi.fn(async (model: AppModel) => {
+        up.add(model.id)
+        return { engine: model.engine as AppEngineRecord['engine'], served: model.ref, alias: model.name, port: 41000, binary: model.binary!, pid: 4242 }
+      }),
+      alive: vi.fn(async (record: AppEngineRecord) => up.has(record.modelId)),
+      loadedContext: vi.fn(async () => window),
+      stop: vi.fn(async (record: AppEngineRecord) => { up.delete(record.modelId) }),
+    }
+  })
+
+  it('lists them under the app they came from, ready to start, beside Grid\'s own', async () => {
+    // A catalog model not here yet runs in nothing; once Grid has downloaded it, it runs in Grid, named
+    // like the apps beside it.
+    const models = appService()
+    expect((await models.list('home')).models.find(m => m.id === 'org/Small-GGUF')).toMatchObject({ state: 'available' })
+    expect((await models.list('home')).models.find(m => m.id === 'org/Small-GGUF')).not.toHaveProperty('app')
+    await writeFile(join(home, 'models', 'Small-Q4.gguf'), Buffer.alloc(64))
+    const snapshot = await models.list('home', true)
+    expect(snapshot.models.find(m => m.id === 'org/Small-GGUF')).toMatchObject({ state: 'downloaded', app: 'Grid' })
+    expect(snapshot.models.filter(m => m.app && m.app !== 'Grid')).toEqual([
+      expect.objectContaining({ id: ollama.id, name: 'llama3.2:3b', app: 'Ollama', state: 'downloaded', sizeBytes: 2 * GiB, canStart: true, canStop: false }),
+      expect.objectContaining({ id: studio.id, name: 'gemma-4-e2b', app: 'LM Studio', state: 'downloaded', canStart: true, canStop: false }),
+    ])
+    expect(ops.start).not.toHaveBeenCalled()
+  })
+
+  it('starts one in its app, joins it at its own address, checks it through the grid, and stops what it started', async () => {
+    const models = appService()
+    await models.act('home', ollama.id, 'start'); await models.settled()
+    expect(ops.start).toHaveBeenCalledWith(ollama, 131072, join(stateDir, 'logs'))
+    expect(calls.find(args => args.includes('--at'))).toEqual(['--remote', 'join', 'home', '--at', 'http://127.0.0.1:41000/v1',
+      '-m', 'llama3.2:3b', '--advertise-as', 'llama3.2:3b', '--max-concurrency', '1'])
+    expect(request.mock.calls.some(([url]) => String(url).includes(RELAY_CHAT))).toBe(true)
+    let row = (await models.list('home', true)).models.find(m => m.id === ollama.id)!
+    expect(row).toMatchObject({ state: 'running', canStart: false, canStop: true, operation: { phase: 'done' } })
+    // One engine of this picker's at a time.
+    expect(await models.act('home', studio.id, 'start').then(() => models.settled()).then(() => models.list('home', true)))
+      .toMatchObject({ models: expect.arrayContaining([expect.objectContaining({ id: studio.id, operation: expect.objectContaining({ phase: 'failed', error: 'Stop llama3.2:3b first to start another local model.' }) })]) })
+    expect(ops.start).toHaveBeenCalledTimes(1)
+
+    await models.act('home', ollama.id, 'stop'); await models.settled()
+    expect(calls.some(args => args.join(' ') === '--remote leave home --engine llama3.2:3b')).toBe(true)
+    expect(ops.stop).toHaveBeenCalledWith(expect.objectContaining({ modelId: ollama.id, pid: 4242 }))
+    row = (await models.list('home', true)).models.find(m => m.id === ollama.id)!
+    expect(row).toMatchObject({ state: 'downloaded', canStart: true, canStop: false })
+    expect(JSON.parse(await readFile(join(stateDir, 'app-engines.json'), 'utf8'))).toEqual([])
+  })
+
+  it('keeps an engine it started stoppable when a later scan reads the model differently', async () => {
+    const models = appService()
+    await models.act('home', ollama.id, 'start'); await models.settled()
+    // The next scan missed the app (a slow probe) and would serve the file with Grid's engine instead.
+    apps = [{ ...ollama, engine: 'grid', ref: join(root, 'blob') }]
+    const row = (await models.list('home', true)).models.filter(m => m.id === ollama.id)
+    expect(row).toEqual([expect.objectContaining({ state: 'running', canStop: true, canStart: false })])
+    await models.act('home', ollama.id, 'stop'); await models.settled()
+    expect(ops.stop).toHaveBeenCalledWith(expect.objectContaining({ modelId: ollama.id }))
+    expect(joinedAliases.size).toBe(0)
+    expect(JSON.parse(await readFile(join(stateDir, 'app-engines.json'), 'utf8'))).toEqual([])
+  })
+
+  it('answers from the last scan while a slow one runs, and the list after it has the new one', async () => {
+    let scans = 0, release!: () => void
+    const models = new LocalModels({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory,
+      appEngines: ops as unknown as AppEngineOps,
+      appModels: async () => {
+        if (++scans === 1) return [ollama]
+        await new Promise<void>(resolve => { release = resolve })
+        return [ollama, studio]
+      } })
+    expect((await models.list('home')).models.filter(m => m.app && m.app !== 'Grid').map(m => m.id)).toEqual([ollama.id])
+    // A forced read starts a scan that hangs (a busy llama-server answering --version late): the list
+    // answers at once from the last scan rather than waiting on it.
+    expect((await models.list('home', true)).models.filter(m => m.app && m.app !== 'Grid').map(m => m.id)).toEqual([ollama.id])
+    expect(scans).toBe(2)
+    release()
+    await vi.waitFor(async () => expect((await models.list('home', true)).models.some(m => m.id === studio.id)).toBe(true))
+  })
+
+  it('answers from the scan it saved when it starts again, and a scan that never answers is given up', async () => {
+    await appService().list('home')
+    let scans = 0
+    const appIds = (snapshot: Awaited<ReturnType<LocalModels['list']>>) => snapshot.models.filter(m => m.app && m.app !== 'Grid').map(m => m.id)
+    // Started again, with every scan hanging: the saved one answers at once, nothing waits on a scan.
+    const restarted = new LocalModels({ stateDir, processEnv: { GRID_HOME: home }, run, request: request as typeof fetch, inventory,
+      appEngines: ops as unknown as AppEngineOps, appScanMs: 50,
+      appModels: () => { scans++; return new Promise<AppModel[]>(() => {}) } })
+    expect(appIds(await restarted.list('home'))).toEqual([ollama.id, studio.id])
+    // That scan is given up at its deadline, the saved answer kept, and the next read starts another.
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(appIds(await restarted.list('home', true))).toEqual([ollama.id, studio.id])
+    expect(scans).toBe(2)
+  })
+
+  it('starts another right after a stop, without a list read between to clear the one that ran', async () => {
+    const models = appService()
+    await models.act('home', ollama.id, 'start'); await models.settled()
+    await models.list('home', true)
+    // A switch: stop, then start at once — the list read above still says llama3.2:3b runs.
+    await models.act('home', ollama.id, 'stop'); await models.settled()
+    await models.act('home', studio.id, 'start'); await models.settled()
+    expect(ops.start).toHaveBeenLastCalledWith(studio, 131072, join(stateDir, 'logs'))
+    expect((await models.list('home', true)).models.find(m => m.id === studio.id)).toMatchObject({ state: 'running', operation: { phase: 'done' } })
+  })
+
+  it('takes it down again, and says so, when the app loaded it with less than 64K', async () => {
+    window = 16384
+    const models = appService()
+    await models.act('home', ollama.id, 'start'); await models.settled()
+    const row = (await models.list('home', true)).models.find(m => m.id === ollama.id)!
+    expect(row.operation).toMatchObject({ phase: 'failed', error: expect.stringContaining('could only get a 16K context in Ollama') })
+    expect(row).toMatchObject({ state: 'downloaded', canStart: true })
+    expect(ops.stop).toHaveBeenCalledTimes(1)
+    expect(joinedAliases.size).toBe(0)
+  })
+
+  it('starts nothing that cannot get 64K beside its weights', async () => {
+    apps = [{ ...ollama, sizeBytes: 60 * GiB }]
+    const models = appService()
+    await models.act('home', ollama.id, 'start'); await models.settled()
+    expect((await models.list('home', true)).models.find(m => m.id === ollama.id)?.operation)
+      .toMatchObject({ phase: 'failed', error: expect.stringContaining('with a 64K context') })
+    expect(ops.start).not.toHaveBeenCalled()
+  })
+
+  it("serves one with Grid's llama.cpp, through a link to the app's file, when the app is not installed", async () => {
+    const file = join(root, 'ollama-blob')
+    await writeFile(file, Buffer.alloc(64))
+    apps = [{ id: 'app:ollama:qwen3:8b', name: 'qwen3:8b', app: 'ollama', engine: 'grid', ref: file, sizeBytes: 64 }]
+    const models = appService()
+    const listed = (await models.list('home')).models.find(m => m.id === 'app:ollama:qwen3:8b')!
+    // Its app is not here, so it runs in Grid, and says so.
+    expect(listed).toMatchObject({ app: 'Grid', state: 'downloaded', canStart: true })
+    await models.act('home', 'app:ollama:qwen3:8b', 'start'); await models.settled()
+    const { readlink } = await import('node:fs/promises')
+    expect(await readlink(join(home, 'models', 'qwen3-8b.gguf'))).toBe(file)
+    expect(calls.find(args => args.includes('--serve'))?.slice(0, 5)).toEqual(['--remote', 'join', 'home', '--serve', 'qwen3-8b.gguf'])
+    expect(ops.start).not.toHaveBeenCalled()
   })
 })

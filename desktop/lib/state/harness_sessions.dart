@@ -11,7 +11,9 @@ enum SessionSort {
   recent('Recently used'),
   name('Name'),
   machine('Machine'),
-  project('Project');
+  project('Project'),
+  memory('RAM: highest first'),
+  cpu('CPU: highest first');
 
   const SessionSort(this.label);
   final String label;
@@ -70,6 +72,9 @@ class HarnessSession {
           machine.connectionStatus == ConnectionStatus.connected) &&
       (!machine.isLocalMachine || machine.usesLocalTransport);
   bool get running => online && !agent.isStopped && agent.terminalAvailable;
+  bool get live =>
+      running ||
+      (online && !agent.isStopped && agent.launchState == 'starting');
   bool get canOpen =>
       open ||
       (online &&
@@ -88,13 +93,17 @@ class HarnessSession {
       : machine.machine.isShared
       ? 'View only'
       : agent.isStopped
-      ? (agent.canPauseAndResume ? 'Paused' : 'Resume unavailable')
+      ? (agent.canPauseAndResume ? 'Saved' : 'Open unavailable')
       : agent.launchState == 'failed'
       ? 'Start failed'
       : agent.launchState == 'starting'
       ? 'Starting'
       : needsInput
       ? 'Needs input'
+      : agent.closePlanState == 'failed'
+      ? 'Could not close'
+      : agent.closePlanState == 'waiting'
+      ? 'Stops after finishing'
       : working
       ? 'Working'
       : agent.terminalAvailable
@@ -105,11 +114,11 @@ class HarnessSession {
       : machine.machine.isShared
       ? 'Shared harnesses are view-only.'
       // Only reachable against a daemon too old to report what its engines can
-      // resume; a current one offers Pause for every harness it runs.
+      // resume; a current one offers Stop for every harness it runs.
       : !agent.canPauseAndResume
       ? (agent.engine == 'claude' || agent.engine == 'codex'
-            ? 'Waiting for a saved conversation before enabling pause and resume.'
-            : 'Update the harness CLI on this machine to pause and resume this engine.')
+            ? 'Waiting for a saved conversation before enabling Stop and Open.'
+            : 'Update the harness CLI on this machine to stop and reopen this agent.')
       : !canControl
       ? agent.launchDetail ??
             agent.terminalUnavailableReason ??
@@ -117,7 +126,10 @@ class HarnessSession {
       : null;
 }
 
-List<HarnessSession> harnessSessions(AppNotifier app) {
+List<HarnessSession> harnessSessions(
+  AppNotifier app, {
+  bool includeLive = false,
+}) {
   final open = {
     for (final pane in app.allPanes)
       if (pane.agentId != null) (pane.machineId, pane.agentId),
@@ -127,7 +139,11 @@ List<HarnessSession> harnessSessions(AppNotifier app) {
   return [
     for (final machine in app.machineStates.values)
       for (final agent in machine.agents)
-        if (known(machine.machine.machineId, agent.id))
+        if (known(machine.machine.machineId, agent.id) ||
+            (includeLive &&
+                !machine.machine.isShared &&
+                !agent.isStopped &&
+                (agent.terminalAvailable || agent.launchState == 'starting')))
           HarnessSession(
             machine: machine,
             agent: agent,
@@ -157,6 +173,8 @@ List<HarnessSession> visibleHarnessSessions(
   SessionFilter filter = SessionFilter.all,
   SessionSort sort = SessionSort.recent,
   List<String> recent = const [],
+  Map<String, double> memory = const {},
+  Map<String, double> cpu = const {},
 }) {
   final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
   final result = sessions.where((row) {
@@ -194,6 +212,8 @@ List<HarnessSession> visibleHarnessSessions(
         (a.project?.label ?? '').toLowerCase(),
         (b.project?.label ?? '').toLowerCase(),
       ),
+      SessionSort.memory => (memory[b.id] ?? -1).compareTo(memory[a.id] ?? -1),
+      SessionSort.cpu => (cpu[b.id] ?? -1).compareTo(cpu[a.id] ?? -1),
     };
     if (comparison != 0) return comparison;
     final name = compareNatural(

@@ -51,7 +51,8 @@ function fixture() {
   }
   writeFileSync(join(home, '.npmrc'), `prefix=${shared}\n`)
   const run = (node: string, install = recipe, shell = '/bin/sh') => {
-    const script = buildEngineLaunchArgv('codex', { installIfMissing: install }, shell, node, 'grid', null)[2]
+    const argv = buildEngineLaunchArgv('codex', { installIfMissing: install }, shell, node, 'grid', null)
+    const script = argv[argv.indexOf('harness-engine') - 1]
     return spawnSync(shell, ['-c', script, 'harness-engine', name, 'argument with spaces'], {
       env, encoding: 'utf8', timeout: 20_000,
     })

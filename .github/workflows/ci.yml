@@ -34,6 +34,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # tty.ReadStream uses libuv's native TTY handle. Exercise descriptor ownership,
+  # binary backpressure and unplug behavior on both supported OSes and runtimes.
+  # These are disposable PTYs; no USB device or existing daemon is touched.
+  serial-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20.19.0, 22.23.2]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Require native PTY support instead of silently skipping it
+        run: python3 -c 'import pty'
+      - name: Serial lifecycle, binary transfer and descriptor cleanup
+        run: npx vitest run src/cable/serial.spec.ts src/cable/serial.real.spec.ts --maxWorkers=1
+      - name: Agent startup through the system zsh login shell
+        run: npx vitest run src/lib/engineShellStartup.spec.ts
+
   # Typecheck, the full suite, and the package updater's complete-coverage gate.
   typecheck-test:
     runs-on: ubuntu-latest
@@ -106,10 +135,16 @@ jobs:
       - name: Guard fuzz and bounded hostile-input time
         run: npx vitest run src/pair/learn/guard.fuzz.spec.ts
 
+      - name: Concurrent registry discovery, hooks and durable close intents
+        run: node scripts/registry-observation-e2e.mjs "$RUNNER_TEMP/registry-observation-e2e"
+
       - name: Verify hn launcher repair in an existing installation
         run: |
           npm run bundle
           node scripts/test-hn-upgrade.mjs
+
+      - name: Verify core harness rollout in the release bundle
+        run: node scripts/test-core-harness-upgrade.mjs dist/cli.js
 
       - name: Require complete harness updater coverage
         run: npm run test:dsh-updates
@@ -144,6 +179,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tmux musl-tools
           npm ci --prefix cli --no-audit --no-fund
+      - name: Real tmux question polling and answer routing
+        working-directory: cli
+        run: node --import tsx scripts/question-poll-native.ts "$RUNNER_TEMP/question-poll.json"
+      - name: Native fixture process cleanup and ownership isolation
+        working-directory: cli
+        run: node --import tsx scripts/check-native-fixture-git.mjs
+      - name: Real tmux byte streaming, paste and resize
+        working-directory: cli
+        env:
+          RUN_REAL_TMUX_STREAM: '1'
+        run: npx vitest run src/lib/tmuxStream.real.spec.ts
+      - name: Codex startup timeout recovery and cancellation
+        working-directory: cli
+        env:
+          RUN_REAL_TMUX_CODEX_STARTUP: '1'
+        run: npx vitest run src/lib/codexStartupRetry.real.spec.ts --maxWorkers=1
       - name: Release unit tests
         run: cargo test --locked --release
       - name: Build static Linux binary
@@ -159,6 +210,11 @@ jobs:
           HN_PANE_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
           HN_PANE_UI_PORT: 19783
         run: python3 -u tests/pane-ui.py
+      - name: Animation, timed messages and idle input
+        env:
+          HARNESS_TUI_BIN: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui
+          HN_REPAINT_TEST_PORT: 19794
+        run: python3 -u tests/repaint.py
       - name: New Harness popup, draft and launch recovery
         env:
           HN_NEW_UI_BINARY: ${{ github.workspace }}/tui/target/${{ matrix.target }}/release/harness-tui

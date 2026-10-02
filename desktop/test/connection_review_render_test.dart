@@ -7,7 +7,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:harness/api/api_client.dart';
 import 'package:harness/auth/auth_session.dart';
 import 'package:harness/auth/cli_link.dart';
 import 'package:harness/core/config.dart';
@@ -146,32 +145,17 @@ void main() {
               },
               signInCode: () async =>
                   (code: 'synthetic-code', ttl: const Duration(seconds: 90)),
-              listDevices: () async => [
-                PairedDevice(
-                  fingerprint: 'FIXTURE',
-                  label: 'Design team iPhone',
-                  pairedAt: DateTime(2026, 9, 28),
-                  online: true,
-                ),
-              ],
-              removeDevice: (_) async => false,
+              onManageDevices: () {},
             ),
           );
           await tester.pumpAndSettle();
           expect(find.text('Done').hitTestable(), findsOneWidget);
           expect(find.byType(PhonePairQr).hitTestable(), findsOneWidget);
           await capture('add-phone');
-          await tester.ensureVisible(find.text('Remove'));
-          await tester.tap(find.text('Remove'));
-          await tester.pumpAndSettle();
-          await tester.ensureVisible(
-            find.byKey(const ValueKey('add-phone-status')),
-          );
-          expect(
-            find.text("Couldn't remove Design team iPhone. Try again."),
-            findsOneWidget,
-          );
-          await capture('add-phone-error');
+          // The way to the account's devices stays reachable at every size.
+          final manage = find.byKey(const ValueKey('add-phone-manage-devices'));
+          await tester.ensureVisible(manage);
+          expect(manage.hitTestable(), findsOneWidget);
           await tester.tap(find.text('Done'));
           await tester.pumpAndSettle();
         }

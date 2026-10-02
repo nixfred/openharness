@@ -1,5 +1,7 @@
 import '../core/host_platform.dart';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -1323,7 +1325,14 @@ fi''';
         RegExp('^v'),
         '',
       );
-      _harnessOutdated = semverGt(kMinimumHarnessCliVersion, installed)
+      // Local CLI builds intentionally use 0.0.1-dev.<revision>. A debug
+      // desktop must not mistake these for an obsolete release and offer to
+      // overwrite the developer's CLI. Release builds retain the minimum.
+      final localDevelopmentBuild =
+          kDebugMode && installed.startsWith('0.0.1-dev.');
+      _harnessOutdated =
+          !localDevelopmentBuild &&
+              semverGt(kMinimumHarnessCliVersion, installed)
           ? installed
           : null;
       return _harnessOutdated == null;

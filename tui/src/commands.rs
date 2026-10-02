@@ -85,6 +85,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("confirm-before", "confirm", "Ask y/n before a command"),
     ("new-harness", "newh", "New harness: [engine] [@machine] [folder] — or choose"),
     ("new-terminal", "newt", "A shell on this pane's machine"),
+    ("choose-command", "choosec", "Every command and setting by name (C-b Enter)"),
     ("take-control", "take", "Reclaim control of all panes across the TUI's tabs"),
     ("clone-harness", "cloneh", "A second harness with this one's history"),
     ("restart-harness", "restarth", "Restart this harness"),
@@ -1243,6 +1244,11 @@ fn run_words(app: &mut App, words: &[String]) {
 fn after_set(app: &mut App, name: &str, now: Option<String>, global: bool, tab: Option<usize>) {
     let name = name.to_string();
     if name == "@hn-look" { app.redraw_all = true; app.fit_panes(); app.push_theme(); }
+    // (Set by hand too — `set -g @hn-theme …`, `@hn-lists fzf`: the colours and lists follow.)
+    if matches!(name.as_str(), "@hn-accent" | "@hn-theme" | "@hn-lists") { app.sync_accent(); app.redraw_all = true }
+    // (The bar down a side and the pane frames change the panes' room.)
+    if matches!(name.as_str(), "@hn-status-bar" | "@hn-border" | "@hn-focus") { app.redraw_all = true; app.fit_panes(); }
+    if name == "@hn-dim" { app.redraw_all = true }
     // alerts_reset_all: every window's silence timer starts again.
     if name == "monitor-silence" { for t in app.tabs.iter_mut() { t.last_output = std::time::Instant::now() } }
     if name.starts_with('@') && now.is_none() { app.opts.user.remove(&name); return }
@@ -2050,7 +2056,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
                 // that window made current by nothing (tmux zooms it where it is).
                 if w != app.active {
                     app.tabs[w].set_active(p);
-                    if app.tabs[w].panes().len() > 1 { app.tabs[w].zoomed = !app.tabs[w].zoomed; app.fit_panes(); app.layout_changed(w) }
+                    if app.tabs[w].panes().len() > 1 { app.tabs[w].zoomed = !app.tabs[w].zoomed; app.fit_panes(); app.view_layout_changed(w) }
                     return;
                 }
                 if app.focused() != Some(p) { app.focus_pane(w, p) }
@@ -2892,7 +2898,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
             app.tabs[w].size = Some(size);
             app.options.windows.entry(app.tabs[w].id.clone()).or_default().insert("window-size".into(), "manual".into());
             app.fit_panes();
-            if app.headless && old != size { app.layout_changed(w) }
+            if app.headless && old != size { app.view_layout_changed(w) }
         }
         "respawn-window" => {
             // tmux's respawn-window: refused while anything runs in the window, unless -k.
@@ -3480,6 +3486,7 @@ fn run_words_in(app: &mut App, words: &[String]) {
         }
         "new-harness" => { if words.len() < 2 { input::run(app, "new") } else { input::new_harness_words(app, &words[1..]) } }
         "new-terminal" => input::run(app, "terminal"),
+        "choose-command" => input::run(app, "commands"),
         "take-control" => app.take_control(),
         // A harness's verbs, on -t's harness (the hook's in a harness-* hook), else the focused
         // pane's; from a shell -t is needed, and one mid-turn is restarted or paused only with -y

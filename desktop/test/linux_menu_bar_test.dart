@@ -136,6 +136,10 @@ void main() {
 
     await tap(tester, 'menu-bar-file');
     await tap(tester, 'menu-bar-open-harness');
+    expect(swarmCalls.last.method, 'sessions');
+
+    await tap(tester, 'menu-bar-file');
+    await tap(tester, 'menu-bar-open-project');
     expect(swarmCalls.last.method, 'addAgent');
 
     await tap(tester, 'menu-bar-file');
@@ -169,7 +173,6 @@ void main() {
     expect(appActions.last, 'increaseTerminalFontSize');
 
     for (final (key, action) in [
-      ('menu-bar-sessions', 'sessions'),
       ('menu-bar-machines', 'machineList'),
       ('menu-bar-models', 'models'),
       ('menu-bar-machine-monitor', 'manageMachines'),

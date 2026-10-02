@@ -337,12 +337,14 @@ export function isWrapped(payload: unknown): payload is WrappedPayload {
 
 /** `up` events (adapter→web, group key) whose payload carries user content. */
 export const ENCRYPTED_UP_TYPES = new Set<string>([
+  'harness_devices_changed',
   'user_message', 'text_delta', 'thinking_delta', 'thinking_title', 'tool_start', 'tool_end',
   'turn_started', 'turn_ended', 'done', 'context_compact', 'turn_summary', 'turn_summary_pending',
   'agent_created', 'agent_synced', 'agent_renamed', 'agent_deleted',
 ])
 /** RPC replies (`<x>_result`) whose payload is encrypted ONLY when the requester has a session. */
 export const ENCRYPTED_RPC_RESULT_TYPES = new Set<string>([
+  'harness_devices_list_result', 'harness_device_settings_result',
   'session_get_result', 'sessions_list_result', 'agents_list_result', 'models_list_result',
   'agent_files_result', 'agent_read_file_result', 'agent_update_result', 'agent_delete_result',
   'e2ee_pairings_list_result', 'e2ee_pairing_unpair_result',
@@ -370,6 +372,7 @@ export const ENCRYPTED_RPC_RESULT_TYPES = new Set<string>([
 ])
 /** Client→adapter frames that carry or can trigger adapter-local user data. */
 export const ENCRYPTED_DOWN_TYPES = new Set<string>([
+  'harness_devices_list', 'harness_device_settings',
   'message',
   // An AskUserQuestion answer is user content, so the firmware wraps it (e2ee_manager.c). Leaving it out
   // of this set did NOT fail loudly: unwrapDown was simply never called, the payload stayed the raw

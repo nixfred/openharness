@@ -13,9 +13,9 @@ import {
   type TmuxRuntimeRef,
 } from './terminalTypes.js'
 
-const MIN_COLS = 40
+const MIN_COLS = 1
 const MAX_COLS = 300
-const MIN_ROWS = 12
+const MIN_ROWS = 1
 const MAX_ROWS = 120
 // One `send-keys -H` line carries two hex characters plus a space per byte. tmux accepts a command
 // line built from 8192 such bytes and rejects 16384 with `%error`, so this leaves a 4x margin.
@@ -115,29 +115,39 @@ export function decodeTmuxControlData(encoded: string): Uint8Array {
   return decodeTmuxControlBytes(Buffer.from(encoded, 'utf8'))
 }
 
+function octalEscapeAt(input: Uint8Array, offset: number): boolean {
+  return input[offset] === 0x5c && offset + 3 < input.length
+    && input[offset + 1] >= 0x30 && input[offset + 1] <= 0x37
+    && input[offset + 2] >= 0x30 && input[offset + 2] <= 0x37
+    && input[offset + 3] >= 0x30 && input[offset + 3] <= 0x37
+}
+
 /** Decode control-mode escaping without first interpreting payload bytes as
  * UTF-8. A Unicode scalar may be split across separate `%output` records; a
  * string decoder would permanently replace both halves with U+FFFD. */
 export function decodeTmuxControlBytes(encoded: Uint8Array): Uint8Array {
-  const input = Buffer.from(encoded)
-  const chunks: Buffer[] = []
-  let plainStart = 0
-  for (let i = 0; i < input.length; i++) {
-    if (input[i] !== 0x5c
-      || i + 3 >= input.length
-      || input[i + 1] < 0x30 || input[i + 1] > 0x37
-      || input[i + 2] < 0x30 || input[i + 2] > 0x37
-      || input[i + 3] < 0x30 || input[i + 3] > 0x37) continue
-    if (i > plainStart) chunks.push(input.subarray(plainStart, i))
-    const value = ((input[i + 1] - 0x30) << 6)
-      | ((input[i + 2] - 0x30) << 3)
-      | (input[i + 3] - 0x30)
-    chunks.push(Buffer.from([value]))
-    i += 3
-    plainStart = i + 1
+  // Own the returned bytes without allocating a Buffer for every escaped byte.
+  // Decoding only shortens the input, so unread bytes stay ahead of the write.
+  const output = Buffer.from(encoded)
+  let read = output.indexOf(0x5c)
+  // Ordinary backslashes do not require a bytewise rewrite either.
+  while (read >= 0 && !octalEscapeAt(output, read)) read = output.indexOf(0x5c, read + 1)
+  if (read < 0) return output
+  let write = read
+  while (read < output.length) {
+    if (octalEscapeAt(output, read)) {
+      output[write++] = ((output[read + 1] - 0x30) << 6)
+        | ((output[read + 2] - 0x30) << 3)
+        | (output[read + 3] - 0x30)
+      read += 4
+    } else {
+      output[write++] = output[read++]
+    }
   }
-  if (plainStart < input.length) chunks.push(input.subarray(plainStart))
-  return Buffer.concat(chunks)
+  const decoded = output.subarray(0, write)
+  // Escape-heavy output can shrink to one quarter of its wire size. Avoid
+  // retaining that larger allocation when a consumer keeps the decoded frame.
+  return write * 2 < output.length ? Buffer.from(decoded) : decoded
 }
 
 export function parseTmuxControlOutput(lineBytes: Uint8Array): { paneId: string; data: Uint8Array } | null {

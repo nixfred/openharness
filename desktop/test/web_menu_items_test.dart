@@ -33,6 +33,10 @@ void main() {
       'swarm.new',
       'harnesses.list',
       'navigation.needs_input',
+      'agent.share',
+      'pane.split_right',
+      'pane.split_down',
+      'pane.close',
       'pane.zoom',
       'pane.layout',
       'keyboard.help',
@@ -42,15 +46,9 @@ void main() {
     }
   });
 
-  test('the menu splits one way only: right', () {
-    final all = _commands(runnableWebMenu((_) => true, compact: false));
-    expect(all, contains('pane.split_right'));
-    expect(all, isNot(contains('pane.split_down')));
-  });
-
   test('rows that cannot run, and groups left empty, are not drawn', () {
     final menu = runnableWebMenu(
-      (command) => !command.startsWith('pane.') && command != 'agent.share',
+      (command) => !command.endsWith('.list'),
       compact: false,
     );
     expect(menu, hasLength(kWebMenuGroups.length - 1));

@@ -292,3 +292,39 @@ describe('resume refusal and readiness edge cases', () => {
     expect(await waitForResumedAgent(saved, { current: () => false, session: () => undefined, process: async () => null, pane: async () => null, sleep: async () => {} })).toMatchObject({ error: 'AGENT_CHANGED' })
   })
 })
+
+it('reattaches when a startup hook rebuilds metadata for the same running process', async () => {
+  const deps = fixture()
+  const existing = { ...saved, registeredAt: 100, processIdentity: { pid: 42, startMarker: 'born', executable: 'codex' } }
+  const refreshed = { ...existing, title: 'Updated by hook', lastHookAt: 200 }
+  deps.live.mockReturnValue(existing)
+  deps.checkLive.mockImplementation(async () => { deps.live.mockReturnValue(refreshed); return { state: 'alive' } })
+  expect(await resumeStoppedAgent(deps)).toMatchObject({ ok: true, session: refreshed })
+  expect(deps.launch).not.toHaveBeenCalled()
+})
+
+it('honors a failure reported by a hook while the same live process was being checked', async () => {
+  const deps = fixture()
+  const row: RegisteredSession = { ...saved, resumeOnly: true }
+  deps.live.mockReturnValue(row)
+  deps.checkLive.mockImplementation(async () => {
+    deps.live.mockReturnValue({ ...row, launch: { state: 'failed', error: 'WRONG_CONVERSATION', detail: 'Different history', at: Date.now() } } as RegisteredSession)
+    return { state: 'alive' }
+  })
+  await expect(resumeStoppedAgent(deps)).resolves.toMatchObject({ ok: false, error: 'WRONG_CONVERSATION' })
+  expect(deps.launch).not.toHaveBeenCalled()
+})
+it.each(['pid', 'conversation', 'route', 'birth'])('refuses an in-place %s replacement while checking a live session', async change => {
+  const deps = fixture()
+  const existing = { ...saved, registeredAt: 100, tmuxPane: '%1', runtimes: [{ backend: 'tmux' as const, paneId: '%1' }], processIdentity: { pid: 42, startMarker: 'born', executable: 'codex' } }
+  deps.live.mockReturnValue(existing)
+  deps.checkLive.mockImplementation(async () => {
+    if (change === 'pid') existing.processIdentity.pid++
+    if (change === 'conversation') existing.sessionId = 'different'
+    if (change === 'route') existing.runtimes[0].paneId = '%2'
+    if (change === 'birth') existing.registeredAt++
+    return { state: 'alive' }
+  })
+  expect(await resumeStoppedAgent(deps)).toMatchObject({ ok: false, error: 'AGENT_CHANGED' })
+  expect(deps.launch).not.toHaveBeenCalled()
+})

@@ -10,6 +10,8 @@
 
 use ratatui::layout::Rect;
 
+mod shared;
+
 /// tmux's PANE_MINIMUM.
 pub const PANE_MINIMUM: u32 = 1;
 
@@ -37,16 +39,6 @@ pub enum Preset {
     Rows,
     MainStack,
     MainRow,
-}
-
-impl Preset {
-    pub const ALL: [(Preset, &'static str, &'static str); 5] = [
-        (Preset::Grid, "Grid", "every pane the same size"),
-        (Preset::MainStack, "Main + stack", "one big on the left, the rest stacked"),
-        (Preset::MainRow, "Main + row", "one big on top, the rest in a row"),
-        (Preset::Columns, "Columns", "side by side"),
-        (Preset::Rows, "Rows", "one above the other"),
-    ];
 }
 
 /// tmux's named layouts, in its order (select-layout, next-layout, M-1 … M-7).

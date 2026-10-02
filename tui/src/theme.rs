@@ -397,8 +397,56 @@ pub mod fzfcolor {
 
 /// Readable accent for hn controls. ANSI blue can be nearly black in terminal themes.
 /// Keep engine branding and explicitly configured tmux colors separate from chrome.
+/// A `[look]` accent (`@hn-accent`, a chosen theme's) wins; with none, the terminal's own palette
+/// gives it (its colours 1-7, as it answered OSC 4), so the chrome is in the terminal's theme; a
+/// terminal that did not answer, hn's teal.
 pub fn accent() -> Color {
+    if let Some(hex) = crate::term_out::accent_override() {
+        if let Some(c) = crate::tmuxconf::colour(&hex) { return c }
+    }
+    if let Some([r, g, b]) = crate::term_out::native_accent() { return Color::Rgb(r, g, b) }
     if palette().2 { Color::Rgb(0, 100, 120) } else { Color::Rgb(95, 215, 230) }
+}
+
+/// The signature colour of a terminal theme, as `#rrggbb` for `@hn-accent`: the palette slot (1-7)
+/// that contrasts most with the theme's background while staying saturated. So choosing a theme in
+/// `hn theme` tints hn's chrome with it, even though the terminal keeps drawing the background and
+/// foreground.
+pub fn theme_accent_hex(name: &str) -> Option<String> {
+    use crate::terminal_themes::TERMINAL_THEMES;
+    TERMINAL_THEMES.iter().find(|t| t.name == name).map(|t| {
+        let c = theme_accent_rgb(t);
+        format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+    })
+}
+
+/// The vivid color of a theme: see [`theme_accent_hex`].
+pub fn theme_accent_rgb(t: &crate::terminal_themes::TerminalTheme) -> [u8; 3] {
+    let colours: Vec<(usize, [u8; 3])> = (1..=7).map(|i| (i, t.palette[i])).collect();
+    accent_of(t.background, &colours)
+}
+
+/// The accent a palette gives on [bg]: of its colours 1-7 ([colours], by number), the one that
+/// stands out most from the background while staying a colour — for a bundled theme, and for the
+/// terminal's own palette when no theme is chosen.
+pub fn accent_of(bg: [u8; 3], colours: &[(usize, [u8; 3])]) -> [u8; 3] {
+    let lum = |c: [u8; 3]| 0.299 * c[0] as f64 + 0.587 * c[1] as f64 + 0.114 * c[2] as f64;
+    let chroma = |c: [u8; 3]| {
+        let mx = c[0].max(c[1]).max(c[2]) as f64;
+        let mn = c[0].min(c[1]).min(c[2]) as f64;
+        if mx == 0.0 { 0.0 } else { (mx - mn) / mx }
+    };
+    let bg_lum = lum(bg);
+    // (Colour 7 is the palette's white: never an accent, or a dark theme's focused border is just
+    // its text colour. The rest: as far from the background as it is vivid, both 0 to 1.)
+    let hues: Vec<[u8; 3]> = colours.iter().filter(|(i, _)| (1..=6).contains(i)).map(|(_, c)| *c).collect();
+    let mut best = colours.iter().find(|(i, _)| *i == 6).or(colours.first()).map(|(_, c)| *c).unwrap_or([95, 215, 230]);
+    let mut best_score = f64::MIN;
+    for p in &hues {
+        let score = (lum(*p) - bg_lum).abs() / 255.0 + chroma(*p);
+        if score > best_score { best_score = score; best = *p; }
+    }
+    best
 }
 // Semantic status colors use the terminal palette. SOFT and MUTED represent emphasis;
 // `fg` applies it to the theme's foreground.
@@ -428,6 +476,9 @@ pub fn palette() -> (Color, Color, bool) {
 /// Surface colors derived from the terminal theme, with a stable fallback before OSC replies.
 #[derive(Clone, Copy, Debug)]
 pub struct PanePalette {
+    /// The terminal's (or theme's) own background: hn's chrome — the panel, the side bar — sits
+    /// on it, as the panes do; `surface` is the focused pane's fill, lifted off it.
+    pub background: Color,
     pub surface: Color, pub inactive_surface: Color,
     pub foreground: Color, pub inactive_foreground: Color, pub muted: Color,
     pub active_foreground: Color,
@@ -439,6 +490,18 @@ pub fn pane_palette() -> PanePalette {
     let native = crate::term_out::terminal_colours().and_then(|(bg, fg)|
         Some((crate::tmuxconf::colour(&bg)?, crate::tmuxconf::colour(&fg)?)));
     pane_palette_for(native)
+}
+
+/// The surfaces the terminal's own colours make, whatever theme is chosen.
+pub fn native_pane_palette() -> PanePalette {
+    let native = crate::term_out::native_terminal_colours().and_then(|(bg, fg)|
+        Some((crate::tmuxconf::colour(&bg)?, crate::tmuxconf::colour(&fg)?)));
+    pane_palette_for(native)
+}
+
+/// The surfaces a theme's own background and foreground make — what choosing it would draw.
+pub fn pane_palette_of(bg: [u8; 3], fg: [u8; 3]) -> PanePalette {
+    pane_palette_for(Some((Color::Rgb(bg[0], bg[1], bg[2]), Color::Rgb(fg[0], fg[1], fg[2]))))
 }
 
 fn pane_palette_for(native: Option<(Color, Color)>) -> PanePalette {
@@ -457,6 +520,7 @@ fn pane_palette_for(native: Option<(Color, Color)>) -> PanePalette {
     let surface = mix(bg, foreground, if light { 4 } else { 10 });
     let surface = if surface == inactive_surface { mix(bg, foreground, if light { 2 } else { 6 }) } else { surface };
     PanePalette {
+        background: bg,
         surface,
         inactive_surface,
         foreground, inactive_foreground: mix(foreground, bg, 9),
@@ -524,6 +588,8 @@ pub fn fzf_change(f: impl FnOnce(&mut Fzf)) {
 pub fn opts_change(f: impl FnOnce(&mut FzfOpts)) {
     let mut c = fzf_opts().clone();
     f(&mut c);
+    // (No list or preview in hn draws a scrollbar, whatever a list asks: see fzf_opts_base.)
+    (c.scrollbar, c.preview_scrollbar) = (None, None);
     OPTS_LIVE.store(Box::into_raw(Box::new(c)), std::sync::atomic::Ordering::Release);
 }
 
@@ -1037,6 +1103,9 @@ fn fzf_opts_base() -> &'static FzfOpts {
             if !sign_set { o.wrap_sign = "> ".into() }
         }
         if no_color() { o.fg = None; o.bg = None }
+        // No list or preview in hn draws a scrollbar, whatever FZF_DEFAULT_OPTS says: they follow
+        // the cursor, and the wheel and the keys scroll them.
+        (o.scrollbar, o.preview_scrollbar) = (None, None);
         o
     })
 }
@@ -1179,7 +1248,22 @@ fn engine_mark_raw(engine: &str) -> (&'static str, Color) {
         "muse" => ("♪", ATTENTION),
         "agy" => ("◈", Color::Rgb(0x42, 0x85, 0xF4)),
         "terminal" => ("❯", SOFT),
-        _ => ("●", SOFT),
+        _ => ("▸", SOFT),
+    }
+}
+
+/// A machine at a glance, in the harnesses' marks (no round ones): `✓` this computer or
+/// connected, a spinner connecting, `?` waiting to be linked, `✗` an error, `·` online but not
+/// connected (soft) or offline (muted).
+pub fn machine_mark(reach: &crate::fleet::Reach, online: bool, tick: u64) -> (&'static str, Color) {
+    use crate::fleet::Reach;
+    match reach {
+        Reach::Ready => ("✓", paint(ONLINE)),
+        Reach::Connecting => (spinner(tick), paint(WARN)),
+        Reach::NeedsLink => ("?", paint(ATTENTION)),
+        Reach::Error(_) => ("✗", paint(DANGER)),
+        _ if online => ("·", paint(SOFT)),
+        _ => ("·", MUTED),
     }
 }
 
@@ -1193,8 +1277,9 @@ pub fn engine_label(engine: &str) -> &str {
 }
 
 /// A harness's state at a glance, the same everywhere hn shows one (pane titles, the window list,
-/// the lists), in Orca's set: a spinner working, `?` needs you, `✓` done and not looked at yet, `·`
-/// idle, `✗` failed; hn adds `◌` starting, `‖` paused and `○` offline. [tick] turns the spinner.
+/// the lists, the side bar), in Orca's set: a spinner working (and starting, in its own colour),
+/// `?` needs you, `✓` done and not looked at yet, `·` idle, `✗` failed; hn adds `‖` paused and a
+/// muted `·` offline — no round marks. [tick] turns the spinner.
 pub fn state_mark(state: State, tick: u64) -> (&'static str, &'static str, Color) {
     let (dot, word, color) = state_mark_raw(state, tick);
     (dot, word, if color == MUTED { color } else { paint(color) })
@@ -1205,31 +1290,68 @@ fn state_mark_raw(state: State, tick: u64) -> (&'static str, &'static str, Color
         State::NeedsInput => ("?", "needs you", ATTENTION),
         State::Working => (spinner(tick), "working", ACCENT_SOFT),
         State::Done => ("✓", "done", ONLINE),
+        State::Unknown => ("◌", "status unavailable", MUTED),
         State::Ready => ("·", "idle", MUTED),
-        State::Starting => ("◌", "starting", WARN),
+        State::Starting => (spinner(tick), "starting", WARN),
         State::Failed => ("✗", "failed", DANGER),
         State::Paused => ("‖", "paused", MUTED),
-        State::Offline => ("○", "offline", MUTED),
+        State::Offline => ("·", "offline", MUTED),
     }
 }
 
 /// The most urgent of several states (a window's panes): needs you, failed, done, working,
 /// starting, idle, paused, offline.
 pub fn most_urgent(states: impl Iterator<Item = State>) -> Option<State> {
-    let rank = |s: &State| match s { State::NeedsInput => 0, State::Failed => 1, State::Done => 2, State::Working => 3, State::Starting => 4, State::Ready => 5, State::Paused => 6, State::Offline => 7 };
+    let rank = |s: &State| match s { State::NeedsInput => 0, State::Failed => 1, State::Done => 2, State::Working => 3, State::Starting => 4, State::Unknown => 5, State::Ready => 6, State::Paused => 7, State::Offline => 8 };
     states.min_by_key(rank)
 }
 
-thread_local! { static ANIMATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
-pub fn set_animations(on: bool) { ANIMATIONS.with(|a| a.set(on)) }
+thread_local! {
+    static ANIMATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static ANIMATION_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub fn begin_animation_frame(on: bool) {
+    ANIMATIONS.with(|a| a.set(on));
+    ANIMATION_USED.with(|a| a.set(false));
+}
 pub fn animations() -> bool { ANIMATIONS.with(|a| a.get()) }
+pub fn needs_animation_frame() -> bool { ANIMATION_USED.with(|a| a.get()) }
+
+/// Reading an animated frame records demand for the next one. Static screens
+/// and reduced-motion indicators do not keep an animation timer running.
+pub fn animation_frame() -> usize {
+    if !animations() { return 0 }
+    ANIMATION_USED.with(|a| a.set(true));
+    (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() / 100).unwrap_or(0)) as usize
+}
 
 /// A spinner frame for things in motion (working dots, connecting cards).
 pub fn spinner(_tick: u64) -> &'static str {
     // fzf's frames, in its order.
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let frame = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() / 100).unwrap_or(0);
-    FRAMES[if animations() { frame as usize % FRAMES.len() } else { 0 }]
+    FRAMES[animation_frame() % FRAMES.len()]
+}
+
+#[cfg(test)]
+mod animation_tests {
+    #[test]
+    fn only_moving_content_requests_animation_and_each_frame_starts_fresh() {
+        use super::*;
+        begin_animation_frame(true);
+        state_mark(State::Ready, 0);
+        state_mark(State::NeedsInput, 0);
+        assert!(!needs_animation_frame());
+        state_mark(State::Working, 0);
+        assert!(needs_animation_frame());
+        begin_animation_frame(true);
+        assert!(!needs_animation_frame());
+        animation_frame(); // the picker's ASCII and Unicode loading frames
+        assert!(needs_animation_frame());
+        begin_animation_frame(false);
+        assert_eq!(spinner(0), "⠋");
+        assert_eq!(animation_frame(), 0);
+        assert!(!needs_animation_frame());
+    }
 }
 
 #[cfg(test)]
@@ -1326,5 +1448,43 @@ mod palette_tests {
         assert_eq!(bg, Color::Rgb(0xf7, 0xf7, 0xf7));
         assert_eq!(fg, Color::Rgb(0x1a, 0x1a, 0x1a));
         assert!(light, "a light background reads as light");
+    }
+}
+
+#[cfg(test)]
+mod accent_theme_tests {
+    use super::*  ;
+    use crate::term_out;
+
+    #[test]
+    fn accent_honours_the_look_override_and_falls_back() {
+        let _colours = term_out::colours_lock();
+        term_out::set_accent_override(Some("#123456".into()));
+        assert_eq!(accent(), Color::Rgb(0x12, 0x34, 0x56));
+        term_out::set_accent_override(Some("#0f0".into()));
+        assert_eq!(accent(), Color::Rgb(0, 0xff, 0));
+        // A blank override falls back to the derived chrome teal, not the last override.
+        term_out::set_accent_override(None);
+        let c = accent();
+        assert_ne!(c, Color::Rgb(0x12, 0x34, 0x56));
+        assert_ne!(c, Color::Rgb(0, 0xff, 0));
+    }
+
+    #[test]
+    fn theme_accent_hex_is_stable_and_theme_specific() {
+        assert_eq!(theme_accent_hex("definitely-not-a-theme"), None);
+        let a = theme_accent_hex("Atom One Dark").expect("known theme has an accent");
+        assert!(a.len() == 7 && a.starts_with('#'));
+        let b = theme_accent_hex("Gruvbox Dark").expect("known theme has an accent");
+        assert_ne!(a, b);
+        // A colour, never the theme's white or its text: Dracula's focused border is not #f8f8f2.
+        for name in ["Dracula", "Atom One Dark", "Gruvbox Dark", "Adwaita", "Nord"] {
+            let Some(t) = crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == name) else { continue };
+            let c = theme_accent_rgb(t);
+            assert_ne!(c, t.foreground, "{name}");
+            assert_ne!(c, t.palette[7], "{name}");
+            let (mx, mn) = (c.iter().max().copied().unwrap_or(0) as f64, c.iter().min().copied().unwrap_or(0) as f64);
+            assert!(mx > 0.0 && (mx - mn) / mx > 0.25, "{name}: {c:?} is a colour");
+        }
     }
 }

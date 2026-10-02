@@ -35,16 +35,65 @@ export function canonicalRepository(raw: string | null): string | null {
 }
 
 /** Bounded subprocesses, no shell, network, or repository mutation. */
+async function runGit(cwd: string, args: string[]): Promise<string | null> {
+  const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE', 'GIT_PREFIX']) delete (environment as NodeJS.ProcessEnv)[key]
+  const { stdout } = await exec('git', ['-C', cwd, ...args], {
+    timeout: 1500, maxBuffer: 16 * 1024, encoding: 'utf8',
+    env: environment,
+  })
+  return stdout.trim() || null
+}
+
 async function git(cwd: string, args: string[]): Promise<string | null> {
+  return runGit(cwd, args).catch(() => null)
+}
+
+/** Read the two config values in one Git process. Git still resolves includes,
+ * worktree config and precedence; the last matching value wins, as with --get. */
+async function projectConfig(cwd: string, branch: string | null) {
+  const marker = branch && !branch.startsWith('Detached ') ? `branch.${branch}.harness` : null
+  const keys = ['remote.origin.url', ...(marker ? [marker] : [])]
+  const pattern = `^(${keys.map(key => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
+  let output: string | null
+  try { output = await runGit(cwd, ['config', '--null', '--get-regexp', pattern]) }
+  catch (error) {
+    if ((error as { code?: string | number }).code === 1) return { remote: null, pending: false }
+    // A large set of duplicate values can exceed the combined output bound.
+    // Keep the individual reads as a fallback so metadata remains available.
+    return { remote: await git(cwd, ['config', '--get', 'remote.origin.url']),
+      pending: marker !== null && await git(cwd, ['config', '--get', marker]) === 'placeholder' }
+  }
+  const values = new Map<string, string | null>()
+  for (const record of output?.split('\0') ?? []) {
+    if (!record) continue
+    // -z separates records with NUL and each key from its value with a newline.
+    // A valueless entry has no newline and overrides an earlier value too.
+    const separator = record.indexOf('\n')
+    const key = separator < 0 ? record : record.slice(0, separator)
+    values.set(key, separator < 0 ? null : record.slice(separator + 1).trim() || null)
+  }
+  return { remote: values.get('remote.origin.url') ?? null, pending: marker !== null && values.get(marker) === 'placeholder' }
+}
+
+/** One discovery process for both paths. Absolute output preserves linked
+ * worktree names even when cwd is a subdirectory or a symlink. */
+async function repositoryPaths(cwd: string): Promise<{ root: string; common: string | null } | null> {
   try {
-    const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }
-    for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE', 'GIT_PREFIX']) delete (environment as NodeJS.ProcessEnv)[key]
-    const { stdout } = await exec('git', ['-C', cwd, ...args], {
-      timeout: 1500, maxBuffer: 16 * 1024, encoding: 'utf8',
-      env: environment,
-    })
-    return stdout.trim() || null
-  } catch { return null }
+    if (!(await stat(cwd)).isDirectory()) return null
+  } catch (error) {
+    // Historical sessions can point at deleted temporary folders. Other stat
+    // failures still defer to Git rather than asserting that a checkout is gone.
+    if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return null
+  }
+  const output = await git(cwd, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'])
+  if (!output) return null
+  const paths = output.split('\n')
+  if (paths.length === 2 && paths.every(isAbsolute)) return { root: paths[0], common: paths[1] }
+  // Older Git prints an unrecognised --path-format flag literally. Ambiguous
+  // output (including a newline in a physical path) retains the separate reads.
+  const root = await git(cwd, ['rev-parse', '--show-toplevel'])
+  return root ? { root, common: await git(root, ['rev-parse', '--git-common-dir']) } : null
 }
 
 // Only four folders run Git at once, including cache refreshes.
@@ -54,18 +103,15 @@ async function inspect(cwd: string): Promise<AgentProject> {
   if (running >= 4) await new Promise<void>(resolve => waiting.push(resolve))
   else running++
   try {
-    const root = await git(cwd, ['rev-parse', '--show-toplevel'])
-    if (!root) return { name: basename(cwd) || cwd, cwd, root: null, remote: null, branch: null }
-    const remote = await git(cwd, ['config', '--get', 'remote.origin.url'])
+    const paths = await repositoryPaths(cwd)
+    if (!paths) return { name: basename(cwd) || cwd, cwd, root: null, remote: null, branch: null }
+    const { root, common } = paths
     // A checkout on no branch still says where it is, as the desktop's own reader does.
     const branch = await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
       ?? await git(cwd, ['rev-parse', '--short', 'HEAD']).then(sha => sha && `Detached ${sha}`)
-    const common = await git(root, ['rev-parse', '--git-common-dir'])
+    const { remote, pending } = await projectConfig(cwd, branch)
     // A linked worktree is named for its repository, not its folder.
     const main = common && basename(common) === '.git' ? dirname(resolve(root, common)) : root
-    const pending = branch && !branch.startsWith('Detached ')
-      ? await git(cwd, ['config', '--get', `branch.${branch}.harness`]) === 'placeholder'
-      : false
     return {
       name: basename(main), cwd, root, remote: canonicalRepository(remote), branch,
       ...(main !== root ? { worktree: true as const } : {}), ...(pending ? { branchPending: true as const } : {}),

@@ -11,6 +11,10 @@ import { createHash, randomBytes } from 'node:crypto'
 export const HARNESS_ACCESS_PREFIX = 'hna_'
 export const HARNESS_REFRESH_PREFIX = 'hnr_'
 export const HARNESS_HANDOFF_PREFIX = 'hnh_'
+/** In a computer's sign-in QR: what the phone that scans it approves. */
+export const HARNESS_QR_PREFIX = 'hnq_'
+/** Held by the computer showing that QR, to learn the answer and claim the session. Never shown. */
+export const HARNESS_QR_POLL_PREFIX = 'hnp_'
 
 const BODY = /^[A-Za-z0-9_-]{43}$/
 
@@ -20,6 +24,8 @@ const shaped = (token: unknown, prefix: string): token is string =>
 export const isHarnessAccessToken = (token: unknown): token is string => shaped(token, HARNESS_ACCESS_PREFIX)
 export const isHarnessRefreshToken = (token: unknown): token is string => shaped(token, HARNESS_REFRESH_PREFIX)
 export const isHarnessHandoffCode = (token: unknown): token is string => shaped(token, HARNESS_HANDOFF_PREFIX)
+export const isHarnessQrCode = (token: unknown): token is string => shaped(token, HARNESS_QR_PREFIX)
+export const isHarnessQrPollToken = (token: unknown): token is string => shaped(token, HARNESS_QR_POLL_PREFIX)
 
 export function newHarnessToken(prefix: string): string {
   return prefix + randomBytes(32).toString('base64url')

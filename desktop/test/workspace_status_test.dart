@@ -27,6 +27,7 @@ import 'package:harness/terminal/terminal_text.dart';
 import 'package:xterm/xterm.dart' show TerminalStyle;
 import 'package:harness/widgets/grid_model_picker.dart';
 import 'package:harness/widgets/workspace_bar_control.dart';
+import 'package:harness/widgets/pane_header_text_button.dart';
 import 'package:harness/widgets/terminal_panel.dart';
 import 'package:harness/widgets/agent_drag.dart';
 import 'package:harness/widgets/status_line.dart';
@@ -227,16 +228,40 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
         for (final pane in app.panes) {
           final cell = find.byKey(pane.cellKey);
+          final selectors = find.descendant(
+            of: cell,
+            matching: find.byType(PaneHeaderTextButton),
+          );
+          expect(selectors, findsNWidgets(2));
+          final labels = tester
+              .widgetList<Text>(
+                find.descendant(of: selectors, matching: find.byType(Text)),
+              )
+              .toList();
+          for (final label in labels) {
+            expect(label.style!.fontFamily, labels.first.style!.fontFamily);
+            expect(label.style!.fontSize, 13);
+            expect(label.style!.fontWeight, FontWeight.normal);
+            expect(label.style!.height, labels.first.style!.height);
+          }
+          expect(labels[0].style!.fontWeight, FontWeight.normal);
+          expect(
+            find.descendant(of: selectors, matching: find.byType(Icon)),
+            findsNothing,
+          );
           final controls = [
             find.byKey(ValueKey(('pane-model', 'm', pane.agentId!))),
-            for (final key in [
-              'pane-split-down',
-              'pane-split-right',
-              'pane-zoom',
-            ])
-              find.descendant(of: cell, matching: find.byKey(ValueKey(key))),
             find.descendant(of: cell, matching: find.byType(PaneCloseButton)),
           ];
+          expect(find.byKey(const ValueKey('pane-zoom')), findsNothing);
+          for (final key in ['pane-split-down', 'pane-split-right']) {
+            expect(
+              find
+                  .descendant(of: cell, matching: find.byKey(ValueKey(key)))
+                  .hitTestable(),
+              findsNothing,
+            );
+          }
           for (var i = 1; i < controls.length; i++) {
             final previous = tester.getRect(controls[i - 1]);
             final rect = tester.getRect(controls[i]);
@@ -251,6 +276,26 @@ void main() {
         expect(tester.takeException(), isNull);
         await tester.pump(const Duration(milliseconds: 100));
         await captureControls(tester, 'pane-toolbar-$count-${brightness.name}');
+        final first = tester.getRect(find.byKey(app.panes.first.cellKey));
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: first.center);
+        for (final direction in ['right', 'down']) {
+          await mouse.moveTo(
+            direction == 'right'
+                ? Offset(first.right - 2, first.center.dy)
+                : Offset(first.center.dx, first.bottom - 2),
+          );
+          await tester.pump(const Duration(milliseconds: 150));
+          expect(
+            find.byKey(ValueKey('pane-split-$direction')).hitTestable(),
+            findsOneWidget,
+          );
+          await captureControls(
+            tester,
+            'pane-edge-$direction-$count-${brightness.name}',
+          );
+        }
+        await mouse.removePointer();
         await tester.pumpWidget(const SizedBox());
         app.dispose();
       });
@@ -380,20 +425,20 @@ void main() {
           subscription('claude', 'aaaaaa', 0),
           subscription('codex', 'bbbbbb', 50),
         ]).text,
-        'Claude 0%  Codex 50%',
+        'Claude 100%   Codex 50%',
       );
       final all = WorkspaceSubscriptionUsage.fromRows([
         subscription('claude', 'aaaaaa', 0),
         subscription('claude', 'cccccc', .3, status: '<1% remaining'),
         subscription('codex', 'bbbbbb', null, status: 'Usage unavailable'),
       ]);
-      expect(all.text, 'Claude aaaaaa 0%  Claude cccccc <1%  Codex —');
+      expect(all.text, 'Claude aaaaaa 100%   Claude cccccc 100%   Codex -');
       expect(all.detail, contains('Codex (bbbbbb): Usage unavailable'));
       expect(all.segments.map((part) => part.tone), [
         WorkspaceUsageTone.normal,
-        WorkspaceUsageTone.exhausted,
         WorkspaceUsageTone.normal,
-        WorkspaceUsageTone.low,
+        WorkspaceUsageTone.normal,
+        WorkspaceUsageTone.normal,
         WorkspaceUsageTone.normal,
         WorkspaceUsageTone.normal,
       ]);
@@ -407,7 +452,7 @@ void main() {
     },
   );
 
-  test('only low and exhausted percentages carry readable warning ink', () {
+  test('all subscription percentages use neutral readable ink', () {
     final oldBrightness = grid.AppTheme.brightness.value;
     addTearDown(() => grid.AppTheme.brightness.value = oldBrightness);
     final usage = WorkspaceSubscriptionUsage.fromRows([
@@ -422,15 +467,8 @@ void main() {
           foreground: palette.foreground,
           surface: palette.workspace,
         );
-        expect(parts[1].foreground, isNot(palette.foreground));
-        expect(parts[3].foreground, isNot(palette.foreground));
-        expect(
-          parts[1].foreground,
-          parts[3].foreground,
-          reason: 'Exhausted allowance shares quiet amber with low allowance.',
-        );
-        for (final index in [0, 2, 4, 5]) {
-          expect(parts[index].foreground, palette.foreground);
+        for (final part in parts) {
+          expect(part.foreground, palette.foreground);
         }
         for (final part in parts) {
           final ink = part.foreground.computeLuminance();
@@ -464,6 +502,7 @@ void main() {
             subscription('codex', 'bbbbbb', 13),
           ];
         final app = createApp();
+        app.machineStates['m']!.localOnly = true;
         final pane = app.adoptSessionForTest(terminal('a0', []));
         addTearDown(app.dispose);
         addTearDown(subscriptions.dispose);
@@ -481,23 +520,20 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        const label = 'Claude 0%  Codex 13%';
+        const label = 'Claude 100%   Codex 87%';
         if (native) {
           expect(updates.last['subscriptionUsage']['text'], label);
           final parts = updates.last['subscriptionUsage']['segments'] as List;
           expect(parts.map((part) => part['text']), [
             'Claude ',
-            '0%',
-            '  Codex ',
-            '13%',
+            '100%',
+            '   Codex ',
+            '87%',
           ]);
           expect(parts[0]['foreground'], parts[2]['foreground']);
-          expect(parts[1]['foreground'], isNot(parts[0]['foreground']));
-          expect(parts[3]['foreground'], isNot(parts[0]['foreground']));
-          expect(
-            updates.last['subscriptionUsage']['detail'],
-            contains('remaining'),
-          );
+          expect(parts[1]['foreground'], parts[0]['foreground']);
+          expect(parts[3]['foreground'], parts[0]['foreground']);
+          expect(updates.last['subscriptionUsage']['detail'], contains('used'));
         } else {
           expect(find.text(label), findsOneWidget);
           final usage = find.byKey(
@@ -513,17 +549,40 @@ void main() {
             tester.view.physicalSize = Size(width, 800);
             await tester.pump();
             expect(tester.takeException(), isNull);
+            expect(usage, findsNothing);
+            final monitor = find.byKey(
+              const ValueKey('workspace-harness-monitor'),
+            );
             expect(
-              tester.getRect(usage).right,
+              tester.getRect(monitor).right,
               lessThan(tester.getRect(context).left),
             );
           }
           tester.view.physicalSize = const Size(1280, 800);
         }
+        if (native) {
+          expect(
+            updates.last['machineResources']['text'],
+            'CPU 0%   RAM 0 MB   GPU 0%   SSD 0 MB',
+          );
+          expect(
+            updates.last['machineResources']['detail'],
+            contains('open harnesses across connected machines'),
+          );
+          expect(updates.last['machineResources']['interactive'], isTrue);
+        } else {
+          expect(
+            find.byKey(const ValueKey('workspace-machine-resources')),
+            findsOneWidget,
+          );
+        }
+        // Monitor navigation is exercised with its daemon fixture in harness_monitor_test.
+        expect(app.focusedPane, same(pane));
+        expect(app.panes, [pane]);
         subscriptions.update([subscription('codex', 'bbbbbb', 27)]);
         await tester.pump();
         if (native) {
-          expect(updates.last['subscriptionUsage']['text'], 'Codex 27%');
+          expect(updates.last['subscriptionUsage']['text'], 'Codex 73%');
           final done = Completer<void>();
           messenger.handlePlatformMessage(
             channel.name,
@@ -535,7 +594,7 @@ void main() {
           await tester.pumpAndSettle();
           await done.future;
         } else {
-          expect(find.text('Codex 27%'), findsOneWidget);
+          expect(find.text('Codex 73%'), findsOneWidget);
           await tester.tap(
             find.byKey(const ValueKey('workspace-subscription-usage')),
           );
@@ -606,6 +665,8 @@ void main() {
     expect(app.allPanes, isNot(contains(first)));
     expect(second.session!.agentId, 'a1');
     await mouse.removePointer();
+    // Closing a tile resizes the remaining terminal through its 50 ms debounce.
+    await tester.pump(const Duration(milliseconds: 60));
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -1284,8 +1345,13 @@ void main() {
       }
       expect(
         tester.getSize(secondTab).width,
-        lessThanOrEqualTo(160 + grid.AppDesktop.tabCloseInset * 2),
-        reason: 'short tab labels keep their compact width in a roomy window',
+        tester.getSize(find.byKey(ValueKey(first.id))).width,
+        reason: 'workspace tabs share one width',
+      );
+      expect(
+        tester.getSize(secondTab).width,
+        lessThanOrEqualTo(grid.AppDesktop.tabMaxWidth),
+        reason: 'tabs stop growing at the shared maximum in a roomy window',
       );
       expect(find.byKey(const ValueKey('swarm-search-button')), findsOneWidget);
       expect(find.byKey(const ValueKey('swarm-store-button')), findsOneWidget);

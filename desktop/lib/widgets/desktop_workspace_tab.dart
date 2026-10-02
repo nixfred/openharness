@@ -90,17 +90,16 @@ class DesktopWorkspaceTab extends StatefulWidget {
         (indicator == 0 ? 0 : indicator + _indicatorGap);
   }
 
-  static double widthOf(
-    BuildContext context,
-    String label, {
-    String? shortcutHint,
-    bool hasActivity = false,
-  }) => naturalWidth(
-    context,
-    label,
-    shortcutHint: shortcutHint,
-    hasActivity: hasActivity,
-  ).clamp(112, 256);
+  /// Tabs share the available width, then scroll at their readable minimum.
+  static double widthForStrip(double availableWidth, int tabCount) {
+    if (tabCount == 0) return 0;
+    return math.min(
+      availableWidth,
+      (availableWidth / tabCount)
+          .clamp(grid.AppDesktop.tabMinWidth, grid.AppDesktop.tabMaxWidth)
+          .floorToDouble(),
+    );
+  }
 
   @override
   State<DesktopWorkspaceTab> createState() => _DesktopWorkspaceTabState();

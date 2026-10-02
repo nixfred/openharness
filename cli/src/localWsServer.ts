@@ -78,6 +78,8 @@ export interface LocalWsServerOptions {
    * Consumed like app_panes: a fact about this desk, never forwarded to the machine.
    */
   onAppSwarms?: (swarms: AppSwarms | null) => void
+  /** Tab membership for cleanup, scoped to the reporting window, including local utility tabs. */
+  onAppTabAgents?: (connection: string, agentIds: string[] | null) => void
   /**
    * The window asked WHICH AGENT a typed task belongs to (⌘K). Answers, and sends NOTHING.
    *
@@ -567,7 +569,11 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         if (!isBinary && options.onAppSwarms) {
           if (parsed?.type === 'app_swarms') {
             const swarms = appSwarmsFrom(parsed.payload)
-            if (swarms) { sentSwarms = true; options.onAppSwarms(swarms) }
+            if (swarms) {
+              sentSwarms = true
+              options.onAppSwarms(swarms)
+              options.onAppTabAgents?.(connId, swarms.swarms.flatMap(s => s.agentIds))
+            }
             return
           }
         }
@@ -709,6 +715,9 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
         // forwarded: a robot plugged into this computer is nothing a remote machine can act on, and the
         // reply is the ordinary `dial_status` the device's own answer produces.
         if (parsed?.type === 'dial_settings') {
+          // Legacy settings are only for this desk. Remote management uses the
+          // encrypted harness_device_settings RPC, dispatched by the host.
+          if (relay || boundMachineId !== options.machineId) return
           const payload = (parsed.payload ?? {}) as Record<string, unknown>
           const id = typeof payload.id === 'string' ? payload.id : ''
           options.onDialSettings?.(id, payload)
@@ -762,6 +771,7 @@ export function attachLocalWsServer(server: http.Server, options: LocalWsServerO
       // exactly backwards, and permanently.
       if (sentPanes) options.onAppPanes?.([], false)
       if (sentSwarms) options.onAppSwarms?.(null)
+      if (sentSwarms) options.onAppTabAgents?.(connId, null)
       if (relay) { relay.detach(); relay = null }
       else if (selected) void options.backend.unregisterLocalClient(connId)
       selected = false

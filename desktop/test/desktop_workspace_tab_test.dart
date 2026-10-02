@@ -58,52 +58,56 @@ Widget _host(
               children: [
                 const SizedBox(width: 8),
                 Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        for (final tab in tabs)
-                          Builder(
-                            builder: (context) => SizedBox(
-                              width: DesktopWorkspaceTab.widthOf(
-                                context,
-                                tab.name,
-                                shortcutHint: tab.hint,
-                                hasActivity: tab.working,
-                              ),
-                              child: DesktopWorkspaceTab(
-                                id: tab.name,
-                                label: tab.name,
-                                selected: tab.name == 'Desktop',
-                                shortcutHint: tab.hint,
-                                showShortcuts: hints,
-                                onSelect: enabled ? (onSelect ?? () {}) : null,
-                                onClose: enabled ? (onClose ?? () {}) : null,
-                                onRename: onRename,
-                                activityLabel: tab.working ? 'Working' : null,
-                                activity: tab.working
-                                    ? SizedBox(
-                                        key: ValueKey('status:${tab.name}'),
-                                        width: 16,
-                                        child: Text(
-                                          '⠋',
-                                          textAlign: TextAlign.center,
-                                          textScaler: TextScaler.noScaling,
-                                          style:
-                                              grid.AppType.mono(
-                                                color: const Color(0xff64d2ff),
-                                              ).copyWith(
-                                                fontFamilyFallback: const [
-                                                  'Apple Symbols',
-                                                ],
-                                              ),
-                                        ),
-                                      )
-                                    : null,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final tab in tabs)
+                            Builder(
+                              builder: (context) => SizedBox(
+                                width: DesktopWorkspaceTab.widthForStrip(
+                                  constraints.maxWidth,
+                                  tabs.length,
+                                ),
+                                child: DesktopWorkspaceTab(
+                                  id: tab.name,
+                                  label: tab.name,
+                                  selected: tab.name == 'Desktop',
+                                  shortcutHint: tab.hint,
+                                  showShortcuts: hints,
+                                  onSelect: enabled
+                                      ? (onSelect ?? () {})
+                                      : null,
+                                  onClose: enabled ? (onClose ?? () {}) : null,
+                                  onRename: onRename,
+                                  activityLabel: tab.working ? 'Working' : null,
+                                  activity: tab.working
+                                      ? SizedBox(
+                                          key: ValueKey('status:${tab.name}'),
+                                          width: 16,
+                                          child: Text(
+                                            '⠋',
+                                            textAlign: TextAlign.center,
+                                            textScaler: TextScaler.noScaling,
+                                            style:
+                                                grid.AppType.mono(
+                                                  color: const Color(
+                                                    0xff64d2ff,
+                                                  ),
+                                                ).copyWith(
+                                                  fontFamilyFallback: const [
+                                                    'Apple Symbols',
+                                                  ],
+                                                ),
+                                          ),
+                                        )
+                                      : null,
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),

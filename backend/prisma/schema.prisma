@@ -659,6 +659,7 @@ model ExperimentalSettings {
   userId           String
   focusBarCreature Boolean @default(false)
   shareButton      Boolean @default(false)
+  devicesTab       Boolean @default(false)
   revision         Int     @default(0)
 
   @@index([userId])
@@ -710,6 +711,9 @@ model HarnessSession {
   refreshHash String    @unique
   /// What the device calls itself ("Dee's iPhone"), for a list of signed-in devices.
   label       String
+  /// `computer` — a computer signed in by a phone scanning its QR (lib/harnessSession.ts): it may
+  /// connect AS a machine. Absent (every older row) or `viewer` — an app, which may not.
+  kind        String?
   createdAt   DateTime  @default(now())
   lastUsedAt  DateTime  @default(now())
   /// Slides forward on every refresh: a phone in use stays signed in, one left in a drawer does not.
@@ -718,6 +722,28 @@ model HarnessSession {
 
   @@index([userId])
   @@map("harness_sessions")
+}
+
+/// One entry of an account's device key log (lib/deviceKeyLog.ts): the identity keys its machines and
+/// viewer apps hold, append-only and hash-chained. Every device trusts the keys the log leaves active,
+/// so signing in is enough for an account's devices to reach each other end to end.
+///
+/// `entry` is the JSON the device sent, kept verbatim; its signature and hash cover a binary encoding
+/// of its fields, so nothing here depends on how Mongo orders keys. The unique `(userId, seq)` is what
+/// makes appending atomic: two devices appending at one head cannot both win.
+model DeviceKeyLogEntry {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String
+  seq       Int
+  hash      String
+  entry     String
+  /// The Harness session (a phone signed in by a QR) that added this key, so removing the key signs
+  /// that session out too. Null for anything else.
+  sessionId String?
+  createdAt DateTime @default(now())
+
+  @@unique([userId, seq])
+  @@map("device_key_log")
 }
 
 /// Public/private link metadata only. The owner daemon keeps the final policy and encrypted discussion.

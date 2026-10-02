@@ -41,6 +41,13 @@ class LocalCliEndpoint {
   /// on the loopback port. [wsUri] names the same endpoint either way.
   final String? socketPath;
 
+  /// The daemon is still on its first scan for agents (`discoveryReady: false`). NOT part of
+  /// readiness, for the same reason [backendOnline] is not: its socket already serves every agent it
+  /// knows, restored tiles wait as intent and attach as each agent's `agent_synced` arrives, so
+  /// holding the app on "Starting local service…" for the scan only made the window late (owner,
+  /// 2026-10-01; measured 2–2.5 s of a cold start). The next probe clears it.
+  final bool scanning;
+
   const LocalCliEndpoint({
     required this.computerId,
     required this.wsUri,
@@ -50,6 +57,7 @@ class LocalCliEndpoint {
     this.backendOnline = true,
     this.agentProjects = const {},
     this.socketPath,
+    this.scanning = false,
   });
 }
 
@@ -606,16 +614,9 @@ class LocalCliDiscovery {
     if (body == null) {
       return const LocalCliProbe.notReady('not a harness status');
     }
-    // New CLIs expose the initial terminal scan explicitly. A missing field means an older CLI and
-    // remains accepted for backward compatibility; false means the daemon is alive but not ready to
-    // publish an authoritative empty/non-empty agent list yet.
-    if (body['discoveryReady'] == false) {
-      return LocalCliProbe.notReady(
-        'still scanning for agents',
-        pid: pid,
-        version: version,
-      );
-    }
+    // New CLIs expose the initial terminal scan explicitly; false means the daemon is alive but its
+    // agent list is not complete yet. Reported, not gated on — see [LocalCliEndpoint.scanning].
+    final scanning = body['discoveryReady'] == false;
     // `connected` is the daemon's own backend-socket state. It used to gate readiness — so a
     // computer that could not reach the backend never got past "Starting local service…", with a
     // daemon, tmux and every agent sitting right there on the loopback. It is reported instead
@@ -672,6 +673,7 @@ class LocalCliDiscovery {
           identity.environment,
         ),
         socketPath: socketPath,
+        scanning: scanning,
       ),
       pid: pid,
       version: version,

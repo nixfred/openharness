@@ -15,6 +15,11 @@ enum ExperimentalFeature {
     'share_button',
     'Share button',
     'Show Share in the top-right corner of the workspace.',
+  ),
+  devicesTab(
+    'devices_tab',
+    'Devices tab',
+    'Manage your Harness devices. Show Devices next to Harness Store. Off by default.',
   );
 
   const ExperimentalFeature(this.id, this.label, this.description);
@@ -22,6 +27,7 @@ enum ExperimentalFeature {
   bool get available => switch (this) {
     focusBarCreature => !kIsWeb && !kViewerMode,
     shareButton => true,
+    devicesTab => !kIsWeb && !kViewerMode,
   };
 }
 
@@ -136,15 +142,22 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
         revision < 0 ||
         features is! Map ||
         ExperimentalFeature.values.any(
-          (feature) => features[feature.id] is! bool,
+          (feature) =>
+              features[feature.id] is! bool &&
+              !(feature == ExperimentalFeature.devicesTab &&
+                  !features.containsKey(feature.id)),
         )) {
       throw const FormatException('Invalid account settings');
     }
     if (revision < _revision) return;
     _revision = revision;
     for (final feature in ExperimentalFeature.values) {
-      _choices[feature] = features[feature.id] as bool;
-      _available[feature] = available is! Map || available[feature.id] != false;
+      // Older servers do not know this experiment. Keep their existing
+      // settings usable, and leave the new feature off and unavailable.
+      _choices[feature] = features[feature.id] == true;
+      _available[feature] =
+          features.containsKey(feature.id) &&
+          (available is! Map || available[feature.id] != false);
     }
     loaded = true;
   }

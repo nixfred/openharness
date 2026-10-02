@@ -66,6 +66,8 @@ typedef struct { uint16_t w, h; const uint16_t *px; const uint8_t *a; } ht_icon_
 // The engines' marks in focus.c's ENGINES order: 20 px as the inbox drew them, and 27 px — LVGL's
 // own 28/20 scaling of the same 20 px art, as the header drew it. And the microphone.
 extern const ht_icon_t ht_icon_engine20[14], ht_icon_engine28[14], ht_icon_mic;
+// The Focus face's 56 px marks (focus_marks.c, scripts/gen_focus_marks.py), in the same order.
+extern const ht_icon_t ht_icon_engine56[14];
 // Precomputed curved-label and larger inbox navigation glyphs.
 extern const ht_font_t ht_open_20, ht_nav_32;
 extern const ht_font_t ht_open_24, ht_right_24, ht_bell_24;
@@ -100,6 +102,10 @@ extern const ht_font_t ht_lock_dot;
 // the letters that live outside it (A-breve, D-stroke, O-horn, U-horn and their lowercase).
 // Same fixed cell as the mono face they stand in for; terminal.c routes them in glyph_font().
 extern const ht_font_t ht_viet_16, ht_viet_20, ht_viet_24, ht_viet_28;
+// Roboto Mono for the Focus skin's curved name: 24 px in the same 15 x 32 cell, Vietnamese from the
+// same face (ht_rviet_24, the 0x1EA0 block + tail like ht_viet_24 — one atlas cannot span both ranges).
+extern const ht_font_t ht_rmono_24, ht_rviet_24;
+extern const uint8_t ht_rmono_24_ink[224][4];
 typedef struct {
     int16_t x, y, w, h;
 } ht_rect_t;
@@ -181,7 +187,17 @@ int ht_lv_label(ht_lv_label_t *label, const ht_font_t *font, const char *text, i
 int ht_fit_width(char *dst, size_t cap, const char *text, int width, const ht_font_t *font);
 // Fixed 24 px upper/lower arcs. Text stays in the scene; each mask is cached on
 // first rasterization and reused across strips, animation and color changes.
+// An arc face: the 24 px mono atlas and its ink bounds, the Vietnamese atlas, and the three icon
+// atlases (with ink) glyph_font() substitutes for U+2197, U+2192 and U+E000. A curved run stores
+// the face's mono atlas as its font, so the mask cache and the damage diff tell faces apart.
+typedef struct {
+    const ht_font_t *mono, *viet, *open, *right, *bell;
+    const uint8_t (*ink)[4], (*open_ink)[4], (*right_ink)[4], (*bell_ink)[4];
+} ht_arc_face_t;
+extern const ht_arc_face_t ht_arc_geist, ht_arc_roboto;
 void ht_arc_title(ht_scene_t *scene, uint16_t fg, const char *text);
+void ht_arc_title_face(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face);
+// The lower arc, in the GeistMono face only (Focus has no lower arc).
 void ht_arc_status(ht_scene_t *scene, uint16_t fg, const char *text);
 // Same conservative bounds used for damage; useful for matching curved hit areas.
 ht_rect_t ht_run_bounds(const ht_run_t *run);

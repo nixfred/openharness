@@ -39,14 +39,12 @@ class KeyboardLesson {
       .join(' / ');
   String get result => switch (command) {
     'swarm.new' => '[work]  [new tab]\nFind a harness, or create one',
-    'agent.open' ||
+    'agent.open' => '# Projects\nChoose a project to see its harnesses.',
     'agent.add' => '[harness 1] │ [harness 2]\nBoth harnesses share this tab.',
     'agent.new' => 'Codex · This Mac · payments\nHarness anything (optional)\nNew harness is selected. Return starts with these settings; Tab reaches each control. Model, approvals, and Codex profile are below the message.',
     'pane.zoom' => '[harness 2 — full workspace]\nPress the same key to restore the other panes.',
-    'pane.close' =>
-      '[harness 1]\nThe second view closes. Its harness keeps running.',
-    'swarm.close' =>
-      '[previous tab]\nThe view closes. Its harnesses keep running.',
+    'pane.close' => '[harness 1]\nClosing the last view saves idle work to disk. Working sessions ask when to stop.',
+    'swarm.close' => '[previous tab]\nIdle sessions are saved and closed. Working sessions ask when to stop.',
     'navigation.commands' => '>rename\nRename Harness\nRename Tab',
     'terminal.find' => 'find > timeout\n1/3 matches in this terminal’s output',
     'picker.complete' => 'project  ~/work/payments\nTab completes the current argument; Enter accepts it.',
@@ -75,7 +73,7 @@ class KeyboardLesson {
     'picker.more_options' => 'New harness\nOpen the composer from search. In the composer, choose a model; Terminal opens the Repo list.',
     'picker.toggle_preview' =>
       'results │ preview\nToggle again to hide the preview.',
-    'agent.stop' => 'Stop Harness?\n> Cancel    Stop\nStopping ends the running harness; its saved conversation is kept. Closing a pane only closes a view.',
+    'agent.stop' => 'Stop Harness?\n> Cancel    Stop\nStopping ends the running harness; its saved conversation is kept. Switching tabs keeps work running.',
     'agent.restart' => 'Restart Harness\nRestarts the harness in the same pane and tries to resume its conversation.',
     'agent.fork' =>
       'Fork Harness\nChoose a name and first task. The source stays open.',

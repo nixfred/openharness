@@ -1,9 +1,18 @@
+import 'dart:async';
+
+import 'new_device_banner.dart';
+
 import 'package:flutter/material.dart';
 
 import 'package:harness_mobile/state/app_state.dart';
+import 'package:harness_mobile/viewer/device_log_sync.dart';
 
 import '../p2p/phone_terminal_p2p.dart';
 import 'agent_home.dart';
+import 'device_detail_page.dart';
+import 'device_rows.dart';
+import 'devices_page.dart';
+import 'phone_navigation.dart' show phoneRoute;
 import 'phone_shell_scope.dart';
 
 /// The signed-in phone app: one page stack, rooted in [AgentHome] — the terminal the phone opens
@@ -39,6 +48,16 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     final notices = widget.notifier.agentNotices.system;
     notices.opened.addListener(_openNoticedAgent);
+    notices.openedDevice.addListener(_openNoticedDevice);
+    // A tap that launched the app is read before this shell exists, so its value is already set and
+    // no listener will ever fire for it: take it once the navigator is up.
+    if (notices.opened.value != null || notices.openedDevice.value != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _openNoticedAgent();
+        _openNoticedDevice();
+      });
+    }
     // ⚠️ Not asked here any more. Signed in with nothing on screen, "Harness would like to send you
     // notifications" is a question with no reason attached. It is asked the first time a harness
     // is on screen — see `FocusHints.onDone` in `terminal_page.dart`.
@@ -49,6 +68,9 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     widget.notifier.agentNotices.system.opened.removeListener(
       _openNoticedAgent,
+    );
+    widget.notifier.agentNotices.system.openedDevice.removeListener(
+      _openNoticedDevice,
     );
     _linkedMachineId.dispose();
     _openAgentRequest.dispose();
@@ -118,6 +140,49 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
     if (agent == null) return;
     opened.value = null;
     _openAgentAtHome(agent.machineId, agent.agentId);
+  }
+
+  /// A tapped "new device" notice: that device's page. One this phone has just been told of opens as
+  /// new; one it no longer lists as new but the account still holds opens plain; one that is gone
+  /// opens the list, which says so by not showing it.
+  void _openNoticedDevice() {
+    final opened = widget.notifier.agentNotices.system.openedDevice;
+    final pub = opened.value;
+    if (pub == null) return;
+    opened.value = null;
+    unawaited(_showDevice(pub));
+  }
+
+  Future<void> _showDevice(String pub) async {
+    final navigator = _navigator.currentState;
+    if (navigator == null) return;
+    for (final m in widget.notifier.newDevices) {
+      if (m.pub != pub) continue;
+      await navigator.push(
+        phoneRoute(
+          (_) => DeviceDetailPage(
+            notifier: widget.notifier,
+            row: rowFromMember(m),
+            isNew: true,
+          ),
+        ),
+      );
+      return;
+    }
+    final DeviceLogListing listing = await widget.notifier.deviceListing();
+    if (!mounted) return;
+    for (final row in listing.members) {
+      if (row.member.pub != pub) continue;
+      await navigator.push(
+        phoneRoute(
+          (_) => DeviceDetailPage(notifier: widget.notifier, row: row),
+        ),
+      );
+      return;
+    }
+    await navigator.push(
+      phoneRoute((_) => DevicesPage(notifier: widget.notifier)),
+    );
   }
 
   /// Back in the foreground: a p2p retry waiting out its delay fires now, and so does every machine
@@ -198,23 +263,34 @@ class _PhoneShellState extends State<PhoneShell> with WidgetsBindingObserver {
             //
             // `MaterialApp` installs one controller for the ROOT navigator only; a nested
             // `Navigator` inherits nothing, so its routes have no observer to drive a flight.
-            body: HeroControllerScope(
-              controller: _heroController,
-              child: Navigator(
-                key: _navigator,
-                // ⚠️ The controller goes in the SCOPE ONLY, never also in `observers`.
-                // `NavigatorState._updateEffectiveObservers` appends the scope's controller to
-                // `widget.observers` itself, so listing it here registers it twice and trips
-                // "A HeroController can not be shared by multiple Navigators" — which reads
-                // like a sharing bug and is really a double-subscription by one navigator.
-                onGenerateRoute: (_) => MaterialPageRoute<void>(
-                  builder: (_) => AgentHome(
-                    notifier: widget.notifier,
-                    openMachineId: _linkedMachineId,
-                    openAgent: _openAgentRequest,
+            body: Column(
+              children: [
+                // A device this phone had never trusted joined the account (device key log).
+                NewDeviceBanner(
+                  notifier: widget.notifier,
+                  navigator: _navigator,
+                ),
+                Expanded(
+                  child: HeroControllerScope(
+                    controller: _heroController,
+                    child: Navigator(
+                      key: _navigator,
+                      // ⚠️ The controller goes in the SCOPE ONLY, never also in `observers`.
+                      // `NavigatorState._updateEffectiveObservers` appends the scope's controller to
+                      // `widget.observers` itself, so listing it here registers it twice and trips
+                      // "A HeroController can not be shared by multiple Navigators" — which reads
+                      // like a sharing bug and is really a double-subscription by one navigator.
+                      onGenerateRoute: (_) => MaterialPageRoute<void>(
+                        builder: (_) => AgentHome(
+                          notifier: widget.notifier,
+                          openMachineId: _linkedMachineId,
+                          openAgent: _openAgentRequest,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+              ],
             ),
           ),
         ),

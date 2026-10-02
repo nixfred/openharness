@@ -14,12 +14,14 @@ static size_t encode(char *p, unsigned cp)
     if (cp < 2048) { p[0]=(char)(0xc0|(cp>>6));p[1]=(char)(0x80|(cp&63));return 2; }
     p[0]=(char)(0xe0|(cp>>12));p[1]=(char)(0x80|((cp>>6)&63));p[2]=(char)(0x80|(cp&63));return 3;
 }
+static const ht_arc_face_t *face;
 static void compare(const char *text, int edge)
 {
+    if(edge && face!=&ht_arc_geist) return; // only the upper arc takes a face
     ht_scene_t scene;
     ht_scene_clear(&scene,ht_rgb(next()&0xffffff));
     if(edge) ht_arc_status(&scene,ht_rgb(next()&0xffffff),text);
-    else ht_arc_title(&scene,ht_rgb(next()&0xffffff),text);
+    else ht_arc_title_face(&scene,ht_rgb(next()&0xffffff),text,face);
     ht_rect_t rect={HT_ARC_X,edge ? HT_HEIGHT-HT_ARC_Y-HT_ARC_HEIGHT : HT_ARC_Y,
                     HT_ARC_WIDTH,HT_ARC_HEIGHT};
     const size_t pixels=(size_t)rect.w*rect.h;
@@ -29,7 +31,7 @@ static void compare(const char *text, int edge)
     assert(original[pixels]==0x7ced&&tight[pixels]==0x7ced);
     assert(!memcmp(original,tight,pixels*sizeof *tight));
 }
-int main(void)
+static void run(void)
 {
     // The two longest labels cover every rotation-table entry in both
     // directions. Every Latin-1 glyph, arrow and bell occupies each one.
@@ -49,5 +51,11 @@ int main(void)
         }
         text[n]=0;compare(text,trial&1);
     }
-    puts("arc bounds: 227 glyphs at every upper/lower rotation + 2000 mixed labels match full-cell pixels PASS");
+}
+int main(void)
+{
+    face=&ht_arc_geist; run();
+    // Roboto Mono's own ink table (and its Vietnamese atlas) must bound every glyph just as tightly.
+    face=&ht_arc_roboto; run(); // upper arc only
+    puts("arc bounds: Roboto Mono face matches too; 227 glyphs at every upper/lower rotation + 2000 mixed labels match full-cell pixels PASS");
 }

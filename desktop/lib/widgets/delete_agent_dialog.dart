@@ -11,7 +11,7 @@ import 'box_chrome.dart' show BoxAnnouncer;
 import 'engine_identity.dart';
 import 'terminal_prompt.dart';
 
-/// Stopping ends the running process; closing a pane only removes its view.
+/// Explicit Stop ends the running process across its views.
 /// Requests remain with the model if this prompt is dismissed.
 Future<void> confirmDeleteAgent(
   BuildContext context,
@@ -174,7 +174,7 @@ class _StopAgentPromptState extends State<_StopAgentPrompt> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Its panes close across tabs. Close Pane keeps it running.',
+                'Its panes close across tabs. Switching tabs keeps it running.',
                 style: DesktopChrome.text(size: 13, color: DesktopChrome.muted),
               ),
               if (_stopping) ...[

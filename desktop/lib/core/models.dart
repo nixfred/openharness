@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/foundation.dart' show immutable, listEquals;
 
+import 'agent_activity.dart';
 import 'runtime_model_name.dart';
 import 'agent_git_context.dart';
 
@@ -289,6 +290,7 @@ class AgentOutputStats {
 }
 
 class Agent {
+  final AgentActivity? activity;
   final String id;
   final String? sessionId;
   final String name;
@@ -340,6 +342,10 @@ class Agent {
 
   /// The CLI's transcript/hook activity time, not its registry refresh time.
   final DateTime? lastActivityAt;
+  final DateTime? createdAt;
+  final bool closeSupported;
+  final String? closePlanState;
+  final String? closePlanDetail;
 
   /// When a person last opened or focused this harness in ANY client, as the
   /// owning daemon recorded it (`lastOpenedAt`, stamped by `agent_update
@@ -428,6 +434,7 @@ class Agent {
   final String? namedAgent;
 
   const Agent({
+    this.activity,
     required this.id,
     this.sessionId,
     required this.name,
@@ -447,6 +454,10 @@ class Agent {
     this.project,
     this.gitContext,
     this.lastActivityAt,
+    this.createdAt,
+    this.closeSupported = false,
+    this.closePlanState,
+    this.closePlanDetail,
     this.lastOpenedAt,
     this.tokensUsed,
     this.tokensUpdatedAt,
@@ -564,6 +575,7 @@ class Agent {
       engine: _safeEngine(j['engine']),
     );
     return Agent(
+      activity: AgentActivity.fromJson(j['activity']),
       id: j['id'] as String,
       sessionId: _safeLabel(j['sessionId']),
       name: j['name'] as String? ?? 'harness',
@@ -584,6 +596,18 @@ class Agent {
       gitContext: AgentGitContext.fromJson(j['gitContext']),
       lastActivityAt: j['updatedAt'] is String
           ? DateTime.tryParse(j['updatedAt'] as String)
+          : null,
+      createdAt: j['createdAt'] is String
+          ? DateTime.tryParse(j['createdAt'] as String)
+          : null,
+      closeSupported: j['closeSupported'] == true,
+      closePlanState:
+          j['closePlan'] is Map &&
+              const {'waiting', 'failed'}.contains(j['closePlan']['state'])
+          ? j['closePlan']['state'] as String
+          : null,
+      closePlanDetail: j['closePlan'] is Map
+          ? _safeDetail(j['closePlan']['detail'])
           : null,
       lastOpenedAt: j['lastOpenedAt'] is String
           ? DateTime.tryParse(j['lastOpenedAt'] as String)
@@ -628,7 +652,9 @@ class Agent {
     String? status,
     bool? terminalAvailable,
     DateTime? lastOpenedAt,
+    bool clearClosePlan = false,
   }) => Agent(
+    activity: activity,
     id: id,
     sessionId: sessionId,
     name: name ?? this.name,
@@ -648,6 +674,10 @@ class Agent {
     project: project,
     gitContext: gitContext ?? this.gitContext,
     lastActivityAt: lastActivityAt,
+    createdAt: createdAt,
+    closeSupported: closeSupported,
+    closePlanState: clearClosePlan ? null : closePlanState,
+    closePlanDetail: clearClosePlan ? null : closePlanDetail,
     lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
     tokensUsed: tokensUsed,
     tokensUpdatedAt: tokensUpdatedAt,

@@ -380,6 +380,63 @@ void main() {
       expect(taps, ['m1/a1']);
       mac.onTap = null;
     });
+
+    test('a click on a device notice comes back as that device', () async {
+      final mac = MacSystemNotifier(channel: channel);
+      final taps = <String>[];
+      mac.onTap = (m, a) => taps.add('$m/$a');
+      Future<void> tap(Map<String, String> args) =>
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+                channel.name,
+                const StandardMethodCodec().encodeMethodCall(
+                  MethodCall('tapped', args),
+                ),
+                (_) {},
+              );
+      await tap({'machineId': SystemNotifications.deviceNoticeMachine, 'agentId': 'pub-1'});
+      // A device notice with no key in it opens nothing.
+      await tap({'machineId': SystemNotifications.deviceNoticeMachine, 'agentId': ''});
+      expect(taps, ['@device/pub-1']);
+      mac.onTap = null;
+    });
+  });
+
+  group('device notices', () {
+    test('carry the device in the click slots; an account notice without one carries nothing', () async {
+      final os = _Recorder();
+      final system = SystemNotifications(store: store(), notifier: os);
+      system.postNotice(id: 'harness-device:p', title: 'New device on your account', body: 'b', devicePub: 'p');
+      system.postNotice(id: 'harness-other', title: 't', body: 'b');
+      await Future<void>.delayed(Duration.zero);
+      expect(SystemNotifications.deviceNoticeMachine, '@device');
+      expect(os.shown.map((s) => (s.machineId, s.agentId)), [('@device', 'p'), ('', '')]);
+    });
+
+    test('a device the daemon announces reaches the system, naming the device and where to remove it', () async {
+      final os = _Recorder();
+      final app = AppNotifier(
+        config: AppConfig.dev,
+        authSession: AuthSession(),
+        configStore: null,
+        systemNotifications: SystemNotifications(store: store(), notifier: os),
+      );
+      addTearDown(app.dispose);
+      app.machines = [_machine];
+      app.machineStates['m1'] = MachineState(_machine);
+      await app.handleEventForTest('m1', {
+        'type': 'device_key_added',
+        'payload': {'pub': 'pub-1', 'label': 'Test iPad', 'kind': 'viewer', 'fingerprint': 'AAAA·BBBB·CCCC·DDDD'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(app.newDevices.single.pub, 'pub-1');
+      expect(app.newDevices.single.fingerprint, 'AAAA·BBBB·CCCC·DDDD');
+      final shown = os.shown.single;
+      expect(shown.title, 'New device on your account');
+      expect(shown.body, endsWith('Not yours? Remove it in Settings ▸ Your devices.'));
+      expect(shown.body, contains('Test iPad'));
+      expect((shown.machineId, shown.agentId), ('@device', 'pub-1'));
+    });
   });
 
   group('Linux', () {

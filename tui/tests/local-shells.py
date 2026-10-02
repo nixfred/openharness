@@ -35,7 +35,7 @@ HOME = BASE / 'home'
 HOME.mkdir()
 HN = BASE / 'hn'
 shutil.copy2(SOURCE, HN)
-ENV = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'TZ') if k in os.environ}
+ENV = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'TZ', 'NODE_PATH') if k in os.environ}
 ENV.update(HOME=str(HOME), PORT=str(PORT), HN_SOCKET_NAME=PREFIX, HN_TMPDIR=str(BASE), SHELL='/bin/sh',
            TERM='xterm-256color', HNE_REMOVE='bad', HNE_KEEP='bad', HNE_HIDDEN='bad')
 CONF = BASE / 'tmux.conf'
@@ -189,9 +189,9 @@ try:
     wait(lambda: hn('display-message', '-p', '#{local_machine}|#{pane_machine}').stdout.strip() == 'mock-local|mock-local',
          'local shell and status share the machine name from the app')
     tm('send-keys', '-t', 'outer', 'C-b', 'N')
-    wait(lambda: 'mock-local:' in tm('capture-pane', '-p', '-t', 'outer').stdout, 'New Harness uses the app machine name')
+    wait(lambda: ' @ local' in tm('capture-pane', '-p', '-t', 'outer').stdout, 'New Harness identifies the local destination')
     tm('send-keys', '-t', 'outer', 'Escape')
-    print('PASS daemon arrival preserves local shell and uses the app machine name everywhere', flush=True)
+    print('PASS daemon arrival preserves local shell and identifies the local destination', flush=True)
 
     hn('kill-server', check=False)
     wait(lambda: not own_processes(), 'all test hn processes stop')

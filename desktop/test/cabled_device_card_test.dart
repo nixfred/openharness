@@ -120,11 +120,13 @@ void main() {
     expect(find.textContaining('habitat 0.0.86'), findsOneWidget);
   });
 
-  testWidgets('a round face offers the rows a circle has', (tester) async {
+  testWidgets('no robot offers Edge text: titles are straight across', (
+    tester,
+  ) async {
     await _pump(tester, const [
       DialStatus(attached: true, id: 'AA:01', settings: _round),
     ]);
-    expect(find.text('Edge text'), findsOneWidget);
+    expect(find.text('Edge text'), findsNothing);
     expect(find.text('Voice language'), findsOneWidget);
   });
 
@@ -216,12 +218,12 @@ void main() {
     expect(find.text('These settings apply to'), findsOneWidget);
     expect(find.textContaining('aa:bb'), findsOneWidget);
     expect(find.textContaining('cc:dd'), findsOneWidget);
-    // Opens on the first attached robot, which is round, so its two round-only rows are drawn once.
-    expect(find.text('Edge text'), findsOneWidget);
+    // Opens on the first attached robot, whose voice is English; the second's is Vietnamese.
+    expect(find.text('English'), findsOneWidget);
 
     await tester.tap(find.textContaining('cc:dd'));
     await tester.pumpAndSettle();
-    expect(find.text('Edge text'), findsNothing);
+    expect(find.text('Tiếng Việt'), findsOneWidget);
     await _tap(tester, const ValueKey('device-quiet-BB:02'));
     expect(
       sent.single.$1,

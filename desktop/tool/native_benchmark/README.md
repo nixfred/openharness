@@ -56,6 +56,26 @@ Use the PID in the completed result's metadata. Hide the fixture through the app
 normal controls and repeat with a new label/file for background idle. This sampler
 reads `proc_pid_rusage` once per second: CPU deltas (100% means one core), physical
 memory footprint, resident memory, interrupt/package-idle wakeups, and disk I/O.
+CPU counters are [Mach absolute ticks](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c#L6391),
+converted with `mach_timebase_info`.
+Schema 2 records the raw ticks, timebase and process birth stamp; a replaced
+process fails the sample. Earlier schema 1 CPU percentages and seconds omitted
+that conversion and are invalid on machines whose timebase is not 1:1. Do not
+reuse them without the original machine's clock metadata. Memory, wakeup and
+disk counters use separate units and are unaffected.
+
+Calibrate the sampler before interpreting CPU results:
+
+```sh
+python3 tool/native_benchmark/test_process_usage.py
+```
+
+This compiles the sampler and compares a private busy worker against Python's
+independent `getrusage` CPU accounting. It also checks idle CPU and preservation
+of existing output, including a file created during sampling. It does not start
+or control any app or agent. The [October 1 calibration](../../../docs/performance/2026-10-01-resource-sampler-calibration.json)
+records the original failure and corrected measurements.
+
 It does not control windows. Its totals cover that process, excluding daemon,
 agent processes, and GPU energy. The fixture has no real network connections, so
 its background cost cannot establish that the connected product has zero timers

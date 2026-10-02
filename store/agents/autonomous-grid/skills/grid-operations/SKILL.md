@@ -44,8 +44,9 @@ a request that says "my grid" goes to `personalGrid`, whatever is selected, and 
 names no grid at all ("run a model on my Mac"). The `type` column of
 `ls --json` is what kind of grid a row is, not a permission to ask about: `permissioned-public` is
 a person's own grid, `private-domain` a company's, `domain-restricted` a team's, `os-community` a
-public one. Only when `personalGrid` is null: say in one line that Harness has not named this
-account's grid yet and ask them to sign in to Harness — never pick one from `ls`.
+public one. Only when `personalGrid` is null: run `harness grid setup` (it makes the account's grid)
+and `"$GRID_FLEET" init` (it records it); still null → say in one line that this account's grid could
+not be found — never pick one from `ls`.
 Connect with
 `"$GRID_FLEET" connect --mode remote --grid NAME --remember` to select a verified grid and reuse it
 in future workspaces. `--remember` writes this controller's `~/.harness/grid-fleet/default.json`;
@@ -293,7 +294,11 @@ move is enough to carry it through without asking again.
 
 Say what failed and stop; translate every message, never repeat a raw line that names the CLI.
 
-  - **Not signed in** → the user's to fix: `harness login`, the only command ever theirs.
+  - **`You're not signed in`** or **`Grid is not installed`** → yours, never the person's: `harness grid
+    setup` (installs Grid when missing and signs this computer in with its Harness account, no browser),
+    then `"$GRID_FLEET" init`, then the step again. Never `grid login`: it is a second sign-in. Only
+    `harness grid setup` saying this computer is not signed in to Harness is theirs: `harness login`,
+    the only command ever theirs.
   - **`No providers available for this model`** right after a join → not registered yet; wait as
     step 6 says.
   - **`exceeds the available context size`** (an agent may show it as a garbled "expected array

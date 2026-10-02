@@ -215,6 +215,32 @@ describe('local CLI WebSocket', () => {
     expect(backend.frames).toEqual([])
     ws.close()
   })
+  it('relays addressed device commands without sending legacy writes to the local cable', async () => {
+    const backend = new FakeBackend(), localSettings = vi.fn(), relayed: Frame[] = []
+    const relayPool = {
+      acquire: async (_id: string, _env: string, _select: Frame, sink: LocalClientSink) => {
+        sink.sendFrame({ type: 'connected', payload: { machineId: 'remote', e2ee: false } })
+        return { send: async (frame: Frame) => { relayed.push(frame) }, sendBinary: async () => {}, detach: () => {} }
+      },
+    }
+    const ws = new WebSocket(await start(backend, {
+      autonomousEnv: 'test', onDialSettings: localSettings,
+      relayPool: relayPool as unknown as NonNullable<LocalWsServerOptions['relayPool']>,
+    }))
+    await onceOpen(ws)
+    const connected = onceMessage(ws)
+    ws.send(JSON.stringify({ type: 'machine_select', payload: { machineId: 'remote', localProtocolVersion: 1 } }))
+    await connected
+    ws.send(JSON.stringify({ type: 'dial_settings', payload: { id: 'same-usb', brightness: 90 } }))
+    const addressed = { type: 'harness_device_settings', payload: { id: 'same-usb', patch: { brightness: 35 }, requestId: 'one' } }
+    ws.send(JSON.stringify(addressed))
+    await vi.waitFor(() => expect(relayed).toContainEqual(addressed))
+    expect(localSettings).not.toHaveBeenCalled()
+    expect(backend.frames).toEqual([])
+    expect(relayed).toHaveLength(1)
+    ws.close()
+  })
+
   it('accepts loopback, selects the exact machine, and routes JSON plus HTRL binary', async () => {
     const backend = new FakeBackend()
     const url = await start(backend)
@@ -359,11 +385,13 @@ describe('local CLI WebSocket', () => {
   it('takes the window\'s swarms, drops what is not a swarm, and forgets them on close', async () => {
     const backend = new FakeBackend()
     const seen: unknown[] = []
+    const tabs = vi.fn()
     server = http.createServer((_req, res) => { res.statusCode = 404; res.end() })
     local = attachLocalWsServer(server, {
       machineId,
       backend,
       onAppSwarms: (swarms) => seen.push(swarms),
+      onAppTabAgents: tabs,
     })
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
     const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/local-ws`
@@ -398,10 +426,13 @@ describe('local CLI WebSocket', () => {
     // Like app_panes: a fact about this desk, so the machine never sees it.
     expect(backend.frames.map((frame) => frame.type)).toEqual([])
 
+    expect(tabs).toHaveBeenCalledExactlyOnceWith(backend.connId, ['a1', 'a2'])
+
     ws.close()
     // The window is gone, and so are its tabs.
     await vi.waitFor(() => expect(seen).toHaveLength(2))
     expect(seen[1]).toBeNull()
+    expect(tabs).toHaveBeenLastCalledWith(backend.connId, null)
   })
 
   it('follows an explicit app_focus, and keeps it off the wire', async () => {

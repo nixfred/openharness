@@ -34,6 +34,7 @@ import 'logging/install.dart';
 import 'shortcuts/app_keymap.dart';
 import 'shortcuts/keyboard_practice.dart';
 import 'widgets/shortcuts_sheet.dart';
+import 'widgets/new_device_notice.dart';
 import 'widgets/update_notice.dart';
 import 'widgets/window_chrome.dart';
 import 'nixfred/boot_splash.dart';
@@ -208,19 +209,33 @@ class _RootShellState extends ConsumerState<RootShell>
 
   @override
   void dispose() {
+    flushAppLog();
     WidgetsBinding.instance.removeObserver(this);
     _appMenuChannel.setMethodCallHandler(null);
     super.dispose();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) flushAppLog();
+  }
+
+  @override
   Future<AppExitResponse> didRequestAppExit() async {
+    final app = ref.read(appStateProvider);
+    // A sign-in still waiting on the browser or a phone ends with the app: its
+    // CLI would otherwise wait on, holding the lock the next sign-in needs.
+    if (app.canCancelLogin) app.cancelLogin();
     // Save the final arrangement, with a bound so an unavailable disk cannot
     // trap the user in the app. Input and tab switching never wait for disk.
-    await ref
-        .read(appStateProvider)
-        .flushPaneLayout()
-        .timeout(const Duration(seconds: 1), onTimeout: () {});
+    try {
+      await app.flushPaneLayout().timeout(
+        const Duration(seconds: 1),
+        onTimeout: () {},
+      );
+    } finally {
+      flushAppLog();
+    }
     return AppExitResponse.exit;
   }
 
@@ -359,6 +374,8 @@ class _RootShellState extends ConsumerState<RootShell>
                 app.status != AppStatus.checkingEnvironment &&
                 app.status != AppStatus.preparingEnvironment)
               UpdateNotice(notifier: app),
+            if (app.newDevices.isNotEmpty && app.status == AppStatus.authenticated)
+              NewDeviceNotice(notifier: app),
             Expanded(child: framed),
           ],
         );

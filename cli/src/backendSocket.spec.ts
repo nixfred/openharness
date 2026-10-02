@@ -8,7 +8,8 @@ import { fileURLToPath } from 'url'
 import { AGENT_OPENED_THROTTLE_MS, BackendSocket, compactRuntimePickerModels, deviceAgentListItem, deviceAgentRow, grokHistoryPage } from './backendSocket.js'
 import { AuthSessionError, type AuthSessionManager } from './lib/authSession.js'
 import { WS_IDLE_DEADLINE_MS as IDLE_DEADLINE_MS } from './lib/wsLiveness.js'
-import type { TerminalStreamManager } from './lib/terminalStreamManager.js'
+import { TerminalStreamManager } from './lib/terminalStreamManager.js'
+import type { TerminalBackendCoordinator } from './lib/terminalBackendCoordinator.js'
 import { decodeTerminalLocal, TerminalBinaryKind } from './lib/terminalBinary.js'
 import { registry, type RegisteredSession } from './lib/registry.js'
 import { stoppedAgents } from './lib/stoppedAgents.js'
@@ -20,12 +21,124 @@ import * as projectFolder from './lib/projectFolder.js'
 import * as claudeTrust from './lib/claudeTrust.js'
 import * as projectPreview from './lib/projectPreview.js'
 import * as storeCatalog from './dsh/catalog.js'
+import * as opencodeVersion from './engines/opencode/version.js'
 import { randomUUID } from 'node:crypto'
 import { fakeGridAnswers, installFakeGrid, type FakeGrid } from './lib/__fixtures__/fakeGrid.js'
 import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
 import { LocalModels } from './lib/localModels.js'
 import type { GridAttachResult } from './lib/gridAttach.js'
-import { STRICT_DOWN_TYPES } from './lib/e2ee/applicationFrames.js'
+import { STRICT_DOWN_TYPES, encryptDownFrame, encryptRpcResult } from './lib/e2ee/applicationFrames.js'
+import { CloseAgentService } from './lib/closeAgentService.js'
+
+describe('safe session close RPC', () => {
+  it('seals cleanup previews and passes the open-tab condition to Close', async () => {
+    const socket = new BackendSocket('fixture'), frames: any[] = []
+    socket.registerLocalClient('local:cleanup', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    socket.cleanupPreview = vi.fn(async () => ({ version: 1, agents: [], kept: 2 }))
+    const request = vi.fn(async () => ({ error: 'SESSION_IN_TAB' }))
+    socket.closeAgentService = { request, dispose() {} } as unknown as CloseAgentService
+    expect(encryptDownFrame('agents_cleanup_preview')).toBe(true)
+    expect(encryptRpcResult('agents_cleanup_preview_result')).toBe(true)
+    await (socket as any).dispatchDown({ type: 'agents_cleanup_preview', payload: { requestId: 'unsealed' } }, 'remote')
+    expect(socket.cleanupPreview).not.toHaveBeenCalled()
+    socket.handleLocalFrame('local:cleanup', { type: 'agents_cleanup_preview', payload: { requestId: 'preview' } })
+    const target = { agentId: 'a', sessionId: 's', createdAt: '2026-10-01T00:00:00.000Z', mode: 'now', onlyIfHidden: true }
+    socket.handleLocalFrame('local:cleanup', { type: 'agent_close', payload: { ...target, requestId: 'close' } })
+    await vi.waitFor(() => expect(frames.some(f => f.payload?.requestId === 'close')).toBe(true))
+    expect(request).toHaveBeenCalledWith(target)
+    expect(frames.find(f => f.payload?.requestId === 'preview').payload).toMatchObject({ version: 1, kept: 2 })
+    await socket.stop()
+  })
+  it.each([
+    { activity: 'idle', sessionId: 'close-history' },
+    { activity: 'working', sessionId: 'close-history' },
+    { activity: 'idle', sessionId: '' },
+    { activity: 'working', sessionId: '' },
+  ] as const)('uses $activity activity for session "$sessionId" even with another live viewer', async ({ activity, sessionId }) => {
+    const socket = new BackendSocket('fixture')
+    const frames: any[] = []
+    for (const connId of ['local:close', 'local:other']) {
+      socket.registerLocalClient(connId, {
+        sendFrame: frame => { frames.push({ connId, ...frame }); return true },
+        sendBinary: () => true,
+      })
+    }
+    const row = registry.openPendingAgent({ engine: 'codex', runtimes: [{ backend: 'tmux', paneId: '%7302' }], cwd: '/tmp' })!
+    row.sessionId = sessionId
+    const checkpoint = vi.fn(async () => {})
+    const stop = vi.fn(async (_agentId, options) => {
+      await options.checkpoint(row, 'before')
+      await options.beforeStop(row)
+      expect(options.current()).toBe(true)
+      registry.removeAgent(row.agentId)
+    })
+    socket.closeAgentService = new CloseAgentService({
+      registry, activity: async () => activity, checkpoint, stop, changed: () => {},
+    })
+    const terminals = new TerminalStreamManager({
+      terminals: {
+        openStream: async () => ({ state: 'succeeded', value: {
+          runtime: { backend: 'tmux', paneId: '%7302' },
+          beginSnapshot: () => {},
+          endSnapshot: () => {},
+          snapshot: async () => ({ state: 'succeeded', value: { bytes: Buffer.from('fixture'), cols: 80, rows: 24 } }),
+          close: async () => {},
+        } }),
+      } as unknown as TerminalBackendCoordinator,
+      resolveAgent: id => registry.byAgent(id),
+      sendTarget: (connId, type, payload) => { frames.push({ connId, type, payload }); return true },
+      sendBinaryTarget: () => true,
+      streamingAvailable: true,
+    })
+    socket.setTerminalStreamManager(terminals)
+    try {
+      const opening = { agentId: row.agentId, protocolVersion: 3, cols: 80, rows: 24 }
+      await terminals.handleFrame('local:close', 'terminal_open', { ...opening, requestId: 'own' })
+      await terminals.handleFrame('local:other', 'terminal_open', { ...opening, requestId: 'other', takeover: false })
+      expect(frames.filter(frame => frame.type === 'terminal_ready')).toHaveLength(2)
+      expect(frames.find(frame => frame.payload?.requestId === 'other')?.payload.readOnly).toBe(true)
+      const closing = { agentId: row.agentId, sessionId: row.sessionId, createdAt: new Date(row.registeredAt).toISOString() }
+      const ask = async (mode: string) => {
+        socket.handleLocalFrame('local:close', { type: 'agent_close', payload: { ...closing, mode, requestId: mode } })
+        await vi.waitFor(() => expect(frames.some(frame => frame.type === 'agent_close_result' && frame.payload.requestId === mode)).toBe(true))
+        return frames.find(frame => frame.type === 'agent_close_result' && frame.payload.requestId === mode).payload
+      }
+      expect(await ask('inspect')).toMatchObject({ activity })
+      expect(await ask('idle')).toMatchObject(activity === 'idle' ? { closed: true } : { error: 'SESSION_NOT_IDLE', activity })
+      if (activity === 'working') {
+        expect(stop).not.toHaveBeenCalled()
+        expect(await ask('now')).toMatchObject({ closed: true })
+      }
+      expect(checkpoint).toHaveBeenCalledOnce()
+      expect(stop).toHaveBeenCalledOnce()
+      expect(registry.byAgent(row.agentId)).toBeUndefined()
+    } finally {
+      registry.removeAgent(row.agentId)
+      await socket.stop()
+    }
+  })
+
+  it('requires encrypted remote frames and never blocks unrelated inventory while saving', async () => {
+    const socket = new BackendSocket('fixture')
+    const frames: any[] = []
+    socket.registerLocalClient('local:close', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    let finish!: (value: { closed: true }) => void
+    const request = vi.fn(() => new Promise<{ closed: true }>(resolve => { finish = resolve }))
+    socket.closeAgentService = { request, dispose() {} } as unknown as CloseAgentService
+    const payload = { requestId: 'closing', agentId: 'fixture', sessionId: 'history', createdAt: '2026-09-30T12:00:00.000Z', mode: 'idle' }
+    expect(encryptDownFrame('agent_close')).toBe(true)
+    expect(encryptRpcResult('agent_close_result')).toBe(true)
+    await (socket as any).dispatchDown({ type: 'agent_close', payload }, 'remote')
+    expect(request).not.toHaveBeenCalled()
+    socket.handleLocalFrame('local:close', { type: 'agent_close', payload })
+    socket.handleLocalFrame('local:close', { type: 'agents_list', payload: { requestId: 'inventory' } })
+    await vi.waitFor(() => expect(frames.some(f => f.type === 'agents_list_result')).toBe(true))
+    expect(frames.some(f => f.type === 'agent_close_result')).toBe(false)
+    finish({ closed: true })
+    await vi.waitFor(() => expect(frames.find(f => f.type === 'agent_close_result')?.payload).toMatchObject({ requestId: 'closing', closed: true }))
+    await socket.stop()
+  })
+})
 
 describe('local model lifecycle RPCs', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -1174,6 +1287,27 @@ describe('BackendSocket outbound queue', () => {
     await socket.stop()
   })
 
+  it('serves per-session resource readings without blocking input or sampling system totals', async () => {
+    const system = vi.spyOn(machineResources, 'readMachineResources')
+    const socket = new BackendSocket('token')
+    let finish!: (value: { sampledAt: string; agents: [] }) => void
+    socket.harnessResourcesReader = vi.fn(() => new Promise<{ sampledAt: string; agents: [] }>(resolve => { finish = resolve }))
+    socket.runtimeModelsProvider = async () => []
+    const frames: Array<Record<string, unknown>> = []
+    socket.registerLocalClient('local:monitor', {
+      sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true,
+    })
+    socket.handleLocalFrame('local:monitor', { type: 'machine_resources', payload: { requestId: 'resources', harnesses: true } })
+    socket.handleLocalFrame('local:monitor', { type: 'models_list', payload: { requestId: 'models' } })
+    await vi.waitFor(() => expect(frames).toContainEqual({ type: 'models_list_result', payload: { requestId: 'models', models: [] } }))
+    expect(system).not.toHaveBeenCalled()
+    const reading = { sampledAt: '2026-09-30T12:00:00Z', agents: [] as [] }
+    finish(reading)
+    await vi.waitFor(() => expect(frames).toContainEqual({ type: 'machine_resources_result', payload: { requestId: 'resources', harnesses: reading } }))
+    await socket.unregisterLocalClient('local:monitor')
+    await socket.stop()
+  })
+
   it('rejects unpaired plaintext stats requests before sampling the machine', async () => {
     const read = vi.spyOn(machineResources, 'readMachineResources')
     const socket = new BackendSocket('token')
@@ -1441,6 +1575,31 @@ describe('BackendSocket outbound queue', () => {
     } finally {
       finish?.()
       await socket.unregisterLocalClient('local:receipt')
+      await socket.stop()
+    }
+  })
+
+  it('explains invalid repository choices without echoing credentials or preparing a folder', async () => {
+    const socket = new BackendSocket('token')
+    const frames: Array<Record<string, unknown>> = []
+    socket.registerLocalClient('local:invalid-project', { sendFrame: frame => { frames.push(frame); return true }, sendBinary: () => true })
+    const prepare = vi.spyOn(projectFolder, 'prepareProjectFolder')
+    const create = vi.fn()
+    socket.onCreateAgent = create
+    try {
+      socket.handleLocalFrame('local:invalid-project', { type: 'agent_create', payload: {
+        requestId: 'invalid', creationId: randomUUID(), engine: 'codex', projectSource: 'remote',
+        repositoryUrl: 'https://private-token@github.com/owner/repo',
+      } })
+      await vi.waitFor(() => expect(frames).toContainEqual({ type: 'agent_create_result', payload: {
+        requestId: 'invalid', error: 'INVALID_REPOSITORY',
+        detail: 'Enter a GitHub HTTPS or SSH URL, or owner/repository.',
+      } }))
+      expect(JSON.stringify(frames)).not.toContain('private-token')
+      expect(prepare).not.toHaveBeenCalled()
+      expect(create).not.toHaveBeenCalled()
+    } finally {
+      await socket.unregisterLocalClient('local:invalid-project')
       await socket.stop()
     }
   })
@@ -2107,6 +2266,40 @@ describe('agent_restart RPC', () => {
     await socket.stop()
   })
 
+  it('adds monitor activity and readings only when explicitly requested', async () => {
+    const { socket, frames } = localSocket()
+    vi.spyOn(registry, 'advertised').mockReturnValue([BASE_SESSION])
+    vi.spyOn(registry, 'list').mockReturnValue([BASE_SESSION])
+    vi.spyOn(stoppedAgents, 'available').mockReturnValue([{ ...BASE_SESSION, agentId: 'stopped' }])
+    socket.harnessResourcesReader = vi.fn(async () => ({ sampledAt: new Date().toISOString(), agents: [{ agentId: 'agent-1', memoryBytes: 123, cpuPercent: 2, processCount: 1 }] }))
+    socket.monitorActivityProvider = sessionId => sessionId === BASE_SESSION.sessionId ? 'needsInput' : 'idle'
+    for (const [requestId, monitor] of [['plain', false], ['monitor', true]] as const) {
+      socket.handleLocalFrame('local:restart', { type: 'agents_list', payload: { requestId, monitor, includeStopped: true } })
+    }
+    await vi.waitFor(() => expect(frames.filter(f => f.type === 'agents_list_result')).toHaveLength(2))
+    const response = (id: string) => (frames.find(frame => (frame.payload as any).requestId === id)?.payload as any).agents
+    expect(response('plain').every((agent: any) => agent.monitor === undefined)).toBe(true)
+    expect(response('monitor').find((a: any) => a.id === 'agent-1').monitor).toMatchObject({ activity: 'needsInput', activityKnown: true, rssBytes: 123, cpu: 2, pid: BASE_SESSION.processIdentity?.pid ?? null })
+    expect(response('monitor').find((a: any) => a.id === 'stopped').monitor).toMatchObject({ rssBytes: 0, cpu: 0, pid: null })
+    expect(socket.harnessResourcesReader).toHaveBeenCalledOnce()
+    await socket.unregisterLocalClient('local:restart'); await socket.stop()
+  })
+
+  it('rejects a stop when the reviewed conversation rotated before the command arrived', async () => {
+    const { socket, frames } = localSocket()
+    const stop = vi.fn(async () => {})
+    socket.onDeleteAgent = stop
+    vi.spyOn(registry, 'byAgent').mockReturnValue({ ...BASE_SESSION, sessionId: 'replacement' })
+    socket.handleLocalFrame('local:restart', { type: 'agent_delete', payload: {
+      requestId: 'stale-stop', agentId: BASE_SESSION.agentId, expectedSessionId: BASE_SESSION.sessionId,
+    } })
+    await vi.waitFor(() => expect(frames).toContainEqual({ type: 'agent_delete_result', payload: {
+      requestId: 'stale-stop', error: 'SESSION_CHANGED', detail: 'This conversation changed. Refresh and review it before stopping.',
+    } }))
+    expect(stop).not.toHaveBeenCalled()
+    await socket.unregisterLocalClient('local:restart'); await socket.stop()
+  })
+
   it('delegates a resume-only intent and retains its original receipt', async () => {
     const { socket, frames } = localSocket()
     const creationId = `resume-${randomUUID()}`
@@ -2120,6 +2313,30 @@ describe('agent_restart RPC', () => {
     expect(handler).toHaveBeenCalledExactlyOnceWith('agent-1')
     await socket.unregisterLocalClient('local:restart')
     await socket.stop()
+  })
+
+  it('binds an explicit resume permission choice to its operation receipt', async () => {
+    const { socket, frames } = localSocket()
+    const creationId = `resume-mode-${randomUUID()}`
+    const handler = vi.fn(async () => ({ ok: true as const, session: { ...BASE_SESSION, permissionMode: 'auto' }, resumed: true }))
+    socket.onResumeAgent = handler
+    vi.spyOn(registry, 'byAgent').mockReturnValue(BASE_SESSION)
+    for (const [requestId, permissionMode] of [['first', 'auto'], ['again', 'auto'], ['changed', 'ask']]) {
+      socket.handleLocalFrame('local:restart', { type: 'agent_resume', payload: { requestId, agentId: 'agent-1', creationId, permissionMode } })
+      await vi.waitFor(() => expect(frames.some(frame => (frame.payload as any).requestId === requestId)).toBe(true))
+    }
+    expect(handler).toHaveBeenCalledExactlyOnceWith('agent-1', 'auto')
+    expect(frames).toContainEqual({ type: 'agent_resume_result', payload: { requestId: 'changed', error: 'CREATION_CONFLICT' } })
+    await socket.unregisterLocalClient('local:restart'); await socket.stop()
+  })
+
+  it.each([7, '', 'allow', { auto: true }])('refuses invalid resume permission payload %j', async permissionMode => {
+    const { socket, frames } = localSocket()
+    socket.onResumeAgent = vi.fn()
+    socket.handleLocalFrame('local:restart', { type: 'agent_resume', payload: { requestId: 'bad-mode', agentId: 'agent-1', permissionMode } })
+    await vi.waitFor(() => expect(frames).toContainEqual({ type: 'agent_resume_result', payload: { requestId: 'bad-mode', error: 'INVALID_PERMISSION_MODE' } }))
+    expect(socket.onResumeAgent).not.toHaveBeenCalled()
+    await socket.unregisterLocalClient('local:restart'); await socket.stop()
   })
 
   it('replies MISSING_AGENT_ID when no agentId is given', async () => {
@@ -2534,11 +2751,20 @@ describe('agent_create with a prompt, a name and a named agent', () => {
   })
 
   it('passes the named agent through for opencode, and null when none was given', async () => {
+    // v1 — pinned, so the answer does not depend on the OpenCode installed where the suite runs.
+    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockReturnValue(1)
     const { seen, reply } = await create({ agent: 'harness-compute', name: 'Local model' })
     expect(seen).toEqual([expect.objectContaining({ engine: 'opencode', agent: 'harness-compute', name: 'Local model', prompt: null })])
     expect(reply).toMatchObject({ agent: expect.objectContaining({ id: 'named-1' }) })
     expect((await create({})).seen).toEqual([expect.objectContaining({ agent: null })])
     expect((await create({ agent: null })).seen).toEqual([expect.objectContaining({ agent: null })])
+  })
+
+  it('refuses a named agent for opencode v2, whose TUI exits 1 on --agent, before any pane exists', async () => {
+    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockReturnValue(2)
+    const { seen, reply } = await create({ agent: 'harness-compute' })
+    expect(reply).toMatchObject({ error: 'AGENT_UNSUPPORTED', detail: expect.stringContaining('opencode') })
+    expect(seen).toHaveLength(0)
   })
 
   it('refuses a named agent for an engine with no documented mechanism, naming the engine, before any pane exists', async () => {
@@ -2823,6 +3049,31 @@ describe('machine_meta carries the grid name without clobbering it on rename', (
     await vi.waitFor(() => expect(revoked).toBe(1))
 
     await socket.stop()
+  })
+
+  it('says whose key a device-key-log removal spent before signing out, and nothing for a plain revoke', async () => {
+    const socket = new BackendSocket('token')
+    const order: string[] = []
+    socket.onDeviceRemoved = (pub) => { order.push(`removed:${pub}`) }
+    socket.onRevoked = () => { order.push('revoked') }
+    socket.connect()
+    const ws = wsMock.instances.at(-1)!
+    ws.open()
+    ws.message({ t: 'down', connId: '', frame: { type: 'machine_revoked', payload: { reason: 'device_removed', pub: 'PUB' } } })
+    await vi.waitFor(() => expect(order).toEqual(['removed:PUB', 'revoked']))
+    await socket.stop()
+
+    const plain = new BackendSocket('token')
+    let removed = 0
+    plain.onDeviceRemoved = () => { removed += 1 }
+    plain.onRevoked = () => {}
+    plain.connect()
+    const ws2 = wsMock.instances.at(-1)!
+    ws2.open()
+    ws2.message({ t: 'down', connId: '', frame: { type: 'machine_revoked', payload: {} } })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(removed).toBe(0)
+    await plain.stop()
   })
 })
 

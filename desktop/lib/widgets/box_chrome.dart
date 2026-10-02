@@ -9,10 +9,15 @@ import '../terminal/terminal_text.dart';
 const double kTerminalCornerRadius = 3;
 
 /// A stable rim for the terminal pane, independent of the desktop dialog frame.
-BorderSide terminalPaneBorder({bool focused = false}) => BorderSide(
-  color: focused ? grid.AppPalette.accentOnSurface : grid.AppPalette.divider,
-  width: 1,
-);
+BorderSide terminalPaneBorder({bool focused = false, bool remote = false}) =>
+    BorderSide(
+      color: !focused
+          ? grid.AppPalette.divider
+          : remote
+          ? grid.AppPalette.remotePaneFocus
+          : grid.AppPalette.accentOnSurface,
+      width: 1,
+    );
 
 /// One gutter around the workspace, between panes, and beside command docks.
 const double kWorkspaceInset = 9.5;

@@ -1,3 +1,4 @@
+import '../approve_sign_in.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -99,6 +100,9 @@ class _ConnectComputerPageState extends State<ConnectComputerPage> {
       context,
       fallbackLabel: 'Not now',
       camera: widget.scanCamera,
+      // The computer may be showing its sign-in QR instead: approving that signs it in, which is
+      // what setting it up needs anyway.
+      onSignInCode: (code) => unawaited(approveComputerSignIn(context, widget.notifier, code)),
     );
     if (!mounted || code == null) return;
     final machineId = code.machineId, pairCode = code.pairCode;

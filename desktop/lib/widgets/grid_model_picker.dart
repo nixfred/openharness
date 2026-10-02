@@ -1,13 +1,10 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:harness/shared/theme/app_icons.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
-import '../shared/theme/workspace_bar_style.dart';
 import '../shared/theme/app_theme.dart' as grid;
-import '../terminal/terminal_theme.dart';
-import '../terminal/terminal_theme_store.dart';
 
 import 'package:harness/terminal/terminal_text.dart';
 
@@ -22,9 +19,9 @@ import 'engine_identity.dart';
 import 'model_picker_answer.dart';
 import 'model_picker_chrome.dart';
 import 'pane_menu.dart';
+import 'pane_header_text_button.dart';
 import 'resting_model_words.dart';
 import 'resting_section.dart';
-import 'workspace_bar_control.dart';
 
 /// The engines whose panes carry a model picker.
 ///
@@ -170,6 +167,13 @@ class _GridModelPickerState extends State<GridModelPicker> {
         !widget.enabled ||
         !_prefetchOwed ||
         !widget.notifier.inForeground) {
+      return;
+    }
+    // Init and re-enabling can happen during layout. Usage refresh notifies
+    // the workspace footer synchronously, so wait until its frame is complete.
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _foregroundChanged());
       return;
     }
     _prefetchOwed = false;
@@ -541,54 +545,18 @@ class _GridModelPickerState extends State<GridModelPicker> {
     );
     final label = _expecting ? 'Switching…' : current;
     if (widget.paneHeader) {
-      final theme = terminalThemeFor(
-        grid.AppTheme.palette.value,
-        terminalThemeStore.value,
-      );
-      final cell = workspaceBarCellSizeOf(context);
-      final labelSize = workspaceBarTextSizeOf(context, label);
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          final padding = math.min(cell.width, constraints.maxWidth / 2);
-          final textWidth = math.max(
-            0.0,
-            math.min(220.0, constraints.maxWidth - padding * 2),
-          );
-          final clipped = labelSize.width > textWidth;
-          return WorkspaceBarControl(
-            label: 'Model: $current',
-            tooltip: [
-              if (clipped || label != current) current,
-              if (widget.enabled) 'Switch model · Subscription or local models',
-              ?sentence,
-            ].join('\n'),
-            foreground: theme.foreground,
-            onPressed: widget.enabled ? _open : null,
-            builder: (context, emphasized) => SizedBox(
-              width: math.min(labelSize.width, textWidth) + padding * 2,
-              height: workspaceBarControlHeight(context),
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: padding),
-                child: Center(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: workspaceBarTextStyle(emphasized: emphasized),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
+      return PaneHeaderTextButton(
+        text: label,
+        fullText: current,
+        label: 'Model: $current',
+        tooltip: [
+          if (widget.enabled) 'Change model · Subscription or local models',
+          ?sentence,
+        ].join('\n'),
+        onPressed: widget.enabled ? _open : null,
       );
     }
-    final foreground = widget.paneHeader
-        ? terminalThemeFor(
-            grid.AppTheme.palette.value,
-            terminalThemeStore.value,
-          ).foreground.withValues(alpha: .65)
-        : AppColors.textSoft;
+    final foreground = AppColors.textSoft;
     return Tooltip(
       // The same sentence the menu shows, one line under the control's own — so a person can learn
       // the agent has no web search without opening the menu at all.
@@ -642,12 +610,10 @@ class _GridModelPickerState extends State<GridModelPicker> {
                         label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: widget.paneHeader
-                            ? workspaceBarTextStyle(color: foreground)
-                            : AppType.monoLabel(
-                                fontWeight: FontWeight.w400,
-                                color: AppColors.textSoft,
-                              ),
+                        style: AppType.monoLabel(
+                          fontWeight: FontWeight.w400,
+                          color: AppColors.textSoft,
+                        ),
                       ),
                     ),
                   ),

@@ -171,6 +171,45 @@ void main() {
     app.dispose();
   });
 
+  testWidgets(
+    'a phone folds the footer into one menu, hidden by the keyboard',
+    (tester) async {
+      final app = await mount(tester, const Size(390, 844), harnesses: 1);
+      app.focusPane(100);
+      await tester.pump(const Duration(milliseconds: 100));
+      const footer = ValueKey('web-footer-menu-button');
+      expect(
+        find.descendant(of: find.byKey(footer), matching: find.text('box')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('workspace-subscription-usage')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(footer));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        find.byKey(const ValueKey('web-footer:Subscriptions')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('web-footer:Machine')), findsOneWidget);
+      await capture(tester, 'web-phone-footer-menu');
+      await tester.tapAt(const Offset(195, 300));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(footer), findsNothing);
+      tester.view.resetViewInsets();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(footer), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    },
+  );
+
   testWidgets('a wide window keeps the grid of harnesses', (tester) async {
     final app = await mount(tester, const Size(1280, 800), harnesses: 3);
     expect(find.text('Agent 0').hitTestable(), findsOneWidget);
@@ -184,6 +223,11 @@ void main() {
     final app = await mount(tester, const Size(1280, 800));
     expect(find.byKey(const ValueKey('web-tab-switcher')), findsNothing);
     expect(find.byKey(const ValueKey('swarm-store-button')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('workspace-subscription-usage')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('web-footer-menu-button')), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     app.dispose();

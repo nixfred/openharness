@@ -1223,7 +1223,9 @@ export class RuntimeProfileManager {
     }
     const message = record(raw.message)
     const assistantModel = raw.type === 'assistant' ? text(message?.model) : ''
-    if (assistantModel) {
+    // Claude uses this marker for local errors such as exhausted quota.
+    // It is not a model change; keep the last real observation.
+    if (assistantModel && assistantModel !== '<synthetic>') {
       state.model = assistantModel
       state.observedAt = Date.now()
     }

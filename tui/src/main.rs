@@ -2,6 +2,7 @@
 //! uses: every harness on every machine (relay + P2P live in the daemon), in tabs and panes that
 //! are the account's desk, driven with tmux's keys.
 
+mod activity;
 mod app;
 mod capture;
 mod tree;
@@ -15,20 +16,24 @@ mod ids;
 mod history;
 mod mirror;
 mod server;
+mod settings;
 mod ipc;
 mod keys;
 mod preview;
 mod config;
 mod copy;
 mod daemon;
+mod devices;
 mod dial;
 mod draw;
 mod event;
 mod fleet;
 mod format;
 mod fzf;
+mod terminal_themes;
 mod input;
 mod layout;
+mod desk_layout;
 mod local;
 mod modal;
 mod new_harness;
@@ -45,6 +50,11 @@ mod term_input;
 mod tmuxconf;
 mod ui;
 mod viewer;
+// ── status bar ──
+mod bar;
+mod bar_more;
+// ── models: the Models view (step 6) ──
+mod models;
 
 use std::io::{self, BufWriter, Write};
 use std::time::{Duration, Instant};
@@ -161,6 +171,8 @@ async fn run_headless(config: config::Config, port: u16) -> io::Result<()> {
     app.cfg_finished = true;
     app.config_files = read;
     if config.prefix_set { app.keymap.prefix = config.prefix }
+    if config.prefix2.is_some() { app.keymap.prefix2 = config.prefix2 }
+    app.apply_look(config.look.as_ref());
     // The server's options, keys, buffers and environment: this client's if it is the first.
     server::join(&mut app);
     // When each harness was last looked at (seen.json): what finished while no one looked is
@@ -177,7 +189,7 @@ async fn run_headless(config: config::Config, port: u16) -> io::Result<()> {
             _ = tokio::time::sleep(Duration::from_millis(500)) => None,
         };
         let apply = |app: &mut app::App, event: Event| match event {
-            Event::Input(_) | Event::Animate => {}
+            Event::Input(_) => {}
             Event::Machine { machine_id, generation, event } => app.on_machine(machine_id, generation, event),
             Event::Apply(f) => f(app),
             Event::Tick => app.on_tick(),
@@ -243,6 +255,7 @@ async fn run(config: config::Config) -> io::Result<()> {
         let mut km = keys::Keymap::tmux_defaults();
         let settings = tmuxconf::load(&mut km);
         if config.prefix_set { km.prefix = config.prefix }
+        if config.prefix2.is_some() { km.prefix2 = config.prefix2 }
         let mut text = String::new();
         for p in &settings.paths { text += &format!("read {}\n", p.display()) }
         text += &format!("prefix {}\n\n", keys::name(&km.prefix));
@@ -291,16 +304,21 @@ async fn run(config: config::Config) -> io::Result<()> {
             f.rest = f.rest[starts[k]..].to_vec();
         }
     }
+    // `hn <command>` where the command is an in-TUI one (theme, palette, layout…): tmux's CLI
+    // would answer "unknown command", because these are not tmux commands. The client starts and
+    // runs it itself, once the launcher is up — as `;`'s chain is (`start_then`). A word the
+    // server answers too (take, new, send…) stays the server's.
+    let gui = !f.rest.is_empty() && f.rest.iter().all(|w| crate::input::is_command(w) && !crate::commands::is_command_name(w));
     // hn <command>: answered from here (hn ls) or by the running client (a tmux command).
-    if let Some(code) = cli::run(&f.rest, explicit, f.socket.as_deref(), f.name.as_deref()).await { std::process::exit(code) }
+    if !gui { if let Some(code) = cli::run(&f.rest, explicit, f.socket.as_deref(), f.name.as_deref()).await { std::process::exit(code) } }
     // -L name, starting a client: its socket's name.
     if let Some(n) = &f.name { unsafe { std::env::set_var("HN_SOCKET_NAME", n) } }
     // hn new -s work / hn attach -t work: the session this client starts in.
     // `hn new … \; split-window …`: the command that starts this client, then the chain after it
     // (run in the client once its session is there, as tmux runs the rest of the command line).
-    let cut = f.rest.iter().position(|w| w == ";").unwrap_or(f.rest.len());
-    let then: Vec<String> = f.rest.get(cut + 1..).map(|r| r.to_vec()).unwrap_or_default();
-    let start = cli::start_session(&f.rest[..cut]);
+    let cut = if gui { 0 } else { f.rest.iter().position(|w| w == ";").unwrap_or(f.rest.len()) };
+    let then: Vec<String> = if gui { f.rest.clone() } else { f.rest.get(cut + 1..).map(|r| r.to_vec()).unwrap_or_default() };
+    let start = if gui { None } else { cli::start_session(&f.rest[..cut]) };
 
     // attach with nothing to attach to (no client, no session kept; the desk's is always there):
     // tmux's words, before it would look for a terminal — `hn attach || hn new` makes one.
@@ -384,13 +402,6 @@ async fn run(config: config::Config) -> io::Result<()> {
         loop { interval.tick().await; if ticks.send(Event::Tick).is_err() { break } }
     });
 
-    // Animation frames do not speed up the maintenance timers (reconnects, RPCs and saves).
-    let animation = tx.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        loop { interval.tick().await; if animation.send(Event::Animate).is_err() { break } }
-    });
-
     mark("terminal ready");
     // Its ids ($N @N %N) from this server name's counters: unique among its clients.
     ids::use_file(&app::sessions_path(None));
@@ -411,8 +422,13 @@ async fn run(config: config::Config) -> io::Result<()> {
     app.cfg_finished = true;
     app.config_files = read.clone();
     if config.prefix_set { app.keymap.prefix = config.prefix }
+    if config.prefix2.is_some() { app.keymap.prefix2 = config.prefix2 }
+    app.apply_look(config.look.as_ref());
     for (chord, command) in &config.keys {
         match command { Some(c) => app.keymap.bind(keys::Table::Root, *chord, c.clone(), false), None => app.keymap.unbind(keys::Table::Root, chord) }
+    }
+    for (chord, command) in &config.prefix_keys {
+        match command { Some(c) => app.keymap.bind(keys::Table::Prefix, *chord, c.clone(), false), None => app.keymap.unbind(keys::Table::Prefix, chord) }
     }
     // The server's options, keys, buffers and environment: this client's if it is the first
     // (tmux reads its configuration once, when its server starts).
@@ -452,6 +468,9 @@ async fn run(config: config::Config) -> io::Result<()> {
     let frame_budget = Duration::from_millis(6);
     let mut last_draw = Instant::now() - frame_budget;
     let mut need_draw = true;
+    // Rendered animation and timed UI messages schedule their next frame.
+    // Maintenance and incoming input/output keep their own cadence.
+    let mut next_repaint: Option<Instant> = None;
     let mut mouse_all = false;
     let mut cursor_colour: Option<String> = None;
     let mut startup_input = std::collections::VecDeque::new();
@@ -459,10 +478,15 @@ async fn run(config: config::Config) -> io::Result<()> {
     loop {
         // Wait for something — or for the frame we owe to come due.
         let wait = if need_draw { frame_budget.saturating_sub(last_draw.elapsed()) } else { Duration::from_secs(3600) };
+        let wait = next_repaint.map(|at| wait.min(at.saturating_duration_since(Instant::now()))).unwrap_or(wait);
         let first = tokio::select! {
             event = rx.recv() => event,
             _ = tokio::time::sleep(wait) => None,
         };
+        if next_repaint.is_some_and(|at| Instant::now() >= at) {
+            next_repaint = None;
+            need_draw = true;
+        }
         let mut refill = false;
         let apply = |app: &mut app::App, event: Event, refill: &mut bool, startup: &mut std::collections::VecDeque<crossterm::event::Event>| {
             match event {
@@ -478,7 +502,6 @@ async fn run(config: config::Config) -> io::Result<()> {
                 }
                 Event::Apply(f) => { f(app); *refill = true }
                 Event::Tick => app.on_tick(),
-                Event::Animate => {},
             }
         };
         if let Some(event) = first { apply(&mut app, event, &mut refill, &mut startup_input); need_draw = true }
@@ -531,6 +554,7 @@ async fn run(config: config::Config) -> io::Result<()> {
         if need_draw && last_draw.elapsed() >= frame_budget {
             // (The backend makes each frame's changes one synchronized update, and writes nothing
             // for a frame that changed nothing.)
+            let frame_started = Instant::now();
             term.draw(|frame| ui::draw(frame, &mut app))?;
             // The focused program's cursor shape (vim's block and bar), passed through as tmux does.
             let shape = app.focused().filter(|_| app.modal.is_none()).and_then(|f| app.panes.get(&f)).map(|p| p.cursor_style()).unwrap_or(cursor::SetCursorStyle::DefaultUserShape);
@@ -550,6 +574,8 @@ async fn run(config: config::Config) -> io::Result<()> {
                 execute!(term.backend_mut(), terminal::SetTitle(&title))?;
                 app.title = title;
             }
+            // Include custom terminal-title formats: they can animate too.
+            next_repaint = ui::next_repaint(&app, frame_started);
         }
     }
     // Its #() jobs ended, as tmux's server ends its jobs.

@@ -45,6 +45,22 @@ class DeviceSettings {
   final int? companionProtocol;
   final DialCompanion? companionDetails;
 
+  /// Last-reported values for the local device library. Restoring these never
+  /// marks a device connected or sends settings back to it.
+  Map<String, Object?> toJson() => {
+    'brightness': brightness,
+    'character': character,
+    'face': face,
+    'muted': muted,
+    'quiet': quiet,
+    'straightTitle': straightTitle,
+    'focusFace': focusFace,
+    'scrollReversed': scrollReversed,
+    'round': round,
+    'voiceLang': voiceLang,
+    if (followCompanion != null) 'followCompanion': followCompanion,
+  };
+
   /// Read with `is`, never `as`, and refused whole when a field is missing: a default here is a value
   /// this window invented, and the pane would then offer a setting the device does not have.
   static DeviceSettings? fromJson(Object? value) {
@@ -267,5 +283,27 @@ class DialState extends ChangeNotifier {
       _storage?.write(_seenKey, '1').catchError((_) {});
     }
     notifyListeners();
+  }
+
+  /// A lost host connection cannot leave USB controls writable. Retain the
+  /// last readings until the daemon greets this window again.
+  void disconnect() {
+    if (!status.attached && !devices.any((d) => d.attached)) return;
+    apply(
+      DialStatus(
+        attached: false,
+        devices: [
+          for (final device in devices)
+            DialStatus(
+              attached: false,
+              id: device.id,
+              mac: device.mac,
+              fw: device.fw,
+              hw: device.hw,
+              settings: device.settings,
+            ),
+        ],
+      ),
+    );
   }
 }

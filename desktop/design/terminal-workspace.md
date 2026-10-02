@@ -30,15 +30,36 @@ system menu bar; the window keeps Search and Store. Linux and browser bars
 retain their notification bell. Show a count badge only when something is unread.
 Tooltips explain icon actions and resolve shortcuts from the live keymap.
 
-The footer shows remaining subscription usage on the left. Its right-hand context follows the focused pane: machine, project, branch, and PR
-at the right. Each pane header ends with model, split down, split right, zoom,
-and close, in that order. The icons stay visible with quiet ink and no button
-chrome. Splitting opens New Harness directly with that pane's agent, machine,
+The footer shows a global harness count, local host CPU/RAM/GPU and subscription
+allowance used on the left, all in neutral ink with whole percentages. Its
+right-hand context follows the focused pane: machine, project, branch and PR.
+Each terminal pane header ends with agent, model and close at every width.
+Hovering the right edge reveals split right; hovering the bottom edge reveals
+split down. These icons sit inside the pane, clear of resize gaps. The header
+has no split, add or zoom icons; zoom remains in menus and shortcuts.
+Agent and model use the same plain-text selector with no pill or chevron. Their
+hover/focus changes ink, not weight or size. The left side keeps the session name
+and activity; only a distinct domain-harness icon remains beside it, rather than
+repeating the named coding agent. Splitting opens New Harness directly with that pane's agent, machine,
 and project, then creates into the chosen split on submission. Clicking the
-model opens the shared Models picker for that harness;
-the footer does not repeat model or effort. Do not show worktree implementation
+agent opens the shared `&` Agents picker; clicking the model opens the shared Models picker for that harness;
+the footer does not repeat model or effort. Agent switching saves the original
+session before starting its replacement in the same project. Its pane and layout
+survive peer cleanup of the stopped source. Show the replacement terminal as soon
+as its creation is confirmed, including during startup. Setup and resume warnings
+preserve keyboard input on an available terminal, with guidance above the output
+so it cannot cover a prompt. Agents that accept an initial message receive bounded
+recent requests and saved answers, preserving the handoff across
+retries; the saved original session keeps the full transcript. Do not show worktree implementation
 paths in everyday labels. User-selected shell/Powerline status styles remain
 available, including PR state colors and the option to disable color.
+
+The captures below use synthetic pane names. Agent and model remain plain text;
+only the hovered edge reveals a split control.
+
+![Four panes with split right revealed in the dark theme](review/2026-10-02-pane-edge-right.png)
+
+![Nine panes with split down revealed in the light theme](review/2026-10-02-pane-edge-down.png)
 
 Machine opens its scope, Project opens related harnesses, Branch opens the
 existing branches/PR history, and the PR opens its URL. These are navigation,
@@ -54,6 +75,15 @@ A single or zoomed pane stays clear. Existing click and keyboard focus actions
 own selection. Keep the current pane clear while a menu or the tab strip has
 keyboard focus. Waiting-question borders remain visible above the veil.
 The overlay does not consume the first click or alter terminal state.
+
+Only the focused pane gets a location-colored rim: blue on this computer,
+muted teal-gray (`AppPalette.remotePaneFocus`) on a known remote machine,
+including a single or zoomed pane. Both use the same solid 1-point boundary.
+Remote location is a quiet cue with less emphasis than local focus blue;
+the footer identifies the machine in text. Unfocused panes keep their neutral
+rim. The existing amber waiting-question border takes precedence over the
+focus color. Location uses machine identity, independently of the connection's
+transport mode.
 
 ## Input and review
 

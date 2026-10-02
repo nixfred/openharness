@@ -248,6 +248,13 @@ void main({bool nativeSmoke = false}) {
     expect(_ownsFocus(tester, _task), isTrue);
   });
 
+  journey('the desktop box takes files: 📎 and drops', (tester) async {
+    await _mount(tester);
+    await _new(tester);
+    expect(find.byKey(const ValueKey('new-harness-attach')), findsOneWidget);
+    expect(find.byKey(const ValueKey('new-harness-drop')), findsOneWidget);
+  });
+
   journey('Tab and Shift-Tab remain inside the composer and reach controls', (
     tester,
   ) async {

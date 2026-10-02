@@ -1,610 +1,377 @@
-/* Harness Monitor's pane.
- *
- * One snapshot from the server, two ways to read it, and six verbs. No build step, no dependencies, no
- * inline script — the page is served with `script-src 'self'`, so everything here is plain DOM and one
- * ES module import for the arithmetic (viewer/scale.js, tested in test/scale.test.mjs).
- *
- * The two views share ONE selection and ONE cursor on purpose: a fleet manager where the dense list and
- * the picture disagree about what is selected is a fleet manager that cannot be trusted with a verb.
- */
-import { HIDE_STEPS, PAUSE_STEPS, UNITS, bytes, humanIdle, idleOfX, parseDuration, snap, xOf } from './scale.js'
-
-const TOKEN = document.querySelector('meta[name="hps-token"]')?.content ?? ''
-
-const el = (id) => document.getElementById(id)
+import { ACTIVITY, SPINNER, COLUMNS, PRESETS, isLive, visibleRows, number, memory, bytes, age, formatValue, sumReading, storageTotal } from './table.js'
+const el = id => document.getElementById(id)
 const dom = {
-  where: el('where'), gauges: el('gauges'), filter: el('filter'), refresh: el('refresh'),
-  lanes: el('lanes-view'), laneList: el('lane-list'), axis: el('axis'), lanesEmpty: el('lanes-empty'),
-  table: el('table'), grid: el('grid'),
-  rulePause: el('rule-pause'), ruleHide: el('rule-hide'),
-  showAll: el('show-all'), policybar: el('policybar'), policyPreview: el('policy-preview'), policySave: el('policy-save'), policyReset: el('policy-reset'),
-  statusLeft: el('status-left'), statusActions: el('status-actions'), statusRight: el('status-right'),
-  inspector: el('inspector'), toast: el('toast'),
+  search: el('search'), filter: el('filter'), machine: el('machine'), columns: el('columns'), columnOptions: el('column-options'),
+  grid: el('grid'), table: el('table'), colgroup: el('colgroup'), head: el('head'), body: el('body'),
+  empty: el('empty'), count: el('count'), message: el('message'), updated: el('updated'), problems: el('problems'),
+  refresh: el('refresh'), freeze: el('freeze'), live: el('live-status'), inspect: el('inspect'),
+  summary: el('summary'), shared: el('shared'), sharedTitle: el('shared-title'), sharedBody: el('shared-body'),
+  inspector: el('inspector'), inspectTitle: el('inspect-title'), inspectContext: el('inspect-context'),
+  inspectContent: el('inspect-content'), inspectClose: el('inspect-close'), inspectStop: el('inspect-stop'),
+  stopDialog: el('stop-dialog'), stopTitle: el('stop-title'), stopContext: el('stop-context'), stopResult: el('stop-result'),
+  stopCancel: el('stop-cancel'), stopConfirm: el('stop-confirm'),
 }
-
+const token = document.querySelector('meta[name="hps-token"]').content
+const STORAGE_KEY = 'harness-monitor.process-table.v4'
+let saved = {}
+try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {} } catch { /* optional preference storage */ }
 const state = {
-  snapshot: null,
-  view: 'lanes',
-  filter: '',
-  showAll: false,
-  selected: new Set(),
-  cursor: null,
-  inspecting: null,
-  sort: { key: 'idle', dir: 'asc' },
-  draft: null,      // policy being dragged, before it is saved
-  busy: false,
+  rows: [], snapshot: null, query: '', filter: 'all', machine: 'all', // Only currently open harnesses, in every view.
+  sort: COLUMNS.some(c => c.key === saved.sort) ? saved.sort : 'rssBytes', direction: saved.direction === 1 ? 1 : -1,
+  preset: Object.hasOwn(PRESETS, saved.preset) ? saved.preset : 'overview',
+  visible: new Set(Array.isArray(saved.visible) ? saved.visible : PRESETS.overview), widths: {},
+  selected: null, inspecting: null, busy: new Set(), nodes: new Map(), shown: [],
+  frozen: false, pending: null, connected: false, receivedAt: 0, review: null,
 }
-
-/* ── the fleet, filtered ──────────────────────────────────────────────────── */
-
-function policy() {
-  return { ...(state.snapshot?.policy ?? {}), ...(state.draft ?? {}) }
+for (const col of COLUMNS) state.widths[col.key] = Math.max(64, Math.min(600, Number(saved.widths?.[col.key]) || col.width))
+const text = (node, value) => { if (node.textContent !== String(value)) node.textContent = value }
+function element(tag, value, className) {
+  const node = document.createElement(tag)
+  if (value != null) node.textContent = value
+  if (className) node.className = className
+  return node
 }
-
-function rows() {
-  const all = state.snapshot?.rows ?? []
-  const hideMs = parseDuration(policy().hideAfterIdle ?? '14d')
-  // Below the fold unless you ask: a pane that opens on 146 rows is the junk drawer this was built to fix.
-  // Filtering by hand overrides it, because someone typing a name is looking for that name anywhere.
-  const needle = state.filter.trim().toLowerCase()
-  const visible = state.showAll || needle
-    ? all
-    : all.filter((row) => row.state !== 'gone' && row.idleMs < hideMs)
-  if (!needle) return visible
-  return visible.filter((row) => [row.name, row.title, row.project, row.engine, row.model, row.branch, row.machine, row.state]
-    .some((field) => String(field ?? '').toLowerCase().includes(needle)))
+function persist() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ sort: state.sort, direction: state.direction, preset: state.preset, visible: [...state.visible], widths: state.widths })) } catch { /* private browsing */ }
 }
-
-/** What the plan says about one row, as the server computed it — unless a line is being dragged, in
- *  which case the same idle rules are applied here so the picture answers while the mouse is moving. */
-function verdictFor(row) {
-  if (state.draft) {
-    const pause = parseDuration(state.draft.pauseAfterIdle ?? policy().pauseAfterIdle)
-
-    if (row.pinned || row.needsInput || row.working || row.attached) return null
-    if (row.state === 'gone' || row.state === 'terminal') return null
-    if (row.state === 'running' && row.idleMs >= pause) return 'pause'
-    return null
-  }
-  const entry = (state.snapshot?.plan ?? []).find((candidate) => candidate.id === row.id)
-  return entry && entry.action !== 'keep' ? entry.action : null
-}
-
-function planTotals(list) {
-  let pause = 0, frees = 0
-  for (const row of list) {
-    if (verdictFor(row) !== 'pause') continue
-    pause += 1
-    if (row.state === 'running') frees += row.rssBytes || 0
-  }
-  return { pause, frees }
-}
-
-/* ── rendering ────────────────────────────────────────────────────────────── */
-
-function renderGauges() {
-  const summary = state.snapshot?.summary
-  if (!summary) return
-  const held = summary.held >= 1024 ** 3 ? `${(summary.held / 1024 ** 3).toFixed(1)} GB` : `${Math.round(summary.held / 1024 ** 2)} MB`
-  const chips = [
-    ['live', summary.running, 'running'],
-    ['', summary.paused, 'paused'],
-    ['', held, 'held'],
-    ['', summary.projects, 'projects'],
-  ]
-  if (summary.needsInput) chips.unshift(['attention', summary.needsInput, 'waiting on you'])
-  dom.gauges.replaceChildren(...chips.map(([kind, value, label]) => {
-    const node = document.createElement('span')
-    node.className = `gauge ${kind}`.trim()
-    node.innerHTML = `<b></b> <span></span>`
-    node.querySelector('b').textContent = value
-    node.querySelector('span').textContent = label
-    return node
-  }))
-  const machines = state.snapshot.rows.filter((row) => !row.local).length
-  dom.where.textContent = machines
-    ? `this machine, plus ${machines} seen elsewhere`
-    : state.snapshot.status === 'degraded' ? 'read from the registry — the daemon is not answering' : 'this machine'
-}
-
-function renderAxis() {
-  const ticks = [['now', 0], ['1h', UNITS.h], ['6h', 6 * UNITS.h], ['1d', UNITS.d], ['3d', 3 * UNITS.d], ['1w', UNITS.w], ['2w', 2 * UNITS.w], ['4w', 4 * UNITS.w]]
-  for (const node of dom.axis.querySelectorAll('.tick')) node.remove()
-  for (const [label, idle] of ticks) {
-    const tick = document.createElement('span')
-    tick.className = 'tick'
-    tick.textContent = label
-    tick.style.left = `${xOf(idle) * 100}%`
-    dom.axis.append(tick)
-  }
-  placeRules()
-}
-
-function placeRules() {
-  const current = policy()
-  const pauseX = xOf(parseDuration(current.pauseAfterIdle))
-  const hideX = xOf(parseDuration(current.hideAfterIdle))
-  dom.rulePause.style.left = `${pauseX * 100}%`
-  dom.ruleHide.style.left = `${hideX * 100}%`
-  dom.rulePause.setAttribute('aria-valuetext', current.pauseAfterIdle)
-  dom.ruleHide.setAttribute('aria-valuetext', current.hideAfterIdle)
-  dom.rulePause.querySelector('.rule-tag').textContent = `pause ${current.pauseAfterIdle}`
-  dom.ruleHide.querySelector('.rule-tag').textContent = `hide ${current.hideAfterIdle}`
-  dom.laneList.style.setProperty('--pause-x', pauseX)
-  dom.laneList.style.setProperty('--hide-x', hideX)
-}
-
-function chipFor(row) {
-  const chip = document.createElement('button')
-  chip.type = 'button'
-  chip.className = 'chip'
-  chip.dataset.id = row.id
-  chip.dataset.state = row.state
-  chip.dataset.working = String(Boolean(row.working && row.state === 'running'))
-  chip.dataset.attention = String(Boolean(row.needsInput))
-  chip.dataset.selected = String(state.selected.has(row.id))
-  const doomed = verdictFor(row)
-  if (doomed) chip.dataset.doomed = 'true'
-  chip.title = `${row.title || row.name}\n${row.engine}${row.model ? ` · ${row.model}` : ''} · idle ${humanIdle(row.idleMs)}${doomed ? `\nthe policy would ${doomed} this` : ''}`
-  const dot = document.createElement('span'); dot.className = 'dot'
-  const what = document.createElement('span'); what.className = 'what'; what.textContent = row.title || row.name
-  chip.append(dot, what)
-  if (row.pinned) { const pin = document.createElement('span'); pin.className = 'pin'; pin.textContent = '📌'; chip.append(pin) }
-  if (row.rssBytes) { const mem = document.createElement('span'); mem.className = 'mem'; mem.textContent = bytes(row.rssBytes); chip.append(mem) }
-  return chip
-}
-
-/** Lay the chips out along the lane, then push any that overlap onto a second row of the same lane.
- *  Measured, not estimated: a title's width depends on the font the app is in. */
-function stack(track) {
-  const chips = [...track.querySelectorAll('.chip')]
-  const width = track.clientWidth || 1
-  const placed = []
-  let rowsUsed = 1
-  for (const chip of chips) {
-    const w = chip.offsetWidth
-    const wanted = Number(chip.dataset.x) * width
-    const left = Math.max(0, Math.min(width - w, wanted - w))   // the chip ends at its own moment in time
-    let level = 0
-    while (placed.some((other) => other.level === level && left < other.right + 6 && left + w > other.left - 6)) level += 1
-    placed.push({ level, left, right: left + w })
-    rowsUsed = Math.max(rowsUsed, level + 1)
-    chip.style.left = `${left}px`
-    chip.style.top = `${5 + level * 26}px`
-  }
-  track.style.height = `${Math.max(34, 10 + rowsUsed * 26)}px`
-}
-
-function renderLanes() {
-  const list = rows().filter((row) => row.state !== 'gone' || state.filter)
-  dom.lanesEmpty.hidden = list.length > 0
-  const lanes = new Map()
-  for (const row of list) {
-    const key = row.project || 'elsewhere'
-    if (!lanes.has(key)) lanes.set(key, [])
-    lanes.get(key).push(row)
-  }
-  // Freshest project first: the top of the hps is the working set, and the sediment sinks.
-  const ordered = [...lanes.entries()].sort((a, b) => Math.min(...a[1].map((r) => r.idleMs)) - Math.min(...b[1].map((r) => r.idleMs)))
-  const fragment = document.createDocumentFragment()
-  for (const [project, group] of ordered) {
-    const lane = document.createElement('div')
-    lane.className = 'lane'
-    const label = document.createElement('div')
-    label.className = 'lane-label'
-    const branch = group.find((row) => row.branch)?.branch
-    label.innerHTML = '<b></b> <i></i>'
-    label.querySelector('b').textContent = project
-    label.querySelector('i').textContent = group.length > 1 ? `×${group.length}` : (branch ?? '')
-    label.title = group.map((row) => `${row.title || row.name} — ${humanIdle(row.idleMs)}`).join('\n')
-    const track = document.createElement('div')
-    track.className = 'track'
-    for (const row of [...group].sort((a, b) => a.idleMs - b.idleMs)) {
-      const chip = chipFor(row)
-      chip.dataset.x = String(xOf(row.idleMs))
-      track.append(chip)
-    }
-    lane.append(label, track)
-    fragment.append(lane)
-  }
-  dom.laneList.replaceChildren(fragment)
-  for (const track of dom.laneList.querySelectorAll('.track')) stack(track)
-}
-
-const COLUMNS = [
-  { key: 'n', label: '#', sortable: false, cell: (row, i) => ({ text: String(i + 1), className: 'c-num' }) },
-  { key: 'state', label: '', cell: (row) => {
-    const glyph = row.needsInput ? '!' : row.state === 'running' ? (row.working ? '◐' : '●')
-      : row.state === 'paused' ? '○' : row.state === 'terminal' ? '$' : '✕'
-    const kind = row.needsInput ? 'attention' : row.working && row.state === 'running' ? 'working' : row.state
-    return { text: glyph, className: `c-state st-${kind}`, title: row.needsInput ? 'looks like it is waiting on you' : row.state }
-  } },
-  { key: 'idle', label: 'idle', cell: (row) => ({ text: row.state === 'gone' ? '—' : humanIdle(row.idleMs), className: 'c-idle' }) },
-  { key: 'engine', label: 'engine', cell: (row) => ({ text: row.engine }) },
-  { key: 'model', label: 'model', cell: (row) => ({ text: row.model ?? '—', className: 'c-dim' }) },
-  { key: 'mem', label: 'mem', cell: (row, i, max) => ({ text: bytes(row.rssBytes), className: 'c-mem membar', bar: max ? (row.rssBytes || 0) / max : 0 }) },
-  { key: 'project', label: 'project', cell: (row) => ({ text: row.project, className: 'c-project' }) },
-  { key: 'branch', label: 'branch', cell: (row) => ({ text: row.branch ?? '—', className: 'c-dim' }) },
-  { key: 'title', label: 'title', cell: (row) => ({ text: row.title || row.name, className: 'c-title' }) },
-  // The verb, on the row. It used to appear only after selecting something, which meant a person looking
-  // for "the pause button" could not find one.
-  { key: 'do', label: '', sortable: false, cell: (row) => ({ text: '', className: 'c-do', verb: row.state === 'running' ? 'pause' : row.state === 'paused' ? 'resume' : null }) },
-]
-
-const SORTS = {
-  idle: (a, b) => a.idleMs - b.idleMs,
-  mem: (a, b) => (b.rssBytes || 0) - (a.rssBytes || 0),
-  state: (a, b) => a.state.localeCompare(b.state) || a.idleMs - b.idleMs,
-  engine: (a, b) => a.engine.localeCompare(b.engine) || a.idleMs - b.idleMs,
-  model: (a, b) => String(a.model ?? '').localeCompare(String(b.model ?? '')),
-  project: (a, b) => a.project.localeCompare(b.project) || a.idleMs - b.idleMs,
-  branch: (a, b) => String(a.branch ?? '').localeCompare(String(b.branch ?? '')),
-  title: (a, b) => String(a.title || a.name).localeCompare(String(b.title || b.name)),
-}
-
-function sortedRows() {
-  const list = [...rows()]
-  const by = SORTS[state.sort.key] ?? SORTS.idle
-  list.sort(by)
-  if (state.sort.dir === 'desc') list.reverse()
-  return list
-}
-
-function renderTable() {
-  const list = sortedRows()
-  const max = Math.max(1, ...list.map((row) => row.rssBytes || 0))
-  const table = document.createElement('table')
-  const thead = document.createElement('thead')
-  const headRow = document.createElement('tr')
-  for (const column of COLUMNS) {
-    const th = document.createElement('th')
-    th.textContent = column.label
-    if (column.sortable !== false) {
-      th.dataset.sort = column.key
-      if (state.sort.key === column.key) th.setAttribute('aria-sort', state.sort.dir === 'asc' ? 'ascending' : 'descending')
-    }
-    headRow.append(th)
-  }
-  thead.append(headRow)
-  const tbody = document.createElement('tbody')
-  list.forEach((row, index) => {
-    const tr = document.createElement('tr')
-    tr.dataset.id = row.id
-    tr.dataset.selected = String(state.selected.has(row.id))
-    tr.dataset.cursor = String(state.cursor === row.id)
-    if (verdictFor(row)) tr.dataset.doomed = 'true'
-    for (const column of COLUMNS) {
-      const td = document.createElement('td')
-      const cell = column.cell(row, index, max)
-      td.className = cell.className ?? ''
-      if (cell.title) td.title = cell.title
-      if (cell.verb) {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.dataset.verb = cell.verb
-        button.dataset.only = row.id
-        button.textContent = cell.verb === 'pause' ? 'Pause' : 'Resume'
-        td.append(button)
-      } else if (cell.bar) {
-        const bar = document.createElement('i')
-        bar.style.width = `${Math.max(2, cell.bar * 46)}px`
-        const span = document.createElement('span')
-        span.textContent = cell.text
-        td.append(bar, span)
-      } else td.textContent = cell.text
-      tr.append(td)
-    }
-    tbody.append(tr)
-  })
-  table.append(thead, tbody)
-  dom.grid.replaceChildren(table)
-}
-
-function renderStatus() {
-  const summary = state.snapshot?.summary
-  const list = rows()
-  const totals = planTotals(list)
-  const held = totals.frees >= 1024 ** 3 ? `${(totals.frees / 1024 ** 3).toFixed(1)} GB` : `${Math.round(totals.frees / 1024 ** 2)} MB`
-  const hidden = (state.snapshot?.rows ?? []).length - list.length
-  const bits = [`${list.length} shown${hidden > 0 ? ` of ${(state.snapshot?.rows ?? []).length}` : ''}`]
-  if (summary) bits.push(`${summary.running} running`, `${summary.paused} paused`)
-  if (totals.pause) bits.push(`policy: pause ${totals.pause} (${held})`)
-  for (const problem of state.snapshot?.problems ?? []) bits.push(`⚠ ${problem.machine}`)
-  dom.statusLeft.textContent = bits.join('  ·  ')
-
-  const count = state.selected.size
-  dom.statusActions.hidden = count === 0
-  if (count) {
-    dom.statusActions.replaceChildren()
-    const label = document.createElement('span')
-    label.textContent = `${count} selected`
-    dom.statusActions.append(label)
-    for (const [verb, text] of [['pause', 'Pause'], ['resume', 'Resume'], ['pin', 'Pin'], ['unpin', 'Unpin']]) {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = text
-      button.dataset.verb = verb
-      dom.statusActions.append(button)
-    }
-    const clear = document.createElement('button')
-    clear.type = 'button'; clear.textContent = 'Clear'; clear.dataset.verb = 'clear'
-    dom.statusActions.append(clear)
-  }
-  dom.statusRight.innerHTML = state.view === 'table'
-    ? '<kbd>j</kbd><kbd>k</kbd> move · <kbd>space</kbd> select · <kbd>p</kbd> pause · <kbd>r</kbd> resume · <kbd>i</kbd> pin · <kbd>/</kbd> filter'
-    : `rules: <code></code> · drag a line to try a change · <kbd>/</kbd> filter`
-  const code = dom.statusRight.querySelector('code')
-  if (code) code.textContent = state.snapshot?.configPath ?? '~/.config/harness/policy.jsonc'
-}
-
-function renderInspector() {
-  const row = (state.snapshot?.rows ?? []).find((candidate) => candidate.id === state.inspecting)
-  if (!row) { dom.inspector.hidden = true; return }
-  dom.inspector.hidden = false
-  const verdict = verdictFor(row)
-  const entry = (state.snapshot?.plan ?? []).find((candidate) => candidate.id === row.id)
-  dom.inspector.replaceChildren()
-  const header = document.createElement('header')
-  const heading = document.createElement('div')
-  const h2 = document.createElement('h2'); h2.textContent = row.title || row.name
-  const sub = document.createElement('div'); sub.className = 'sub'
-  sub.textContent = `${row.state}${row.pinned ? ' · pinned' : ''} · ${row.engine}${row.model ? ` ${row.model}` : ''} · ${row.machine}`
-  heading.append(h2, sub)
-  const close = document.createElement('button'); close.type = 'button'; close.className = 'ghost'; close.textContent = '✕'
-  close.addEventListener('click', () => { state.inspecting = null; renderInspector() })
-  header.append(heading, close)
-  dom.inspector.append(header)
-
-  if (entry && entry.action !== 'keep') {
-    const why = document.createElement('p'); why.className = 'why'
-    why.textContent = `The policy would ${entry.action} this: ${entry.why}.`
-    dom.inspector.append(why)
-  } else if (entry?.protectedBy) {
-    const why = document.createElement('p'); why.className = 'why'
-    why.textContent = `Protected: ${entry.why}.`
-    dom.inspector.append(why)
-  }
-
-  const dl = document.createElement('dl')
-  const pairs = [
-    ['idle', `${humanIdle(row.idleMs)} — last turn ${new Date(row.lastActivity).toLocaleString()}`],
-    ['folder', row.home || '—'],
-    ['branch', row.branch ?? '—'],
-    ['memory', row.rssBytes ? `${bytes(row.rssBytes)} across ${row.procs} ${row.procs === 1 ? 'process' : 'processes'}` : '—'],
-    ['pane', row.pane ? `${row.pane}${row.dead ? ' (dead, held open)' : ''}` : '—'],
-    ['harness', row.dshName ?? row.dsh ?? '—'],
-    ['id', row.id.slice(0, 8)],
-  ]
-  for (const [key, value] of pairs) {
-    const dt = document.createElement('dt'); dt.textContent = key
-    const dd = document.createElement('dd'); dd.textContent = value
-    dl.append(dt, dd)
-  }
-  dom.inspector.append(dl)
-
-  if (row.screenTail) {
-    const screen = document.createElement('pre'); screen.className = 'screen'; screen.textContent = row.screenTail
-    dom.inspector.append(screen)
-  }
-  const actions = document.createElement('div'); actions.className = 'row-actions'
-  // A shell has no conversation to pause or resume, so it is offered neither.
-  const verbs = row.state === 'terminal' ? [] : row.state === 'running' ? [['pause', 'Pause']] : [['resume', 'Resume']]
-  if (row.state !== 'terminal') verbs.push(row.pinned ? ['unpin', 'Unpin'] : ['pin', 'Pin'])
-  for (const [verb, text] of verbs) {
-    const button = document.createElement('button')
-    button.type = 'button'; button.className = 'ghost'; button.textContent = text
-    button.addEventListener('click', () => act(verb, [row.id]))
-    actions.append(button)
-  }
-  dom.inspector.append(actions)
-  if (verdict) dom.inspector.dataset.verdict = verdict
-}
-
-function render() {
-  if (!state.snapshot) return
-  renderGauges()
-  placeRules()
-  if (state.view === 'lanes') renderLanes(); else renderTable()
-  renderStatus()
-  renderInspector()
-}
-
-/* ── talking to the server ────────────────────────────────────────────────── */
-
-function toast(message, bad = false) {
-  dom.toast.textContent = message
-  dom.toast.className = `toast${bad ? ' bad' : ''}`
-  dom.toast.hidden = false
-  clearTimeout(toast.timer)
-  toast.timer = setTimeout(() => { dom.toast.hidden = true }, 4200)
-}
-
+function message(value) { text(dom.message, value) }
 async function post(path, payload) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-hps-token': TOKEN },
-    body: JSON.stringify(payload),
-  })
-  return response.json()
+  const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-hps-token': token }, body: JSON.stringify(payload) })
+  const result = await response.json()
+  if (!response.ok || result.error) throw new Error(result.error || 'Request failed. Refresh and try again.')
+  return result
 }
-
-async function act(verb, ids) {
-  if (state.busy || !ids.length) return
-  state.busy = true
-  try {
-    const reply = await post('/api/act', { verb, ids })
-    if (reply.error) { toast(reply.error, true); return }
-    const results = reply.results ?? []
-    const ok = results.filter((result) => result.ok && !result.already).length
-    const refused = results.filter((result) => result.refused)
-    if (results.length === 1) toast(`${results[0].ok ? '' : 'not '}${verb}: ${results[0].detail}`, !results[0].ok)
-    else toast(`${verb}: ${ok} done${refused.length ? `, ${refused.length} left alone (${refused[0].detail})` : ''}`, ok === 0)
-    state.selected.clear()
-  } catch (error) {
-    toast(`Could not ${verb}: ${error.message}`, true)
-  } finally {
-    state.busy = false
-  }
+const CLOSE_WIDTH = 56
+const activeColumns = () => {
+  const ordered = PRESETS[state.preset]
+  return ordered ? ordered.map(key => COLUMNS.find(c => c.key === key))
+    : COLUMNS.filter(c => c.required || state.visible.has(c.key))
 }
-
-async function savePolicy() {
-  if (!state.draft) return
-  const reply = await post('/api/policy', { policy: state.draft })
-  if (reply.error) { toast(reply.error, true); return }
-  toast(`Saved to ${state.snapshot?.configPath ?? 'policy.jsonc'}: pause after ${reply.policy.pauseAfterIdle}, hide after ${reply.policy.hideAfterIdle}.`)
-  state.draft = null
-  dom.policybar.hidden = true
-  render()
+function resizeColumns() {
+  for (const col of dom.colgroup.children) col.style.width = (col.dataset.key === 'close' ? CLOSE_WIDTH : state.widths[col.dataset.key]) + 'px'
+  for (const header of dom.head.querySelectorAll('th')) header.querySelector('.resize')?.setAttribute('aria-valuenow', String(state.widths[header.dataset.key]))
+  dom.table.style.width = activeColumns().reduce((sum, c) => sum + state.widths[c.key], CLOSE_WIDTH) + 'px'
 }
-
-/* ── input ────────────────────────────────────────────────────────────────── */
-
-function setView(view) {
-  state.view = view
-  dom.lanes.hidden = view !== 'lanes'
-  dom.table.hidden = view !== 'table'
-  for (const button of document.querySelectorAll('.segmented button')) {
-    button.setAttribute('aria-selected', String(button.dataset.view === view))
-  }
-  render()
-}
-
-function toggle(id, additive) {
-  if (!additive) {
-    const only = state.selected.size === 1 && state.selected.has(id)
-    state.selected.clear()
-    if (!only) state.selected.add(id)
-  } else if (state.selected.has(id)) state.selected.delete(id)
-  else state.selected.add(id)
-  state.cursor = id
-}
-
-function targets() {
-  if (state.selected.size) return [...state.selected]
-  return state.cursor ? [state.cursor] : []
-}
-
-function moveCursor(delta) {
-  const list = state.view === 'table' ? sortedRows() : rows()
-  if (!list.length) return
-  const index = list.findIndex((row) => row.id === state.cursor)
-  const next = list[Math.min(list.length - 1, Math.max(0, (index < 0 ? 0 : index) + delta))]
-  state.cursor = next.id
-  state.inspecting = state.inspecting ? next.id : null
-  render()
-  const node = dom.grid.querySelector(`tr[data-id="${next.id}"]`)
-  node?.scrollIntoView({ block: 'nearest' })
-}
-
-document.addEventListener('click', (event) => {
-  const chip = event.target.closest('.chip')
-  if (chip) { toggle(chip.dataset.id, event.metaKey || event.ctrlKey || event.shiftKey); state.inspecting = chip.dataset.id; render(); return }
-  const tr = event.target.closest('#grid tbody tr')
-  if (tr) { toggle(tr.dataset.id, event.metaKey || event.ctrlKey || event.shiftKey); state.inspecting = state.inspecting ? tr.dataset.id : null; render(); return }
-  const th = event.target.closest('#grid th[data-sort]')
-  if (th) {
-    const key = th.dataset.sort
-    state.sort = { key, dir: state.sort.key === key && state.sort.dir === 'asc' ? 'desc' : 'asc' }
-    render(); return
-  }
-  const button = event.target.closest('[data-verb]')
-  const verb = button?.dataset.verb
-  if (verb === 'clear') { state.selected.clear(); render(); return }
-  // A button on a row acts on THAT row, whatever else is selected — otherwise clicking Pause next to one
-  // harness would pause five.
-  if (verb) { event.stopPropagation(); act(verb, button.dataset.only ? [button.dataset.only] : targets()); return }
-  const view = event.target.closest('[data-view]')?.dataset.view
-  if (view) setView(view)
-})
-
-dom.refresh.addEventListener('click', () => post('/api/refresh', {}).then(() => toast('Refreshed.')))
-dom.showAll.addEventListener('click', () => {
-  state.showAll = !state.showAll
-  dom.showAll.setAttribute('aria-pressed', String(state.showAll))
-  render()
-})
-dom.policySave.addEventListener('click', savePolicy)
-dom.policyReset.addEventListener('click', () => { state.draft = null; dom.policybar.hidden = true; render() })
-dom.filter.addEventListener('input', () => { state.filter = dom.filter.value; render() })
-
-/* Dragging a rule: the hps is the only place a threshold can be judged, because the thing you are
-   judging is how many chips end up on the wrong side of it. */
-for (const rule of [dom.rulePause, dom.ruleHide]) {
-  const steps = rule.dataset.rule === 'pause' ? PAUSE_STEPS : HIDE_STEPS
-  const key = rule.dataset.rule === 'pause' ? 'pauseAfterIdle' : 'hideAfterIdle'
-  const begin = (event) => {
-    event.preventDefault()
-    rule.classList.add('dragging')
-    const track = dom.axis.getBoundingClientRect()
-    const move = (moveEvent) => {
-      const x = (moveEvent.clientX - track.left) / Math.max(1, track.width)
-      state.draft = { ...(state.draft ?? {}), [key]: snap(idleOfX(x), steps) }
-      dom.policybar.hidden = false
-      const totals = planTotals(rows())
-      const held = totals.frees >= 1024 ** 3 ? `${(totals.frees / 1024 ** 3).toFixed(1)} GB` : `${Math.round(totals.frees / 1024 ** 2)} MB`
-      dom.policyPreview.textContent = `pause after ${policy().pauseAfterIdle}, hide after ${policy().hideAfterIdle} → would pause ${totals.pause}, handing back ${held}`
-      render()
+function buildColumns() {
+  dom.colgroup.replaceChildren(); dom.head.replaceChildren(); state.nodes.clear(); dom.body.replaceChildren()
+  const tr = element('tr')
+  for (const col of activeColumns()) {
+    const width = element('col'); width.dataset.key = col.key; dom.colgroup.append(width)
+    const th = element('th', null, col.numeric ? 'numeric' : ''); th.scope = 'col'; th.dataset.key = col.key
+    const sort = element('button', col.label); sort.type = 'button'; sort.title = col.help || 'Sort by ' + col.label
+    sort.onclick = () => { state.direction = state.sort === col.key ? -state.direction : col.numeric ? -1 : 1; state.sort = col.key; persist(); render() }
+    const grip = element('span', null, 'resize'); grip.tabIndex = 0; grip.role = 'separator'
+    grip.setAttribute('aria-orientation', 'vertical'); grip.setAttribute('aria-label', 'Resize ' + col.label)
+    grip.setAttribute('aria-valuemin', '64'); grip.setAttribute('aria-valuemax', '600')
+    const change = value => { state.widths[col.key] = Math.max(64, Math.min(600, value)); resizeColumns() }
+    grip.onpointerdown = event => {
+      event.preventDefault(); const start = event.clientX, width = state.widths[col.key]
+      grip.setPointerCapture(event.pointerId)
+      grip.onpointermove = move => change(width + move.clientX - start)
+      grip.onpointerup = grip.onpointercancel = () => { grip.onpointermove = null; persist() }
     }
-    const end = () => {
-      rule.classList.remove('dragging')
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', end)
+    grip.onkeydown = event => { if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); change(state.widths[col.key] + (event.key === 'ArrowLeft' ? -16 : 16)); persist() } }
+    th.append(sort, grip); tr.append(th)
   }
-  rule.addEventListener('pointerdown', begin)
-  rule.addEventListener('keydown', (event) => {
-    const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0
-    if (!direction) return
-    event.preventDefault()
-    const current = policy()[key]
-    const index = Math.max(0, Math.min(steps.length - 1, steps.indexOf(current) - direction))
-    state.draft = { ...(state.draft ?? {}), [key]: steps[index] }
-    dom.policybar.hidden = false
-    render()
-  })
+  const closeWidth = element('col'); closeWidth.dataset.key = 'close'; dom.colgroup.append(closeWidth)
+  const closeHeader = element('th', null, 'row-actions'); closeHeader.scope = 'col'
+  closeHeader.append(element('span', 'Close harness', 'sr-only')); tr.append(closeHeader)
+  dom.head.append(tr); resizeColumns(); render()
 }
-
-document.addEventListener('keydown', (event) => {
-  if (event.target === dom.filter) {
-    if (event.key === 'Escape') { dom.filter.value = ''; state.filter = ''; dom.filter.blur(); render() }
+function columnMenu() {
+  dom.columnOptions.replaceChildren()
+  for (const group of ['Session', 'Resources', 'AI usage']) {
+    dom.columnOptions.append(element('strong', group))
+    for (const col of COLUMNS.filter(c => c.group === group && !c.required)) {
+      const label = element('label'), check = element('input'); check.type = 'checkbox'; check.checked = state.visible.has(col.key)
+      label.title = col.help || col.label
+      check.onchange = () => { if (check.checked) state.visible.add(col.key); else state.visible.delete(col.key); state.preset = null; persist(); buildColumns() }
+      label.append(check, document.createTextNode(col.label)); dom.columnOptions.append(label)
+    }
+  }
+  const reset = element('button', 'Reset columns'); reset.onclick = () => setPreset('overview'); dom.columnOptions.append(reset)
+}
+function positionColumnMenu() {
+  if (!dom.columns.open) return
+  const anchor = dom.columns.querySelector('summary').getBoundingClientRect()
+  const height = Math.min(innerHeight * .65, 500)
+  const below = innerHeight - anchor.bottom - 14
+  const top = below < 160 && anchor.top > below ? Math.max(8, anchor.top - height - 6) : anchor.bottom + 6
+  dom.columnOptions.style.left = Math.max(8, Math.min(anchor.right - 230, innerWidth - 238)) + 'px'
+  dom.columnOptions.style.top = top + 'px'
+  dom.columnOptions.style.maxHeight = Math.max(0, Math.min(height, innerHeight - top - 8)) + 'px'
+}
+dom.columns.addEventListener('toggle', positionColumnMenu)
+window.addEventListener('resize', positionColumnMenu)
+function setPreset(preset) {
+  state.preset = preset; state.visible = new Set(PRESETS[preset]);
+  for (const col of COLUMNS) state.widths[col.key] = col.width
+  if (preset === 'ai') { state.sort = 'tokens'; state.direction = -1 }
+  else { state.sort = 'rssBytes'; state.direction = -1 }
+  persist(); columnMenu(); buildColumns()
+}
+for (const button of document.querySelectorAll('[data-preset]')) button.onclick = () => setPreset(button.dataset.preset)
+const iconNames = new Set(['codex', 'opencode', 'cursor', 'pi', 'hermes', 'commandcode', 'devin', 'muse', 'amp', 'kilo', 'grok', 'copilot', 'agy', 'claude'])
+const engineNames = { codex: 'Codex', claude: 'Claude', opencode: 'OpenCode', cursor: 'Cursor', terminal: 'Terminal', pi: 'Pi', hermes: 'Hermes', copilot: 'Copilot', gemini: 'Gemini' }
+function createRow(row) {
+  const tr = element('tr'); tr.dataset.id = row.id
+  tr.onclick = () => { state.selected = row.id; select(); dom.grid.focus({ preventScroll: true }) }
+  tr.ondblclick = event => { if (!event.target.closest('button')) inspect(row.id) }
+  for (const col of activeColumns()) {
+    const td = element('td', null, col.numeric ? 'numeric' : ''); td.dataset.key = col.key
+    if (col.key === 'name') td.append(element('strong'))
+    if (col.key === 'activity') { const span = element('span', null, 'status'); span.append(element('span', null, 'mark'), element('span')); td.append(span) }
+    if (col.key === 'engine') {
+      const span = element('span', null, 'engine'), img = element('img'); img.alt = ''; img.hidden = true
+      span.append(img, element('span')); td.append(span)
+    }
+    tr.append(td)
+  }
+  const actions = element('td', null, 'row-actions'), close = element('button', null, 'close-harness')
+  close.type = 'button'
+  const mark = element('span', '×'); mark.setAttribute('aria-hidden', 'true'); close.append(mark)
+  close.onclick = event => { event.stopPropagation(); state.selected = row.id; select(); reviewStop(row.id) }
+  actions.append(close); tr.append(actions)
+  return tr
+}
+function updateRow(tr, row) {
+  for (const td of tr.children) {
+    const key = td.dataset.key, col = COLUMNS.find(c => c.key === key)
+    if (td.classList.contains('row-actions')) {
+      const close = td.firstChild
+      close.disabled = !canStop(row)
+      close.setAttribute('aria-label', 'Close ' + row.name)
+      close.title = state.busy.has(row.id) ? 'Closing…' : state.frozen ? 'Turn on live updates before closing.'
+        : !state.connected || !currentSnapshot() ? 'Reconnect before closing.'
+        : row.unavailable || (row.canStop ? 'Close ' + row.name : 'This harness is not ready to close.')
+      close.setAttribute('aria-busy', String(state.busy.has(row.id)))
+    } else if (key === 'name') {
+      text(td.children[0], row.name)
+      td.title = [row.name, row.home, row.model].filter(Boolean).join('\n')
+    } else if (key === 'activity') {
+      const [mark, label] = ACTIVITY[row.activity] || ACTIVITY.unknown
+      td.firstChild.className = 'status ' + row.activity; text(td.firstChild.children[0], mark); text(td.firstChild.children[1], label)
+      td.title = row.activityKnown || ['offline', 'starting', 'failed'].includes(row.activity) ? label : 'The owning daemon has not reported activity.'
+    } else if (key === 'engine') {
+      const img = td.firstChild.children[0], icon = iconNames.has(row.engine) ? row.engine : null
+      img.hidden = !icon; img.className = ['cursor', 'opencode', 'grok', 'copilot'].includes(icon) ? 'dark-tile' : ''
+      if (icon && img.getAttribute('src') !== 'icons/' + icon + '.png') img.src = 'icons/' + icon + '.png'
+      text(td.firstChild.children[1], engineNames[row.engine] || row.engine || '—')
+    } else {
+      text(td, formatValue(key, row[key]))
+      td.classList.toggle('unknown', row[key] == null)
+      td.title = row[key] == null ? (col.help || col.label) + '\nThis reading is unavailable.'
+        : ['lastActivity', 'createdAt'].includes(key) ? new Date(row[key]).toLocaleString()
+        : col.numeric ? Number(row[key]).toLocaleString() + '\n' + (col.help || col.label) : String(row[key])
+    }
+  }
+}
+const currentSelection = () => state.shown.find(r => r.id === state.selected)
+const currentSnapshot = () => ['ok', 'degraded'].includes(state.snapshot?.status)
+const canStop = row => row?.canStop && isLive(row) && state.connected && currentSnapshot() && !state.frozen && !state.busy.has(row.id)
+function select() {
+  for (const [id, node] of state.nodes) node.setAttribute('aria-selected', String(id === state.selected))
+  dom.inspect.disabled = !currentSelection()
+}
+const totalText = (total, formatter) => total.value == null ? '—' : (total.partial ? '≥' : '') + formatter(total.value)
+function summary() {
+  const rows = state.shown
+  const shared = (state.snapshot?.shared ?? []).filter(s => s.online && rows.some(r => r.machineId === s.machineId && s.agentIds.includes(r.agentId)))
+  const resources = [...rows, ...shared]
+  dom.summary.replaceChildren()
+  for (const [label, total, format, hint] of [
+    ['CPU', sumReading(resources, 'cpu'), n => Math.round(n) + '%', '100% is one core. Shared servers count once.'],
+    ['RAM', sumReading(resources, 'rssBytes'), memory, 'Resident memory including child processes and shared servers once. Shared memory pages can overlap.'],
+    ['GPU', sumReading(resources, 'gpuPercent'), n => Math.round(n) + '%', 'Harness process GPU use on supported macOS and Linux NVIDIA drivers. First samples and unavailable counters show —. Cloud model GPU usage is not reported.'],
+    ['SSD', storageTotal(rows.map(r => r.online === false ? { ...r, workspaceBytes: null } : r)), bytes, 'Workspace disk space. Shared and nested folders count once per machine. Stopping does not delete files.'],
+    ['Tokens', sumReading(rows, 'tokens'), number, 'Conversation totals for shown sessions. Cached input is included once.'],
+  ]) {
+    const item = element('div', null, 'total'); item.title = hint + ' ≥ means a partial total.'
+    item.append(element('span', label), element('strong', totalText(total, format))); dom.summary.append(item)
+  }
+  const scope = element('p', `${(!state.connected || !currentSnapshot()) && !state.frozen ? 'Last harness readings' : 'Shown harnesses only'} · ≥ partial · — unavailable`, 'summary-scope'); dom.summary.append(scope)
+  dom.shared.hidden = !shared.length; text(dom.sharedTitle, shared.length + ' shared ' + (shared.length === 1 ? 'server' : 'servers') + ' included once')
+  dom.sharedBody.replaceChildren()
+  for (const server of shared) {
+    const row = element('div', null, 'shared-row')
+    row.append(element('strong', server.name), element('span', server.machine), element('span', `${server.agentIds.length} sessions`),
+      element('span', formatValue('cpu', server.cpu) + ' CPU'), element('span', memory(server.rssBytes) + ' RAM'))
+    dom.sharedBody.append(row)
+  }
+}
+function render() {
+  const { scrollTop, scrollLeft } = dom.grid
+  state.shown = visibleRows(state.rows, state)
+  const ids = new Set(state.shown.map(r => r.id))
+  for (const [id, node] of state.nodes) if (!ids.has(id)) { node.remove(); state.nodes.delete(id) }
+  if (state.selected && !ids.has(state.selected)) state.selected = null
+  let at = dom.body.firstChild
+  for (const row of state.shown) {
+    let node = state.nodes.get(row.id)
+    if (!node) { node = createRow(row); state.nodes.set(row.id, node) }
+    updateRow(node, row); if (at !== node) dom.body.insertBefore(node, at); at = node.nextSibling
+  }
+  select(); dom.grid.scrollTop = scrollTop; dom.grid.scrollLeft = scrollLeft
+  for (const th of dom.head.querySelectorAll('th')) {
+    const col = COLUMNS.find(c => c.key === th.dataset.key)
+    if (!col) continue
+    th.setAttribute('aria-sort', state.sort === col.key ? (state.direction === 1 ? 'ascending' : 'descending') : 'none')
+    text(th.firstChild, col.label + (state.sort === col.key ? (state.direction === 1 ? ' ↑' : ' ↓') : ''))
+  }
+  for (const button of document.querySelectorAll('[data-preset]')) button.setAttribute('aria-pressed', String(button.dataset.preset === state.preset))
+  const ready = state.snapshot && state.snapshot.status !== 'starting'
+  dom.empty.hidden = state.shown.length > 0
+  const filtered = state.query || state.machine !== 'all' || state.filter !== 'all'
+  text(dom.empty.firstElementChild, !ready ? 'Connecting to your machines…' : filtered ? 'No matching harnesses' : 'No open harnesses')
+  text(dom.empty.lastElementChild, !ready ? 'Open harnesses will appear here.' : filtered ? 'Try another search, machine, or status.' : 'Harnesses appear here while they are open, including when idle.')
+  const active = state.rows.filter(isLive).length
+  text(dom.count, `${filtered ? state.shown.length + ' of ' : ''}${active} open ${active === 1 ? 'harness' : 'harnesses'}`)
+  text(dom.updated, state.frozen ? 'Updates frozen' : state.receivedAt ? 'Updated ' + age(state.receivedAt) : 'Connecting…')
+  text(dom.live, state.frozen ? 'Frozen' : !state.connected ? 'Reconnecting' : state.snapshot?.status === 'starting' ? 'Connecting' : !currentSnapshot() ? 'Unavailable' : 'Live')
+  dom.live.classList.toggle('inactive', state.frozen || !state.connected || !currentSnapshot())
+  if (ready) summary()
+  if (dom.inspector.open) renderInspector()
+}
+function inspect(id) {
+  const row = state.rows.find(r => r.id === id); if (!row) return
+  state.inspecting = id; renderInspector(); dom.inspector.showModal()
+}
+function renderInspector() {
+  const row = state.rows.find(r => r.id === state.inspecting)
+  dom.inspectStop.disabled = !canStop(row)
+  if (!row) { text(dom.inspectContext, 'This harness is no longer open.'); return }
+  text(dom.inspectTitle, row.name)
+  text(dom.inspectContext, [engineNames[row.engine] || row.engine, row.machine, ACTIVITY[row.activity]?.[1]].filter(Boolean).join(' · '))
+  dom.inspectContent.replaceChildren()
+  for (const group of ['Resources', 'AI usage', 'Session']) {
+    const section = element('section', null, 'inspect-section'); section.append(element('h3', group)); const dl = element('dl')
+    for (const col of COLUMNS.filter(c => c.group === group && !['name', 'activity', 'engine', 'machine'].includes(c.key))) {
+      const label = element('dt', col.label), value = element('dd', formatValue(col.key, row[col.key])); label.title = col.help || col.label
+      dl.append(label, value)
+    }
+    section.append(dl); dom.inspectContent.append(section)
+  }
+  const processes = element('section', null, 'inspect-section processes'); processes.append(element('h3', 'Process tree'))
+  processes.append(element('p', 'Owned processes and children; nested harnesses and shared servers are counted separately.'))
+  if (!row.processes?.length) processes.append(element('p', 'Process details are unavailable on this machine.', 'muted'))
+  else {
+    const table = element('table'), head = element('tr')
+    for (const title of ['PID', 'Parent PID', 'CPU', 'RAM']) head.append(element('th', title))
+    const tbody = element('tbody'); table.append(head, tbody)
+    for (const process of row.processes) {
+      const tr = element('tr')
+      for (const value of [process.pid, process.parent, formatValue('cpu', process.cpuPercent), memory(process.memoryBytes)]) tr.append(element('td', value))
+      tbody.append(tr)
+    }
+    processes.append(table)
+    if (row.processCount > row.processes.length) processes.append(element('p', `Showing ${row.processes.length} of ${row.processCount} processes.`, 'muted'))
+  }
+  dom.inspectContent.append(processes)
+  const notes = element('p', 'GPU readings describe attributable processes on the owning machine, not a cloud model. Storage includes existing workspace files and remains after stopping. Missing readings are unavailable, not zero.', 'muted metric-note')
+  dom.inspectContent.append(notes)
+}
+function reviewStop(id) {
+  const row = state.rows.find(r => r.id === id); if (!canStop(row)) return
+  state.review = { id: row.id, sessionId: row.sessionId, lastActivity: row.lastActivity, name: row.name }
+  text(dom.stopTitle, 'Close “' + row.name + '”?')
+  text(dom.stopContext, `${row.machine} · ${ACTIVITY[row.activity]?.[1] || 'Unknown'} · ${memory(row.rssBytes)} RAM · ${number(row.tokens)} tokens`)
+  text(dom.stopResult, ''); dom.stopConfirm.disabled = false; dom.stopCancel.disabled = false
+  dom.stopDialog.showModal()
+}
+dom.inspect.onclick = () => inspect(state.selected)
+dom.inspectStop.onclick = () => reviewStop(state.inspecting)
+dom.inspectClose.onclick = () => dom.inspector.close()
+dom.stopCancel.onclick = () => dom.stopDialog.close()
+dom.stopDialog.addEventListener('cancel', event => { if (state.busy.has(state.review?.id)) event.preventDefault() })
+dom.stopConfirm.onclick = async () => {
+  const review = state.review
+  if (!review || state.busy.has(review.id)) return
+  const row = state.rows.find(r => r.id === review.id)
+  if (!canStop(row) || row.sessionId !== review.sessionId) {
+    text(dom.stopResult, 'This session or connection changed. Cancel, refresh and review it again.')
+    dom.stopConfirm.disabled = true
     return
   }
-  if (event.metaKey || event.ctrlKey || event.altKey) return
-  const key = event.key
-  if (key === '/') { event.preventDefault(); dom.filter.focus(); return }
-  if (key === '1') return setView('lanes')
-  if (key === '2') return setView('table')
-  if (key === 'j' || key === 'ArrowDown') { event.preventDefault(); return moveCursor(1) }
-  if (key === 'k' || key === 'ArrowUp') { event.preventDefault(); return moveCursor(-1) }
-  if (key === 'g') { const list = state.view === 'table' ? sortedRows() : rows(); state.cursor = list[0]?.id ?? null; return render() }
-  if (key === 'G') { const list = state.view === 'table' ? sortedRows() : rows(); state.cursor = list.at(-1)?.id ?? null; return render() }
-  if (key === ' ') { event.preventDefault(); if (state.cursor) { toggle(state.cursor, true); render() } return }
-  if (key === 'Enter') { state.inspecting = state.cursor; return render() }
-  if (key === 'Escape') { state.selected.clear(); state.inspecting = null; state.draft = null; dom.policybar.hidden = true; return render() }
-  // h pause · r resume · x retire · i pin · u unpin. `p` and `w` stay bound to the same two verbs,
-  // because anyone who used this before it was renamed will reach for them.
-  const verbs = { p: 'pause', h: 'pause', r: 'resume', w: 'resume', i: 'pin', u: 'unpin' }
-  if (verbs[key]) { event.preventDefault(); act(verbs[key], targets()) }
-})
-
-window.addEventListener('resize', () => { if (state.view === 'lanes') renderLanes() })
-
-/* ── the stream ───────────────────────────────────────────────────────────── */
-
-function listen() {
-  const source = new EventSource('/events')
-  source.addEventListener('snapshot', (event) => {
-    try { state.snapshot = JSON.parse(event.data) } catch { return }
-    render()
-  })
-  source.addEventListener('error', () => {
-    dom.where.textContent = 'reconnecting…'
-    source.close()
-    setTimeout(listen, 2500)
-  })
+  state.busy.add(review.id); dom.stopConfirm.disabled = true; dom.stopCancel.disabled = true; text(dom.stopResult, 'Closing…'); render()
+  try {
+    const reply = await post('/api/act', { verb: 'stop', ids: [review.id], manual: true, expected: [review] })
+    const result = reply.results?.find(r => r.id === review.id)
+    if (!result?.ok) { text(dom.stopResult, result?.detail || 'Close was not confirmed. Refresh to check.'); return }
+    state.rows = state.rows.filter(r => r.id !== review.id || r.sessionId !== review.sessionId)
+    message('Closed ' + review.name + '. History and files kept.'); dom.stopDialog.close()
+    if (dom.inspector.open && state.inspecting === review.id) dom.inspector.close()
+    dom.grid.focus({ preventScroll: true })
+  } catch (error) { text(dom.stopResult, error.message + ' Refresh to check before trying again.') }
+  finally { state.busy.delete(review.id); dom.stopCancel.disabled = false; render() }
 }
-
-renderAxis()
-listen()
+dom.search.oninput = () => { state.query = dom.search.value; render() }
+dom.filter.onchange = () => { state.filter = dom.filter.value; render() }
+dom.machine.onchange = () => { state.machine = dom.machine.value; render() }
+dom.grid.onkeydown = event => {
+  if (event.target.closest('button') || event.target.classList.contains('resize')) return
+  if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault(); const index = state.shown.findIndex(r => r.id === state.selected)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? state.shown.length - 1 : Math.max(0, Math.min(state.shown.length - 1, index + (event.key === 'ArrowUp' ? -1 : 1)))
+    state.selected = state.shown[next]?.id ?? null; select(); state.nodes.get(state.selected)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  } else if (event.key === 'Enter' && state.selected) { event.preventDefault(); inspect(state.selected) }
+  else if (['Delete', 'Backspace'].includes(event.key) && state.selected) { event.preventDefault(); reviewStop(state.selected) }
+}
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && dom.columns.open) { dom.columns.open = false; dom.columns.querySelector('summary').focus() }
+  if ((event.key === '/' || ((event.metaKey || event.ctrlKey) && event.key === 'f')) && !document.querySelector('dialog[open]') && !['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) { event.preventDefault(); dom.search.focus() }
+})
+document.addEventListener('pointerdown', event => { if (!dom.columns.contains(event.target)) dom.columns.open = false })
+dom.refresh.onclick = async () => {
+  dom.refresh.disabled = true
+  try { await post('/api/refresh', {}); message(state.frozen ? 'New readings ready. Live updates to display them.' : '') } catch (error) { message(error.message) }
+  finally { dom.refresh.disabled = false }
+}
+dom.freeze.onclick = () => {
+  state.frozen = !state.frozen; text(dom.freeze, state.frozen ? 'Live updates' : 'Freeze updates'); dom.freeze.setAttribute('aria-pressed', String(state.frozen))
+  if (!state.frozen && state.pending) { applySnapshot(state.pending); state.pending = null }
+  render()
+}
+function applySnapshot(snapshot) {
+  state.snapshot = snapshot; state.rows = (snapshot.rows ?? []).filter(isLive); state.receivedAt = Date.now()
+  const machines = new Map((snapshot.machines ?? []).map(m => [m.machineId, m.name]))
+  for (const row of state.rows) machines.set(row.machineId, row.machine)
+  const signature = JSON.stringify([...machines])
+  if (dom.machine.dataset.signature !== signature) {
+    dom.machine.dataset.signature = signature; dom.machine.replaceChildren(new Option('All machines', 'all'))
+    for (const [id, name] of machines) dom.machine.append(new Option(name, id))
+    if (!machines.has(state.machine)) state.machine = 'all'
+    dom.machine.value = state.machine
+  }
+  dom.problems.hidden = !snapshot.problems?.length
+  text(dom.problems, (snapshot.problems ?? []).map(p => p.machine + ': ' + String(p.error ?? 'Unavailable').replace('Offline — showing the last known sessions.', 'Offline — reconnect to view open harnesses.')).join(' · '))
+  render()
+}
+let stream
+function connect() {
+  if (stream || document.hidden) return
+  stream = new EventSource('/events')
+  stream.addEventListener('snapshot', event => {
+    try {
+      const snapshot = JSON.parse(event.data); state.connected = true
+      if (dom.message.textContent.startsWith('Readings are stale.')) message('')
+      if (state.frozen) state.pending = snapshot; else applySnapshot(snapshot)
+    } catch { message('Could not read the monitor update. Refresh and try again.') }
+  })
+  stream.onerror = () => { state.connected = false; message('Connection interrupted. Showing last readings; reconnecting…'); render() }
+  stream.onopen = () => { if (dom.message.textContent.startsWith('Connection interrupted.')) message('') }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) { stream?.close(); stream = null; state.connected = false } else connect() })
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
+setInterval(() => {
+  if (document.hidden || reducedMotion.matches || state.frozen || !state.connected) return
+  const mark = SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]
+  for (const node of dom.body.querySelectorAll('.working .mark')) text(node, mark)
+}, 100)
+setInterval(() => {
+  if (document.hidden || state.frozen || !state.receivedAt) return
+  if (state.connected && Date.now() - state.receivedAt > 45_000) {
+    state.connected = false; message('Readings are stale. Showing the last update; refresh to reconnect.')
+  }
+  render()
+}, 10_000)
+columnMenu(); buildColumns(); connect()

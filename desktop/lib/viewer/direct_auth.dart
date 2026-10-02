@@ -27,7 +27,19 @@ class DirectAuth implements AccessTokenSource {
     return (token ?? '').isNotEmpty;
   }
 
+  /// Whether a sign-in by hand happened since this was last asked — the device key log reads it to
+  /// tell signing in again after a removal from an app opening under a removed key
+  /// (`device_log_sync.dart` `register`). Asking clears it.
+  bool consumeFreshSignIn() {
+    final fresh = _freshSignIn;
+    _freshSignIn = false;
+    return fresh;
+  }
+
+  bool _freshSignIn = false;
+
   Future<void> signIn(IssuedTokens tokens, {bool Function()? stillCurrent}) {
+    _freshSignIn = true;
     final revision = ++_revision;
     _refreshing = null;
     return _write(revision, () async {
@@ -37,6 +49,7 @@ class DirectAuth implements AccessTokenSource {
         refreshToken: tokens.refreshToken,
         autonomousEnv: tokens.autonomousEnv ?? api.config.autonomousEnv,
         expiresIn: tokens.expiresIn,
+        ssoClientId: tokens.clientId,
       );
       // Cancel can land during a disk write. These writes are serialized, so
       // clearing this incomplete login cannot erase a newer queued login.
@@ -118,6 +131,7 @@ class DirectAuth implements AccessTokenSource {
       final tokens = await api.refresh(
         refreshToken,
         autonomousEnv: autonomousEnv,
+        clientId: await session.ssoClientId(),
       );
       _requireCurrent(revision);
       await _write(

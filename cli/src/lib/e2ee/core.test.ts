@@ -209,6 +209,23 @@ describe('e2ee core — codes + fingerprint + classification', () => {
       requestId: 'models-1', models: [{ id: 'runtime-v1:s1:codex:gpt@high' }],
     })
   })
+
+  it('encrypts device discovery, settings, replies and inventory broadcasts', () => {
+    for (const type of ['harness_devices_list', 'harness_device_settings']) {
+      expect(C.isEncryptedDownType(type)).toBe(true)
+      expect(C.isEncryptedRpcResultType(`${type}_result`)).toBe(true)
+    }
+    expect(C.isEncryptedUpType('harness_devices_changed')).toBe(true)
+    const key = seeded(31)(32)
+    const patch = { id: 'device-1', patch: { brightness: 40 } }
+    const request = C.wrapPayload(key, 'p', 1, 'harness_device_settings', undefined, patch)
+    expect(request).not.toHaveProperty('patch')
+    expect(C.unwrapPayload(key, request.__e2e, 'harness_device_settings', undefined)).toEqual(patch)
+    const inventory = { revision: 2, status: { devices: [{ id: 'device-1', attached: true }] } }
+    const event = C.wrapPayload(key, 'g', 2, 'harness_devices_changed', undefined, inventory, 'ab12cd34')
+    expect(event).not.toHaveProperty('status')
+    expect(C.unwrapPayload(key, event.__e2e, 'harness_devices_changed', undefined)).toEqual(inventory)
+  })
 })
 
 /**
@@ -224,6 +241,6 @@ describe('e2ee core — interop keystone', () => {
   it('core.ts still hashes to the pinned value shared with the other implementations', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const actual = createHash('sha256').update(readFileSync(join(here, 'core.ts'))).digest('hex')
-    expect(actual).toBe('122eda9ad44db16a1c983d9951340e17826fe3921202036bf2030f3a9116e80f')
+    expect(actual).toBe('bf8c3f18c8c3eb4cf675e2027e19fd23523bb691e47045f057ff5725af45a685')
   })
 })

@@ -50,12 +50,12 @@ Future<void> _tap(WidgetTester tester, String key) async {
 void main() {
   testWidgets('scopes switch by click, without prefix keys', (tester) async {
     final app = await _mount(tester);
-    expect(find.byKey(const ValueKey('web-picker-bar')), findsOneWidget);
-    await _tap(tester, 'web-picker-scope:@');
+    // The desktop picker's own scopes: the browser adds no second row.
+    await _tap(tester, 'search-category-Machines');
     expect(_search(tester).scopePrefix, '@');
-    await _tap(tester, 'web-picker-scope::');
+    await _tap(tester, 'search-category-Models');
     expect(_search(tester).scopePrefix, ':');
-    await _tap(tester, 'web-picker-scope:');
+    await _tap(tester, 'search-category-Harnesses');
     expect(_search(tester).scopePrefix, '');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -66,13 +66,13 @@ void main() {
     tester,
   ) async {
     final app = await _mount(tester);
-    await _tap(tester, 'web-picker-scope:@');
+    await _tap(tester, 'search-category-Machines');
     final search = _search(tester);
-    expect(find.byKey(const ValueKey('web-picker-back')), findsNothing);
+    expect(find.byKey(const ValueKey('search-back')), findsNothing);
     expect(search.scopeToGroup('machine:remote-box'), isTrue);
     await tester.pump(const Duration(milliseconds: 100));
     expect(search.canGoBack, isTrue);
-    await _tap(tester, 'web-picker-back');
+    await _tap(tester, 'search-back');
     expect(search.canGoBack, isFalse);
     expect(search.scopePrefix, '@');
     // A selected machine shows its actions, not "Enter select · Esc back".
@@ -83,9 +83,28 @@ void main() {
     app.dispose();
   });
 
+  testWidgets('a resource\'s actions keep a gap above the panel\'s edge', (
+    tester,
+  ) async {
+    final app = await _mount(tester);
+    await _tap(tester, 'search-category-Machines');
+    // Key hints are hidden here, and they were the only space under the row.
+    expect(find.byKey(const ValueKey('resource-control-hints')), findsNothing);
+    final actions = tester.getRect(
+      find.byKey(const ValueKey('swarm-search-resource-actions')),
+    );
+    final panel = tester.getRect(
+      find.byKey(const ValueKey('swarm-search-results')),
+    );
+    expect(panel.bottom - actions.bottom, greaterThanOrEqualTo(12));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
   testWidgets('the close button dismisses the picker', (tester) async {
     final app = await _mount(tester);
-    await _tap(tester, 'web-picker-close');
+    await _tap(tester, 'search-close');
     await tester.pump(const Duration(milliseconds: 200));
     expect(find.byType(SwarmSearchResults), findsNothing);
     expect(tester.takeException(), isNull);

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/auth/auth_session.dart';
+import 'package:harness/auth/sign_in_provider.dart';
 import 'package:harness/core/config.dart';
 import 'package:harness/core/local_key_value_store.dart';
 import 'package:harness/viewer/browser_login.dart';
@@ -36,17 +37,24 @@ class _Api extends DirectAuthApi {
   final requests = <({String code, String state, String tx})>[];
   String? origin;
   String? nativeRedirect;
+  SignInProvider? provider;
   @override
   Future<({String authorizeUrl, String tx})> authorizeNative(
-    String redirectUri,
-  ) {
+    String redirectUri, {
+    SignInProvider? provider,
+  }) {
     nativeRedirect = redirectUri;
+    this.provider = provider;
     return authorization.future;
   }
 
   @override
-  Future<({String authorizeUrl, String tx})> authorizeWeb(String origin) {
+  Future<({String authorizeUrl, String tx})> authorizeWeb(
+    String origin, {
+    SignInProvider? provider,
+  }) {
     this.origin = origin;
+    this.provider = provider;
     return authorization.future;
   }
 
@@ -174,7 +182,10 @@ void main() {
     'authorization stays in this tab and cancellation discards its transaction',
     () async {
       String? opened;
-      final pending = login.login(onAuthorizeUrl: (url) => opened = url);
+      final pending = login.login(
+        onAuthorizeUrl: (url) => opened = url,
+        provider: SignInProvider.apple,
+      );
       final cancelled = expectLater(
         pending,
         throwsA(isA<DirectAuthException>()),
@@ -186,6 +197,8 @@ void main() {
       api.authorization.complete((authorizeUrl: url, tx: 'transaction'));
       await Future<void>.delayed(Duration.zero);
       expect(api.origin, 'https://harness.example');
+      // The button the person pressed reaches the backend with the request.
+      expect(api.provider, SignInProvider.apple);
       expect(api.nativeRedirect, isNull);
       expect(opened, url);
       expect(jsonDecode(browser.transaction!)['tx'], 'transaction');

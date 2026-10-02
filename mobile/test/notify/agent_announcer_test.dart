@@ -14,6 +14,9 @@ class _RecordingNotices implements SystemNotices {
   final opened = ValueNotifier<AgentRef?>(null);
 
   @override
+  final openedDevice = ValueNotifier<String?>(null);
+
+  @override
   Future<void> requestPermission() async {}
 
   @override
@@ -21,6 +24,9 @@ class _RecordingNotices implements SystemNotices {
 
   @override
   Future<void> cancel(AgentRef agent) async => cancelled.add(agent);
+
+  @override
+  Future<void> showAccountNotice({required String key, required String title, required String body}) async {}
 }
 
 void main() {

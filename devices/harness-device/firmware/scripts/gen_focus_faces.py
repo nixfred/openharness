@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""The Focus skin's generated proportional faces, converted with lv_font_conv.
+
+    python3 devices/harness-device/firmware/scripts/gen_focus_faces.py [--instance]
+
+Writes main/ui/habitat/focus_faces.c and focus_faces.h: the faces lvgl_fonts.c (the LVGL firmware's
+own Geist and Montserrat) does not have. Focus draws in Geist (owner, 2026-10-02), so that means
+geist_med_30 for the recap; the Roboto set from an earlier trial stays generated but unused, and the
+linker drops it. Each is converted exactly as the LVGL Geist faces were: lv_font_conv
+(pinned, run through npx) with --bpp 4 --no-compress --no-prefilter, kerning on, over gen_lvgl_assets.py's
+TEXT codepoints, then parsed with that script's lv_font() / emit_font(). Roboto has no check / cross marks
+(U+2713 / U+2717), and neither has Geist (its faces took them from macOS's proprietary Arial Unicode),
+so each Roboto face takes those two codepoints from Noto Sans Symbols 2 (OFL 1.1, vendored as
+fonts/NotoSansSymbols2-Regular.ttf with fonts/NotoSansSymbols2-OFL.txt) through a second --font.
+
+Sources (OFL 1.1, fonts/Roboto-OFL.txt): the Roboto variable font,
+    https://github.com/googlefonts/roboto-3-classic/releases  (Roboto[wdth,wght].ttf, or the copy
+    at https://github.com/google/fonts/tree/main/ofl/roboto)
+fonts/Roboto-Regular.ttf and Roboto-Medium.ttf are static instances of it (wght 400 / 500, wdth 100).
+The default run reads those vendored files and needs node and fontTools (pip install fonttools: it
+reads each font's coverage). `--instance VARIABLE.ttf` re-cuts the Roboto instances first.
+"""
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_lvgl_assets as base   # noqa: E402  (importing has no side effects; its main() is guarded)
+
+root = base.root
+LV_FONT_CONV = 'lv_font_conv@1.5.2'
+FONTS = root / 'fonts'
+# Roboto has no check / cross marks; they come from Noto Sans Symbols 2 (OFL, vendored), so recaps keep showing them.
+MARKS = {0x2713, 0x2717}
+MARKS_FONT = FONTS / 'NotoSansSymbols2-Regular.ttf'   # github.com/google/fonts ofl/notosanssymbols2
+KEEP = base.TEXT
+assert MARKS <= KEEP
+WEIGHTS = {'Regular': 400, 'Medium': 500}
+
+# name -> (font file in fonts/, px, fallback face). Montserrat stays behind the one that draws
+# FontAwesome glyphs (roboto_med_22: the bell count's neighbour and the close cross).
+FACES = [
+    ('geist_med_30', 'Geist-Medium', 30, 'NULL'),   # the Focus recap: 2 px over the LVGL 28 (owner, 2026-10-02)
+    ('roboto_med_38', 'Roboto-Medium', 38, 'NULL'),
+    ('roboto_med_32', 'Roboto-Medium', 32, 'NULL'),
+    ('roboto_med_28', 'Roboto-Medium', 28, 'NULL'),
+    ('roboto_med_30', 'Roboto-Medium', 30, 'NULL'),
+    ('roboto_reg_38', 'Roboto-Regular', 38, 'NULL'),
+    ('roboto_reg_25', 'Roboto-Regular', 25, 'NULL'),
+    ('roboto_reg_20', 'Roboto-Regular', 20, 'NULL'),
+    ('roboto_med_24', 'Roboto-Medium', 24, 'NULL'),
+    ('roboto_med_22', 'Roboto-Medium', 22, '&ht_lv_montserrat_22'),
+]
+
+
+def instance(variable):
+    from fontTools.ttLib import TTFont
+    from fontTools.varLib import instancer
+    for style, wght in WEIGHTS.items():
+        font = instancer.instantiateVariableFont(TTFont(variable), {'wght': wght, 'wdth': 100})
+        font.save(FONTS / f'Roboto-{style}.ttf')
+
+
+def ranges(codes):
+    """Sorted codepoints as lv_font_conv -r arguments: runs a-b, singles a."""
+    out, codes = [], sorted(codes)
+    i = 0
+    while i < len(codes):
+        j = i
+        while j + 1 < len(codes) and codes[j + 1] == codes[j] + 1:
+            j += 1
+        out.append(f'0x{codes[i]:X}' + (f'-0x{codes[j]:X}' if j > i else ''))
+        i = j + 1
+    return ','.join(out)
+
+
+def covered(source):
+    """The TEXT codepoints the font really has. A requested range with a hole makes lv_font_conv emit a
+    format-0-full cmap, which lv_font() does not read; the LVGL Geist faces, too, hold only what Geist
+    draws (it lacks a dozen rare Latin Extended-A letters, which fall to '?' as they always did)."""
+    from fontTools.ttLib import TTFont
+    return (KEEP - MARKS) & set(TTFont(FONTS / f'{source}.ttf').getBestCmap())
+
+
+def convert(source, px, tmp, name):
+    out = tmp / f'{name}.c'
+    subprocess.run(['npx', '-y', LV_FONT_CONV, '--size', str(px), '--bpp', '4', '--format', 'lvgl',
+                    '--no-compress', '--no-prefilter', '--force-fast-kern-format',
+                    '--font', str(FONTS / f'{source}.ttf'), '-r', ranges(covered(source)),
+                    '--font', str(MARKS_FONT), '-r', ranges(MARKS),
+                    '--lv-include', 'lvgl.h', '-o', str(out)], check=True, capture_output=True, text=True)
+    return out.read_text()
+
+
+def main():
+    if '--instance' in sys.argv:
+        instance(sys.argv[sys.argv.index('--instance') + 1])
+        shutil.copy(Path(sys.argv[sys.argv.index('--instance') + 1]).parent / 'OFL.txt',
+                    FONTS / 'Roboto-OFL.txt')
+    c = ['// Generated by scripts/gen_focus_faces.py. Do not edit.\n'
+         f'// Roboto Regular / Medium (OFL 1.1) through {LV_FONT_CONV}: --bpp 4 --no-compress --no-prefilter.\n'
+         '#include "terminal.h"\n']
+    h = ['// Generated by scripts/gen_focus_faces.py. Do not edit.\n#pragma once\n#include "terminal.h"\n']
+    total = 0
+    with tempfile.TemporaryDirectory() as t:
+        for name, source, px, fallback in FACES:
+            font = base.lv_font(convert(source, px, Path(t), name))
+            code, size = base.emit_font(name, font, KEEP, fallback)
+            c.append(code)
+            h.append(f'extern const ht_pfont_t ht_lv_{name};\n')
+            # Self-check: every TEXT codepoint the font has, the marks and the 98 Vietnamese letters were
+            # kept, and the metrics are sane.
+            m = re.search(rf'static const uint16_t {name}_codes\[\] = \{{(.*?)\}};', code)
+            codes = {int(v) for v in m.group(1).split(',')}
+            missing = (covered(source) | MARKS) - codes
+            assert not missing, (name, sorted(missing))
+            assert len(set(range(0x1EA0, 0x1EFA)) & codes) == 90 and {0x1A0, 0x1A1, 0x1AF, 0x1B0} <= codes
+            assert 0 < font['line'] - font['base'] < font['line'], name
+            total += size
+            print(f'{name}: {len(codes)} glyphs, line {font["line"]}, ascent {font["line"] - font["base"]},'
+                  f' {size} bytes')
+    (root / 'main/ui/habitat/focus_faces.c').write_text(''.join(c))
+    (root / 'main/ui/habitat/focus_faces.h').write_text(''.join(h))
+    print(f'total {total} bytes')
+
+
+if __name__ == '__main__':
+    main()

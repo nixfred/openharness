@@ -29,6 +29,10 @@ import 'transient_menus.dart';
 ///
 /// [onOpen] hands the caller the entry and its closer, for a menu that wants to redraw itself
 /// while open or to be closed from outside; [onClose] runs once, however the menu ended.
+///
+/// [focusFirst] highlights the first row as the menu opens, for a menu a key opened: Return takes
+/// it. A menu a click opened passes false — the pointer picks the row, and arrows still start at
+/// the first one.
 Future<T?> showPaneMenu<T>({
   required BuildContext context,
   required RelativeRect position,
@@ -37,6 +41,7 @@ Future<T?> showPaneMenu<T>({
   void Function(OverlayEntry entry, void Function() close)? onOpen,
   VoidCallback? onClose,
   bool Function()? shouldRestoreFocus,
+  bool focusFirst = true,
   double minWidth = 340,
   double maxWidth = 540,
 }) {
@@ -84,6 +89,7 @@ Future<T?> showPaneMenu<T>({
           delegate: _PaneMenuPosition(position, minWidth, maxWidth),
           child: _PaneMenuFocus(
             close: () => close(null),
+            focusFirst: focusFirst,
             // A row list sizes itself to its widest row ([IntrinsicWidth]) and scrolls as one
             // column. A BODY does neither: it is handed the menu's box and lays itself out, which
             // is what a panel with something pinned above and below a scrolling middle needs.
@@ -178,8 +184,13 @@ class _PaneMenuPosition extends SingleChildLayoutDelegate {
 }
 
 class _PaneMenuFocus extends StatefulWidget {
-  const _PaneMenuFocus({required this.close, required this.child});
+  const _PaneMenuFocus({
+    required this.close,
+    required this.focusFirst,
+    required this.child,
+  });
   final VoidCallback close;
+  final bool focusFirst;
   final Widget child;
 
   @override
@@ -193,7 +204,10 @@ class _PaneMenuFocusState extends State<_PaneMenuFocus> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _scope.nextFocus();
+      if (!mounted) return;
+      // Either way the menu takes the keyboard — Escape and the arrows are
+      // its own — but only [focusFirst] lights a row before one is asked for.
+      widget.focusFirst ? _scope.nextFocus() : _scope.requestFocus();
     });
   }
 

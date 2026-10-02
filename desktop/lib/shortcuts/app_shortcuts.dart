@@ -447,11 +447,30 @@ SingleActivator _platformActivator(SingleActivator keys) {
   );
 }
 
+/// ⌥⌘←/→ is the Mac's tab key, as in Safari and Chrome. With Alt as the
+/// prefix it would be Alt+arrows — the shell's word motions and the
+/// browser's Back/Forward — so Linux and the web keep Alt-Shift-brackets.
+const _altPrefixTabShortcuts = <ShortcutAction, SingleActivator>{
+  ShortcutAction.nextSwarm: SingleActivator(
+    LogicalKeyboardKey.bracketRight,
+    alt: true,
+    shift: true,
+  ),
+  ShortcutAction.previousSwarm: SingleActivator(
+    LogicalKeyboardKey.bracketLeft,
+    alt: true,
+    shift: true,
+  ),
+};
+
 AppShortcut _platformShortcut(AppShortcut shortcut) => !altWorkspacePrefix
     ? shortcut
     : AppShortcut(
         action: shortcut.action,
         activator:
+            (shortcut.activator.meta
+                ? _altPrefixTabShortcuts[shortcut.action]
+                : null) ??
             (kIsWeb ? null : _linuxAltShortcuts[shortcut.action]) ??
             _platformActivator(shortcut.activator),
         label: shortcut.label,
@@ -475,7 +494,7 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.addAgent,
     activator: SingleActivator(LogicalKeyboardKey.keyO, meta: true),
-    label: 'Open Harness',
+    label: 'Open Project',
     group: ShortcutGroup.actions,
   ),
   AppShortcut(
@@ -540,9 +559,9 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.nextSwarm,
     activator: SingleActivator(
-      LogicalKeyboardKey.bracketRight,
+      LogicalKeyboardKey.arrowRight,
       meta: true,
-      shift: true,
+      alt: true,
     ),
     label: 'Next Tab',
     group: ShortcutGroup.navigate,
@@ -550,9 +569,9 @@ const kSwarmShortcuts = [
   AppShortcut(
     action: ShortcutAction.previousSwarm,
     activator: SingleActivator(
-      LogicalKeyboardKey.bracketLeft,
+      LogicalKeyboardKey.arrowLeft,
       meta: true,
-      shift: true,
+      alt: true,
     ),
     label: 'Previous Tab',
     group: ShortcutGroup.navigate,

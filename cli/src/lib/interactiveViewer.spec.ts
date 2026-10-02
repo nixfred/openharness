@@ -1,10 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { InteractiveViewerCapture, InteractiveViewers, surfaceFrame } from './interactiveViewer.js'
+import { InteractiveViewerCapture, InteractiveViewers, monitorHostActions, surfaceFrame } from './interactiveViewer.js'
 
 const frame = (extra = {}) => ({ surfaceId: 'one', agentId: 'agent', op: 'frame', width: 800, height: 600, dark: true, ...extra })
 const pointer = { type: 'pointer', event: 'mousePressed', x: .5, y: .25, button: 'left', buttons: 1, clickCount: 1, modifiers: 0 }
 
 describe('interactive viewer input boundary', () => {
+  it('allows only bounded monitor navigation, never executable input or lifecycle writes', () => {
+    expect(monitorHostActions([{ action: 'open', machineId: 'm', agentId: 'a', script: 'ignored' },
+      { action: 'assistant', chooseModel: true, prompt: 'ignored' }, { action: 'stop', agentId: 'a' }, null,
+      { action: 'open', machineId: 'm', agentId: '' }])).toEqual([
+      { action: 'open', machineId: 'm', agentId: 'a' }, { action: 'assistant', chooseModel: true },
+    ])
+    expect(monitorHostActions(Array(9).fill({ action: 'assistant' }))).toEqual([])
+  })
   it('maps only ordinary pointer, keyboard, and text input to CDP', () => {
     const parsed = surfaceFrame(frame({ events: [pointer,
       { type: 'key', event: 'keyDown', key: 'Enter', code: 'Enter', keyCode: 13, modifiers: 0 },
@@ -51,7 +59,7 @@ describe('owner viewer sessions', () => {
   beforeEach(() => {
     vi.useFakeTimers(); captures = []; target = 'http://127.0.0.1:8000/'
     viewers = new InteractiveViewers(() => target, () => {
-      const capture = { start: vi.fn(async () => {}), frame: vi.fn(async () => 'jpeg'), stop: vi.fn(async () => {}) }
+      const capture = { start: vi.fn(async () => {}), frame: vi.fn(async () => 'jpeg'), takeHostActions: vi.fn(async () => []), stop: vi.fn(async () => {}) }
       captures.push(capture)
       return capture as unknown as InteractiveViewerCapture
     })

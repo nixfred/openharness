@@ -4,7 +4,7 @@
  * mode 0600 (pairs are rare — no debounce needed). The identity key is the root of trust; losing it
  * forces every browser to re-pair.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { env } from '../../config/env.js'
 import { newIdentity, newPairId, b64e, b64d, fingerprint, type Identity, type PairRole } from './core.js'
@@ -13,6 +13,22 @@ import { stretchPassword } from './passwordPake.js'
 const DIR = join(env.ADAPTER_DATA_DIR, 'e2e')
 const IDENTITY_FILE = join(DIR, 'identity.json')
 const PAIRED_FILE = join(DIR, 'paired.json')
+
+/** This computer's identity public key (base64) as already on disk, or null. Unlike `E2eeStore.init()`
+ *  it never creates a key and writes nothing, so a read-only command can show the fingerprint without
+ *  minting an identity as a side effect. */
+export function peekIdentityPub(): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(IDENTITY_FILE, 'utf-8')) as { pub?: unknown }
+    return typeof raw.pub === 'string' && raw.pub ? raw.pub : null
+  } catch { return null }
+}
+
+/** Whether an identity was retired here (`identity.json.removed-*`, left by signing this device out of
+ *  the account), so "no identity" can be told apart from "never had one". */
+export function identitySpent(): boolean {
+  try { return readdirSync(DIR).some((f) => f.startsWith('identity.json.removed-')) } catch { return false }
+}
 const REMOTE_PASSWORD_FILE = join(DIR, 'remotePassword.json')
 
 // Remote-password lockout tuning (anti online-guessing for a reusable, human-memorable secret — see
@@ -47,9 +63,14 @@ export interface PairedClient {
 /** What a password-linked peer is: another harness machine (which also serves, so it can be dialed back)
  *  or a viewer app (mobile / viewer desktop — dial-out only). */
 export type PeerKind = 'machine' | 'viewer'
-function writeSecure(file: string, data: unknown): void {
+/** How long `init()` waits for another process's just-created identity file to be written (10 × 20 ms). */
+const IDENTITY_READ_RETRIES = 10
+const IDENTITY_READ_RETRY_MS = 20
+const sleepSync = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
+function writeSecure(file: string, data: unknown, flag: 'w' | 'wx' = 'w'): void {
   mkdirSync(DIR, { recursive: true, mode: 0o700 })
-  writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 })
+  writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600, flag })
 }
 
 export class E2eeStore {
@@ -61,13 +82,26 @@ export class E2eeStore {
    *  Idempotent. */
   init(): Identity {
     if (this.identity) return this.identity
-    try {
+    const readIdentity = (): Identity => {
       const raw = JSON.parse(readFileSync(IDENTITY_FILE, 'utf-8')) as { priv: string; pub: string }
-      this.identity = { priv: b64d(raw.priv), pub: b64d(raw.pub) }
-    } catch {
+      return { priv: b64d(raw.priv), pub: b64d(raw.pub) }
+    }
+    // `harness login` and a booting daemon can both get here: exclusive create so exactly one key is
+    // ever minted, and the loser adopts the winner's instead of overwriting it. The create makes the
+    // file before its bytes land, so a loser that reads it empty waits a moment and reads again; only
+    // a file still unreadable after that is taken as broken and replaced, as before.
+    for (let attempt = 0; !this.identity; attempt++) {
+      try { this.identity = readIdentity(); break } catch { /* missing, half-written or broken */ }
       const id = newIdentity()
-      writeSecure(IDENTITY_FILE, { priv: b64e(id.priv), pub: b64e(id.pub) })
-      this.identity = id
+      try {
+        writeSecure(IDENTITY_FILE, { priv: b64e(id.priv), pub: b64e(id.pub) }, 'wx')
+        this.identity = id
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+        if (attempt < IDENTITY_READ_RETRIES) { sleepSync(IDENTITY_READ_RETRY_MS); continue }
+        writeSecure(IDENTITY_FILE, { priv: b64e(id.priv), pub: b64e(id.pub) })
+        this.identity = id
+      }
     }
     try {
       const arr = JSON.parse(readFileSync(PAIRED_FILE, 'utf-8')) as Array<PairedClient & { role?: PairRole }>

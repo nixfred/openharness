@@ -316,6 +316,7 @@ class SwarmDestination {
     this.machineLabel = '',
     this.agentId,
     this.modelId,
+    this.agentEngine,
     this.storeId,
     this.engine,
     this.closedId,
@@ -361,6 +362,8 @@ class SwarmDestination {
   final DateTime? lastActivityAt;
   final String? swarmId, machineId, agentId, engine;
   final String? modelId;
+  final String? agentEngine;
+  bool get isAgentChoice => agentEngine != null;
   bool get isModel => modelId != null;
   final String? storeId;
   bool get isStoreEntry => storeId != null;
@@ -414,6 +417,7 @@ class SwarmDestination {
       !isNote &&
       !isModel &&
       !isStoreEntry &&
+      !isAgentChoice &&
       pickerQuery == null &&
       external == null;
   bool get hasView => swarmId != null;

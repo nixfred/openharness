@@ -1,4 +1,4 @@
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { join } from "path";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -8,6 +8,90 @@ import { TmuxBackend } from "../lib/tmuxBackend.js";
 
 // vitest runs from cli/, so this is cli/scripts/install.sh — the file published to the CDN.
 const installer = join(process.cwd(), "scripts", "install.sh");
+
+describe('installer interrupted downloads', () => {
+  it('recovers real truncated HTTP responses without mixing manifest or binary bytes', async () => {
+    const { createServer } = await import('node:http');
+    const scratch = mkdtempSync(join(tmpdir(), 'harness-download-http-'));
+    const bytes = Buffer.from([0, 1, 255, 10, 2, 0, 42, 128]);
+    const counts = new Map<string, number>();
+    const server = createServer((req, res) => {
+      const route = req.url!;
+      const count = (counts.get(route) ?? 0) + 1;
+      counts.set(route, count);
+      const body = route === '/manifest' ? Buffer.from('{"version":"verified"}') : bytes;
+      res.writeHead(200, { 'Content-Length': body.length, 'Connection': 'close' });
+      res.end(count < 3 ? body.subarray(0, 3) : body);
+    });
+    try {
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+      const port = (server.address() as { port: number }).port;
+      const source = readFileSync(installer, 'utf8');
+      const fn = source.slice(source.indexOf('download() {'), source.indexOf('# sha256 is'));
+      const child = spawn('/bin/sh', ['-ec', fn + '\ndownload "$URL/manifest"\ndownload "$URL/binary" -o "$TARGET"'], {
+        env: { ...process.env, URL: `http://127.0.0.1:${port}`, TARGET: join(scratch, 'binary') },
+      });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', data => { stdout += data });
+      child.stderr.on('data', data => { stderr += data });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject); child.on('close', resolve);
+      });
+      expect(code, stderr).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({ version: 'verified' });
+      expect(readFileSync(join(scratch, 'binary'))).toEqual(bytes);
+      expect(Object.fromEntries(counts)).toEqual({ '/manifest': 3, '/binary': 3 });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it.each([6, 7, 18, 28, 35, 52, 55, 56, 92])('retries curl error %i and discards partial manifest output', code => {
+    const scratch = mkdtempSync(join(tmpdir(), 'harness-download-'));
+    try {
+      writeCommand(scratch, 'curl', [
+        'n=0; [ ! -f "$COUNT" ] || n=$(cat "$COUNT")',
+        'n=$((n + 1)); echo "$n" > "$COUNT"',
+        `if [ "$n" -lt 3 ]; then printf 'broken partial JSON'; exit ${code}; fi`,
+        'printf \'{"version":"test"}\\n\'',
+      ]);
+      writeCommand(scratch, 'sleep', ['exit 0']);
+      const source = readFileSync(installer, 'utf8');
+      const fn = source.slice(source.indexOf('download() {'), source.indexOf('# sha256 is'));
+      const result = spawnSync('/bin/sh', ['-c', fn + '\ndownload https://example.invalid/manifest'], {
+        encoding: 'utf8', env: { ...process.env, PATH: `${scratch}:/usr/bin:/bin`, COUNT: join(scratch, 'count') },
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ version: 'test' });
+      expect(readFileSync(join(scratch, 'count'), 'utf8').trim()).toBe('3');
+      expect(result.stderr).toContain('retrying download (3/3)');
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+
+  it.each([[35, 3], [22, 1], [60, 1], [23, 1]])('bounds failures and preserves curl status %i', (code, attempts) => {
+    const scratch = mkdtempSync(join(tmpdir(), 'harness-download-fail-'));
+    try {
+      writeCommand(scratch, 'curl', [
+        'echo "$*" >> "$CALLS"', `printf partial; exit ${code}`,
+      ]);
+      writeCommand(scratch, 'sleep', ['exit 0']);
+      const source = readFileSync(installer, 'utf8');
+      const fn = source.slice(source.indexOf('download() {'), source.indexOf('# sha256 is'));
+      const result = spawnSync('/bin/sh', ['-c', fn + '\ndownload https://example.invalid/runtime -o "$TARGET"'], {
+        encoding: 'utf8', env: { ...process.env, PATH: `${scratch}:/usr/bin:/bin`,
+          CALLS: join(scratch, 'calls'), TARGET: join(scratch, 'download') },
+      });
+      expect(result.status).toBe(code);
+      expect(result.stdout).toBe('');
+      const calls = readFileSync(join(scratch, 'calls'), 'utf8').trim().split('\n');
+      expect(calls).toHaveLength(attempts);
+      expect(calls[0]).toContain('--connect-timeout 20 --max-time 600');
+      expect(calls[0]).toContain(`-o ${join(scratch, 'download')}`);
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+});
 
 const writeCommand = (directory: string, name: string, lines: string[]) => {
   const path = join(directory, name);
@@ -772,7 +856,7 @@ describe("scripts/install.sh command contract", () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
-  });
+  }, 20_000); // Several real shell/package-manager processes, as in the other installer integration checks.
 
   // ── the managed grid ──────────────────────────────────────────────────────────────────────────
   //

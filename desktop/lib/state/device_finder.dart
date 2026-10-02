@@ -72,7 +72,7 @@ class DeviceFinder {
       'total': search.rows.length, 'busy': false,
       'enabled': enabled && !composing, 'canQuery': supported && !composing,
       'query': search.query, 'status': '',
-      'action': search.actionLabel(row) == 'Resume & open' ? 'resume' : 'open',
+      'action': 'open',
       'error': _error.isNotEmpty
           ? _error
           : !supported

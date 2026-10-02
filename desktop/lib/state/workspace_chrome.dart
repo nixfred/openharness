@@ -1,7 +1,5 @@
 import 'package:flutter/widgets.dart';
 
-import 'swarm_search.dart';
-
 /// The workspace's command table as a host composition sees it: the same ids
 /// and callbacks keys, native menus and the command box already run.
 class WorkspaceCommands {
@@ -17,20 +15,36 @@ class WorkspaceCommands {
   final void Function(String id) run;
 }
 
-/// The open picker as a host composition's bar sees it: its search, and the
-/// same focus and close the picker's own keys use.
-class WorkspacePicker {
-  const WorkspacePicker({
-    required this.search,
-    required this.focus,
-    required this.close,
+/// One entry of the workspace footer as a host composition sees it: what it
+/// names, what it currently reads, and the same action its footer link runs.
+class WorkspaceFooterItem {
+  const WorkspaceFooterItem({
+    required this.title,
+    this.detail = '',
+    this.onPressed,
   });
 
-  final SwarmSearchController search;
+  final String title;
+  final String detail;
+  final VoidCallback? onPressed;
+}
 
-  /// Hands typing back to the picker's input after a click.
-  final VoidCallback focus;
-  final VoidCallback close;
+/// The workspace footer's content, for a host that lays it out its own way.
+class WorkspaceFooter {
+  const WorkspaceFooter({
+    required this.summary,
+    required this.items,
+    this.share,
+  });
+
+  /// One line standing for the whole footer, e.g. `MacBook · feat/web`.
+  final String summary;
+
+  /// Subscriptions, then the focused harness's machine, project, branch, PR.
+  final List<WorkspaceFooterItem> items;
+
+  /// The Share action, when the Share button is enabled.
+  final WorkspaceFooterItem? share;
 }
 
 /// What a host composition adds to the shared workspace. Desktop passes none;
@@ -42,13 +56,13 @@ class WorkspaceChrome {
     required this.leadingWidth,
     required this.leading,
     this.newHarnessMachine,
-    this.pickerBar,
+    this.pickerShowsBack = false,
     this.showsKeyHints = true,
     this.viewMachineCloses = false,
     this.showsShareStatus = false,
     this.scrollsTabsByArrows = false,
-    this.attachesFiles = false,
     this.compactTabs,
+    this.compactFooter,
     this.compactBelow = 0,
   });
 
@@ -60,9 +74,8 @@ class WorkspaceChrome {
   /// runs none. Null (or no answer) keeps sending the person to Machines.
   final String? Function()? newHarnessMachine;
 
-  /// A row above the picker's input, e.g. clickable scopes and Back.
-  final Widget Function(BuildContext context, WorkspacePicker picker)?
-  pickerBar;
+  /// True gives the picker a clickable Back out of an open machine or project.
+  final bool pickerShowsBack;
 
   /// False hides keyboard hints inside the workspace's pickers ([KeyHints]).
   final bool showsKeyHints;
@@ -77,13 +90,15 @@ class WorkspaceChrome {
   /// True puts arrows either side of a tab list too long for the bar.
   final bool scrollsTabsByArrows;
 
-  /// True lets New Harness take files — a button and drops on its box.
-  final bool attachesFiles;
-
   /// Below [compactBelow] of window width the workspace goes compact: this
   /// replaces the tab list (the Store button steps aside), and only the focused
   /// harness is drawn — a phone has room for neither a tab row nor a grid.
   final Widget Function(BuildContext context, WorkspaceCommands commands)?
   compactTabs;
+
+  /// Replaces the status bar while compact. It is handed the footer's content
+  /// and owns its own height — zero hides it.
+  final Widget Function(BuildContext context, WorkspaceFooter footer)?
+  compactFooter;
   final double compactBelow;
 }

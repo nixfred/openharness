@@ -163,7 +163,11 @@ void main() {
       await setup(tester);
       expect(tester.widget<NewHarnessForm>(form).embedded, isTrue);
       expect(find.byKey(const ValueKey('welcome-sessions')), findsNothing);
-      expect(find.byKey(const ValueKey('workspace-status-bar')), findsNothing);
+      // An empty tab still exposes live sessions running elsewhere in the account.
+      expect(
+        find.byKey(const ValueKey('workspace-harness-monitor')),
+        findsOneWidget,
+      );
       expect(find.byKey(const ValueKey('new-harness-close')), findsNothing);
       expect(find.byKey(const ValueKey('new-harness-dismiss')), findsNothing);
       expect(tester.widget<TextField>(task).focusNode!.hasFocus, isTrue);
@@ -416,7 +420,9 @@ void main() {
         );
         expect(connection.starts, isEmpty);
         if (scale == 1) {
-          app.machineStates['m']!.agents = [];
+          for (final machine in app.machineStates.values) {
+            machine.agents = [];
+          }
           await tester.pumpWidget(const SizedBox());
           await tester.pumpWidget(preview);
           await tester.pumpAndSettle();
@@ -433,11 +439,17 @@ void main() {
   }
 
   testWidgets(
-    'native footer stays hidden on an empty tab and returns with work',
+    'native footer exposes live sessions on an empty tab and hides with no work',
     (tester) async {
       await setup(tester, mac: true);
+      expect(updates.last['footerCovered'], isFalse);
+      expect(updates.last['harnessMonitor']['text'], startsWith('Harnesses 2'));
+      for (final machine in app.machineStates.values) {
+        machine.agents = [];
+      }
+      app.notifyListeners();
+      await tester.pumpAndSettle();
       expect(updates.last['footerCovered'], isTrue);
-      expect(find.byKey(const ValueKey('workspace-status-bar')), findsNothing);
       app.adoptSessionForTest(terminal('a0', []));
       app.notifyListeners();
       await tester.pumpAndSettle();

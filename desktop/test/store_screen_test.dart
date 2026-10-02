@@ -311,7 +311,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('New Harness'), findsNothing);
-      expect(find.text('Resume Harness'), findsNothing);
+      expect(find.text('Open Harness'), findsNothing);
       final action = find.byKey(const ValueKey('store-primary-action'));
       expect(
         find.descendant(of: action, matching: find.text('Update')),

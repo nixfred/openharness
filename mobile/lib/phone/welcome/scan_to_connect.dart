@@ -36,9 +36,22 @@ class ScanToConnectPage extends StatefulWidget {
     this.signingIn = false,
     this.fallbackLabel = 'Use email instead',
     this.camera,
+    this.onSignInCode,
+    this.acceptConnectCodes = true,
+    this.title = 'Scan the code on your computer',
+    this.hint = 'On your Mac: Harness ▸ Add Phone…',
   });
 
   final ValueChanged<ConnectCode> onCode;
+
+  /// A computer's sign-in QR ([SignInCode]) was read — offered only where the page takes one.
+  final ValueChanged<SignInCode>? onSignInCode;
+
+  /// Whether an Add Phone QR ([ConnectCode]) is one this page takes.
+  final bool acceptConnectCodes;
+
+  final String title;
+  final String hint;
   final VoidCallback onUseEmail;
   final VoidCallback onBack;
 
@@ -63,7 +76,15 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
   void _onDetect(BarcodeCapture capture) {
     if (_done) return;
     for (final barcode in capture.barcodes) {
-      final code = ConnectCode.parse(barcode.rawValue ?? '');
+      final raw = barcode.rawValue ?? '';
+      final signIn = widget.onSignInCode == null ? null : SignInCode.parse(raw);
+      if (signIn != null) {
+        _done = true;
+        HapticFeedback.mediumImpact();
+        widget.onSignInCode!(signIn);
+        return;
+      }
+      final code = widget.acceptConnectCodes ? ConnectCode.parse(raw) : null;
       if (code == null) continue;
       _done = true;
       HapticFeedback.mediumImpact();
@@ -120,7 +141,7 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: Tty.origin),
           child: TtyText(
-            widget.signingIn ? 'Signing in…' : 'Scan the code on your computer',
+            widget.signingIn ? 'Signing in…' : widget.title,
             size: TtySize.title,
             weight: FontWeight.w600,
           ),
@@ -129,7 +150,7 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: Tty.origin),
           child: TtyText(
-            'On your Mac: Harness ▸ Add Phone…',
+            widget.hint,
             color: tty.faint,
             size: TtySize.meta,
           ),
@@ -170,12 +191,17 @@ class _ScanToConnectPageState extends State<ScanToConnectPage> {
 /// The camera over the current page, and the code it read — null when the person went back or
 /// took the other way ([fallbackLabel]). For a phone that is already signed in and wants a
 /// computer: unlocking one, or pairing with one just set up.
+///
+/// [onSignInCode]: a computer's sign-in QR read here instead is handed on (after the camera closes)
+/// rather than ignored — the person pointed the phone at a computer, whichever code it showed.
 Future<ConnectCode?> scanForCode(
   BuildContext context, {
   required String fallbackLabel,
   Widget? camera,
+  ValueChanged<SignInCode>? onSignInCode,
 }) async {
   ConnectCode? scanned;
+  SignInCode? signIn;
   await Navigator.of(context).push(
     phoneRoute(
       (page) => Scaffold(
@@ -185,6 +211,43 @@ Future<ConnectCode?> scanForCode(
             camera: camera,
             fallbackLabel: fallbackLabel,
             onCode: (code) {
+              scanned = code;
+              Navigator.of(page).pop();
+            },
+            onSignInCode: onSignInCode == null
+                ? null
+                : (code) {
+                    signIn = code;
+                    Navigator.of(page).pop();
+                  },
+            onUseEmail: () => Navigator.of(page).pop(),
+            onBack: () => Navigator.of(page).pop(),
+          ),
+        ),
+      ),
+    ),
+  );
+  if (signIn case final code?) onSignInCode?.call(code);
+  return scanned;
+}
+
+/// The camera over the current page, for a computer's sign-in QR only — Settings ▸ Sign in a
+/// computer. Null when the person went back.
+Future<SignInCode?> scanForSignIn(BuildContext context, {Widget? camera}) async {
+  SignInCode? scanned;
+  await Navigator.of(context).push(
+    phoneRoute(
+      (page) => Scaffold(
+        backgroundColor: Tty.of(page).ground,
+        body: SafeArea(
+          child: ScanToConnectPage(
+            camera: camera,
+            title: 'Scan the code on the computer',
+            hint: 'On the computer: Sign in ▸ Scan with your phone',
+            fallbackLabel: 'Not now',
+            acceptConnectCodes: false,
+            onCode: (_) {},
+            onSignInCode: (code) {
               scanned = code;
               Navigator.of(page).pop();
             },

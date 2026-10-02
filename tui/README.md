@@ -85,6 +85,13 @@ whole file checked first, so a bad line is `file:line: why` and none of that fil
 tmux. `run-shell` lines run too: a plugin's `tmux …` reaches hn (the `tmux` on its PATH is hn),
 never a tmux server you have running.
 
+Shared tabs use the same ordered pane rectangles as desktop, including custom divider
+proportions. The layout picker offers desktop's shapes for the current pane count;
+`C-b Space` still cycles tmux's seven layouts and shares their exact geometry.
+Window resizing scales the saved arrangement without rearranging panes or publishing
+an edit. Selected tab, focus and zoom remain local to each client. Standalone tmux
+sessions retain tmux's resize behavior.
+
 Splits, `resize-pane`, the seven layouts, `swap-pane`, `rotate-window`, `join-pane`, `break-pane`
 and `select-pane` are tmux 3.5a's own arithmetic (layout.c, window.c): the same split sizes, the same
 pane numbers and the same active pane after each. hn draws these layouts as pane surfaces
@@ -151,15 +158,19 @@ Harness's own, only on keys tmux leaves unbound (every tmux key does what tmux d
 | | |
 |---|---|
 | `C-b a` / `C-b A` | the next harness that needs you (`next-harness`) / all those waiting on you (`M-1…9` answers from the list; `M-a` types an answer — an option's number, several for a multi-choice question, `1,3`, or your own words) |
-| `C-b N` `C-b T` | New Harness popup / new terminal. The popup keeps Agent, Project and Options together, with searchable choices. Options match desktop: Model, Approvals, applicable Profile, Branch and Worktree. |
+| `C-b N` `C-b T` | New Harness popup / new terminal. Agent, Project and optional Task sit above Branch, Worktree, Model, Approvals and applicable Profile, with searchable choices. |
 | `C-b I` `C-b @` `C-b S` | models, machines, the Harness Store |
 | `C-b g` `C-b B` | send a task (Harness picks the harness) / broadcast to the window |
 | `C-b R` `C-b P` `C-b K` | restart, pause, clone the harness |
 
-`C-b N` opens the compact desktop-style New Harness form with Agent, Project, collapsed
-Options and New Harness. The initial destination is the connected local Harness machine, with successful agent
+`C-b N` opens a compact, centered New Harness form. Agent, Project and optional Task come first,
+then a blank row separates Branch, Worktree, Model, Approvals and applicable Profile.
+All settings are visible without expanding Options. Project reads `project @ local`, or
+`project @ machine` for a remote destination; focusing it shows the full path below.
+The initial destination is the connected local Harness machine, with successful agent
 and project choices remembered. Explicit project commands keep their destination. Enter starts
-with the displayed choices; Up/Down moves between fields and previews their chooser. Enter,
+with the displayed choices; the action names the selected agent (for example, Start Codex).
+Up/Down moves between fields and previews their choices on the right. Enter,
 Right or typing enters the chooser. Tab switches between the form and chooser; Enter accepts
 an item and returns to New Harness. A second Enter starts it in the current window, splitting
 beside the focused pane when needed. Lowercase `C-b n` remains next window.
@@ -167,11 +178,23 @@ beside the focused pane when needed. Lowercase `C-b n` remains next window.
 Agent combines coding agents and installed Store harnesses; a Store harness then offers its
 compatible coding agents. Project offers Clone Repository, Open Folder, New Folder and recent
 machine/folder pairs. Folder actions choose a machine first. Ctrl-L in the folder browser edits
-a path. Options contains Model, agent-specific Approvals, Codex Profile, Branch and Worktree.
+a path. Project search includes the 50 most recently active distinct folders per machine;
+duplicate sessions in one folder count once. Combine a machine name and folder, such as
+`office harness` or `m2 harness`, in either order. The local machine's actual
+name remains searchable when its label says `local`.
+Task opens an editor beside the form: Enter accepts, Alt-Enter inserts a newline,
+and pasted tasks retain line breaks. Escape preserves the task in the draft. Supported agents
+receive it as their first message; an unavailable first task or one exceeding the daemon's
+2,000-character limit is explained before launch. A blank task starts an ordinary session.
 Git projects default to a new worktree from main, as on desktop; missing main requires a branch
 choice. Models and profiles are checked on the selected machine before starting.
 
-Choosers sit beside the form, or occupy its column in narrow terminals. Escape returns through
+![Compact New Harness form with visible settings and an agent picker on the right](docs/new-harness.png)
+
+<sub>Rendered from the isolated terminal fixture in `tests/new-harness.py`.</sub>
+
+The main form stays centered and fixed as agents, fields and choosers change. Choosers extend
+to its right; in narrow terminals they temporarily occupy the form's place. Escape returns through
 nested choosers and preserves a dismissed draft. Confirmed failures keep the draft and reuse
 any prepared project folder on retry. A lost reply offers Check status for the original launch;
 repeated Enter cannot start another harness while its outcome is unknown. Input in the form

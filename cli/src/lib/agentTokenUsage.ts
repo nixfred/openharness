@@ -10,17 +10,18 @@ import { sqliteReadAll } from './sqliteRead.js'
 import { emptyOutputLedger, ingestOutput, outputSnapshot, validOutputLedger, type AgentOutputStats, type OutputLedger } from './agentOutputStats.js'
 import { emptySessionWork, ingestSessionWork, sessionWorkSnapshot, validSessionWork, type SessionWork, type SessionWorkLedger } from './sessionWork.js'
 
-export type AgentTokenUsage = { totalTokens: number | null; updatedAt: string; output?: AgentOutputStats; work?: SessionWork }
+export type AgentTokenUsage = { totalTokens: number | null; updatedAt: string; inputTokens?: number; outputTokens?: number; cachedTokens?: number; output?: AgentOutputStats; work?: SessionWork }
 type Target = Pick<RegisteredSession, 'engine' | 'sessionId' | 'transcriptPath' | 'codexHome' | 'agentId' | 'forkedFrom' | 'registeredAt'>
   & Partial<Pick<RegisteredSession, 'cwd'>>
 type Buckets = [number, number, number, number]
 type CodexTotals = [number, number, number, number]
 type Checkpoint = {
-  version: 4; key: string; offset: number; size: number; mtime: number; inode: string;
+  version: 5; key: string; offset: number; size: number; mtime: number; inode: string;
   boundary: string; total: number; observed: boolean; updatedAt: string | null;
   claude: Record<string, Buckets>; codex: CodexTotals | null; seen: Record<string, true>;
   output: OutputLedger;
   work: SessionWorkLedger; sourceSession: string | null;
+  usage: [number, number, number];
 }
 type Entry = {
   target: Target; value: AgentTokenUsage | null; checked: number; pending: Promise<void> | null;
@@ -50,7 +51,7 @@ function targetSnapshot(s: Target): Target {
     codexHome: s.codexHome, cwd: s.cwd, registeredAt: s.registeredAt, forkedFrom: s.forkedFrom ? { ...s.forkedFrom } : null }
 }
 function empty(key: string): Checkpoint {
-  return { version: 4, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0,
+  return { version: 5, key, offset: 0, size: 0, mtime: 0, inode: '', boundary: '', total: 0, usage: [0, 0, 0],
     observed: false, updatedAt: null, claude: {}, codex: null, seen: {}, output: emptyOutputLedger(),
     work: emptySessionWork(), sourceSession: null }
 }
@@ -97,6 +98,9 @@ function ingest(state: Checkpoint, line: string, target: Target): void {
     const merged = next.map((value, i) => Math.max(value, old[i])) as Buckets
     state.claude[key] = merged
     state.total += sum(merged) - sum(old)
+    state.usage[0] += merged[0] + merged[2] + merged[3] - old[0] - old[2] - old[3]
+    state.usage[1] += merged[1] - old[1]
+    state.usage[2] += merged[2] - old[2]
     state.observed = true
   } else {
     const payload = object(row.payload)
@@ -120,6 +124,9 @@ function ingest(state: Checkpoint, line: string, target: Target): void {
     if (delta) {
       // Codex input includes cache reads; output includes reasoning.
       state.total += Math.max(delta[0], delta[1]) + delta[2]
+      state.usage[0] += Math.max(delta[0], delta[1])
+      state.usage[1] += delta[2]
+      state.usage[2] += delta[1]
       state.observed = true
     }
   }
@@ -213,6 +220,7 @@ export class AgentTokenUsageCache {
       return
     }
     entry.value = { totalTokens: state.observed ? state.total : null, updatedAt: state.updatedAt,
+      ...(state.observed ? { inputTokens: state.usage[0], outputTokens: state.usage[1], cachedTokens: state.usage[2] } : {}),
       ...(output ? { output } : {}), ...(work ? { work } : {}) }
     if (previous?.totalTokens !== entry.value.totalTokens
       || JSON.stringify(previous?.output) !== JSON.stringify(output ?? undefined)
@@ -224,7 +232,7 @@ export class AgentTokenUsageCache {
       if ((await stat(file)).size > MAX_CACHE_BYTES) return empty(key)
       const raw = JSON.parse(await readFile(file, 'utf8')) as Checkpoint
       const version: number = raw.version
-      if (version === 3 && raw.key === key) {
+      if ((version === 3 || version === 4) && raw.key === key) {
         const work = { ...raw.work, currentOrder: 0, failedOrder: 0 }
         if (validSessionWork(work)) {
           // Receipts may already have been compacted out of the transcript. Replay the available
@@ -238,7 +246,8 @@ export class AgentTokenUsageCache {
         }
       }
       // Replay old transcripts once: v3 skipped ordinary batched code-mode receipts, including PRs.
-      if (raw.version === 4 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
+      if (raw.version === 5 && raw.key === key && Number.isSafeInteger(raw.total) && raw.total >= 0
+        && Array.isArray(raw.usage) && raw.usage.length === 3 && raw.usage.every(n => Number.isSafeInteger(n) && n >= 0)
         && typeof raw.observed === 'boolean'
         && (raw.updatedAt === null || typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt)))
         && Number.isSafeInteger(raw.size) && raw.size >= 0 && Number.isFinite(raw.mtime)
@@ -286,6 +295,8 @@ export class AgentTokenUsageCache {
       if (!['tokens_input', 'tokens_output', 'tokens_reasoning', 'tokens_cache_read', 'tokens_cache_write']
         .every(key => typeof row[key] === 'number' && Number.isSafeInteger(row[key]) && Number(row[key]) >= 0)) return
       state.total = sum(Object.values(row).map(tokens))
+      state.usage = [tokens(row.tokens_input) + tokens(row.tokens_cache_read) + tokens(row.tokens_cache_write),
+        tokens(row.tokens_output) + tokens(row.tokens_reasoning), tokens(row.tokens_cache_read)]
       state.observed = true
     } else {
       const path = entry.target.transcriptPath!

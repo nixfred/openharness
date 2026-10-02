@@ -416,13 +416,20 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 100));
       final download = tester.getRect(find.byType(WebDownloadButton));
-      final signIn = tester.getRect(
-        find.widgetWithText(FilledButton, 'Sign in'),
-      );
-      expect(download.bottom, lessThan(signIn.top));
+      // Both ways in, each a thumb's target, inside the phone's width.
+      for (final provider in ['Google', 'Apple']) {
+        final signIn = tester.getRect(
+          find.widgetWithText(FilledButton, 'Continue with $provider'),
+        );
+        expect(download.bottom, lessThan(signIn.top));
+        expect(signIn.right, lessThanOrEqualTo(390));
+        expect(signIn.height, greaterThanOrEqualTo(56));
+        expect(
+          find.text('Continue with $provider').hitTestable(),
+          findsOneWidget,
+        );
+      }
       expect(download.right, lessThanOrEqualTo(390));
-      expect(signIn.height, greaterThanOrEqualTo(56));
-      expect(find.text('Sign in').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       app.dispose();

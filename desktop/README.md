@@ -189,14 +189,21 @@ upstream package upgrade without preserving the local rendering and IME fixes.
 On macOS, the Harness portrait symbol follows the system menu bar's appearance and
 carries a small circular unread badge at its bottom-right corner,
 only when notifications are unread (`99+` above 99; the tooltip keeps the exact count). Open it for
-sessions with unread results or questions, grouped
-by project and marked with blue dots. Read sessions disappear from the list;
-an empty inbox says “No unread notifications.” The menu also offers New Harness,
-Clear All Notifications, Open Harness, Settings, and Quit. Selecting a
-conversation reuses its existing pane and
-brings the window forward. Clear All dismisses the displayed notifications
-without answering pending questions or clearing newer arrivals. Linux and the
-browser keep the in-window notification bell.
+one Notifications section, with questions first and the newest results below.
+Each row pairs the harness name with its question or completion recap, the
+shared tab/pane status mark, and arrival time. Tab and machine details remain
+in tooltips. The first five appear here; View all opens the full inbox. Read sessions
+disappear, and an empty inbox says “No unread notifications.” Working starts
+expanded, showing active sessions with elapsed time when the app observed their start;
+idle sessions and sessions already listed above do not fill this section.
+Working never contributes to the unread badge. New Harness and Open Harness
+use the normal creation and existing-session pickers. Show Harness brings the
+window forward; Quit exits the app. Selecting a conversation reuses its existing
+pane before revealing the window. The close icon beside Notifications marks
+all read, acknowledging the opening
+snapshot without answering pending questions or clearing newer arrivals.
+Linux and the browser keep the in-window notification bell. GitHub merge
+notifications are not part of this menu yet.
 
 The search icon to the left of Harness Store opens a compact list across your
 machines. Each harness shows its agent and name, followed by its machine, project,

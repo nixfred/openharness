@@ -157,6 +157,87 @@ class _WakeRow extends StatelessWidget {
   );
 }
 
+/// "Stop [model]?" before Use stops the local model other harnesses are on, to start another in its
+/// place (one runs at a time). Only asked when [users] — those harnesses' names — is not empty: the
+/// harness being switched is moving off it anyway. True only for the button that says so.
+Future<bool> confirmStopInUse(
+  BuildContext context, {
+  required String model,
+  required List<String> users,
+}) async =>
+    await showAppDialog<bool>(
+      context: context,
+      builder: (_) => _StopInUsePrompt(model: model, users: users),
+    ) ??
+    false;
+
+class _StopInUsePrompt extends StatefulWidget {
+  const _StopInUsePrompt({required this.model, required this.users});
+
+  final String model;
+  final List<String> users;
+
+  @override
+  State<_StopInUsePrompt> createState() => _StopInUsePromptState();
+}
+
+class _StopInUsePromptState extends State<_StopInUsePrompt> {
+  final _cancel = FocusNode(debugLabel: 'Cancel stopping a model in use');
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && ModalRoute.of(context)?.isCurrent != false) {
+        _cancel.requestFocus();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _cancel.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    final users = widget.users;
+    final who = users.length == 1
+        ? users.single
+        : '${users.first} and ${users.length - 1} more';
+    return DesktopPromptSurface(
+      body: DesktopPromptScrollBody(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Stop ${widget.model}?', style: DesktopChrome.heading()),
+            const SizedBox(height: DesktopChrome.groupGap),
+            Text(
+              '$who ${users.length == 1 ? 'uses' : 'use'} it, and will stop answering until '
+              '${users.length == 1 ? 'it moves' : 'they move'} to another model. One local model '
+              'runs at a time on this computer.',
+              style: DesktopChrome.text(size: 13),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          focusNode: _cancel,
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Stop and switch'),
+        ),
+      ],
+    );
+  }
+}
+
 /// "Switch anyway?" before moving an agent onto [model], every computer serving which seems
 /// offline. True only for the button that says so; Cancel, Escape and a click outside all leave
 /// the agent where it is. The move itself is never refused — the daemon can be wrong about a

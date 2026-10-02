@@ -46,6 +46,18 @@ const agents = DEMO ? {
   [LOCAL]: [agent(randomUUID(), 'Mock Claude', 'claude'), agent(randomUUID(), 'Mock Codex', 'codex'), agent(randomUUID(), 'Mock paused', 'claude', 'stopped')],
   [REMOTE]: [agent(randomUUID(), 'Remote shell', 'terminal')],
 }
+if (process.env.MOCK_PROJECT_SEARCH === '1') {
+  // A large local history must not keep remote folders out of the project picker.
+  for (let i = 0; i < 70; i++) {
+    const older = new Date(Date.parse(now) - (i + 1) * 60_000).toISOString()
+    agents[LOCAL].push(project({ ...agent(`project-search-${i}`, `Local project ${i}`, 'codex'), createdAt: older, updatedAt: older },
+      `autonomous-harness-2026-${String(i).padStart(3, '0')}`, 'main'))
+  }
+}
+if (process.env.MOCK_SHARED_LAYOUT === '1') {
+  for (let i = 1; i <= 9; i++) agents[LOCAL].push(agent(`shared-layout-${i}`, `Shared pane ${i}`, 'terminal'))
+}
+
 // Opt-in viewer fixtures, so the normal terminal roster and its tests keep their identities.
 if (process.env.MOCK_VIEWER === '1') {
   agents[LOCAL].push({ ...agent('mock-blender', 'Mock Blender', 'claude'), dsh: 'autonomous/blender',
@@ -208,8 +220,8 @@ const server = http.createServer((req, res) => {
   }
   if (req.url === '/api/status') return json(res, { machineId: LOCAL, signedIn: true, version: 'mock', webUrl: process.env.MOCK_WEB_URL || 'https://harness.example' })
   if (req.url === '/api/machines') return json(res, { machines: [
-    { machineId: LOCAL, name: DEMO ? 'studio' : 'mock-local', status: 'running' },
-    { machineId: REMOTE, name: DEMO ? 'gpu-box' : 'mock-remote', status: 'running' },
+    { machineId: LOCAL, name: process.env.MOCK_PROJECT_SEARCH === '1' ? 'M2' : DEMO ? 'studio' : 'mock-local', status: 'running' },
+    { machineId: REMOTE, name: process.env.MOCK_PROJECT_SEARCH === '1' ? 'office' : DEMO ? 'gpu-box' : 'mock-remote', status: 'running' },
   ] })
   // Harnesses that finish a turn with no window watching: their transcripts change now
   // (tokenUsage.updatedAt), as the daemon would record (POST /test/finish?n=5).

@@ -18,8 +18,13 @@ class LocalModel {
     this.contextWindow,
     this.estTokS,
     this.paramsB,
+    this.app,
   });
   final String id, name, state;
+
+  /// The app this model was downloaded with and starts in (`Ollama`, `LM Studio`, `llama.cpp`): one found
+  /// in that app's folder. Null for Grid's own models, and from an older daemon.
+  final String? app;
   final String? quant;
   final double? sizeBytes, tokensPerSecond, requests, windowSeconds;
   final bool recommended, canStart, canStop;
@@ -76,6 +81,10 @@ class LocalModel {
     contextWindow: _number(data['contextWindow']),
     estTokS: _number(data['estTokS']),
     paramsB: _number(data['paramsB']),
+    app: switch (data['app']) {
+      final String app when app.trim().isNotEmpty => app.trim(),
+      _ => null,
+    },
   );
 }
 

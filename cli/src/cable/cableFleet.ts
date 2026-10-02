@@ -1,7 +1,8 @@
 // One protocol session per USB dial, sharing the desktop's event source.
 // Voice buffers, decoding, firmware transfers and disconnects remain per dial.
 import { join } from 'node:path'
-import { findDialPorts, SerialLink, type DialPort } from './serial.js'
+import { DialVerdicts } from './dialPortVerdicts.js'
+import { findDialPorts, portInUse, SerialLink, type DialPort } from './serial.js'
 import type { CableSession, CableHost, CablePort, DialStatus, PortOpener } from './cableSession.js'
 import type { DialLog } from './dialLog.js'
 
@@ -15,6 +16,12 @@ export interface CableFleetOptions {
   /** Optional local selection. An empty list discovers all matching dials. */
   serials?: string[]
   intervalMs?: number
+  /** Which boards have already been found not to be dials. In memory only unless it has a file. */
+  verdicts?: DialVerdicts
+  /** Does another process have this tty open? A port somebody else is using is not looked at. */
+  inUse?: (path: string) => Promise<boolean>
+  /** How often a board ruled out is checked for another program working on it. */
+  watchEveryMs?: number
 }
 
 export class CableFleet {
@@ -25,6 +32,13 @@ export class CableFleet {
   private readonly discover: () => Promise<DialPort[]>
   private readonly open: OpenPort
   private readonly serials: Set<string>
+  private readonly verdicts: DialVerdicts
+  private readonly inUse: (path: string) => Promise<boolean>
+  /** Ports already reported as in use, so the log says it once rather than every scan. */
+  private readonly heldNotes = new Set<string>()
+  /** For each board ruled out: when it was last checked for another program's use, and whether it was in use. */
+  private readonly watched = new Map<string, { at: number; wasBusy: boolean }>()
+  private readonly watchEveryMs: number
 
   constructor(private readonly Session: SessionConstructor, private readonly host: CableHost,
               private readonly logs: string, private readonly Log: typeof DialLog,
@@ -32,6 +46,9 @@ export class CableFleet {
     this.discover = options.discover ?? findDialPorts
     this.open = options.open ?? SerialLink.open
     this.serials = new Set((options.serials ?? []).map(s => s.toUpperCase()))
+    this.verdicts = options.verdicts ?? new DialVerdicts()
+    this.inUse = options.inUse ?? portInUse
+    this.watchEveryMs = options.watchEveryMs ?? 8_000
   }
 
   get isConnected(): boolean { return [...this.entries.values()].some(e => e.session.isConnected) }
@@ -61,6 +78,28 @@ export class CableFleet {
     return this.scanTask
   }
 
+  /**
+   * Has a program had this ruled-out board open and let go since it was ruled out?
+   *
+   * That is how a board becomes a dial: someone flashes it, with esptool or `idf.py`, and neither a
+   * reset nor a reflash changes what USB says about it, so the flash itself is the only sign there is.
+   * When the port goes from held to free the verdict is forgotten and the board is looked at once more.
+   * Checked every few seconds, not every scan: `lsof` is a process, and the answer changes slowly.
+   */
+  private async workedOn(port: DialPort): Promise<boolean> {
+    const key = (port.serialNumber ?? port.path).toUpperCase()
+    const watch = this.watched.get(key) ?? { at: 0, wasBusy: false }
+    this.watched.set(key, watch)
+    if (Date.now() - watch.at < this.watchEveryMs) return false
+    watch.at = Date.now()
+    if (await this.inUse(port.path)) { watch.wasBusy = true; return false }
+    if (!watch.wasBusy) return false
+    watch.wasBusy = false
+    this.verdicts.clear(port)
+    this.host.log(`cable: ${port.path} was in use and is free again — looking at it once more`)
+    return true
+  }
+
   private async reconcile(): Promise<void> {
     const ports = await this.discover()
     if (this.stopped) return
@@ -68,6 +107,8 @@ export class CableFleet {
     for (const port of ports) {
       const serial = port.serialNumber?.toUpperCase()
       if (this.serials.size && (!serial || !this.serials.has(serial))) continue
+      // Found not to be a dial already, and nobody seen working on it since: nothing to look at.
+      if (this.verdicts.isForeign(port) && !(await this.workedOn(port))) continue
       present.set(serial || port.path, port)
     }
     let removed = false
@@ -83,6 +124,15 @@ export class CableFleet {
     if (this.stopped) return
     for (const [id, port] of present) {
       if (this.entries.has(id)) continue
+      // A board somebody else has open is somebody's work in progress (a flash, a monitor, a console).
+      // Two readers on one tty interleave bytes, so it is not opened, and looked at again next scan.
+      if (await this.inUse(port.path)) {
+        if (!this.heldNotes.has(port.path)) this.host.log(`cable: ${port.path} is in use by another program — leaving it alone`)
+        this.heldNotes.add(port.path)
+        continue
+      }
+      this.heldNotes.delete(port.path)
+      if (this.stopped) return
       const entry: Entry = { port, attached: false, status: { attached: false }, session: undefined! }
       const attached = () => {
         if (entry.attached) return
@@ -106,6 +156,16 @@ export class CableFleet {
         get: (target, key) => {
           if (key === 'onDialAttached') return attached
           if (key === 'onDialGone') return gone
+          if (key === 'onForeignPort') return (path: string, why: string) => {
+            this.verdicts.markForeign(port)
+            this.host.log(`cable: ${path} is not a Harness dial (${why}) — leaving it alone until it is unplugged or reset [usb ${id}]`)
+            // Off this call stack: the session is in the middle of deciding this, and stop() waits on it.
+            setTimeout(() => {
+              if (this.entries.get(id) !== entry) return
+              this.entries.delete(id)
+              void entry.session.stop()
+            }, 0)
+          }
           if (key === 'onDialStatus') return (status: DialStatus) => {
             entry.status = { ...status, id }
             this.publish()
@@ -160,7 +220,7 @@ export class CableFleet {
     if (!entry) return { ok: false, error: 'That device is not plugged into this computer.' }
     if (!entry.status.attached) return { ok: false, error: 'That device is unplugged.' }
     try {
-      await entry.session.setSettings(patch)
+      if (!await entry.session.setSettings(patch)) return { ok: false, error: 'The device did not take the change.' }
       return { ok: true }
     } catch (error) {
       this.host.log(`cable: ${entry.port.path} settings: ${String(error)}`)

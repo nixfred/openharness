@@ -10,9 +10,9 @@ import '../core/models.dart' show SharedHarness;
 /// terminal. It is DERIVED from the agent (the daemon says where the viewer
 /// is, and the tile follows) and never persisted: a restored layout re-opens
 /// it from the agent's next frame, so a stale URL from a previous run can
-/// never be loaded. [companion] is the built-in native viewer, derived from
-/// the selected individual only after its account's experiment is enabled.
-enum PaneKind { terminal, web, companion }
+/// never be loaded. [companion] and [devices] are built-in native DSH viewers,
+/// derived only after their account's experiment is enabled.
+enum PaneKind { terminal, web, companion, devices }
 
 /// One tile in the terminal grid.
 ///
@@ -40,7 +40,8 @@ class TerminalPane {
   final PaneKind kind;
   bool get isWeb => kind == PaneKind.web;
   bool get isCompanion => kind == PaneKind.companion;
-  bool get isViewer => isWeb || isCompanion;
+  bool get isDevices => kind == PaneKind.devices;
+  bool get isViewer => isWeb || isCompanion || isDevices;
 
   /// [PaneKind.web] only: what the tile loads. Changes when the agent's frame
   /// names a new viewer URL; the panel navigates rather than remounts.

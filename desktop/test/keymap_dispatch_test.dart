@@ -204,4 +204,26 @@ void main() {
       expect(keyStrokeFor(LogicalKeyboardKey.shiftLeft, shift: true), isNull);
     },
   );
+
+  test('macOS shifted symbols read as the key under them', () {
+    // A real ⇧⌘] on a Mac arrives with `}` as its logical key.
+    expect(
+      keyStrokeFor(LogicalKeyboardKey.braceRight, command: true, shift: true),
+      KeyStroke.parse('cmd+shift+]'),
+    );
+    expect(
+      keyStrokeFor(LogicalKeyboardKey.braceLeft, command: true, shift: true),
+      KeyStroke.parse('cmd+shift+['),
+    );
+    expect(
+      keyStrokeFor(LogicalKeyboardKey.question, command: true, shift: true),
+      KeyStroke.parse('cmd+shift+/'),
+    );
+    expect(
+      keyStrokeFor(LogicalKeyboardKey.exclamation, command: true, shift: true),
+      KeyStroke.parse('cmd+shift+1'),
+    );
+    // Without shift a brace is not a key the bindings can name.
+    expect(keyStrokeFor(LogicalKeyboardKey.braceRight, command: true), isNull);
+  });
 }

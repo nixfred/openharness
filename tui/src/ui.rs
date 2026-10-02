@@ -2,7 +2,7 @@
 //! The tmux split tree remains intact beneath presentation insets. Classic and tmux looks
 //! retain line borders; the search keeps fzf's layout and colours with a preview window.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
@@ -24,6 +24,123 @@ use crate::picker::Picker;
 use crate::theme::{self, bold, fg, engine_mark, state_mark};
 use crate::input::{home_rows, HomeRow};
 
+/// Time-dependent content asks for its next repaint; a static surface asks for
+/// none. Hints and messages are deadlines, independent of reduced motion.
+pub fn next_repaint(app: &App, frame_started: Instant) -> Option<Instant> {
+    // A deadline crossed during rendering still needs one more frame. The next
+    // draw starts after it, so expired messages cannot create a repaint loop.
+    let now = frame_started;
+    let mut next = theme::needs_animation_frame().then(|| now + Duration::from_millis(100));
+    let mut deadline = |at: Instant, ms: u64| {
+        if let Some(at) = at.checked_add(Duration::from_millis(ms)).filter(|at| *at > now) {
+            next = Some(next.map_or(at, |old| old.min(at)));
+        }
+    };
+    if let Some((_, _, at)) = app.toast.as_ref().filter(|_| app.toast_ms() != u64::MAX) {
+        deadline(*at, app.toast_ms());
+    }
+    let hints = !(app.options.tmux_look() && app.options.get("@hn-hint-time", "", None).is_none());
+    if app.prefix && hints {
+        if let Some(at) = app.prefix_at { deadline(at, app.keymap.hint_ms); }
+    }
+    next
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::*;
+
+    fn app() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (100, 30));
+        app.started = Instant::now() - Duration::from_secs(4);
+        app
+    }
+
+    fn render(app: &mut App) {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|frame| draw(frame, app)).unwrap();
+    }
+
+    #[test]
+    fn rendered_formats_start_and_stop_motion_and_terminal_titles_count_too() {
+        let mut app = app();
+        render(&mut app);
+        assert!(next_repaint(&app, Instant::now()).is_none(), "an empty, settled home is static");
+        app.options.global_session.insert("status-right".into(), "#{spinner}".into());
+        render(&mut app);
+        assert!(next_repaint(&app, Instant::now()).is_some());
+        app.options.global_session.insert("@hn-animations".into(), "off".into());
+        render(&mut app);
+        assert!(next_repaint(&app, Instant::now()).is_none());
+        app.options.global_session.insert("@hn-animations".into(), "on".into());
+        app.options.global_session.insert("status".into(), "off".into());
+        render(&mut app);
+        assert!(next_repaint(&app, Instant::now()).is_none(), "a hidden status must not keep its spinner alive");
+        app.options.global_session.insert("set-titles-string".into(), "#{spinner}".into());
+        assert!(app.window_title().is_some());
+        assert!(next_repaint(&app, Instant::now()).is_some(), "terminal titles are expanded after the screen");
+        app.options.global_session.insert("set-titles-string".into(), "Harness".into());
+        render(&mut app);
+        app.window_title();
+        assert!(next_repaint(&app, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn timed_notices_and_hints_keep_their_deadlines_without_motion() {
+        let mut app = app();
+        theme::begin_animation_frame(false);
+        let at = Instant::now();
+        app.toast = Some(("notice".into(), Color::Yellow, at));
+        app.display_ms = 2500;
+        app.prefix = true;
+        app.prefix_at = Some(at);
+        app.keymap.hint_ms = 1000;
+        assert_eq!(next_repaint(&app, Instant::now()), Some(at + Duration::from_millis(1000)));
+        app.prefix = false;
+        assert_eq!(next_repaint(&app, Instant::now()), Some(at + Duration::from_millis(2500)));
+        app.toast_exact = Some(0);
+        assert!(next_repaint(&app, Instant::now()).is_none(), "until-keypress notices have no expiry timer");
+        app.toast_exact = Some(20);
+        app.toast.as_mut().unwrap().2 = at - Duration::from_secs(1);
+        app.prefix = true;
+        app.prefix_at = Some(at - Duration::from_secs(2));
+        assert!(next_repaint(&app, Instant::now()).is_none(), "expired deadlines must not spin the loop");
+        app.keymap.hint_ms = u64::MAX;
+        next_repaint(&app, Instant::now()); // user-configured delays must not overflow Instant
+    }
+
+    #[test]
+    fn a_deadline_crossed_during_drawing_gets_one_more_frame() {
+        let mut app = app();
+        theme::begin_animation_frame(false);
+        let now = Instant::now();
+        let at = now - Duration::from_millis(100);
+        app.toast = Some(("notice".into(), Color::Yellow, at));
+        app.toast_exact = Some(90);
+        assert_eq!(next_repaint(&app, at), Some(at + Duration::from_millis(90)));
+        assert!(next_repaint(&app, now).is_none());
+        app.toast = None;
+        app.prefix = true;
+        app.prefix_at = Some(at);
+        app.keymap.hint_ms = 90;
+        assert_eq!(next_repaint(&app, at), Some(at + Duration::from_millis(90)));
+        assert!(next_repaint(&app, now).is_none());
+    }
+
+    #[test]
+    fn tmux_hints_only_request_a_frame_when_enabled() {
+        let mut app = app();
+        theme::begin_animation_frame(false);
+        app.options.global_session.insert("@hn-look".into(), "tmux".into());
+        app.prefix = true;
+        app.prefix_at = Some(Instant::now());
+        assert!(next_repaint(&app, Instant::now()).is_none());
+        app.options.global_session.insert("@hn-hint-time".into(), "600".into());
+        assert_eq!(next_repaint(&app, Instant::now()), app.prefix_at.map(|at| at + Duration::from_millis(600)));
+    }
+}
+
 /// screen_write_box_border_set: a box's corners, sides and its rule's joins, for tmux's box
 /// lines (single, double, heavy, simple, rounded, padded, none).
 fn box_set(lines: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
@@ -38,7 +155,7 @@ fn box_set(lines: &str) -> (&'static str, &'static str, &'static str, &'static s
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    theme::set_animations(app.options.animations());
+    theme::begin_animation_frame(app.options.animations());
     app.renumber();
     // automatic-rename as of this frame: a pane that went into a mode ([tmux]) or out of one is
     // named so in the window list it is drawn with.
@@ -48,6 +165,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     crate::term_out::begin_frame(usstyle, links);
     let area = frame.area();
     if area.width == 0 || area.height == 0 { return }
+    // Ratatui can observe a resize before the queued terminal event reaches the app.
+    // Every pane and popup must use this frame's dimensions before drawing into its buffer.
+    if app.size != (area.width, area.height) {
+        app.size = (area.width, area.height);
+        app.fit_panes();
+    }
     // The status lines (tmux's status: off, on, 2 … 5), at the bottom or (status-position) the top.
     let lines = app.status_lines().max(1).min(area.height);
     let status = Rect::new(0, if app.status_top { 0 } else { area.height - lines }, area.width, lines);
@@ -58,7 +181,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let buf = frame.buffer_mut();
     let mut cursor: Option<Position> = None;
     // A list takes the window (with --height, only its bottom rows: the panes stay in view).
-    let full_screen = matches!(app.modal, Some(Modal::Picker { .. }) if theme::fzf_opts().height.is_none());
+    // (The settings panel is not one: it floats over the panes, as the New Harness form does.)
+    let full_screen = matches!(&app.modal, Some(Modal::Picker { kind, .. }) if theme::fzf_opts().height.is_none() && !crate::settings::is_panel(kind));
     if !full_screen {
         if app.tab().home || app.tab().root.is_none() { empty_window(buf, app, body) }
         else { cursor = window(buf, app, body) }
@@ -68,11 +192,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let clocks: Vec<Rect> = app.rects.iter().filter(|(id, _)| app.panes.get(id).map(|p| p.clock).unwrap_or(false)).map(|(id, r)| { if Some(*id) == app.focused() { cursor = None } app.content_of(app.tab(), *r) }).collect();
         for rect in clocks { clock(buf, app, rect) }
     }
+    // ── status bar ──
+    // The status bar down a side, and the tabs over the panes beside it.
+    crate::bar::draw(buf, app);
     if let Some(Modal::DisplayPanes { .. }) = &app.modal { display_panes(buf, app) }
     let search_busy = app.said_due.is_some() || app.said_pending > 0;
     let msg_style = app.message_style();
+    if let Some(Modal::Picker { kind, mut picker }) = app.modal.take_if(|m| matches!(m, Modal::Picker { kind, .. } if crate::settings::is_panel(kind))) {
+        let (at, shown) = crate::settings::draw(buf, app, body, &kind, &mut picker);
+        cursor = at;
+        if let Some(rect) = shown { panel_preview(buf, app, &kind, &picker, rect) }
+        app.modal = Some(Modal::Picker { kind, picker });
+    }
     if let Some(modal) = &mut app.modal {
         match modal {
+            Modal::Picker { kind, .. } if crate::settings::is_panel(kind) => {}
             // (--no-input: no prompt, no cursor.)
             // (Too small to hold a list — a window being dragged, a drop-down terminal opening: none
             // drawn until it has the room, as fzf clamps and tmux draws what fits; never a crash.)
@@ -81,7 +215,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
     // The picker drew with a placeholder preview; a live pane preview needs the whole app.
-    if let Some(Modal::Picker { kind, picker }) = app.modal.as_ref().filter(|_| body.height >= 1 && body.width >= 2) {
+    if let Some(Modal::Picker { kind, picker }) = app.modal.as_ref().filter(|m| body.height >= 1 && body.width >= 2 && !matches!(m, Modal::Picker { kind, .. } if crate::settings::is_panel(kind))) {
         if let (_, Some(pbox), _) = fzf_split(fzf_frame(body, picker).inner, picker) { preview(buf, app, kind, picker, &pbox) }
     }
     let popup = match &app.modal { Some(Modal::Popup { pane, x, y, width, height, border, title, look }) => Some((*pane, *x, *y, *width, *height, *border, title.clone(), look.clone())), _ => None };
@@ -200,15 +334,19 @@ fn which_key(buf: &mut Buffer, app: &App, body: Rect) {
     // (A third of the window at most: the panes stay in view above it.)
     let height = (rows_needed as u16 + 2).min((body.height / 3).max(4)).min(body.height);
     let area = Rect::new(body.x, body.y + body.height - height, body.width, height);
+    // The shortcut box takes hn's chrome colours (the terminal's surfaces), so it sits with the
+    // status line and pane surfaces rather than floating in the terminal's default colours.
+    let pal = theme::pane_palette();
+    let panel = Style::default().bg(pal.surface);
+    let border = Style::default().fg(pal.border).bg(pal.surface);
     crate::term_out::clear_extras(area);
-    for y in area.y..area.y + area.height { for x in area.x..area.x + area.width { if let Some(c) = buf.cell_mut((x, y)) { c.reset(); } } }
-    let border = Style::default();
+    for y in area.y..area.y + area.height { for x in area.x..area.x + area.width { if let Some(c) = buf.cell_mut((x, y)) { c.reset(); c.set_style(panel); } } }
     for x in area.x..area.x + area.width { buf.set_string(x, area.y, "─", border); buf.set_string(x, area.y + area.height - 1, "─", border) }
     for y in area.y..area.y + area.height { buf.set_string(area.x, y, "│", border); buf.set_string(area.x + area.width - 1, y, "│", border) }
     buf.set_string(area.x, area.y, "┌", border); buf.set_string(area.x + area.width - 1, area.y, "┐", border);
     buf.set_string(area.x, area.y + area.height - 1, "└", border); buf.set_string(area.x + area.width - 1, area.y + area.height - 1, "┘", border);
     let title = format!(" {} ", crate::keys::name(&app.keymap.prefix));
-    buf.set_string(area.x + 2, area.y, &title, Style::default().add_modifier(Modifier::BOLD));
+    buf.set_string(area.x + 2, area.y, &title, Style::default().fg(pal.foreground).bg(pal.surface).add_modifier(Modifier::BOLD));
     let inner_rows = area.height.saturating_sub(2) as usize;
     // Column-major, like ls: read down, then across.
     let fits = cols * inner_rows.max(1);
@@ -216,16 +354,16 @@ fn which_key(buf: &mut Buffer, app: &App, body: Rect) {
         // Say there is more, bottom right of the box (C-b ? has them all).
         let more = format!(" +{} more — {} ? ", items.len() - fits + 1, crate::keys::name(&app.keymap.prefix));
         let mx = (area.x + area.width).saturating_sub(more.width() as u16 + 2);
-        buf.set_string(mx, area.y + area.height - 1, &more, Style::default().add_modifier(Modifier::DIM));
+        buf.set_string(mx, area.y + area.height - 1, &more, Style::default().fg(pal.muted).bg(pal.surface).add_modifier(Modifier::DIM));
     }
     for (i, (key, what)) in items.iter().enumerate() {
         let (col, row) = (i / inner_rows.max(1), i % inner_rows.max(1));
         if col >= cols || (items.len() > fits && i + 1 >= fits) { break }
         let x = area.x + 2 + (col * col_w) as u16;
         let y = area.y + 1 + row as u16;
-        buf.set_string(x, y, format!("{key:>key_w$}"), bold(theme::accent()));
+        buf.set_string(x, y, format!("{key:>key_w$}"), Style::default().fg(theme::accent()).bg(pal.surface).add_modifier(Modifier::BOLD));
         let room = col_w - key_w - 3;
-        buf.set_stringn(x + key_w as u16 + 1, y, clip(what, room), room, Style::default());
+        buf.set_stringn(x + key_w as u16 + 1, y, clip(what, room), room, Style::default().fg(pal.foreground).bg(pal.surface));
     }
 }
 
@@ -237,9 +375,14 @@ fn which_key(buf: &mut Buffer, app: &App, body: Rect) {
 fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
     let focus = app.focused();
     let surfaces = app.options.pane_look();
+    // A theme chosen in Appearance is the panes' too, as a terminal's theme is: their default text
+    // and background, and the sixteen colours programs name (None: the terminal's own).
+    let themed = chosen_theme(app);
     if surfaces {
         crate::term_out::clear_extras(body);
         buf.set_style(body, Style::default().bg(Color::Reset));
+    } else if let Some(t) = themed {
+        buf.set_style(body, Style::default().bg(theme::depth_fit(rgb(t.background))));
     }
     let rects = app.rects.clone();
     let mut cursor = None;
@@ -248,11 +391,17 @@ fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
         let content = app.content_of(app.tab(), *rect);
         // tmux's window-style / window-active-style: the default colours a pane's cells fall back to.
         // tty_default_colours: the active pane's window-active-style where it sets a colour, else
-        // window-style (both the pane's own, its window's or the global ones).
+        // window-style (both the pane's own, its window's or the global ones) — else the theme's.
         let (a, w) = (app.style_of("window-active-style", app.active, Some(*id)), app.style_of("window-style", app.active, Some(*id)));
         let window = if active { (a.fg.or(w.fg), a.bg.or(w.bg)) } else { (w.fg, w.bg) };
+        // (A style's `default` is Reset: the terminal's colour, which the theme stands in for.)
+        let set = |c: Option<Color>| c.filter(|c| *c != Color::Reset);
+        let window = match themed {
+            Some(t) => (set(window.0).or(Some(theme::depth_fit(rgb(t.foreground)))), set(window.1).or(Some(theme::depth_fit(rgb(t.background))))),
+            None => window,
+        };
         if surfaces {
-            let f = crate::pane_frame::frame(*rect, app.window_area(app.tab()), app.pane_status(app.tab()));
+            let f = crate::pane_frame::frame(*rect, app.window_area(app.tab()), app.box_inner(app.tab()), app.pane_status(app.tab()));
             // Single and zoomed panes also sit directly on the terminal background.
             buf.set_style(f.surface, Style::default().fg(window.0.unwrap_or(Color::Reset)).bg(window.1.unwrap_or(Color::Reset)));
         }
@@ -277,17 +426,23 @@ fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
             if let Some(pos) = pane_body(buf, pane, content, active, window) { cursor = Some(pos) }
             pane.dirty = false;
         }
+        if let Some(t) = themed { theme_ansi(buf, content, t) }
+        // `@hn-dim on`: a pane you are not in, a little quieter (with one pane, nothing to set apart).
+        if !active && rects.len() > 1 && app.options.dim_others() {
+            let pal = theme::pane_palette();
+            crate::settings::dim(buf, content, window.1.unwrap_or(pal.background), window.0.unwrap_or(pal.foreground));
+        }
     }
-    if surfaces { pane_chrome(buf, app); } else { borders(buf, app, body); }
+    if surfaces { pane_chrome(buf, app); } else if app.options.box_panes() { boxes(buf, app); } else { borders(buf, app, body); }
     if app.modal.is_some() && !matches!(app.modal, Some(Modal::Copy { .. })) { None } else { cursor }
 }
 
 /// Integrated titles on borderless pane surfaces. Background contrast identifies focus.
 /// Program cells retain their ANSI colours; moving focus changes no content dimensions or mouse coordinates.
 fn pane_chrome(buf: &mut Buffer, app: &App) {
-    let canvas = app.window_area(app.tab());
+    let (canvas, inner) = (app.window_area(app.tab()), app.box_inner(app.tab()));
     for (id, rect) in &app.rects {
-        let f = crate::pane_frame::frame(*rect, canvas, app.pane_status(app.tab()));
+        let f = crate::pane_frame::frame(*rect, canvas, inner, app.pane_status(app.tab()));
         let active = Some(*id) == app.focused();
         let style_name = if active { "pane-active-border-style" } else { "pane-border-style" };
         let style = app.style_of(style_name, app.active, Some(*id));
@@ -367,6 +522,62 @@ fn title_line(buf: &mut Buffer, app: &App, id: u64, area: Rect, style: Style) {
     for (i, cell) in crate::draw::format_draw_over(&expanded, style, area.width).into_iter().enumerate() {
         if let Some((ch, cs)) = cell { if let Some(c) = buf.cell_mut((area.x + i as u16, area.y)) { c.set_symbol(if ch.is_empty() { " " } else { &ch }); c.set_style(cs); } }
     }
+}
+
+// ── box panes ──
+
+/// Box panes (`@hn-border box`, the default): every pane its own frame in pane-border-lines' box
+/// lines — the accent around the focused one, the attention colour around one whose harness waits
+/// on you (a question, a permission, its input), as the app colours its line; the quiet border
+/// colour elsewhere (or your pane-border-style / pane-active-border-style). The pane's title is
+/// drawn into the frame's top or bottom line as ` title `, in the accent and bold when focused.
+fn boxes(buf: &mut Buffer, app: &App) {
+    let tab = app.tab();
+    let (canvas, status) = (app.window_area(tab), app.pane_status(tab));
+    let lines = app.options.get("pane-border-lines", &tab.id, None).unwrap_or_default();
+    let hz = box_set(&lines).4;
+    let inner = app.box_inner(tab);
+    let frames: Vec<(u64, crate::pane_frame::Frame)> = app.rects.iter().map(|(id, r)| (*id, crate::pane_frame::boxed_in(*r, canvas, inner, status))).filter(|(_, f)| f.content != f.surface).collect();
+    // Each box its own line, in its own colour — boxes side by side touch (`││`), never sharing a
+    // line or joining at a corner.
+    for (id, f) in &frames {
+        let (r, style) = (f.surface, box_style(app, *id));
+        let edge: std::collections::HashSet<(u16, u16)> = (r.x..r.right()).flat_map(|x| [(x, r.y), (x, r.bottom() - 1)]).chain((r.y..r.bottom()).flat_map(|y| [(r.x, y), (r.right() - 1, y)])).collect();
+        for &(x, y) in &edge {
+            let on = |dx: i32, dy: i32| edge.contains(&((x as i32 + dx) as u16, (y as i32 + dy) as u16));
+            let g = crate::settings::joint(&lines, y > 0 && on(0, -1), on(0, 1), x > 0 && on(-1, 0), on(1, 0));
+            if let Some(c) = buf.cell_mut((x, y)) { c.set_symbol(g).set_style(style); }
+        }
+    }
+    for (id, f) in &frames {
+        let (id, style) = (*id, box_style(app, *id));
+        let active = Some(id) == app.focused();
+        let Some(t) = f.title else { continue };
+        // (Its own colour for the words: the frame's when it waits on you, else a quieter one.)
+        let words = if active { style.add_modifier(Modifier::BOLD) } else if app.pane_state(id) == Some(crate::fleet::State::NeedsInput) { style } else { style.fg(theme::paint(theme::pane_palette().muted)) };
+        let Some(fmt) = app.options.get("pane-border-format", &tab.id, Some(id)) else { continue };
+        let expanded = crate::format::expand(app, &fmt, app.active, Some(id), true);
+        let cells = crate::draw::format_draw_over(&expanded, words, t.width.saturating_sub(1));
+        // ` title `: a blank after the words where the line would run on.
+        let end = cells.iter().position(|c| c.is_none()).unwrap_or(cells.len());
+        for (i, cell) in cells.into_iter().enumerate() {
+            if let Some((ch, cs)) = cell { if let Some(c) = buf.cell_mut((t.x + i as u16, t.y)) { c.set_symbol(if ch.is_empty() { " " } else { &ch }); c.set_style(cs); } }
+        }
+        if end > 0 { if let Some(c) = buf.cell_mut((t.x + end as u16, t.y)) { if c.symbol() == hz { c.set_symbol(" ").set_style(words); } } }
+    }
+}
+
+/// A box's frame colour: focused → the accent, waiting on you → the attention colour, else the
+/// quiet border colour; your own pane-(active-)border-style where you set one (and tmux's own
+/// under `@hn-look tmux`, which draws no boxes). The marked pane's frame is bold.
+fn box_style(app: &App, id: u64) -> Style {
+    let active = Some(id) == app.focused();
+    let own = if active { app.look.active_border.is_some() } else { app.look.border.is_some() };
+    let style = if own { border_style(app, active) }
+        else if active { Style::default().fg(theme::paint(theme::accent())).add_modifier(if theme::no_color() { Modifier::BOLD } else { Modifier::empty() }) }
+        else if app.pane_state(id) == Some(crate::fleet::State::NeedsInput) { Style::default().fg(theme::paint(theme::ATTENTION)) }
+        else { Style::default().fg(theme::paint(theme::pane_palette().border)) };
+    if app.marked == Some(id) { style.add_modifier(Modifier::BOLD) } else { style }
 }
 
 /// A window with no harness in it: the harnesses you were just with, one key away.
@@ -468,6 +679,52 @@ fn empty_window(buf: &mut Buffer, app: &App, area: Rect) {
         let w = line.width() as u16;
         let x = if index < centered { area.x + area.width.saturating_sub(w) / 2 } else { left };
         buf.set_line(x, y, line, area.width.saturating_sub(x - area.x));
+    }
+    themed_home(buf, area);
+}
+
+// ── a theme over the panes ──
+
+fn rgb(c: [u8; 3]) -> Color { Color::Rgb(c[0], c[1], c[2]) }
+
+/// The theme chosen in Appearance (`@hn-theme`), where one is and colour is on.
+fn chosen_theme(app: &App) -> Option<&'static crate::terminal_themes::TerminalTheme> {
+    if theme::no_color() { return None }
+    let name = app.options.get("@hn-theme", "", None).filter(|n| !n.is_empty())?;
+    crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == name)
+}
+
+/// The sixteen colours a program names (red, bright green…), in [area], as [t] has them — what a
+/// terminal with that theme would show. Colours a program gives exactly (256-colour, RGB) stay.
+fn theme_ansi(buf: &mut Buffer, area: Rect, t: &crate::terminal_themes::TerminalTheme) {
+    let ansi = |c: Color| -> Color {
+        let i = match c {
+            Color::Black => 0, Color::Red => 1, Color::Green => 2, Color::Yellow => 3, Color::Blue => 4, Color::Magenta => 5, Color::Cyan => 6, Color::Gray => 7,
+            Color::DarkGray => 8, Color::LightRed => 9, Color::LightGreen => 10, Color::LightYellow => 11, Color::LightBlue => 12, Color::LightMagenta => 13, Color::LightCyan => 14, Color::White => 15,
+            Color::Indexed(i) if i < 16 => i as usize,
+            other => return other,
+        };
+        theme::depth_fit(rgb(t.palette[i]))
+    };
+    for y in area.y..area.bottom() { for x in area.x..area.right() {
+        if let Some(c) = buf.cell_mut((x, y)) { c.fg = ansi(c.fg); c.bg = ansi(c.bg); }
+    } }
+}
+
+/// With a theme chosen (Settings → Theme), the home screen stands on the theme's background where
+/// the terminal's showed — as the panes the daemon paints and the status line already do. (Its
+/// text is the theme's already: `fg` dims the theme's own foreground.) Without one, as the
+/// terminal has it.
+fn themed_home(buf: &mut Buffer, area: Rect) {
+    if !crate::term_out::theme_chosen() || theme::no_color() { return }
+    // The theme's own background (a pane's surface is lifted off it).
+    let (bg, fg, _) = theme::palette();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let Some(c) = buf.cell_mut((x, y)) else { continue };
+            if matches!(c.bg, Color::Reset) { c.bg = theme::depth_fit(bg) }
+            if matches!(c.fg, Color::Reset) { c.fg = theme::depth_fit(fg) }
+        }
     }
 }
 
@@ -920,6 +1177,28 @@ fn fzf_border(buf: &mut Buffer, body: Rect) {
 /// its scrollbar.
 pub struct PreviewBox { pub rect: Rect, pub shape: String, pub inner: Rect, pub bar_x: u16, pub opts: theme::PreviewWindow }
 
+/// A list's preview inside the settings panel: the same preview fzf's window shows (a harness's
+/// live screen, a machine's notes…), without a box, on the panel's own surface.
+fn panel_preview(buf: &mut Buffer, app: &App, kind: &PickerKind, picker: &Picker, rect: Rect) {
+    let opts = picker.preview_window.clone().unwrap_or_else(|| theme::fzf_opts().preview_window.clone());
+    let inner = Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), rect.height);
+    let pb = PreviewBox { rect, shape: "none".into(), inner, bar_x: rect.right().saturating_sub(1), opts };
+    preview(buf, app, kind, picker, &pb);
+    // What the preview left in the terminal's colours takes the panel's; its scrollbar's column
+    // is left blank (the panel draws no scrollbars: the wheel and the keys scroll it).
+    let base = crate::settings::chrome().base;
+    picker.preview_bar.set(None);
+    for y in rect.y..rect.bottom() { if let Some(c) = buf.cell_mut((pb.bar_x, y)) { c.set_symbol(" ").set_style(base); } }
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                if matches!(c.bg, Color::Reset) { c.bg = base.bg.unwrap_or(Color::Reset) }
+                if matches!(c.fg, Color::Reset) { c.fg = base.fg.unwrap_or(Color::Reset) }
+            }
+        }
+    }
+}
+
 /// A border shape's sides: top, right, bottom, left.
 fn shape_sides(shape: &str) -> (bool, bool, bool, bool) {
     match shape {
@@ -1181,7 +1460,7 @@ fn fzf(buf: &mut Buffer, body: Rect, picker: &mut Picker, kind: &PickerKind, sea
     const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const ASCII_SPINNER: [&str; 8] = ["-", "\\", "|", "/", "-", "\\", "|", "/"];
     let frames: &[&str] = if theme::fzf().unicode { &SPINNER } else { &ASCII_SPINNER };
-    let spinner = frames[if theme::animations() { (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0) / 100) as usize % frames.len() } else { 0 }];
+    let spinner = frames[if reading { theme::animation_frame() % frames.len() } else { 0 }];
     let w = ia.width as i32;
     let put = |pbuf: &mut Buffer, x: i32, y: u16, s: &str, st: Style| { if x >= 0 && x < w && !s.is_empty() { pbuf.set_stringn(ia.x + x as u16, y, s, (w - x) as usize, st); } };
     let bar = |pbuf: &mut Buffer, x: i32, y: u16, n: i32| {
@@ -2592,5 +2871,462 @@ mod fzf_list_tests {
         p.set_rows(vec![Row::new("a", "alpha")]);
         p.set_query("zzz");
         assert!(!screen(&mut p).contains("(empty)"));
+    }
+
+    #[test]
+    fn only_loading_pickers_ask_for_animation_frames() {
+        let mut p = Picker::new("t", "");
+        for busy in [false, true, false] {
+            theme::begin_animation_frame(true);
+            p.busy = busy.then(|| "loading".into());
+            screen(&mut p);
+            assert_eq!(theme::needs_animation_frame(), busy);
+        }
+        theme::begin_animation_frame(false);
+        p.busy = Some("loading".into());
+        screen(&mut p);
+        assert!(!theme::needs_animation_frame());
+    }
+}
+
+#[cfg(test)]
+mod theme_render_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::modal;
+
+    fn app() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (150, 42));
+        app.fleet.local_id = "local".into();
+        app.fleet.machines.push(crate::fleet::Machine {
+            id: "local".into(), name: "studio".into(), local: true, status: "online".into(), reach: crate::fleet::Reach::Ready,
+        });
+        app.homes.insert("local".into(), "/home/dev".into());
+        app
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(150, 42)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..42).map(|y| (0..150).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// `theme` opens the settings panel over the window (not fzf's full-screen list), and a key
+    /// into a section shows that section's options — which a fleet refresh leaves open.
+    #[test]
+    fn theme_draws_the_settings_panel_and_a_refresh_keeps_its_section() {
+        let mut app = app();
+        crate::input::run(&mut app, "theme");
+        let s = screen(&mut app);
+        assert!(s.contains("Appearance") && s.contains("Pane titles") && s.contains("Preview"), "{s}");
+        crate::input::modal_key(&mut app, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE));
+        crate::input::refill(&mut app);
+        let s = screen(&mut app);
+        for v in ["off", "top", "bottom"] { assert!(s.contains(v), "{v} missing after a refresh:\n{s}") }
+        let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+        assert_eq!(picker.theme_in.as_deref(), Some("status"));
+        let _ = modal::theme_sections(&app);
+    }
+
+    /// The launcher with long rows — harnesses in several projects on several machines, whose
+    /// right column (project, machine, age) is wider than the list — stays inside its panel, before
+    /// and after `@` then ⌫; `@` lands on the machine you are on, its preview beside it.
+    #[test]
+    fn long_rows_stay_in_the_panel_and_at_lands_on_this_machine() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in = rt.enter();
+        let mut app = app();
+        app.fleet.machines.push(crate::fleet::Machine { id: "far".into(), name: "Macbooks-MacBook-Pro-5.local".into(), local: false, status: "online".into(), reach: crate::fleet::Reach::Ready });
+        for (i, (name, project, m)) in [("autonomous-harness", "autonomous-harness", "far"), ("grid-mac-lmstudio3", "autonomous-grid", "far"), ("grid-mac-ollama", "autonomous-grid", "local")].iter().enumerate() {
+            let a = crate::fleet::agent_from(m, &serde_json::json!({"id": format!("a{i}"), "name": name, "engine": "claude", "state": "idle", "cwd": format!("/home/dev/{project}"), "project": {"name": project}}), None);
+            app.fleet.agents.insert((m.to_string(), format!("a{i}")), a);
+        }
+        let outside = |app: &mut App| -> Vec<String> {
+            let s = screen(app);
+            let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+            let r = picker.screen_area.get();
+            s.lines().enumerate().filter(|(y, _)| *y as u16 >= r.y && (*y as u16) < r.bottom())
+                .filter_map(|(_, l)| { let left: String = l.chars().take(r.x as usize).collect(); let right: String = l.chars().skip(r.right() as usize).collect(); (!left.trim().is_empty() || !right.trim().is_empty()).then(|| l.to_string()) })
+                .collect()
+        };
+        crate::commands::execute_bound(&mut app, "choose-tree -Zs");
+        assert!(outside(&mut app).is_empty(), "{:?}", outside(&mut app));
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE));
+        assert!(outside(&mut app).is_empty());
+        {
+            let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+            assert_eq!(picker.current_id().as_deref(), Some("local"), "on the machine you are on");
+            assert!(picker.preview_area.get().is_some());
+        }
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(outside(&mut app).is_empty(), "{:?}", outside(&mut app));
+    }
+
+    /// A chosen theme is the panes' too: the sixteen colours a program names take the theme's
+    /// palette (red is Dracula's red), and a colour given exactly stays as it was.
+    #[test]
+    fn a_theme_gives_the_panes_its_sixteen_colours() {
+        let t = crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == "Dracula").unwrap();
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_fg(Color::Red);
+        buf[(1, 0)].set_fg(Color::Indexed(12)).set_bg(Color::Black);
+        buf[(2, 0)].set_fg(Color::Rgb(1, 2, 3));
+        theme_ansi(&mut buf, area, t);
+        assert_eq!(buf[(0, 0)].fg, theme::depth_fit(rgb(t.palette[1])));
+        assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].bg), (theme::depth_fit(rgb(t.palette[12])), theme::depth_fit(rgb(t.palette[0]))));
+        assert_eq!(buf[(2, 0)].fg, Color::Rgb(1, 2, 3));
+    }
+
+    /// The home screen follows a chosen theme: the wordmark in its accent, the screen on its
+    /// background; with no theme, the terminal's own background stays.
+    #[test]
+    fn the_home_screen_follows_the_theme() {
+        let _colours = crate::term_out::colours_lock();
+        let mut app = app();
+        let bg_at = |app: &mut App| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(150, 42)).unwrap();
+            term.draw(|f| draw(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (buf[(1, 1)].bg, (0..42).flat_map(|y| (0..150).map(move |x| (x, y))).find(|p| buf[*p].symbol() == "█").map(|p| buf[p].fg))
+        };
+        let (plain, _) = bg_at(&mut app);
+        assert_eq!(plain, Color::Reset, "no theme: the terminal's own background");
+        let _ = app.set_look("theme", "Adwaita Dark");
+        let t = crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == "Adwaita Dark").unwrap();
+        let (themed, logo) = bg_at(&mut app);
+        assert_eq!(themed, theme::depth_fit(Color::Rgb(t.background[0], t.background[1], t.background[2])));
+        assert_eq!(logo, Some(theme::depth_fit(theme::accent())), "the wordmark in the theme's accent");
+        let _ = app.set_look("theme", "");
+    }
+
+    /// C-b s opens the launcher in the panel (over the window, not full screen), with the scopes
+    /// it switches between; typing `@` switches to the machines in the same place, with the
+    /// row's preview beside the list; `>` to the commands.
+    #[test]
+    fn the_launcher_and_its_scopes_are_panels_with_previews() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // (Switching lists asks machines for theirs, in the background.)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in = rt.enter();
+        let mut app = app();
+        crate::commands::execute_bound(&mut app, "choose-tree -Zs");
+        let s = screen(&mut app);
+        assert!(s.contains("Harnesses") && s.contains("> commands") && s.contains("@ machines") && s.contains("? help"), "{s}");
+        let (at, kind0) = match &app.modal { Some(Modal::Picker { picker, kind }) => (picker.screen_area.get(), std::mem::discriminant(kind)), _ => panic!("no panel") };
+        assert!(at.width < 150, "a panel, not the whole screen");
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE));
+        let s = screen(&mut app);
+        let Some(Modal::Picker { picker, kind }) = &app.modal else { panic!("closed") };
+        assert!(matches!(kind, PickerKind::Machines) && std::mem::discriminant(kind) != kind0);
+        assert_eq!(picker.screen_area.get(), at, "same place");
+        assert!(s.contains("Machines") && s.contains("studio"), "{s}");
+        assert!(picker.preview_area.get().is_some(), "the machine's preview beside the list");
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        let _ = screen(&mut app);
+        let Some(Modal::Picker { kind, .. }) = &app.modal else { panic!("closed") };
+        assert!(matches!(kind, PickerKind::Palette));
+    }
+
+    /// Typing in a section puts the cursor on the best match, not where the current value was;
+    /// hn's own commands show the key that runs them.
+    #[test]
+    fn typing_goes_to_the_best_match_and_commands_show_their_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _colours = crate::term_out::colours_lock();
+        let mut app = app();
+        let _ = app.set_look("theme", "Aizen Dark");
+        crate::input::run(&mut app, "theme");
+        // (Theme is the third section: Pane titles, Focus, Theme.)
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right] { crate::input::modal_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE)) }
+        {
+            let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+            assert_eq!(picker.current_id().as_deref(), Some("theme:Aizen Dark"), "a section opens on the value in use");
+        }
+        for c in "adwaita".chars() { crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)) }
+        let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+        assert_eq!(picker.current_id().as_deref(), Some("theme:Adwaita"));
+        let _ = app.set_look("theme", "");
+        let rows = modal::command_rows(&app);
+        let key = |id: &str| rows.iter().find(|r| r.id == id).map(|r| r.right.clone()).unwrap_or_default();
+        assert_eq!(key("cmd:new"), "C-b N");
+        assert_eq!(key("cmd:theme"), "C-b Enter");
+        assert_eq!(key("cmd:split-right"), "C-b %");
+    }
+
+    /// C-b Enter lists commands in the same panel; typing narrows it, Enter on Settings turns the
+    /// panel into the settings (same place), and Esc steps back to the commands. C-b Space stays
+    /// tmux's next-layout.
+    #[test]
+    fn enter_opens_commands_and_settings_open_in_place() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        let bound = |code: KeyCode| app.keymap.prefix_table.iter().find(|b| b.chord.code == code).map(|b| b.command.clone());
+        assert_eq!(bound(KeyCode::Enter).as_deref(), Some("choose-command"));
+        assert_eq!(bound(KeyCode::Char(' ')).as_deref(), Some("next-layout"));
+        crate::commands::execute_bound(&mut app, "choose-command");
+        let s = screen(&mut app);
+        assert!(s.contains("Commands") && s.contains("New harness"), "{s}");
+        let at = match &app.modal { Some(Modal::Picker { picker, .. }) => picker.screen_area.get(), _ => panic!("no panel") };
+        // (A few letters are enough: the best match comes first.)
+        for c in "appe".chars() { crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)) }
+        let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+        assert_eq!(picker.current_id().as_deref(), Some("cmd:theme"), "Appearance ranks first for `appe`");
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let s = screen(&mut app);
+        assert!(s.contains("Pane titles") && s.contains("Preview"), "{s}");
+        let Some(Modal::Picker { kind, picker }) = &app.modal else { panic!("closed") };
+        assert!(matches!(kind, PickerKind::Theme) && picker.from_commands);
+        // (The commands a palette; Appearance, with its preview, the large panel around it.)
+        let large = picker.screen_area.get();
+        assert!(large.width > at.width && large.contains(at.as_position()), "{at:?} in {large:?}");
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let s = screen(&mut app);
+        let Some(Modal::Picker { kind, picker }) = &app.modal else { panic!("Esc closed it") };
+        assert!(matches!(kind, PickerKind::Commands), "{s}");
+        assert_eq!(picker.current_id().as_deref(), Some("cmd:theme"));
+        assert_eq!(picker.screen_area.get(), at, "back in the palette's place");
+    }
+
+    // ── tabs ──
+
+    /// The launcher's tab row: ↓ past the list's last row goes onto it; there ←/→ open the next
+    /// tab (round from the last to the first), ↑ goes back to the list, and a key typed searches
+    /// the tab chosen. The panel keeps its size from tab to tab.
+    #[test]
+    fn down_past_the_list_goes_onto_the_tabs_and_arrows_switch_them() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // (A tab opened fetches what it lists, as it does when typed.)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in = rt.enter();
+        let mut app = app();
+        let key = |app: &mut App, code: KeyCode| crate::input::modal_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+        let now =|app: &App| match &app.modal { Some(Modal::Picker { kind, picker }) => (kind.clone(), picker.on_tabs, picker.query.clone()), _ => panic!("closed") };
+        crate::input::run(&mut app, "open");
+        screen(&mut app);
+        let (rows, at) = match &app.modal { Some(Modal::Picker { picker, .. }) => (picker.visible.len(), picker.screen_area.get()), _ => panic!("no panel") };
+        // (As many ↓ as rows and one more: past the last row, onto the tabs; another stays there.)
+        for _ in 0..=rows + 1 { key(&mut app, KeyCode::Down) }
+        assert!(now(&app).1, "on the tabs");
+        let s = screen(&mut app);
+        assert!(s.contains("← → switch") && s.contains("harnesses"), "{s}");
+        key(&mut app, KeyCode::Right);
+        let (kind, tabs, query) = now(&app);
+        assert!(matches!(kind, PickerKind::Palette) && tabs && query == ">", "{kind:?} {query}");
+        key(&mut app, KeyCode::Right); key(&mut app, KeyCode::Right);
+        assert!(matches!(now(&app).0, PickerKind::Projects));
+        for _ in 0..3 { key(&mut app, KeyCode::Left) }
+        assert!(matches!(now(&app).0, PickerKind::Open { .. }) && now(&app).2.is_empty());
+        key(&mut app, KeyCode::Left);
+        assert!(matches!(now(&app).0, PickerKind::Help), "round to the last tab");
+        screen(&mut app);
+        assert_eq!(match &app.modal { Some(Modal::Picker { picker, .. }) => picker.screen_area.get(), _ => panic!() }, at, "the same size on every tab");
+        key(&mut app, KeyCode::Right);
+        key(&mut app, KeyCode::Up);
+        assert!(!now(&app).1, "↑ back to the list");
+        // Typed on the tabs: a search in the tab chosen.
+        for _ in 0..=rows + 1 { key(&mut app, KeyCode::Down) }
+        for _ in 0..3 { key(&mut app, KeyCode::Right) }
+        key(&mut app, KeyCode::Char('w'));
+        let (kind, tabs, query) = now(&app);
+        assert!(matches!(kind, PickerKind::Projects) && !tabs && query == "#w", "{kind:?} {query}");
+    }
+
+    // ── mouse ──
+
+    /// The mouse over a panel's list: the wheel scrolls the list and the chosen row stays chosen;
+    /// the row under the mouse is the one chosen; a key brings the list back to it.
+    #[test]
+    fn the_wheel_scrolls_a_panel_and_the_mouse_over_a_row_chooses_it() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+        let mut app = app();
+        crate::commands::execute_bound(&mut app, "choose-command");
+        screen(&mut app);
+        let state = |app: &App| match &app.modal { Some(Modal::Picker { picker, .. }) => (picker.cursor, picker.scroll, picker.list_area.get(), picker.row_at.clone()), _ => panic!("closed") };
+        let (cursor, scroll, list, _) = state(&app);
+        let mouse = |app: &mut App, kind: MouseEventKind, row: u16| crate::input::handle(app, Event::Mouse(MouseEvent { kind, column: list.x + 4, row, modifiers: KeyModifiers::NONE }));
+        assert!(app.wants_motion(), "a panel asks for the mouse's moves");
+        for _ in 0..3 { mouse(&mut app, MouseEventKind::ScrollDown, list.y + 2) }
+        screen(&mut app);
+        let (now, scrolled, _, rows) = state(&app);
+        assert_eq!(now, cursor, "the wheel does not choose");
+        assert!(scrolled > scroll, "the list scrolled: {scroll} → {scrolled}");
+        // Over a row: that row is chosen, and the list stays where the wheel left it.
+        let (y, vi) = rows[3];
+        mouse(&mut app, MouseEventKind::Moved, y);
+        screen(&mut app);
+        let (now, still, _, _) = state(&app);
+        assert_eq!((now, still), (vi, scrolled), "the row under the mouse, the list where it was");
+        // A key: the list follows the cursor again.
+        for _ in 0..40 { crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)) }
+        screen(&mut app);
+        assert_eq!(state(&app).1, 0, "back at the top with the cursor");
+    }
+
+    /// One click on a panel's row runs it (the mouse over it chose it already): "tmux commands…"
+    /// opens tmux's, grouped, in the same panel; Esc comes back to hn's, on that row.
+    #[test]
+    fn one_click_runs_a_row_and_tmux_commands_open_behind_their_row() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app();
+        crate::commands::execute_bound(&mut app, "choose-command");
+        screen(&mut app);
+        let picker = |app: &App| match &app.modal { Some(Modal::Picker { kind, picker }) => (kind.clone(), picker.theme_in.clone(), picker.current_id(), picker.row_at.clone(), picker.list_area.get()), _ => panic!("closed") };
+        // To the row, by keys (it may be below the fold), then one click on it.
+        for c in "tmux".chars() { crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)) }
+        screen(&mut app);
+        let (_, _, at, rows, list) = picker(&app);
+        assert_eq!(at.as_deref(), Some("cmd:tmux-commands"), "the row first for `tmux`");
+        let y = rows.iter().find(|(_, vi)| match &app.modal { Some(Modal::Picker { picker, .. }) => picker.rows[picker.visible[*vi].0].id == "cmd:tmux-commands", _ => false }).unwrap().0;
+        crate::input::handle(&mut app, Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: list.x + 4, row: y, modifiers: KeyModifiers::NONE }));
+        let s = screen(&mut app);
+        let (kind, inside, _, _, _) = picker(&app);
+        assert!(matches!(kind, PickerKind::Commands) && inside.as_deref() == Some("tmux"), "one click opened it");
+        assert!(s.contains("tmux commands") && s.contains("tmux · Windows") && !s.contains("New harness"), "{s}");
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let (kind, inside, at, _, _) = picker(&app);
+        assert!(matches!(kind, PickerKind::Commands) && inside.is_none() && at.as_deref() == Some("cmd:tmux-commands"), "Esc back to hn's, on its row");
+    }
+
+    /// A harness moved onto a model: the model list closes, the status line says it.
+    #[test]
+    fn a_model_switched_closes_the_model_list() {
+        let mut app = app();
+        crate::input::run(&mut app, "models");
+        assert!(matches!(app.modal, Some(Modal::Picker { kind: PickerKind::Models, .. })));
+        crate::models::on_retarget(&mut app, "qwen3-coder", false, Ok(serde_json::json!({})));
+        assert!(app.modal.is_none(), "closed");
+        assert!(app.toast.as_ref().is_some_and(|t| format!("{t:?}").contains("qwen3-coder")), "{:?}", app.toast);
+    }
+
+    // ── keys ──
+
+    /// A plain-key prefix (`` ` ``, Enter) is the prefix over the panes, and only there: in a list
+    /// or a line being typed, the key is the list's (typed into the search, Enter chooses). A prefix
+    /// with a modifier works over the lists, as before.
+    #[test]
+    fn a_plain_key_prefix_leaves_the_lists_their_keys() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.keymap.prefix = crate::keys::parse("`").unwrap();
+        let key = |app: &mut App, code: KeyCode, mods: KeyModifiers| crate::input::handle(app, Event::Key(KeyEvent::new(code, mods)));
+        key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+        assert!(app.prefix, "over the panes, ` is the prefix");
+        app.prefix = false;
+        crate::commands::execute_bound(&mut app, "choose-command");
+        key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+        let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+        assert!(!app.prefix && picker.query == "`", "in a list, ` is typed: {:?}", picker.query);
+        // A prefix with a modifier still works over a list.
+        app.keymap.prefix = crate::keys::parse("C-a").unwrap();
+        key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert!(app.prefix, "C-a over a list is the prefix");
+    }
+
+    /// Keybinds from the command list: its own panel in the same place — no preview, the
+    /// prefix first and fixed — where Enter on a command waits for its key, a key in use is
+    /// replaced on its second press, and Esc steps back to the commands.
+    #[test]
+    fn keybinds_open_from_commands_change_a_key_and_esc_goes_back() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        // (As the client takes a key: a key being waited for goes there first.)
+        let key = |app: &mut App, code: KeyCode| {
+            let k = KeyEvent::new(code, KeyModifiers::NONE);
+            if app.capturing.is_some() { crate::settings::captured(app, k) } else { crate::input::modal_key(app, k) }
+        };
+        let said = |app: &App| match &app.modal { Some(Modal::Picker { picker, .. }) => picker.flash.as_ref().map(|f| f.0.clone()).unwrap_or_default(), _ => panic!("closed") };
+        crate::commands::execute_bound(&mut app, "choose-command");
+        screen(&mut app);
+        let at = match &app.modal { Some(Modal::Picker { picker, .. }) => picker.screen_area.get(), _ => panic!("no panel") };
+        for c in "keyb".chars() { key(&mut app, KeyCode::Char(c)) }
+        let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
+        assert_eq!(picker.current_id().as_deref(), Some("cmd:keybinds"));
+        key(&mut app, KeyCode::Enter);
+        let s = screen(&mut app);
+        let Some(Modal::Picker { kind, picker }) = &app.modal else { panic!("closed") };
+        assert!(matches!(kind, PickerKind::Keybinds) && picker.from_commands);
+        assert_eq!(picker.screen_area.get(), at, "the panel stayed where it was");
+        assert!(s.contains("Keybinds") && s.contains("Prefix") && s.contains("Second prefix") && s.contains("Split right") && s.contains("Navigation"), "{s}");
+        assert!(!s.contains("Preview") && !s.contains("Appearance"), "{s}");
+        // The prefix: Enter waits for the new one; Esc leaves it.
+        assert_eq!(picker.current_id().as_deref(), Some("prefix"));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.capturing.is_some() && said(&app).starts_with("Prefix: press"), "{}", said(&app));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.capturing.is_none() && said(&app) == "Unchanged", "{}", said(&app));
+        // Split right onto n (Next swarm's): named first, replaced on the second press.
+        if let Some(Modal::Picker { picker, .. }) = &mut app.modal { let i = crate::modal::KEYBINDS.iter().position(|k| k.0 == "Split right").unwrap(); picker.select(&format!("key:{i}")) }
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(said(&app), "Split right: press a key · Esc cancels");
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(said(&app), "C-b n is Next swarm — n again to replace · Esc to keep");
+        key(&mut app, KeyCode::Char('n'));
+        assert!(said(&app).starts_with("Split right: C-b n"), "{}", said(&app));
+        let s = screen(&mut app);
+        assert!(s.lines().any(|l| l.contains("Split right") && l.contains("C-b n")), "the row shows its key now:\n{s}");
+        // Esc: back to the commands, the cursor on Keybinds.
+        key(&mut app, KeyCode::Esc);
+        let Some(Modal::Picker { kind, picker }) = &app.modal else { panic!("Esc closed it") };
+        assert!(matches!(kind, PickerKind::Commands));
+        assert_eq!(picker.current_id().as_deref(), Some("cmd:keybinds"));
+        // Alt-k on a command in the list: the same — a key in use is named first.
+        if let Some(Modal::Picker { picker, .. }) = &mut app.modal { picker.select("cmd:split-down") }
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+        assert!(app.capturing.is_some());
+        key(&mut app, KeyCode::Char('n'));
+        assert!(said(&app).starts_with("C-b n is Split right — n again"), "{}", said(&app));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(said(&app), "Unchanged");
+        assert_eq!(app.keymap.prefix_command(&crate::keys::parse("n").unwrap()).map(|b| b.command.as_str()), Some("split-window -h"));
+        // Opened by name (not from the list), Esc closes it.
+        app.modal = None;
+        crate::input::run(&mut app, "keybinds");
+        assert!(matches!(&app.modal, Some(Modal::Picker { kind: PickerKind::Keybinds, picker }) if !picker.from_commands));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+    }
+}
+
+#[cfg(test)]
+mod which_key_tests {
+    use super::*;
+    use crate::app::App;
+
+    fn app() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (150, 42));
+        app.fleet.local_id = "local".into();
+        app.fleet.machines.push(crate::fleet::Machine {
+            id: "local".into(), name: "studio".into(), local: true, status: "online".into(), reach: crate::fleet::Reach::Ready,
+        });
+        app.homes.insert("local".into(), "/home/dev".into());
+        app
+    }
+
+    /// The shortcut box (the prefix hint) must not panic and must draw on the themed pane surface,
+    /// so it matches hn's chrome instead of floating in the terminal's default colours.
+    #[test]
+    fn shortcut_box_uses_the_themed_surface() {
+        let _colours = crate::term_out::colours_lock();
+        let mut app = app();
+        app.prefix = true;
+        app.prefix_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        for w in [16, 40, 80, 150] {
+            for h in [4, 10, 24] {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                which_key(&mut buf, &app, area);
+                // Its panel cells take the pane surface colour.
+                let surface = theme::pane_palette().surface;
+                let mut any = false;
+                for y in area.y..area.y + area.height { for x in area.x..area.x + area.width { if buf[(x, y)].style().bg == Some(surface) { any = true } } }
+                assert!(any, "the shortcut box should draw on the themed pane surface ({w}x{h})");
+            }
+        }
     }
 }

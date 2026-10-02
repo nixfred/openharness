@@ -11,130 +11,133 @@ void main() {
     'Open Harness sorts by activity as it opened, and keeps that order while open',
     (tester) async {
       final app = createApp();
-      addTearDown(app.dispose);
-      app.machineStates['m']!.agents = [
-        for (final (id, hour) in [
-          ('a1', 10),
-          ('a10', 12),
-          ('a11', 11),
-          ('a12', null),
-        ])
-          Agent(
-            id: id,
-            sessionId: 'session-$id',
-            name: 'Agent ${id.substring(1)}',
-            engine: 'codex',
-            terminalAvailable: true,
-            lastActivityAt: hour == null
-                ? null
-                : DateTime.utc(2026, 9, 23, hour),
-          ),
-      ];
-      final recent = [
-        agentDestinationId('m', 'a1'),
-        agentDestinationId('m', 'a12'),
-        agentDestinationId('m', 'a10'),
-      ];
-      final search = SwarmSearchController(
-        app,
-        recent,
-        adding: true,
-        offersCreate: true,
-        activityFirst: true,
-        placement: HarnessPlacement.newTab,
-      );
-      addTearDown(search.dispose);
-      expect(search.setupLayout, isTrue);
-      expect(search.rows.first.isCreate, isTrue);
-      expect(search.rows.skip(1).map((row) => row.agentId), [
-        'a10',
-        'a11',
-        'a1',
-        'a12',
-      ]);
-      search.setQuery('Agent 1');
-      // The harness named exactly that leads; the rest keep activity order.
-      expect(
-        search.rows.where((row) => !row.isCreate).map((row) => row.agentId),
-        ['a1', 'a10', 'a11', 'a12'],
-      );
+      try {
+        app.machineStates['m']!.agents = [
+          for (final (id, hour) in [
+            ('a1', 10),
+            ('a10', 12),
+            ('a11', 11),
+            ('a12', null),
+          ])
+            Agent(
+              id: id,
+              sessionId: 'session-$id',
+              name: 'Agent ${id.substring(1)}',
+              engine: 'codex',
+              terminalAvailable: true,
+              lastActivityAt: hour == null
+                  ? null
+                  : DateTime.utc(2026, 9, 23, hour),
+            ),
+        ];
+        final recent = [
+          agentDestinationId('m', 'a1'),
+          agentDestinationId('m', 'a12'),
+          agentDestinationId('m', 'a10'),
+        ];
+        final search = SwarmSearchController(
+          app,
+          recent,
+          adding: true,
+          offersCreate: true,
+          activityFirst: true,
+          placement: HarnessPlacement.newTab,
+        );
+        addTearDown(search.dispose);
+        expect(search.setupLayout, isTrue);
+        expect(search.rows.first.isCreate, isTrue);
+        expect(search.rows.skip(1).map((row) => row.agentId), [
+          'a10',
+          'a11',
+          'a1',
+          'a12',
+        ]);
+        search.setQuery('Agent 1');
+        // The harness named exactly that leads; the rest keep activity order.
+        expect(
+          search.rows.where((row) => !row.isCreate).map((row) => row.agentId),
+          ['a1', 'a10', 'a11', 'a12'],
+        );
 
-      final ordinary = SwarmSearchController(app, recent, adding: true);
-      addTearDown(ordinary.dispose);
-      ordinary.setQuery('Agent 1');
-      expect(ordinary.setupLayout, isFalse);
-      expect(ordinary.rows.first.agentId, 'a1');
+        final ordinary = SwarmSearchController(app, recent, adding: true);
+        addTearDown(ordinary.dispose);
+        ordinary.setQuery('Agent 1');
+        expect(ordinary.setupLayout, isFalse);
+        expect(ordinary.rows.first.agentId, 'a1');
 
-      final selected = search.selected!.id;
-      await app.handleEventForTest('m', {
-        'type': 'agent_synced',
-        'payload': {
-          'agent': {
-            'id': 'a1',
-            'sessionId': 'session-a1',
-            'name': 'Agent 1',
-            'engine': 'codex',
-            'terminal': {'available': true},
-            'updatedAt': '2026-09-23T12:00:30Z',
-          },
-        },
-      });
-      // Agent 1 just worked, but the open list does not move under the cursor.
-      expect(search.rows.first.isCreate, isTrue);
-      expect(search.rows.skip(1).map((row) => row.agentId), [
-        'a1',
-        'a10',
-        'a11',
-        'a12',
-      ]);
-      expect(search.selected!.id, selected);
-      search.setQuery('');
-      expect(search.rows.skip(1).map((row) => row.agentId), [
-        'a10',
-        'a11',
-        'a1',
-        'a12',
-      ]);
-      // The next opening reads activity afresh.
-      final reopened = SwarmSearchController(
-        app,
-        recent,
-        adding: true,
-        offersCreate: true,
-        activityFirst: true,
-        placement: HarnessPlacement.newTab,
-      );
-      addTearDown(reopened.dispose);
-      expect(reopened.rows.skip(1).map((row) => row.agentId), [
-        'a1',
-        'a10',
-        'a11',
-        'a12',
-      ]);
-
-      search.setQuery('retry-safe');
-      expect(search.rows.every((row) => row.isCreate), isTrue);
-      Future<void> response(String id) async {
+        final selected = search.selected!.id;
         await app.handleEventForTest('m', {
-          'type': 'text_delta',
+          'type': 'agent_synced',
           'payload': {
-            'agentId': id,
-            'sessionId': 'session-$id',
-            'content': 'The operation is now retry-safe.',
+            'agent': {
+              'id': 'a1',
+              'sessionId': 'session-a1',
+              'name': 'Agent 1',
+              'engine': 'codex',
+              'terminal': {'available': true},
+              'updatedAt': '2026-09-23T12:00:30Z',
+            },
           },
         });
-        await tester.pump(const Duration(milliseconds: 80));
-      }
+        // Agent 1 just worked, but the open list does not move under the cursor.
+        expect(search.rows.first.isCreate, isTrue);
+        expect(search.rows.skip(1).map((row) => row.agentId), [
+          'a1',
+          'a10',
+          'a11',
+          'a12',
+        ]);
+        expect(search.selected!.id, selected);
+        search.setQuery('');
+        expect(search.rows.skip(1).map((row) => row.agentId), [
+          'a10',
+          'a11',
+          'a1',
+          'a12',
+        ]);
+        // The next opening reads activity afresh.
+        final reopened = SwarmSearchController(
+          app,
+          recent,
+          adding: true,
+          offersCreate: true,
+          activityFirst: true,
+          placement: HarnessPlacement.newTab,
+        );
+        addTearDown(reopened.dispose);
+        expect(reopened.rows.skip(1).map((row) => row.agentId), [
+          'a1',
+          'a10',
+          'a11',
+          'a12',
+        ]);
 
-      await response('a11');
-      search.move(1);
-      expect(search.selected!.agentId, 'a11');
-      await response('a1');
-      // Found now too, in the order this opening listed them.
-      expect(search.rows.skip(1).map((row) => row.agentId), ['a11', 'a1']);
-      expect(search.selected!.agentId, 'a11');
-      search.setQuery('>');
-      expect(search.setupLayout, isTrue);
+        search.setQuery('retry-safe');
+        expect(search.rows.every((row) => row.isCreate), isTrue);
+        Future<void> response(String id) async {
+          await app.handleEventForTest('m', {
+            'type': 'text_delta',
+            'payload': {
+              'agentId': id,
+              'sessionId': 'session-$id',
+              'content': 'The operation is now retry-safe.',
+            },
+          });
+          await tester.pump(const Duration(milliseconds: 80));
+        }
+
+        await response('a11');
+        search.move(1);
+        expect(search.selected!.agentId, 'a11');
+        await response('a1');
+        // Found now too, in the order this opening listed them.
+        expect(search.rows.skip(1).map((row) => row.agentId), ['a11', 'a1']);
+        expect(search.selected!.agentId, 'a11');
+        search.setQuery('>');
+        expect(search.setupLayout, isTrue);
+      } finally {
+        app.dispose();
+      }
     },
   );
 

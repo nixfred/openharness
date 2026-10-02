@@ -52,7 +52,7 @@ void config_save_voicelang(const char *lang)
 uint8_t config_load_brightness(void)
 {
     nvs_handle_t h;
-    uint8_t v = 255;    // default 100%: a dial nobody has dimmed is at full (owner, 2026-09-30)
+    uint8_t v = 204;    // default 80%: a dial nobody has dimmed (owner, 2026-10-01; was 100%)
     if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_u8(h, "bright", &v);   // leaves v at default if key is absent
         nvs_close(h);

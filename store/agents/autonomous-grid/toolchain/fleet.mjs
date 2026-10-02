@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createLog, verifyEngine, verifyModel, verifyRelay } from '../lib/verify.mjs';
+import { createLog, verifyEngine, verifyModel, verifyRelay, relayOnlyRefusal } from '../lib/verify.mjs';
 import { join, resolve } from 'node:path';
 import { atomicJson, DEFAULT_CONFIG, execute, gridJson, harnessNameFor, nameJoin, readConfig, runTracked } from '../lib/fleet.mjs';
 import { createCollector } from '../lib/telemetry.mjs';
@@ -137,6 +137,12 @@ try {
     }
     const usage = 'Use: fleet verify --at http://HOST:PORT/v1 --model ID [--kind ENGINE] [--no-tools] [--grid GRID --alias NAME], or --grid GRID --alias NAME alone for an engine on another machine';
     if (Boolean(options.grid) !== Boolean(options.alias) || (options.at ? !options.model : !options.grid)) throw new Error(usage);
+    if (!options.at) {
+      const config = await readConfig(workspace);
+      const listed = await gridJson({ id: 'local', transport: 'local' }, config.mode, ['models', options.grid], { timeoutMs: 30_000 });
+      const refusal = listed.ok ? relayOnlyRefusal(listed.value, options.alias, config.machines.find(m => m.transport === 'local')?.name) : null;
+      if (refusal) throw new Error(refusal);
+    }
     const log = createLog();
     const engine = options.at
       ? await verifyEngine({ url: options.at, model: options.model, kind: options.kind, tools: options.tools, log })
