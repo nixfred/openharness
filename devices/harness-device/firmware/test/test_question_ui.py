@@ -74,6 +74,8 @@ static void change(void) {}
 static void question_chrome(ht_scene_t *f) { (void)f; } // nixfred ring: proved in test_nixfred_ring.c
 static void input_cancel(void) { s.pressed=-1; }
 static void view(view_t v) { input_cancel(); s.view=v; s.offset=0; }
+// nixfred slice 6: an answer's receipt hands on to the answer chain (exercised in test_touch_ui).
+static int chained; static void nf_chain_after(const char *answered) { (void)answered; chained++; }
 static void voice_close(void) { s.voice_open=s.voice_waiting=false; }
 static void display_lock(void) {}
 static void display_unlock(void) {}

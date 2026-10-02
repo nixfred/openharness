@@ -144,6 +144,23 @@ describe('Nixfred wiring', () => {
     expect(bare).toEqual({ t: 'nixfred.fleet', clock: 14 * 3600 + 7 * 60 + 30, lanes: [] })
   })
 
+  it('dialFleet names the agents whose open question is a permission (perm), and omits it when none', () => {
+    const now = new Date(2026, 9, 1, 9, 0, 0).getTime()
+    const frame = dialFleet({ machineId: 'm1', alerts: [], agents: [
+      { agentId: 'a', state: 'permission' }, { agentId: 'b', state: 'waiting' }, { agentId: 'c', state: 'permission' }, { agentId: 'd', state: 'working' },
+    ] }, null, now)
+    expect(frame.perm).toEqual(['a', 'c'])
+    const many = dialFleet({ machineId: 'm1', alerts: [], agents: Array.from({ length: 12 }, (_, i) => ({ agentId: `p${i}`, state: 'permission' })) }, null, now)
+    expect(many.perm).toHaveLength(8)
+    expect('perm' in dialFleet({ machineId: 'm1', alerts: [], agents: [{ agentId: 'b', state: 'waiting' }] }, null, now)).toBe(false)
+  })
+
+  it('a permission question puts its agent in the fleet frame the dial receives', () => {
+    nix.attention.question('a', true, 'run the migration?')
+    const fleet = dial.filter((m) => m.t === 'nixfred.fleet').pop() as Record<string, unknown> | undefined
+    expect(fleet?.perm).toEqual(['a'])
+  })
+
   it('sends nixfred.fleet to the dial when attention changes', () => {
     nix.attention.turnStarted('a', 'fix login')
     expect(dial.some((m) => m.t === 'nixfred.fleet')).toBe(true)

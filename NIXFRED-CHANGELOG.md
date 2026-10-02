@@ -5,6 +5,83 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware: smart navigation, a shade that never talks, 2026-10-01 (branch nixfred/firmware-smartnav)
+
+Sits on nixfred/main 98da920e. Firmware `0.0.86-nixfred.6`, ESP-IDF v5.5.0, 1,737,115 B against an 8 MB slot
+(79% free), DIRAM 45.33% used (+0.12 points; the new state lives in the PSRAM struct).
+
+- Fred: "It is very hard to get to the menu sometimes and starts talking when I'm trying to go to the
+  menu." And: "When I click on a machine it seems to go to my workload list."
+- ROOT CAUSE of "starts talking": slice 4 exempted the home face's footer controls from the hold so a slow
+  press still acted on release, for up to 1800 ms. The microphone's target is the bottom-centre band of the
+  glass (x 143..323, y 353 to the bottom edge), exactly where a thumb rests on a round device. A hold there
+  showed no ring and opened no hub; on release (anything under 1.8 s) it started voice, and the next tap
+  ("finish voice") sent the clip. Evidence: the daemon journal on fw .5 logged twelve voice uploads of 0.1
+  to 1.2 s between 22:03 and 22:06, two of which reached an agent as turns ("Sorry. Yep.", "Hello?").
+  The old test even pinned it ("the microphone footer still starts speech on a slow press").
+- ROOT CAUSE of "goes to my workload list": a tile pressed slowly ran into the hold, which on fw .4 opened
+  the session list (on .5 the hub). Machine selection itself never changes view (the ack only moves the
+  check mark); nothing on the host does either.
+- Gestures before: tap; hold 650 ms still (ring from 200 ms) opens the hub except on the footers, voice,
+  draft, form, selection, answer review, transfer; footer slow press up to 1800 ms acts on release (the
+  mic STARTS VOICE); creature middle tap starts voice (Focus: nothing); vertical swipes scroll or page,
+  pull down on Focus opens the inbox; horizontal swipes switch agents on the face, go home from lists,
+  step back in questions; BOOT tap aborts voice or stops the turn or goes home, BOOT hold 800 ms toggles the
+  screen; PWR tap toggles the screen. The CST9217 driver reads one point (no multi-touch).
+- Gestures after:
+  - THE SHADE: pull down from the top rim (a contact starting in the top 60 px, 14 px of mostly vertical
+    travel engages it, 96 px opens). Opens the hub from the faces, the lists, plans, machines, settings and
+    a question or permission (never answering it). Not armed where something is being composed or spoken.
+    It owns the contact once engaged: nothing scrolls, pages or presses under it, and an early release
+    opens nothing. The notch follows the finger and an arc spreads from 12 o'clock; full pull lights a glow.
+  - THE NOTCH: a small pill at 12 o'clock on Focus's home and agent faces, the shade's affordance.
+  - THE HOLD is armed on the footers now, the microphone included: a press under 650 ms still presses, at
+    650 ms the hub opens and the contact is consumed, so a hold NEVER starts voice. Not armed on the
+    workspace slider (its own press-and-slide) or on a machine tile.
+  - BACK: a swipe in from the left rim (start x < 44, 90 px across) steps back along an 8-deep history of
+    views; on a list a plain swipe right is back too (left is still home). The hub is never a step of its
+    own: a wedge's screen goes back to where the hub was opened.
+  - Machine tile: a tap or a slow press (under 1.8 s, under 24 px of drift) selects it and stays on
+    machines; the acknowledgement shows "gus selected" with this machine's load. Never the session list.
+  - BOOT and PWR unchanged, except BOOT also stops the answer chain.
+- SUGGESTED NEXT: the hub's centre is one action from live state, in priority order: a permission waiting
+  (red, "Answer <agent>" with the question), a question waiting (yellow), a finished agent with an unread
+  recap (green, opens its face), an unread inbox, then with nothing urgent the plan with the most banked
+  share ("Use Kimi", "+36% banked"). Otherwise "close". One tap does it; it only opens, it never answers.
+- WEDGE ORDER: urgent wedges (sessions with someone waiting, an unread inbox) move to the front in their
+  base order; otherwise the positions never move. Re-ranking by recency each use would move wedges under
+  the hand, so the wedge used last carries a small dot instead (remembered across hub openings).
+- ANSWER CHAIN: when a question or permission answered on the dial gets its receipt, a toast says
+  "next: <agent>" / "tap to stay" for 1.6 s, then that agent's question opens. A tap anywhere (or BOOT)
+  stops it. With nobody left, the view steps back to where the question was opened from.
+- NOTIFICATION CARD: a tap opens that agent's face (its recap), not the inbox list; the inbox when the agent
+  is not on this dial.
+- Host: `nixfred.fleet` gains `perm`, the ids of agents whose open question is a permission (attention
+  state `permission`, at most 8), so the ranking knows a permission the dial has not loaded yet. Stock
+  firmware drops the frame as before.
+- Renderer: `nixfred_notch` (1 run), `nixfred_shade` (3 runs, constant through the pull), `nixfred_toast`
+  (3 runs) in nixfred_art.c; the hub keeps its 39 runs plus one for the last-wedge dot, the centre's core
+  ring grew to r 94 so the suggestion's lines stay inside it. Hub hits unchanged (7 of 24). The machine tile
+  prints "63%" (it printed a cut "load ..").
+- Verified: full test/run.sh passes on gus with the slice 2 cc wrapper, with and without IDF_PATH. New
+  test_nixfred_smartnav.c (notch, shade and toast keep their runs, partial redraw equals full, inside the
+  glass, glow only at full pull). test_touch_ui gains smartnav_checks (Tim and Tux): the shade opens the hub
+  from eight screens at three x positions and from a question and a permission, never voice and never an
+  answer; a mid-pull opens nothing; no shade in voice; every priority of the suggestion and its tap; the
+  permission outranks a question; urgent-first order and the remembered wedge; the chain, its stop and its
+  return; back from a wedge's screen and through two screens; the card to the recap; the machine tap and a
+  slow press stay on machines with the confirmation. longpress_checks now holds across the whole mic band
+  (none starts voice, all open the hub) and the slow mic and roll cases run inside 650 ms.
+  test_machine_ui: the ack confirms on machines and never moves the view. test_question_ui and
+  test_voice_ui mirror the new hooks. CLI: nixfredWiring and cable specs pass (416), tsc clean.
+  nixfred/firmware-graphics-6-host-render.png is a HOST render through the touch harness (notch, shade at
+  half pull, the hub in each suggestion case, the "next" toast, the machine confirmation), not a photo of
+  the glass. Flashed over USB with the slice 1-5 method (same four images and offsets, NVS untouched); the
+  daemon logged `dial 80:45:6B:35:06:CC on fw 0.0.86-nixfred.6 proto 3`, no offer.
+- Not verified: any of it by a real finger on the glass (the shade's 60 px start band and 96 px pull, the
+  left-rim back, the hold on the mic band), the toast and the chain over a live question, the suggestion
+  against live `nixfred.fleet` perm frames on the device.
+
 ## Device firmware: the hub, hold anywhere for every screen, 2026-10-01 (branch nixfred/firmware-hub)
 
 Sits on nixfred/main 8a428937. Firmware `0.0.86-nixfred.5`, ESP-IDF v5.5.0, 1,730,480 B against an 8 MB

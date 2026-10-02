@@ -667,8 +667,9 @@ static void hub_glyph(ht_scene_t *f, const nixfred_hub_wedge_t *w, int gx, int g
 #undef NONE
 }
 
-void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, const char *clock,
-                 const char *summary, uint16_t summary_tone, const nixfred_palette_t *p)
+void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, int last,
+                 const char *clock, const char *title, const char *detail, uint16_t tone, bool urgent,
+                 const nixfred_palette_t *p)
 {
     uint16_t bg = f->background;
     if (n > NIXFRED_HUB_MAX) n = NIXFRED_HUB_MAX;
@@ -682,26 +683,71 @@ void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, 
         int start = (i * part - part / 2 + gap + HT_TURN) % HT_TURN;
         // Then the wedge's glyph and words fade in, one after another.
         unsigned pct = (unsigned)clamp1000((bloom - 250 - i * 70) * 1000 / 450) / 10;
-        uint16_t tone = w[i].live ? w[i].tone : over(p->ink, bg, 35);
+        uint16_t wt = w[i].live ? w[i].tone : over(p->ink, bg, 35);
         bool down = i == pressed && w[i].live;
         // Glow is urgency: a soft band inside the arc, canvas when nothing here needs you.
         ht_ring(f, CX, CY, NIXFRED_RIM_IN - 11, NIXFRED_RIM_IN - 1, start, sweep > 0 ? sweep : 1,
-                w[i].glow && sweep > 0 ? over(tone, bg, 16 * pct / 100 + 4) : bg);
+                w[i].glow && sweep > 0 ? over(wt, bg, 16 * pct / 100 + 4) : bg);
         ht_ring(f, CX, CY, down ? NIXFRED_RIM_IN - 6 : NIXFRED_RIM_IN, NIXFRED_RIM_OUT, start, sweep > 0 ? sweep : 1,
-                sweep > 0 ? over(tone, bg, w[i].live ? 100 : 60) : bg);
+                sweep > 0 ? over(wt, bg, w[i].live ? 100 : 60) : bg);
         int x, y;
         nixfred_hub_centre(i, n, &x, &y);
-        hub_glyph(f, &w[i], x, y - 28, over(tone, bg, pct), pct);
-        text_centred(f, x, y - 8, &ht_mono_16, over(down ? tone : w[i].live ? p->ink : tone, bg, pct), bg,
+        hub_glyph(f, &w[i], x, y - 28, over(wt, bg, pct), pct);
+        text_centred(f, x, y - 8, &ht_mono_16, over(down ? wt : w[i].live ? p->ink : wt, bg, pct), bg,
                      w[i].label ? w[i].label : "", NIXFRED_HUB_HIT_W);
         text_centred(f, x, y + 14, &ht_lv_geist_reg_20.base,
-                     over(w[i].glow ? tone : w[i].live ? over(p->ink, bg, 75) : tone, bg, pct), bg,
+                     over(w[i].glow ? wt : w[i].live ? over(p->ink, bg, 75) : wt, bg, pct), bg,
                      w[i].line[0] ? w[i].line : " ", NIXFRED_HUB_HIT_W + 6);
     }
-    // The centre: the time and the fleet in a few characters; a tap here closes the hub.
+    // The wedge used last time: a small dot just inside the middle of its rim arc. Canvas when there is none,
+    // so the run count never changes.
+    {
+        int lx = CX, ly = CY;
+        bool show = last >= 0 && last < n;
+        if (show) polar(CX, CY, NIXFRED_RIM_IN - 18, last * part, &lx, &ly);
+        ht_ring(f, lx, ly, 0, 4, 0, HT_TURN, show ? over(p->ink, bg, 70 * (unsigned)e / 1000) : bg);
+    }
+    // The centre: the time, then the suggested next action; a tap here does it.
     unsigned cp = (unsigned)clamp1000(bloom * 2) / 10;
-    ht_ring(f, CX, CY, NIXFRED_HUB_CORE_R - 2, NIXFRED_HUB_CORE_R, 0, HT_TURN, over(p->accent, bg, 30 * cp / 100));
-    text_centred(f, CX, CY - 34, &ht_mono_28, over(p->ink, bg, cp), bg, clock && clock[0] ? clock : "--:--", 130);
-    text_centred(f, CX, CY + 2, &ht_mono_20, over(summary_tone, bg, cp), bg, summary && summary[0] ? summary : "-", 130);
-    text_centred(f, CX, CY + 32, &ht_mono_16, over(p->ink, bg, 40 * cp / 100), bg, "close", 100);
+    ht_ring(f, CX, CY, NIXFRED_HUB_CORE_R - (urgent ? 4 : 2), NIXFRED_HUB_CORE_R,
+            0, HT_TURN, over(urgent ? tone : p->accent, bg, (urgent ? 90 : 30) * cp / 100));
+    // Each line stays inside the core ring's chord at its height, with a margin, so nothing touches the ring.
+    text_centred(f, CX, CY - 54, &ht_mono_20, over(p->ink, bg, 55 * cp / 100), bg, clock && clock[0] ? clock : "--:--", 120);
+    text_centred(f, CX, CY - 16, &ht_lv_geist_reg_20.base, over(tone, bg, cp), bg, title && title[0] ? title : "close", 156);
+    text_centred(f, CX, CY + 16, &ht_mono_16, over(p->ink, bg, 80 * cp / 100), bg, detail && detail[0] ? detail : " ", 136);
+}
+
+// ---- slice 6: the shade, the notch and the toast ----------------------------------------------------------
+
+void nixfred_notch(ht_scene_t *f, int drop, uint16_t ink)
+{
+    if (drop < 0) drop = 0;
+    ht_box(f, CX - NIXFRED_NOTCH_W / 2, NIXFRED_NOTCH_Y + drop, NIXFRED_NOTCH_W, NIXFRED_NOTCH_H, NIXFRED_NOTCH_H / 2,
+           ink, ink);
+}
+
+void nixfred_shade(ht_scene_t *f, int permille, uint16_t accent, uint16_t ink)
+{
+    permille = clamp1000(permille);
+    bool ready = permille >= 1000;
+    // The arc spreads both ways from 12 o'clock: half a turn at full pull.
+    int half = permille * (HT_TURN / 4) / 1000;
+    if (half < 1) half = 1;
+    uint16_t bg = f->background;
+    ht_ring(f, CX, CY, NIXFRED_RIM_IN - 12, NIXFRED_RIM_IN - 2, (HT_TURN - half) % HT_TURN, 2 * half,
+            ready ? dim(accent, 22) : bg);
+    ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, (HT_TURN - half) % HT_TURN, 2 * half,
+            dim(accent, 35 + 65 * (unsigned)permille / 1000));
+    nixfred_notch(f, permille * NIXFRED_SHADE_PULL / 1000, ready ? accent : over(ink, bg, 45 + 40 * (unsigned)permille / 1000));
+}
+
+void nixfred_toast(ht_scene_t *f, const char *line, const char *hint, uint16_t edge, uint16_t ink, uint16_t dimc)
+{
+    uint16_t bg = f->background;
+    ht_box(f, CX - NIXFRED_TOAST_W / 2, NIXFRED_TOAST_Y, NIXFRED_TOAST_W, NIXFRED_TOAST_H, NIXFRED_TOAST_H / 2,
+           over(edge, bg, 10), edge);
+    text_centred(f, CX, NIXFRED_TOAST_Y + 9, &ht_lv_geist_reg_20.base, ink, over(edge, bg, 10),
+                 line && line[0] ? line : " ", NIXFRED_TOAST_W - 40);
+    text_centred(f, CX, NIXFRED_TOAST_Y + 39, &ht_mono_16, dimc, over(edge, bg, 10),
+                 hint && hint[0] ? hint : " ", NIXFRED_TOAST_W - 60);
 }

@@ -1308,6 +1308,13 @@ static void handle_message(const cJSON *root)
             char c = l->valuestring[0];
             nf.lanes[nf.lane_count++].letter = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
         }
+        // slice 6: which agents' open questions are permission prompts, so the hub can rank them first.
+        const cJSON *perm = cJSON_GetObjectItemCaseSensitive(p, "perm");
+        cJSON_ArrayForEach(row, perm) {
+            if (nf.perm_count == UI_NF_PERMS) break;
+            if (!cJSON_IsString(row) || !row->valuestring[0] || strlen(row->valuestring) >= ID_MAX) continue;
+            snprintf(nf.perm[nf.perm_count++], ID_MAX, "%s", row->valuestring);
+        }
         const cJSON *al = cJSON_GetObjectItemCaseSensitive(p, "alert");
         if (cJSON_IsObject(al)) {
             const cJSON *a = cJSON_GetObjectItemCaseSensitive(al, "a"), *b = cJSON_GetObjectItemCaseSensitive(al, "b");

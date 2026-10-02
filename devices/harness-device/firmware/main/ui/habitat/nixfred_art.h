@@ -151,7 +151,7 @@ void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t
 // `bloom` 0..1000 is the opening motion: the rim arcs light in turn as a sweep passes, then each wedge's
 // glyph and words fade in. Run count depends only on `n`, never on `bloom`, `pressed` or the readouts, so
 // every frame of the bloom and every live update is a damage diff.
-enum { NIXFRED_HUB_MAX = 6, NIXFRED_HUB_R = 150, NIXFRED_HUB_CORE_R = 72, NIXFRED_HUB_BLOOM_MS = 380,
+enum { NIXFRED_HUB_MAX = 6, NIXFRED_HUB_R = 150, NIXFRED_HUB_CORE_R = 94, NIXFRED_HUB_BLOOM_MS = 380,
        NIXFRED_HUB_HIT_W = 128, NIXFRED_HUB_HIT_H = 120 };
 typedef enum { NIXFRED_GLYPH_SESSIONS, NIXFRED_GLYPH_PLANS, NIXFRED_GLYPH_MACHINES, NIXFRED_GLYPH_SWARMS,
                NIXFRED_GLYPH_INBOX } nixfred_glyph_t;
@@ -167,5 +167,26 @@ typedef struct {
 } nixfred_hub_wedge_t;
 // Where wedge `i` of `n` sits (its label's centre), for the caller's tap targets.
 void nixfred_hub_centre(int i, int n, int *x, int *y);
-void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, const char *clock,
-                 const char *summary, uint16_t summary_tone, const nixfred_palette_t *p);
+// The centre is the SUGGESTED NEXT action (slice 6): `title` in `tone` ("ANSWER", "ALLOW?", "RECAP", "INBOX",
+// "USE KIMI" or "close"), `detail` under it ("Lee: send invite?"), the clock above both. `urgent` lights the
+// core ring in `tone` (glow means urgency); otherwise it stays a faint accent. `last` is the wedge used last
+// time (-1 none): a small dot on its rim arc, so the hand finds it again. Always the same run count.
+void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, int last,
+                 const char *clock, const char *title, const char *detail, uint16_t tone, bool urgent,
+                 const nixfred_palette_t *p);
+
+// ---- slice 6: the shade, the notch and the toast ----------------------------------------------------------
+
+// The grab notch at 12 o'clock: a short pill on the rim that says "pull down from here". `drop` px moves it
+// down the glass while a shade is being pulled. Always one run.
+enum { NIXFRED_NOTCH_W = 40, NIXFRED_NOTCH_H = 6, NIXFRED_NOTCH_Y = 5 };
+void nixfred_notch(ht_scene_t *f, int drop, uint16_t ink);
+// The shade being pulled down from the top rim (`permille` 0..1000 of the pull that opens the hub): the notch
+// follows the finger, an arc spreads from 12 o'clock both ways round the rim, and at 1000 a soft glow band
+// says "let go to open". Always three runs, drawn last over the face.
+enum { NIXFRED_SHADE_PULL = 96 };
+void nixfred_shade(ht_scene_t *f, int permille, uint16_t accent, uint16_t ink);
+// A toast near the top of the glass: a dark pill with a coloured border, one line and a dim hint under it
+// ("next: Lee" / "tap to stay"). Always three runs.
+enum { NIXFRED_TOAST_Y = 72, NIXFRED_TOAST_W = 300, NIXFRED_TOAST_H = 66 };
+void nixfred_toast(ht_scene_t *f, const char *line, const char *hint, uint16_t edge, uint16_t ink, uint16_t dim);

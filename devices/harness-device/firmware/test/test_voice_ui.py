@@ -64,6 +64,7 @@ static struct {
     uint8_t nf_msg_kind; uint32_t nf_msg_at; // nixfred: a failure MESSAGE flashes the rim
     int nf_retries; // nixfred slice 3: the connecting ring
     uint8_t nf_hold_step; // nixfred slice 4: the hold ring (input_cancel clears it)
+    uint8_t nf_shade; int16_t nf_shade_pm; // nixfred slice 6: the shade (input_cancel clears it)
     struct { bool valid, supported, loading, pending, uncertain; uint32_t revision, deadline; int index; char error[120],speech_error[96],agent[64],token[48]; struct { bool can_text; } item[4]; } q;
     agent_t agents[1];
     struct { bool live_summary; } memory[PANE_MEMORY_MAX];
@@ -119,6 +120,8 @@ void open_question(void) { assert(false); }
 bool queue(action_t action) { if (queue_full) return false; queued = action; return true; }
 '''
 harness += 'static bool nf_msg_keep;\n'
+# nixfred slice 6: view() notes the back stack; that stack is exercised in test_touch_ui, a no-op here.
+harness += 'static void nf_history_note(view_t from, view_t to) { (void)from; (void)to; }\n'
 harness += function('question_view') + function('copy') + function('input_cancel') + function('view') + function('voice_close') + function('workspace_failed') + function('show_failure')
 dispatch = source.split('case A_VOICE:\n', 1)[1].split('case A_PET:', 1)[0]
 harness += 'static void dispatch(action_t a) { switch (a.kind) { case A_VOICE:\n' + dispatch + '} }\n'

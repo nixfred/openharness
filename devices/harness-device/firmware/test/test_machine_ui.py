@@ -28,10 +28,15 @@ static struct {
     cable_machine_t machines[CABLE_MAX_MACHINES]; int machine_count;
     char selected_machine[64],pending_machine[64],title[80],message[256];
     uint32_t machine_deadline;
+    int view;   // nixfred slice 6: the view the acknowledgement must leave alone
 } s;
 static uint32_t now;
 static int lock_depth,errors,changes,viewed;
-enum { MESSAGE=4 };
+enum { MESSAGE=4, MACHINES=5, AGENTS=6 };
+// nixfred slice 6: an answered machine tap shows a confirmation where the finger is (the toast); it never
+// changes the view. Counted here; the toast itself is drawn and tested in test_touch_ui.
+static int confirmed; static char confirmed_id[64];
+static void nf_machine_selected(const char *id) { assert(lock_depth>0); confirmed++; snprintf(confirmed_id,sizeof confirmed_id,"%s",id); }
 static uint32_t ms(void) { return now; }
 static void display_lock(void) { lock_depth++; }
 static void display_unlock(void) { assert(lock_depth>0);lock_depth--; }
@@ -62,6 +67,11 @@ int main(void) {
     assert(!strcmp(s.selected_machine,"old") && !strcmp(s.pending_machine,"new"));
     ui_machine_selected_ack("new");
     assert(!strcmp(s.selected_machine,"new") && !s.pending_machine[0]);
+    // Not on the machines screen: no confirmation. On it: one, for the machine tapped, and the view stays.
+    assert(!confirmed);
+    s.view=MACHINES; viewed=0; request("gus",1500); ui_machine_selected_ack("gus");
+    assert(confirmed==1 && !strcmp(confirmed_id,"gus") && s.view==MACHINES && viewed!=AGENTS && !viewed);
+    s.view=0; COPY(s.selected_machine,"new");
     ui_machine_select_error("old","OFFLINE","Too late");assert(!errors);
     request("newer",2000);
     ui_machine_select_error("newer","OFFLINE","Native host error");

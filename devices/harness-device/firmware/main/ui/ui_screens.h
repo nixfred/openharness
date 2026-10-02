@@ -325,6 +325,7 @@ void ui_nixfred_plans(const uint16_t *used_permille, const uint8_t *tone, int n)
 void ui_nixfred_plan_detail(const char (*name)[10], const int16_t *banked, int pick, int n);
 // `nixfred.fleet`: what the dial cannot see for itself. Every field optional; stock firmware drops the frame.
 #define UI_NF_LANES 16
+#define UI_NF_PERMS 8
 typedef struct {
     int32_t clock_s;                       // local seconds since midnight, -1 unknown
     char machine_id[ID_MAX];               // the host's own machine, for its capability arcs
@@ -334,6 +335,8 @@ typedef struct {
     bool alert;                            // a collision inside its hour
     uint32_t alert_at;                     // the alert's identity (its time), so one alert opens one card
     char alert_a[ID_MAX], alert_b[ID_MAX], alert_an[CABLE_NAME_MAX], alert_bn[CABLE_NAME_MAX], alert_detail[120];
+    int perm_count;                        // slice 6: agents whose open question is a PERMISSION (`perm`)
+    char perm[UI_NF_PERMS][ID_MAX];
 } ui_nf_fleet_t;
 void ui_nixfred_fleet(const ui_nf_fleet_t *fleet);
 

@@ -104,7 +104,7 @@ export function dialPlans(compact: ReturnType<SubscriptionsService['compact']>):
 /** What the attention payload holds that `dialFleet` reads. */
 export interface DialFleetSource {
   machineId: string
-  agents: Array<{ agentId: string; lane?: string | null }>
+  agents: Array<{ agentId: string; lane?: string | null; state?: string }>
   alerts: CollisionEvent[]
 }
 
@@ -113,6 +113,9 @@ export interface DialFleetSource {
  * for the ambient clock, each agent's policy lane as one letter, the newest collision inside its hour,
  * and this machine's load, battery and VRAM as permille for its machine tile. Every field is optional on
  * the dial; stock firmware counts the frame unknown and drops it.
+ *
+ * `perm` (firmware slice 6): the agents whose open question is a PERMISSION prompt, so the hub's suggested
+ * next action can put a permission before an ordinary question. Only the ids; the words stay in the inbox.
  */
 export function dialFleet(src: DialFleetSource, caps: MachineCapabilities | null, now: number): Record<string, unknown> & { t: 'nixfred.fleet' } {
   const d = new Date(now)
@@ -121,6 +124,8 @@ export function dialFleet(src: DialFleetSource, caps: MachineCapabilities | null
     clock: d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds(),
     lanes: src.agents.filter((a) => typeof a.lane === 'string' && a.lane).slice(0, 16).map((a) => ({ id: a.agentId, lane: a.lane!.charAt(0).toUpperCase() })),
   }
+  const perm = src.agents.filter((a) => a.state === 'permission').slice(0, 8).map((a) => a.agentId)
+  if (perm.length) frame.perm = perm
   if (caps) {
     const pm = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 1000)
     const gpu = caps.gpus[0]

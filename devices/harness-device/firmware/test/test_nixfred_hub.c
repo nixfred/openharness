@@ -101,7 +101,9 @@ static void hub(ht_scene_t *f, int bloom, int pressed, bool urgent, bool empty)
     nixfred_hub_wedge_t w[NIXFRED_HUB_MAX];
     int n = wedges(w, urgent, empty);
     ht_scene_clear(f, BLACK);
-    nixfred_hub(f, w, n, bloom, pressed, empty ? "" : "14:07", urgent ? "! 2/9" : "~ 3/9", urgent ? P.red : P.accent, &P);
+    // Slice 6: the centre is the suggested next action (a permission when urgent, the banked plan when not).
+    nixfred_hub(f, w, n, bloom, pressed, urgent ? 1 : -1, empty ? "" : "14:07", empty ? "" : urgent ? "Answer Lee" : "Use Kimi",
+                empty ? "" : urgent ? "Run the migration?" : "+36% banked", urgent ? P.red : P.green, urgent, &P);
 }
 
 int main(void)
@@ -126,7 +128,7 @@ int main(void)
     }
     // Settled: every label and every live line is drawn, the clock and the summary in the middle.
     const char *words[] = {"SESSIONS", "PLANS", "MACHINES", "SWARMS", "INBOX", "9 agents", "KIMI +8%", "load 63%",
-                           "3 tabs", "all read", "14:07", "~ 3/9"};
+                           "3 tabs", "all read", "14:07", "Use Kimi", "+36% banked"};
     for (unsigned i = 0; i < sizeof words / sizeof *words; i++) assert(has_text(&a, words[i]));
     shot("hub-settled");
     // At rest before the bloom the wedges are not yet lit: the glass at a wedge's label is canvas.
@@ -143,7 +145,7 @@ int main(void)
     // Pressing a wedge and live updates (urgent readouts) are damage diffs of the same run count.
     hub(&b, 1000, 2, false, false); assert(b.count == runs); transition(&a, &b); a = b;
     hub(&b, 1000, -1, true, false); assert(b.count == runs); transition(&a, &b);
-    assert(has_text(&b, "2/9 need you") && has_text(&b, "4 unread") && has_text(&b, "! 2/9"));
+    assert(has_text(&b, "2/9 need you") && has_text(&b, "4 unread") && has_text(&b, "Answer Lee"));
     shot("hub-urgent");
     // Glow is urgency: the SESSIONS wedge's band inside the rim is red when someone waits on a permission,
     // and canvas when nobody does.
@@ -151,7 +153,7 @@ int main(void)
     hub(&a, 1000, -1, false, false); render(&a); assert(px(full, 233, 233 - (NIXFRED_RIM_IN - 8)) == 0);
     // Nothing known yet (no plans, no fleet frame, nothing unread): same runs, dim lines, no clock.
     hub(&b, 1000, -1, false, true); assert(b.count == runs); render(&b); inside_glass();
-    assert(has_text(&b, "no data") && !has_text(&b, "14:07"));
+    assert(has_text(&b, "no data") && !has_text(&b, "14:07") && has_text(&b, "close"));
     shot("hub-empty");
     puts("nixfred slice 5: PASS (hub bloom keeps its runs, partial redraw equals full, live readouts, inside the glass)");
     return 0;
