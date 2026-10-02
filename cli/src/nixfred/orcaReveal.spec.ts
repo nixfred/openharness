@@ -73,4 +73,40 @@ describe('revealSession: Orca and herdr both present', () => {
     expect(r).toMatchObject({ host: 'herdr', switched: true })
     expect(calls.some((c) => c[0] === '/usr/bin/orca')).toBe(false)
   })
+  it('tmux: selects the pane, then focuses the terminal of an attached client', async () => {
+    const calls: string[][] = []
+    const run = async (bin: string, args: string[]) => {
+      calls.push([bin, ...args])
+      if (args.includes('list-clients')) return '700\n'
+      if (args[0] === '-j') return JSON.stringify([{ class: 'com.mitchellh.ghostty', address: '0xb2', pid: 650 }])
+      return 'ok'
+    }
+    const fs = { environ: () => 'TMUX_PANE=%3\u0000TMUX=/tmp/tmux-1000/default,1,0\u0000', ppid: (p: number) => (p === 700 ? 650 : null) }
+    const r = await revealSession(500, null, { run, fs, orcaBin: null, openTerminal: null })
+    expect(r).toMatchObject({ host: 'tmux', switched: true, focused: true, window: 'com.mitchellh.ghostty' })
+    expect(calls[0]).toEqual(['tmux', '-S', '/tmp/tmux-1000/default', 'select-window', '-t', '%3'])
+  })
+  it('tmux with no attached client opens a terminal attached to that pane', async () => {
+    const opened: string[][] = []
+    const run = async (_b: string, args: string[]) => (args.includes('list-clients') ? '' : args[0] === '-j' ? '[]' : 'ok')
+    const fs = { environ: () => 'TMUX_PANE=%3\u0000', ppid: () => null }
+    const r = await revealSession(500, null, { run, fs, orcaBin: null, openTerminal: (p, a) => { opened.push([p, ...(a ?? [])]) } })
+    expect(opened).toEqual([['tmux', 'attach-session', '-t', '%3']])
+    expect(r).toMatchObject({ host: 'tmux', window: 'new-terminal' })
+  })
+  it('the nearest host in the process tree wins over inherited variables (tmux started inside Orca)', async () => {
+    const calls: string[][] = []
+    const run = async (bin: string, args: string[]) => { calls.push([bin, ...args]); return args.includes('list-clients') ? '' : args[0] === '-j' ? '[]' : 'ok' }
+    const comm: Record<number, string> = { 40: 'tmux: server', 30: 'orca-ide' }
+    const fs = { environ: () => 'ORCA_TERMINAL_HANDLE=term_c07405a6-d443\u0000TMUX_PANE=%7\u0000', ppid: (p: number) => (p === 50 ? 40 : p === 40 ? 30 : null), comm: (p: number) => comm[p] ?? 'bash' }
+    const r = await revealSession(50, null, { run, fs, orcaBin: '/usr/bin/orca', openTerminal: () => {} })
+    expect(r.host).toBe('tmux')
+    expect(calls.some((c) => c[0] === '/usr/bin/orca')).toBe(false)
+  })
+  it('a herdr pane wins over inherited Orca variables', async () => {
+    const run = async (_b: string, args: string[]) => (args[0] === '-j' ? '[]' : 'ok')
+    const fs = { environ: () => 'ORCA_TERMINAL_HANDLE=term_c07405a6-d443\u0000HERDR_WORKSPACE_ID=w2T\u0000', ppid: (p: number) => (p === 50 ? 40 : null), comm: (p: number) => (p === 40 ? 'herdr' : 'bash'), clientPids: () => [] }
+    const r = await revealSession(50, null, { run, fs, orcaBin: '/usr/bin/orca', openTerminal: null })
+    expect(r.host).toBe('herdr')
+  })
 })

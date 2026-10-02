@@ -32,6 +32,8 @@ const defaultRun: Run = (bin, args, env) => new Promise((resolve, reject) => {
 export interface ProcFs {
   environ(pid: number): string | null
   ppid(pid: number): number | null
+  /** The process name (/proc/<pid>/comm). Optional: without it the host is chosen from the environment alone. */
+  comm?(pid: number): string | null
   /** Pids whose argv is exactly this program with no subcommand (a client, not `herdr server`). */
   clientPids?(prog: string): number[]
 }
@@ -44,6 +46,7 @@ export const nodeProcFs: ProcFs = {
       return Number.isSafeInteger(v) && v > 0 ? v : null
     } catch { return null }
   },
+  comm: (pid) => { try { return readFileSync(`/proc/${pid}/comm`, 'utf8').trim() } catch { return null } },
   clientPids: (prog) => {
     const out: number[] = []
     try {
@@ -69,15 +72,31 @@ function envVars(raw: string | null): Map<string, string> {
 
 /** Bring the agent with this engine pid to the front. `orcaHandle` wins when the registry already knows it. */
 /** Open the desktop's default terminal running one program, detached (Omarchy: xdg-terminal-exec under uwsm). */
-function defaultOpenTerminal(prog: string): void {
+function defaultOpenTerminal(prog: string, args: string[] = []): void {
   // herdr refuses to start inside another herdr ("nested herdr is disabled"): drop its markers.
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('HERDR_')))
-  const child = spawn('uwsm-app', ['--', 'xdg-terminal-exec', prog], { detached: true, stdio: 'ignore', env })
+  const child = spawn('uwsm-app', ['--', 'xdg-terminal-exec', prog, ...args], { detached: true, stdio: 'ignore', env })
   child.on('error', () => {})
   child.unref()
 }
 
-export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null; openTerminal?: ((prog: string) => void) | null; prefer?: 'orca' | 'herdr' } = {}): Promise<RevealResult> {
+/**
+ * The host that really holds the agent: the NEAREST multiplexer or IDE above it in the process tree.
+ * Environment variables are inherited (a tmux started inside Orca carries ORCA_*, an Orca started inside
+ * herdr carries HERDR_*), so they cannot say which one is innermost; the parent chain can.
+ */
+export function innermostHost(pid: number | null, fs: ProcFs): 'tmux' | 'herdr' | 'orca' | null {
+  if (!pid || !fs.comm) return null
+  for (let p: number | null = fs.ppid(pid), hops = 0; p && p > 1 && hops < 16; p = fs.ppid(p), hops++) {
+    const c = fs.comm(p) ?? ''
+    if (c.startsWith('tmux')) return 'tmux'
+    if (c === 'herdr') return 'herdr'
+    if (c === 'orca-ide' || c === 'orca') return 'orca'
+  }
+  return null
+}
+
+export async function revealSession(pid: number | null, orcaHandle: string | null = null, deps: { run?: Run; fs?: ProcFs; orcaBin?: string | null; openTerminal?: ((prog: string, args?: string[]) => void) | null; prefer?: 'orca' | 'herdr' } = {}): Promise<RevealResult> {
   const run = deps.run ?? defaultRun
   const fs = deps.fs ?? nodeProcFs
   if (!pid && !(orcaHandle && ORCA_HANDLE_RE.test(orcaHandle))) return { host: 'none', switched: false, focused: false, window: null }
@@ -85,6 +104,8 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
   const handle = orcaHandle ?? vars.get('ORCA_TERMINAL_HANDLE') ?? null
   let host: RevealResult['host'] = 'none'
   let switched = false
+  let tmuxClients: number[] = []
+  let tmuxAttach: string[] | null = null
 
   const herdrWs = vars.get('HERDR_WORKSPACE_ID') ?? ''
   const hasHerdr = HERDR_ID_RE.test(herdrWs)
@@ -100,7 +121,12 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
     return ok
   }
 
-  if (hasOrca && !(hasHerdr && prefer === 'herdr')) {
+  const inner = innermostHost(pid, fs)
+  const hasTmux = TMUX_PANE_RE.test(vars.get('TMUX_PANE') ?? '')
+  if (inner === 'herdr' && hasHerdr) {
+    host = 'herdr'
+    switched = await focusHerdr()
+  } else if (inner !== 'tmux' && hasOrca && !(hasHerdr && prefer === 'herdr' && inner !== 'orca')) {
     host = 'orca'
     const bin = deps.orcaBin === undefined ? findOrcaBin() : deps.orcaBin
     if (bin) { try { switched = /"ok"\s*:\s*true/.test(await run(bin, ['terminal', 'switch', '--terminal', handle!, '--json'])) } catch { /* Orca down */ } }
@@ -110,13 +136,20 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
       const h = await focusHerdr()
       if (!switched && h) { host = 'herdr'; switched = true }
     }
-  } else if (TMUX_PANE_RE.test(vars.get('TMUX_PANE') ?? '')) {
+  } else if (hasTmux) {
     host = 'tmux'
     const pane = vars.get('TMUX_PANE')!
     const socket = (vars.get('TMUX') ?? '').split(',')[0]
     const sock = socket && socket.startsWith('/') ? ['-S', socket] : []
     try { await run('tmux', [...sock, 'select-window', '-t', pane]); await run('tmux', [...sock, 'select-pane', '-t', pane]); switched = true } catch { /* no server */ }
     try { await run('tmux', [...sock, 'switch-client', '-t', pane]) } catch { /* no attached client is fine */ }
+    // The tmux server is detached from any window: the window that shows this pane is the terminal of an
+    // attached client. Remember those clients' pids for the window walk below; with none, open one.
+    try {
+      const out = await run('tmux', [...sock, 'list-clients', '-t', pane, '-F', '#{client_pid}'])
+      tmuxClients = out.split('\n').map((l) => Number(l.trim())).filter((n) => Number.isSafeInteger(n) && n > 1)
+    } catch { tmuxClients = [] }
+    tmuxAttach = [...sock, 'attach-session', '-t', pane]
   } else if (hasHerdr) {
     host = 'herdr'
     switched = await focusHerdr()
@@ -133,6 +166,19 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
     for (let p: number | null = pid, hops = 0; p && p > 1 && hops < 40; p = fs.ppid(p), hops++) {
       const c = byPid.get(p)
       if (c?.address) { addr = c.address; window = c.class ?? null; break }
+    }
+    // tmux: walk up from each attached client to its terminal window.
+    if (!addr && host === 'tmux') {
+      for (const cp of tmuxClients) {
+        for (let p: number | null = cp, hops = 0; p && p > 1 && hops < 40; p = fs.ppid(p), hops++) {
+          const c = byPid.get(p)
+          if (c?.address) { addr = c.address; window = c.class ?? null; break }
+        }
+        if (addr) break
+      }
+    }
+    if (!addr && host === 'tmux' && tmuxAttach && deps.openTerminal !== null) {
+      try { (deps.openTerminal ?? defaultOpenTerminal)('tmux', tmuxAttach); window = 'new-terminal'; focused = true } catch { /* no launcher */ }
     }
     // herdr's server is detached: the window showing it is the one running a bare `herdr` client.
     if (!addr && host === 'herdr' && fs.clientPids) {
@@ -162,4 +208,23 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
 export async function revealOrcaTerminal(handle: string, run?: Run, orcaBin?: string | null): Promise<{ switched: boolean; focused: boolean }> {
   const r = await revealSession(null, handle, { run, orcaBin })
   return { switched: r.switched, focused: r.focused }
+}
+
+/** The pid of the process in a tmux pane (the agent the Harness daemon itself started), or null. */
+export async function tmuxPanePid(pane: string, run: Run = defaultRun): Promise<number | null> {
+  if (!TMUX_PANE_RE.test(pane)) return null
+  try {
+    const v = Number((await run('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'])).trim())
+    return Number.isSafeInteger(v) && v > 1 ? v : null
+  } catch { return null }
+}
+
+/** Focus the Harness desktop app if it is open. True when a window was focused. */
+export async function focusHarnessApp(run: Run = defaultRun): Promise<boolean> {
+  try {
+    const clients = JSON.parse(await run('hyprctl', ['-j', 'clients'])) as Array<{ class?: string; address?: string }>
+    const addr = clients.find((c) => c.class === 'com.autonomous.harness')?.address
+    if (!addr || !HYPR_ADDR_RE.test(addr)) return false
+    return (await run('hyprctl', ['dispatch', `hl.dsp.focus({ window = "address:${addr}" })`])).trim() === 'ok'
+  } catch { return false }
 }

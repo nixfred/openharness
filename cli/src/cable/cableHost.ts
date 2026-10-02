@@ -14,7 +14,7 @@ import { notificationReadToken, type UnreadNotification } from './notificationRe
 
 import { AuthSessionManager, readAuthSession } from '../lib/authSession.js'
 import { registry, projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { revealSession } from '../nixfred/orcaReveal.js'
+import { focusHarnessApp, revealSession, tmuxPanePid } from '../nixfred/orcaReveal.js'
 import { fetchRelease, loadImage, otaKeyForBoard, shouldOffer } from './fwPush.js'
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
@@ -625,14 +625,23 @@ export class DaemonCableHost implements CableHost {
   private revealLocal(machineId: string, agentId: string, delayMs: number): void {
     if (machineId !== this.localId()) return
     const row = typeof registry.byAgent === 'function' ? registry.byAgent(agentId) : undefined
-    if (!row || row.hosted !== 'external') return
+    if (!row) return
     if (this.revealTimer) clearTimeout(this.revealTimer)
     this.revealTimer = setTimeout(() => {
       this.revealTimer = null
-      const pid = row.external?.proc?.pid ?? null
-      void revealSession(pid, row.external?.orca?.terminal ?? null)
-        .then((r) => this.wiring.log(`cable: reveal ${agentId.slice(0, 8)} · host=${r.host} switched=${r.switched} window=${r.window ?? '-'} focused=${r.focused}`))
-        .catch(() => {})
+      const log = (r: { host: string; switched: boolean; window: string | null; focused: boolean }): void =>
+        this.wiring.log(`cable: reveal ${agentId.slice(0, 8)} · host=${r.host} switched=${r.switched} window=${r.window ?? '-'} focused=${r.focused}`)
+      if (row.hosted === 'external') {
+        void revealSession(row.external?.proc?.pid ?? null, row.external?.orca?.terminal ?? null).then(log).catch(() => {})
+        return
+      }
+      // A pane this daemon started: the Harness app shows it when the app is open; otherwise reveal the tmux pane itself.
+      void (async () => {
+        if (await focusHarnessApp()) { log({ host: 'harness-app', switched: true, window: 'com.autonomous.harness', focused: true }); return }
+        const pane = typeof row.tmuxPane === 'string' ? row.tmuxPane : ''
+        const pid = pane ? await tmuxPanePid(pane) : null
+        if (pid) log(await revealSession(pid, null))
+      })().catch(() => {})
     }, delayMs)
     this.revealTimer.unref?.()
   }
