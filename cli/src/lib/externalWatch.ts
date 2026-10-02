@@ -11,6 +11,10 @@
  * runtime, so every action that needs one already refuses it. It goes offline on SessionEnd, or when
  * the engine process that sent its hooks is gone, and is forgotten a while after that.
  *
+ * Sessions that never sent a hook (started before the switch or the hook, or before the daemon last
+ * started) are found from the processes that have a session open (`OpenSessions`, the same answer
+ * Cmd-P uses) and listed idle until their next hook says otherwise.
+ *
  * Off by default. `harness external on|off|status` writes the switch file the hook script and the daemon
  * both read; `HARNESS_EXTERNAL_SESSIONS=1|0` overrides it.
  */
@@ -20,6 +24,9 @@ import { basename, join } from 'node:path'
 import type { AgentFrame } from './agentFrame.js'
 import type { AgentProject } from './agentProject.js'
 import { resumeMode } from './resumeCapability.js'
+import type { SessionOwner } from './sessionSearch/external.js'
+import { readCodexHead } from './sessionSearch/externals/codex.js'
+import { readJson, record, text as recordText, within } from './sessionSearch/externals/support.js'
 import type { ProcessIdentity } from './terminalTypes.js'
 
 export type ExternalEngine = 'claude' | 'codex'
@@ -315,6 +322,64 @@ export function externalAgentFrame(row: ExternalSession, project: AgentProject |
   }
 }
 
+// ── discovery ──────────────────────────────────────────────────────────────────────────────────────
+
+/** A session open in a terminal process right now, found without a hook. */
+export interface DiscoveredExternal {
+  engine: ExternalEngine
+  sessionId: string
+  pid: number
+  cwd: string | null
+}
+
+/** What an owner's record says about its session: where it runs, and who started it. */
+export interface OwnerRecord { cwd: string | null; entrypoint?: string; kind?: string }
+
+/**
+ * Reads an owner's record: Claude's `sessions/<pid>.json`, or the head of the Codex rollout the
+ * process holds open. Null when it cannot be read.
+ */
+export async function readOwnerRecord(owner: Pick<SessionOwner, 'engine' | 'record'>): Promise<OwnerRecord | null> {
+  if (owner.engine === 'claude') {
+    const row = record(await readJson(owner.record).catch(() => null))
+    if (!row) return null
+    return {
+      cwd: absolutePath(row.cwd),
+      ...(recordText(row.entrypoint) ? { entrypoint: recordText(row.entrypoint) } : {}),
+      ...(recordText(row.kind) ? { kind: recordText(row.kind) } : {}),
+    }
+  }
+  if (owner.engine === 'codex') {
+    const head = await readCodexHead(owner.record).catch(() => null)
+    return head && typeof head === 'object' ? { cwd: absolutePath(head.cwd) } : null
+  }
+  return null
+}
+
+/**
+ * The Claude Code and Codex sessions open in a terminal that could be external rows. Only an owner
+ * on exact evidence counts: one with a terminal (not an app or a server), not in one of Harness's
+ * own panes, not known only from its arguments, and not unverified because Harness's panes could
+ * not be listed. A program driving Claude (`sdk-cli`), a non-interactive run, and anything working in
+ * Harness's data folder (its recaps and summaries) are never rows.
+ */
+export async function discoverExternalSessions(
+  owners: ReadonlyMap<string, Pick<SessionOwner, 'pid' | 'engine' | 'tty' | 'record' | 'harness' | 'fromArgs' | 'unverified'>>,
+  opts: { dataDir: string; read?: typeof readOwnerRecord },
+): Promise<DiscoveredExternal[]> {
+  const found: DiscoveredExternal[] = []
+  for (const [sessionId, owner] of owners) {
+    if (!ENGINES.has(owner.engine) || !SESSION_ID.test(sessionId)) continue
+    if (!owner.tty || owner.harness || owner.fromArgs || owner.unverified) continue
+    const meta = await (opts.read ?? readOwnerRecord)(owner)
+    if (!meta) continue
+    if (meta.entrypoint === 'sdk-cli' || (meta.kind !== undefined && meta.kind !== 'interactive')) continue
+    if (meta.cwd && within(opts.dataDir, meta.cwd)) continue
+    found.push({ engine: owner.engine as ExternalEngine, sessionId: sessionId.toLowerCase(), pid: owner.pid, cwd: meta.cwd })
+  }
+  return found
+}
+
 // ── the daemon side ────────────────────────────────────────────────────────────────────────────────
 
 type ProcessTableRow = ProcessIdentity & { parentPid: number }
@@ -345,6 +410,8 @@ export interface ExternalWatchDeps<Row extends ProcessTableRow> {
   publish: (frame: AgentFrame) => void
   /** A row is gone. */
   remove: (agentId: string) => void
+  /** Sessions open in a terminal right now (lib/sessionSearch/external.ts `OpenSessions`); none when absent. */
+  discovered?: () => Promise<DiscoveredExternal[]>
   now?: () => number
   log?: (line: string) => void
 }
@@ -392,6 +459,31 @@ export function createExternalWatch<Row extends ProcessTableRow>(deps: ExternalW
       const { offline, removed } = sessions.sweep((p) => live.has(`${p.pid}\u0000${p.startMarker}`), now())
       for (const row of offline) await publish(row)
       for (const row of removed) deps.remove(row.agentId)
+    },
+    /**
+     * Add a row, idle, for each live session that has none: one that started before the switch or
+     * the hook, or before this daemon. Its process is the one holding the session now, so the sweep
+     * takes it offline when that process exits, and a later hook moves it on as usual.
+     */
+    async discover(): Promise<void> {
+      if (!enabled() || !deps.discovered) return
+      const found = (await deps.discovered().catch(() => [] as DiscoveredExternal[]))
+        .filter((s) => !deps.owned(s.sessionId) && !sessions.bySession(s.sessionId))
+      if (!found.length) return
+      const rows = await deps.processes()
+      if (!rows) return
+      const byPid = new Map(rows.map((row) => [row.pid, row]))
+      for (const s of found) {
+        const proc = byPid.get(s.pid)
+        if (!proc || !deps.isEngine(proc, s.engine) || descendsFrom(rows, s.pid, deps.selfPid)) continue
+        const row = sessions.apply({
+          engine: s.engine, event: 'SessionStart', sessionId: s.sessionId, cwd: s.cwd,
+          title: null, model: null, message: '', notificationType: '', callerPid: null,
+        }, { now: now(), process: { pid: proc.pid, executable: proc.executable, startMarker: proc.startMarker } })
+        if (!row) continue
+        log(`[external] found ${row.engine} session ${row.sessionId.slice(0, 8)} · ${row.cwd ?? '?'}`)
+        await publish(row)
+      }
     },
     /** The rows for an `agents_list` reply. */
     frames(): Promise<AgentFrame[]> {

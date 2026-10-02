@@ -142,7 +142,7 @@ const envSchema = z.object({
   // Off by default so a fat-fingered path or a compromised relay hop can't walk the whole filesystem.
   HARNESS_FS_BROWSE_UNRESTRICTED: z.string().optional(),
   // Where Claude Code writes its per-session JSONL transcripts.
-  CLAUDE_PROJECTS_DIR: z.string().default(join(homedir(), '.claude', 'projects')),
+  CLAUDE_PROJECTS_DIR: z.string().default(join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects')),
   // Codex state root. Only hook-registered rollout files beneath <CODEX_HOME>/sessions are exposed.
   CODEX_HOME: z.string().default(join(homedir(), '.codex')),
   // Grok state root. Conversation records live below <GROK_HOME>/sessions/<encoded-cwd>/<uuid>/updates.jsonl.

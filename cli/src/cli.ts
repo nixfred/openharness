@@ -163,7 +163,7 @@ import { SESSION_SEARCH_FILE, searchCommand } from './lib/sessionSearch/command.
 import { sweepWorktrees } from './lib/worktreeSweep.js'
 import { nameBranchAfterSession } from './lib/branchNaming.js'
 import { agentProject, forgetAgentProject } from './lib/agentProject.js'
-import { createExternalWatch, externalCommand } from './lib/externalWatch.js'
+import { createExternalWatch, discoverExternalSessions, externalCommand } from './lib/externalWatch.js'
 import { createStopAgentService } from './lib/stopAgentService.js'
 import { createResumeAgentService } from './lib/resumeAgentService.js'
 import { buildLaunchOverrides, validateLaunchOverrides, type LaunchOverrides, type LaunchOverridesDeps, type LaunchOverridesResult, type LaunchSource } from './lib/launchOverrides.js'
@@ -4200,10 +4200,15 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     project: (cwd) => agentProject(cwd),
     publish: (agent) => backendRef?.send({ type: 'agent_synced', payload: { agent } }),
     remove: (agentId) => backendRef?.send({ type: 'agent_deleted', payload: { agentId, retained: false } }),
+    discovered: async () => discoverExternalSessions(await openSessions.owners(), { dataDir: env.ADAPTER_DATA_DIR }),
   })
   backend.externalAgentsProvider = () => externalWatch.frames()
   const externalSweep = setInterval(() => { void externalWatch.sweep().catch(() => {}) }, 20_000)
   externalSweep.unref?.()
+  // Sessions that sent no hook yet: once shortly after start, then with every sweep's look.
+  const externalDiscover = (): void => { void externalWatch.discover().catch(() => {}) }
+  setTimeout(externalDiscover, 3_000).unref?.()
+  setInterval(externalDiscover, 20_000).unref?.()
 
   const { server: hookServer, port: hookPort, localSocket } = await startHookServer(daemonPort(), {
     onExternalHook: (body) => externalWatch.hook(body),

@@ -146,6 +146,11 @@ export class OpenSessions {
     return (await this.current()).owners.get(sessionId) ?? null
   }
 
+  /** Every session open in a running process, with its owner, from an answer at most `maxAgeMs` old. */
+  async owners(): Promise<ReadonlyMap<string, SessionOwner>> {
+    return (await this.current()).owners
+  }
+
   /** Whether [owner] is mid-turn. An engine whose store cannot say counts as busy: the answer only
    *  decides whether to ask before stopping it. */
   async busy(owner: Pick<SessionOwner, 'engine' | 'pid' | 'record'>): Promise<boolean> {
