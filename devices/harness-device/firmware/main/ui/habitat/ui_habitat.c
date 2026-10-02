@@ -90,7 +90,8 @@ typedef enum {
     MODELS,
     MESSAGE,
     OTA,
-    NF_PLANS   // nixfred slice 3: the subscription detail face
+    NF_PLANS,  // nixfred slice 3: the subscription detail face
+    NF_HUB     // nixfred slice 5: the hub a hold anywhere opens
 } view_t;
 typedef enum {
     A_NONE,
@@ -129,7 +130,8 @@ typedef enum {
     A_CARRY, A_CARRY_DROP, A_CARRY_SEND,
     A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
     A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ,
-    A_NF_PLANS, A_NF_CARD   // nixfred slice 3: open the plans face; open the inbox from the card
+    A_NF_PLANS, A_NF_CARD,  // nixfred slice 3: open the plans face; open the inbox from the card
+    A_NF_HUB_CLOSE          // nixfred slice 5: close the hub, back to where the hold began
 } action_kind_t;
 typedef struct {
     action_kind_t kind;
@@ -268,6 +270,8 @@ static EXT_RAM_BSS_ATTR struct {
     int nf_retries;                         // connection attempts since the link was last up
     uint32_t nf_view_at, nf_orbit, nf_orbit_at, nf_scan_at;
     uint8_t nf_hold_step;                   // slice 4: how far the hold ring has filled, 0..19 (0: none)
+    uint32_t nf_hub_at;                     // slice 5: when the hub opened (its bloom), 0: never
+    uint8_t nf_hub_return;                  // slice 5: the view the hold began on, where closing returns
     uint8_t nf_last_view, nf_was_ambient;
     uint32_t nf_card_at, nf_card_gone;      // card arrival; when its dismiss began (0: not dismissed)
     char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
@@ -950,18 +954,18 @@ static void agents_open(void)
     if (s.offset < 0) s.offset = 0;
 }
 /*
- * nixfred slice 4: HOLD ANYWHERE FOR THE SESSION LIST.
+ * nixfred slice 4: HOLD ANYWHERE (slice 5: for the hub; slice 4 opened the session list).
  *
- * A still finger held NF_HOLD_MS opens the session list while it is still down; the rest of that contact
+ * A still finger held NF_HOLD_MS opens the hub (nf_hub_open) while it is still down; the rest of that contact
  * is consumed, so lifting or sliding afterwards selects nothing. From NF_HOLD_SHOW_MS a ring fills on the
  * rim so the hold is visibly registering; a tap (350 ms at most) shows at most a sliver of it.
  *
  * The existing long presses win where they live, so the hold is not armed:
  *   - in VOICE (hold = stop into a draft review), DRAFT / DRAFT_OPTIONS (hold on Edit = options), FORM,
- *     SELECTION and ANSWER_REVIEW (an answer or text being composed), OTA, and AGENTS (already there);
+ *     SELECTION and ANSWER_REVIEW (an answer or text being composed), OTA, and NF_HUB (already there);
  *   - on the home or agent face's footer controls (microphone, bell, tab pill, return, drop, the
  *     workspace slider): they are pressed and released, and a slow press must still be a press. The
- *     agent's name is the exception: its press opens this same list, so holding it simply gets there;
+ *     agent's name is the exception: holding it opens the hub like the rest of the face;
  *   - on a creature skin's middle (A_PET), which keeps its own hold-for-tabs. On Focus, the only skin the
  *     device build draws, the middle of the face is where this hold lives.
  * A hold never dispatches what is under the finger: on a question or permission screen it leaves the
@@ -974,13 +978,13 @@ static bool nf_hold_armed(void)
         return false;
     if (display_is_asleep() || brand_visible() || s.voice_open || form.id[0] || draft.page.active) return false;
     switch (s.view) {
-    case AGENTS: case VOICE: case FORM: case DRAFT: case DRAFT_OPTIONS: case SELECTION: case ANSWER_REVIEW: case OTA:
+    case NF_HUB: case VOICE: case FORM: case DRAFT: case DRAFT_OPTIONS: case SELECTION: case ANSWER_REVIEW: case OTA:
         return false;
     default:
         break;
     }
     bool surface = s.view == HOME || s.view == AGENT;
-    // The title (A_AGENTS) is a footer too, but it opens this same list: holding it gets there sooner.
+    // The title (A_AGENTS) is a footer too, but a hold on it is a hold on the face: it opens the hub.
     if (surface && home_footer(pressed_action.kind) && pressed_action.kind != A_AGENTS) return false;
     if (surface && pressed_action.kind == A_PET && character.id != HT_CHARACTER_FOCUS) return false;
     return true;
@@ -1004,14 +1008,15 @@ static uint32_t nf_hold_wait(uint32_t now)
     uint32_t left = NF_HOLD_MS - t;
     return left < NF_HOLD_FRAME_MS ? left : NF_HOLD_FRAME_MS;
 }
-// Advance the ring; at the end of the hold open the session list. True when it opened.
+static void nf_hub_open(void);
+// Advance the ring; at the end of the hold open the hub. True when it opened.
 static bool nf_hold_tick(uint32_t now)
 {
     int pm = nf_hold_permille(now);
     if (pm >= 1000) {
-        ESP_LOGI("habitat", "hold: session list");
+        ESP_LOGI("habitat", "hold: hub");
         s.nf_hold_step = 0;
-        agents_open();
+        nf_hub_open();
         // view() consumed the contact; if it refused to move, consume it anyway so this fires once.
         if (s.touch_down) s.touch_cancelled = true;
         s.pressed = -1;
@@ -2076,7 +2081,10 @@ static int nf_card_y(uint32_t now, int *trail)
     s.nf_card_at = 0;
     return HT_HEIGHT;
 }
-static bool nf_card_up(void) { return s.nf_card_at && !s.nf_card_gone; }
+static bool nf_card_up(void)
+{
+    return s.nf_card_at && !s.nf_card_gone;
+}
 // Put a hit before every other one: the first hit under a finger wins.
 static void nf_hit_first(hit_t h)
 {
@@ -2119,7 +2127,7 @@ static void nf_render_ambient(ht_scene_t *f, uint32_t now)
                     clock, line, &p);
     s.hits[s.hit_count++] = (hit_t){{0, 0, HT_WIDTH, HT_HEIGHT}, A_PET, 0, true}; // a touch only wakes it
 }
-// What slice 3 adds over the home face: the lane tag, the plans' tap target and the notification card.
+// What slice 3 adds over the home face: the lane tag and the notification card.
 static void nf_home_extras(ht_scene_t *f, uint32_t now)
 {
     if (!s.connected || s.loading) return;
@@ -2131,10 +2139,8 @@ static void nf_home_extras(ht_scene_t *f, uint32_t now)
         ht_text(f, HT_WIDTH / 2 - ht_mono_16.width / 2, 302 - ht_mono_16.height / 2, ht_mono_16.width, &ht_mono_16,
                 FG, BG, l);
     }
-    if (s.nf_plan_count > 0) {   // the plan arcs sit in the bottom corners of the rim; a tap opens them
-        nf_hit_first((hit_t){{30, 360, 108, 84}, A_NF_PLANS, 0, true});
-        nf_hit_first((hit_t){{328, 360, 108, 84}, A_NF_PLANS, 0, true});
-    }
+    // Slice 5: the plan arcs in the bottom corners are display only. Their tap targets collided with the
+    // compose control under them; the plans face is a wedge of the hub now.
     int trail, y = nf_card_y(now, &trail);
     if (y < HT_HEIGHT) {
         nixfred_palette_t p = nf_palette();
@@ -2253,6 +2259,8 @@ static uint32_t nf3_period(uint32_t now)
         uint32_t t = now - s.nf_card_at;
         NF_WANT(s.nf_card_gone || t < NF_CARD_IN_MS || t > NF_CARD_IN_MS + NF_CARD_HOLD_MS - 40 ? 30 : 250);
     }
+    if (s.view == NF_HUB && s.nf_hub_at && now - s.nf_hub_at < NIXFRED_HUB_BLOOM_MS + 40) NF_WANT(NF_SWEEP_FRAME_MS);
+    else if (s.view == NF_HUB && s.nf_clock_at) NF_WANT(1000);   // the clock in its centre
     if (s.view == MESSAGE && s.nf_msg_kind == 3) NF_WANT(150);
     if (s.view == MESSAGE && s.nf_msg_kind == 4) NF_WANT(NF_PHASE_MS);
     if (nf_swarm_visible() && !s.quiet && !s.nap) {
@@ -2270,6 +2278,100 @@ static bool nf_card_swipe(int start_y, int dy)
     s.nf_card_gone = ms() | 1;
     change();
     return true;
+}
+
+/*
+ * nixfred slice 5: THE HUB. A hold anywhere (slice 4's 650 ms, same ring, same exceptions) opens it.
+ *
+ * Five wedges clockwise from 12 o'clock, each with a glyph, a label and one live line:
+ *   SESSIONS  how many agents and how many need you (red for a permission, yellow for a question) -> AGENTS
+ *   PLANS     the next plan's name and banked share, its use as a gauge                            -> NF_PLANS
+ *   MACHINES  this machine's load and VRAM (or battery) as two arcs                                -> MACHINES
+ *   SWARMS    how many tabs; the ring of rings                                                     -> TABS
+ *   INBOX     how many notices are unread (dim, and opens nothing, when there are none)            -> INBOX
+ * The centre holds the clock and the fleet summary ("! 1/9"); a tap there, on the glass between the
+ * wedges, or a swipe either way, closes it back to the view the hold began on. There is no STOP ALL
+ * wedge: the dial has no request that stops every agent (`nixfred.panic` runs host to dial only, and
+ * A_STOP_YES stops one agent's turn), so one is not drawn rather than drawn doing something else.
+ * Nothing here answers a question: every wedge only changes the view.
+ */
+static void nf_hub_open(void)
+{
+    view_t from = s.view;
+    view(NF_HUB);
+    if (s.view != NF_HUB) return;
+    s.nf_hub_return = (uint8_t)from;
+    s.nf_hub_at = ms() | 1;
+}
+static void nf_hub_close(void)
+{
+    view_t back = (view_t)s.nf_hub_return;
+    // Somewhere that cannot be re-entered as it was (a one-off message, a transfer, a question since
+    // answered elsewhere) closes to the home face instead.
+    if (back == NF_HUB || back == MESSAGE || back == OTA || back == VOICE || back == FORM || back == DRAFT ||
+        back == DRAFT_OPTIONS || back == SELECTION || (question_view(back) && !s.q.valid) || (back == AGENT && !active()))
+        back = HOME;
+    view(back);
+}
+static void nf_render_hub(ht_scene_t *f, uint32_t now)
+{
+    nixfred_palette_t p = nf_palette();
+    nixfred_hub_wedge_t w[5];
+    memset(w, 0, sizeof w);
+    static const char *const labels[5] = {"SESSIONS", "PLANS", "MACHINES", "SWARMS", "INBOX"};
+    static const action_kind_t opens[5] = {A_AGENTS, A_NF_PLANS, A_MACHINES, A_TABS, A_INBOX};
+    for (int i = 0; i < 5; i++) {
+        w[i].glyph = (uint8_t)i; w[i].label = labels[i]; w[i].tone = p.accent; w[i].live = true;
+        w[i].arc = w[i].arc2 = -1; w[i].arc_tone = p.accent;
+    }
+    uint8_t st[NIXFRED_RIM_MAX];
+    int n = nf_states(st, NIXFRED_RIM_MAX, now), asks = 0, perms = 0;
+    for (int i = 0; i < n; i++) { asks += st[i] == NIXFRED_WAITING || st[i] == NIXFRED_PERMISSION; perms += st[i] == NIXFRED_PERMISSION; }
+    if (asks) {
+        snprintf(w[0].line, sizeof w[0].line, "%d/%d need you", asks, s.count);
+        w[0].tone = perms ? p.red : p.yellow; w[0].glow = true;
+    } else snprintf(w[0].line, sizeof w[0].line, s.count == 1 ? "1 agent" : s.count ? "%d agents" : "no agents", s.count);
+    int pick = s.nf_plan_pick - 1;
+    if (pick < 0 || pick >= s.nf_plan_count) pick = s.nf_plan_count > 0 ? 0 : -1;
+    if (pick >= 0) {
+        char name[10];
+        snprintf(name, sizeof name, "%s", s.nf_plan_name[pick][0] ? s.nf_plan_name[pick] : "plan");
+        for (char *c = name; *c; c++) if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
+        int b = s.nf_plan_banked[pick], bank = b >= 0 ? (b + 5) / 10 : -((-b + 5) / 10);
+        snprintf(w[1].line, sizeof w[1].line, "%s %+d%%", name, bank);
+        w[1].arc = s.nf_plan_used[pick]; w[1].arc_tone = color(nf_plan_color(s.nf_plan_tone[pick]));
+    } else snprintf(w[1].line, sizeof w[1].line, "no data");
+    if (s.nf_fleet.machine_id[0] || s.nf_clock_at) {
+        w[2].arc = s.nf_fleet.load;
+        w[2].arc2 = s.nf_fleet.vram >= 0 ? s.nf_fleet.vram : s.nf_fleet.battery;
+        if (s.nf_fleet.load >= 0) snprintf(w[2].line, sizeof w[2].line, "load %d%%", (s.nf_fleet.load + 5) / 10);
+    }
+    if (!w[2].line[0]) snprintf(w[2].line, sizeof w[2].line, s.machine_count == 1 ? "1 host" : "%d hosts", s.machine_count);
+    snprintf(w[3].line, sizeof w[3].line, s.tab_count == 1 ? "1 tab" : "%d tabs", s.tab_count);
+    unsigned unread = notice_unread(NULL);
+    if (unread) {
+        snprintf(w[4].line, sizeof w[4].line, "%u unread", unread);
+        w[4].glow = true; w[4].tone = waiting() ? p.yellow : p.accent;
+    } else snprintf(w[4].line, sizeof w[4].line, "all read");
+    w[4].live = s.notice_count > 0;
+    char clock[8], summary[16];
+    uint16_t tone = p.accent;
+    nf_clock(clock, sizeof clock, now);
+    nixfred_fleet_summary(summary, sizeof summary, &tone, st, n, &p);
+    int bloom = s.nf_hub_at && now - s.nf_hub_at < NIXFRED_HUB_BLOOM_MS ?
+        (int)((now - s.nf_hub_at) * 1000 / NIXFRED_HUB_BLOOM_MS) : 1000;
+    nixfred_hub(f, w, 5, bloom, s.pressed >= 0 && s.pressed < 5 ? s.pressed : -1, clock, summary, tone, &p);
+    // Tap targets: the wedges first (the first hit under a finger wins), then the centre, then the rest
+    // of the glass, which closes it too.
+    for (int i = 0; i < 5; i++) {
+        int x, y;
+        nixfred_hub_centre(i, 5, &x, &y);
+        s.hits[s.hit_count++] = (hit_t){{x - NIXFRED_HUB_HIT_W / 2, y - NIXFRED_HUB_HIT_H / 2, NIXFRED_HUB_HIT_W,
+                                         NIXFRED_HUB_HIT_H}, w[i].live ? opens[i] : A_NONE, 0, true}; // a dim wedge swallows its tap
+    }
+    s.hits[s.hit_count++] = (hit_t){{HT_WIDTH / 2 - NIXFRED_HUB_CORE_R, HT_HEIGHT / 2 - NIXFRED_HUB_CORE_R,
+                                     2 * NIXFRED_HUB_CORE_R, 2 * NIXFRED_HUB_CORE_R}, A_NF_HUB_CLOSE, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{0, 0, HT_WIDTH, HT_HEIGHT}, A_NF_HUB_CLOSE, 0, true};
 }
 
 bool habitat_scene_take(ht_scene_t *f)
@@ -2301,6 +2403,9 @@ bool habitat_scene_take(ht_scene_t *f)
         break;
     case NF_PLANS:
         nf_render_plans(f);
+        break;
+    case NF_HUB:
+        nf_render_hub(f, ms());
         break;
     case AGENTS:
         render_agents(f);
@@ -2667,6 +2772,9 @@ static void dispatch(action_t a)
         break;
     case A_NF_PLANS:
         view(NF_PLANS);
+        break;
+    case A_NF_HUB_CLOSE:
+        nf_hub_close();
         break;
     case A_NOTICE: {
         if (s.connected && !visit.pending && a.id[0]) {
@@ -3250,6 +3358,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
         s.pressed = -1;
         if (!s.touch_cancelled && gesture.axis == 1 && abs(dy) > 40 && nf_card_swipe(s.start_y, dy)) {
             // nixfred: a swipe up from the card dismissed it (with its trail).
+        } else if (s.view == NF_HUB && !s.touch_cancelled && (abs(dx) > 40 || abs(dy) > 40)) {
+            nf_hub_close();   // nixfred slice 5: a swipe either way closes the hub, opening nothing
         } else if (scrolled || s.touch_cancelled) {
             // Motion owns this entire contact, even if it returns to its start.
         } else if (tab_contact) {

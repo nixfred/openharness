@@ -605,3 +605,103 @@ void nixfred_hold_rim(ht_scene_t *f, int permille, uint16_t accent)
     ht_ring(f, CX, CY, NIXFRED_RIM_IN - 6, NIXFRED_RIM_OUT, 0, sweep > 0 ? sweep : 1,
             sweep > 0 ? accent : dim(accent, 30));
 }
+
+// ---- slice 5: the hub --------------------------------------------------------------------------------------
+
+void nixfred_hub_centre(int i, int n, int *x, int *y)
+{
+    if (n < 1) n = 1;
+    polar(CX, CY, NIXFRED_HUB_R, i * HT_TURN / n, x, y);
+}
+
+static int clamp1000(int v) { return v < 0 ? 0 : v > 1000 ? 1000 : v; }
+
+// One glyph at `gx, gy`, always exactly three runs (an unused run is a 1-unit arc in the canvas colour),
+// so the hub's run count never depends on which glyph or gauge is showing.
+static void hub_glyph(ht_scene_t *f, const nixfred_hub_wedge_t *w, int gx, int gy, uint16_t c, unsigned pct)
+{
+    uint16_t bg = f->background, track = over(c, bg, pct * 28 / 100);
+    uint16_t gauge = over(w->arc_tone, bg, pct);
+    int used = 0;
+#define NONE() (ht_ring(f, gx, gy, 0, 1, 0, 1, bg), used++)
+    switch (w->glyph) {
+    case NIXFRED_GLYPH_SESSIONS: // the session list: three rows, the first one the active agent
+        ht_box(f, gx - 15, gy - 10, 30, 5, 2, c, c);
+        ht_box(f, gx - 15, gy - 2, 30, 5, 2, over(c, bg, 60), over(c, bg, 60));
+        ht_box(f, gx - 15, gy + 6, 22, 5, 2, over(c, bg, 35), over(c, bg, 35));
+        used = 3;
+        break;
+    case NIXFRED_GLYPH_PLANS: { // a gauge: from 7:30 round to 4:30, filled to the next plan's use
+        enum { S = HT_TURN * 5 / 8, SW = HT_TURN * 3 / 4 };
+        ht_ring(f, gx, gy, 10, 15, S, SW, track); used++;
+        int fill = w->arc >= 0 ? SW * clamp1000(w->arc) / 1000 : 0;
+        ht_ring(f, gx, gy, 10, 15, S, fill > 0 ? fill : 1, fill > 0 ? gauge : track); used++;
+        NONE();
+        break;
+    }
+    case NIXFRED_GLYPH_MACHINES: { // load on the outer ring (amber from 80%, red from 95%), VRAM inside
+        ht_ring(f, gx, gy, 12, 16, 0, HT_TURN, track); used++;
+        int load = w->arc >= 0 ? clamp1000(w->arc) : 0;
+        uint16_t loadc = w->arc >= 950 ? over(ht_rgb(0xcd3131), bg, pct) : w->arc >= 800 ? over(ht_rgb(0xffb000), bg, pct) : gauge;
+        ht_ring(f, gx, gy, 12, 16, 0, load ? HT_TURN * load / 1000 : 1, load ? loadc : track); used++;
+        int aux = w->arc2 >= 0 ? clamp1000(w->arc2) : 0;
+        ht_ring(f, gx, gy, 6, 8, 0, aux ? HT_TURN * aux / 1000 : 1, aux ? over(c, bg, pct * 70 / 100) : bg); used++;
+        break;
+    }
+    case NIXFRED_GLYPH_SWARMS: { // a ring of rings: the tab, its orbit, one agent on it
+        ht_ring(f, gx, gy, 5, 8, 0, HT_TURN, c); used++;
+        ht_ring(f, gx, gy, 14, 15, 0, HT_TURN, track); used++;
+        int ax, ay; polar(gx, gy, 14, HT_TURN / 8, &ax, &ay);
+        ht_ring(f, ax, ay, 0, 4, 0, HT_TURN, c); used++;
+        break;
+    }
+    case NIXFRED_GLYPH_INBOX: // a card with a notice dot when something is unread
+        ht_box(f, gx - 15, gy - 10, 30, 21, 4, bg, c); used++;
+        ht_box(f, gx - 9, gy - 2, 18, 3, 1, over(c, bg, 60), over(c, bg, 60)); used++;
+        ht_ring(f, gx + 14, gy - 10, 0, 5, 0, HT_TURN, w->glow ? c : bg); used++;
+        break;
+    default:
+        break;
+    }
+    while (used < 3) NONE();
+#undef NONE
+}
+
+void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, const char *clock,
+                 const char *summary, uint16_t summary_tone, const nixfred_palette_t *p)
+{
+    uint16_t bg = f->background;
+    if (n > NIXFRED_HUB_MAX) n = NIXFRED_HUB_MAX;
+    if (n < 1) return;
+    bloom = clamp1000(bloom);
+    int e = 1000 - (1000 - bloom) * (1000 - bloom) / 1000; // ease out
+    int part = HT_TURN / n, gap = 26;
+    for (int i = 0; i < n; i++) {
+        // The rim: a sweep passes from 12 o'clock and lights each wedge's arc as it goes.
+        int lit = clamp1000(e * n - i * 1000), sweep = (part - 2 * gap) * lit / 1000;
+        int start = (i * part - part / 2 + gap + HT_TURN) % HT_TURN;
+        // Then the wedge's glyph and words fade in, one after another.
+        unsigned pct = (unsigned)clamp1000((bloom - 250 - i * 70) * 1000 / 450) / 10;
+        uint16_t tone = w[i].live ? w[i].tone : over(p->ink, bg, 35);
+        bool down = i == pressed && w[i].live;
+        // Glow is urgency: a soft band inside the arc, canvas when nothing here needs you.
+        ht_ring(f, CX, CY, NIXFRED_RIM_IN - 11, NIXFRED_RIM_IN - 1, start, sweep > 0 ? sweep : 1,
+                w[i].glow && sweep > 0 ? over(tone, bg, 16 * pct / 100 + 4) : bg);
+        ht_ring(f, CX, CY, down ? NIXFRED_RIM_IN - 6 : NIXFRED_RIM_IN, NIXFRED_RIM_OUT, start, sweep > 0 ? sweep : 1,
+                sweep > 0 ? over(tone, bg, w[i].live ? 100 : 60) : bg);
+        int x, y;
+        nixfred_hub_centre(i, n, &x, &y);
+        hub_glyph(f, &w[i], x, y - 28, over(tone, bg, pct), pct);
+        text_centred(f, x, y - 8, &ht_mono_16, over(down ? tone : w[i].live ? p->ink : tone, bg, pct), bg,
+                     w[i].label ? w[i].label : "", NIXFRED_HUB_HIT_W);
+        text_centred(f, x, y + 14, &ht_lv_geist_reg_20.base,
+                     over(w[i].glow ? tone : w[i].live ? over(p->ink, bg, 75) : tone, bg, pct), bg,
+                     w[i].line[0] ? w[i].line : " ", NIXFRED_HUB_HIT_W + 6);
+    }
+    // The centre: the time and the fleet in a few characters; a tap here closes the hub.
+    unsigned cp = (unsigned)clamp1000(bloom * 2) / 10;
+    ht_ring(f, CX, CY, NIXFRED_HUB_CORE_R - 2, NIXFRED_HUB_CORE_R, 0, HT_TURN, over(p->accent, bg, 30 * cp / 100));
+    text_centred(f, CX, CY - 34, &ht_mono_28, over(p->ink, bg, cp), bg, clock && clock[0] ? clock : "--:--", 130);
+    text_centred(f, CX, CY + 2, &ht_mono_20, over(summary_tone, bg, cp), bg, summary && summary[0] ? summary : "-", 130);
+    text_centred(f, CX, CY + 32, &ht_mono_16, over(p->ink, bg, 40 * cp / 100), bg, "close", 100);
+}

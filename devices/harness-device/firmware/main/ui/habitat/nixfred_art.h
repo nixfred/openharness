@@ -143,3 +143,29 @@ void nixfred_hold_rim(ht_scene_t *f, int permille, uint16_t accent);
 
 // One line centred on `cx`, cut to whole letters with ".." to fit `max_w` px.
 void nixfred_label(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, const char *text, int max_w);
+
+// ---- slice 5: the hub (hold anywhere) ---------------------------------------------------------------------
+
+// The hub: up to NIXFRED_HUB_MAX wedges around the glass, clockwise from 12 o'clock, each a rim arc in its
+// tone, a glyph, a label and one live line; the centre holds the clock and the fleet summary and closes it.
+// `bloom` 0..1000 is the opening motion: the rim arcs light in turn as a sweep passes, then each wedge's
+// glyph and words fade in. Run count depends only on `n`, never on `bloom`, `pressed` or the readouts, so
+// every frame of the bloom and every live update is a damage diff.
+enum { NIXFRED_HUB_MAX = 6, NIXFRED_HUB_R = 150, NIXFRED_HUB_CORE_R = 72, NIXFRED_HUB_BLOOM_MS = 380,
+       NIXFRED_HUB_HIT_W = 128, NIXFRED_HUB_HIT_H = 120 };
+typedef enum { NIXFRED_GLYPH_SESSIONS, NIXFRED_GLYPH_PLANS, NIXFRED_GLYPH_MACHINES, NIXFRED_GLYPH_SWARMS,
+               NIXFRED_GLYPH_INBOX } nixfred_glyph_t;
+typedef struct {
+    uint8_t glyph;        // nixfred_glyph_t
+    const char *label;    // "SESSIONS"
+    char line[24];        // the live readout under it
+    uint16_t tone;        // the wedge's colour: the accent, or the colour of what needs you
+    bool glow;            // glow is urgency: a band inside the rim arc
+    bool live;            // false: drawn dim (nothing to open)
+    int arc, arc2;        // the glyph's gauges in permille (plans: next plan's use; machines: load, VRAM), -1 none
+    uint16_t arc_tone;
+} nixfred_hub_wedge_t;
+// Where wedge `i` of `n` sits (its label's centre), for the caller's tap targets.
+void nixfred_hub_centre(int i, int n, int *x, int *y);
+void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, int pressed, const char *clock,
+                 const char *summary, uint16_t summary_tone, const nixfred_palette_t *p);

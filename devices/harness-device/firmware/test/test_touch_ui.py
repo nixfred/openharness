@@ -81,8 +81,15 @@ static struct {
     int nf_retries; // slice 3: the connecting ring and the notification card
     uint8_t nf_hold_step; // slice 4: the hold ring (ui_habitat.c's field, mirrored)
     uint32_t nf_card_at, nf_card_gone; char nf_card_id[ID_MAX], nf_card_name[CABLE_NAME_MAX], nf_card_text[96];
+    // slice 3 fields the hub's live readouts read (ui_habitat.c's, mirrored; nf_fleet trimmed to what is read)
+    char nf_plan_name[NIXFRED_PLANS_MAX][10]; int16_t nf_plan_banked[NIXFRED_PLANS_MAX]; int nf_plan_pick;
+    int32_t nf_clock_s; uint32_t nf_clock_at;
+    struct { char machine_id[ID_MAX]; int16_t load, battery, vram; int lane_count;
+             struct { char id[ID_MAX]; char letter; } lanes[16]; } nf_fleet;
+    uint32_t nf_hub_at; uint8_t nf_hub_return; // slice 5: the hub's bloom start and the view it returns to
 } s;
 static bool nf_msg_keep;
+static void nf_hub_open(void); static void nf_hub_close(void); // slice 5 (ui_habitat.c declares them likewise)
 // Slice 3's animation clock and card gesture live in their own block; this harness drives slice 2's.
 static uint32_t nf2_period(uint32_t now);
 static uint32_t nf3_period(uint32_t now) { (void)now; return 0; }
@@ -244,7 +251,7 @@ visit_worker=source.split('static void worker(',1)[1].split('        case A_VISI
 code+='static void visit_work(action_t a) { switch(a.kind) { case A_VISIT_SEND:'+visit_worker+'default: break; } }\n'
 carry_actions = source.split('case A_CARRY:\n',1)[1].split('case A_NAP:',1)[0]
 code += 'static void carry_action(action_t a) { switch(a.kind) { case A_CARRY:\n' + carry_actions + 'default: break; } }\n'
-code += 'static void dispatch(action_t a);\n'
+code += 'static void dispatch(action_t a);\nstatic void nf_hub_open(void);\nstatic void nf_hub_close(void);\n'
 question_actions = source.split('    case A_QUESTION_CHOICES:\n',1)[1].split('    case A_INBOX:',1)[0]
 code += 'static void question_action(action_t a) { switch(a.kind) { case A_QUESTION_CHOICES:\n'+question_actions+'default: break; } }\n'
 draft_actions = source.split('    case A_DRAFT_EDIT:\n',1)[1].split('    case A_HOME:',1)[0]
@@ -276,9 +283,12 @@ static void dispatch(action_t a) {
         switches++; s.active = !strcmp(a.id, "b") ? 1 : 0; view(AGENT);
     } else if (a.kind == A_SETTINGS) view(SETTINGS);
     else if (a.kind == A_FIND) view(FORM);
-    else if (a.kind == A_AGENTS) view(AGENTS);
+    else if (a.kind == A_AGENTS) agents_open();                  // mirrors ui_habitat.c's dispatch
     else if (a.kind == A_INBOX) notice_open();
     else if (a.kind == A_HOME) view(HOME);
+    else if (a.kind == A_NF_HUB_CLOSE) nf_hub_close();             // mirrors ui_habitat.c's dispatch
+    else if (a.kind == A_NF_PLANS) view(NF_PLANS);
+    else if (a.kind == A_MACHINES) view(MACHINES);
     else if (a.kind == A_NOTICE) notice_action(a);
     else if (a.kind == A_RECAP_DISMISS) dismiss_result(a.id);
     else if (a.kind == A_DESKTOP) desktop_action(a);
@@ -289,6 +299,10 @@ static void dispatch(action_t a) {
     } else if (a.kind == A_SELECT_EXTEND) ht_selection_extend(&selection,3000);
 }
 '''
+code += source[source.index('enum { NF_AMBIENT_AFTER_MS'):].split(';',1)[0] + ';\n'
+for name in ['nf_lane_of', 'nf_card_y', 'nf_card_up', 'nf_hit_first', 'nf_clock', 'nf_home_extras', 'nf_render_plans',
+             'nf_hub_open', 'nf_hub_close', 'nf_render_hub']:
+    code += function(name)
 code += function('habitat_touch') + function('habitat_touch_cancel')
 code += r'''
 static ht_scene_t scene;
@@ -304,7 +318,10 @@ static void scene_take(void) {
     else if (s.view == VOICE) render_voice(&scene);
     else if (s.view == TABS || s.view == INBOX || s.view == MACHINES) render_list(&scene);
     else if (s.view == AGENTS) render_agents(&scene);
-    else if (s.view == SELECTION) render_selection(&scene); else render_home(&scene);
+    else if (s.view == SELECTION) render_selection(&scene);
+    else if (s.view == NF_HUB) nf_render_hub(&scene, ms());
+    else if (s.view == NF_PLANS) nf_render_plans(&scene);
+    else { render_home(&scene); if (s.view == HOME) nf_home_extras(&scene, ms()); }
     if (s.view == SETTINGS) { ht_scene_clear(&scene,BG); s.hit_count=0; render_settings(&scene); }
     if (present_scene) habitat_scene_presented(habitat_scene_receipt());
 }
@@ -1172,23 +1189,23 @@ static void longpress_checks(void) {
     // 250..350 the middle (A_PET), 370 and below the microphone.
     focus_setup(); hold_at(233,300,1000,1150); assert(s.view==HOME && !s.nf_hold_step);
     hold_at(233,300,1152,1420); assert(s.view==HOME && s.nf_hold_step>0 && s.nf_hold_step<20);
-    hold_at(233,300,1424,1700); assert(s.view==AGENTS && s.touch_cancelled && !s.nf_hold_step);
+    hold_at(233,300,1424,1700); assert(s.view==NF_HUB && s.touch_cancelled && !s.nf_hold_step);
     habitat_touch(false,233,300,1750); scene_take();
-    assert(s.view==AGENTS && !starts && !tab_switches && !switches && !boops);
+    assert(s.view==NF_HUB && !starts && !tab_switches && !switches && !boops);
     // Holding the agent's name gets to the same list; a tap on it still opens it as before.
-    focus_setup(); hold_at(233,180,1000,1700); assert(s.view==AGENTS && s.touch_cancelled);
-    habitat_touch(false,233,180,1750); assert(s.view==AGENTS);
+    focus_setup(); hold_at(233,180,1000,1700); assert(s.view==NF_HUB && s.touch_cancelled);
+    habitat_touch(false,233,180,1750); assert(s.view==NF_HUB);
     focus_setup(); tap(1000,233,180); assert(s.view==AGENTS);
     // The same from an agent's face, and from the inbox, the tab list, settings and machines.
-    const int views[]={AGENT,INBOX,TABS,SETTINGS,MACHINES};
+    const int views[]={AGENT,AGENTS,INBOX,TABS,SETTINGS,MACHINES,NF_PLANS};
     for (unsigned i=0;i<sizeof views/sizeof *views;i++) {
         focus_setup(); view((view_t)views[i]); scene_take();
-        hold_at(233,300,1000,1700); assert(s.view==AGENTS && !starts && !switches && !tab_switches);
-        habitat_touch(false,233,300,1750); assert(s.view==AGENTS);
+        hold_at(233,300,1000,1700); assert(s.view==NF_HUB && s.nf_hub_return==views[i] && !starts && !switches && !tab_switches);
+        habitat_touch(false,233,300,1750); assert(s.view==NF_HUB);
     }
     // A drag is never a hold; a release before the end opens nothing and clears the ring.
     focus_setup(); hold_at(233,300,1000,1300); habitat_touch(true,233,240,1310); hold_at(233,240,1314,1800);
-    assert(s.view!=AGENTS && !s.nf_hold_step); habitat_touch(false,233,240,1810);
+    assert(s.view!=NF_HUB && !s.nf_hold_step); habitat_touch(false,233,240,1810);
     focus_setup(); hold_at(233,300,1000,1500); assert(s.nf_hold_step);
     habitat_touch(false,233,300,1504); scene_take(); assert(s.view==HOME && !s.nf_hold_step && !starts);
     // The tab pill keeps its slow press: released on target it opens the tab list, never the sessions.
@@ -1213,14 +1230,80 @@ static void longpress_checks(void) {
             hold_at(spots[i][0],spots[i][1],1000,1700);
             habitat_touch(true,spots[i][0]+3,spots[i][1]+3,1704);
             habitat_touch(false,spots[i][0]+3,spots[i][1]+3,1760); scene_take();
-            assert(s.view==AGENTS && !question_sends && !s.q.pending && !s.q.item[0].selected && s.q.valid);
+            assert(s.view==NF_HUB && !question_sends && !s.q.pending && !s.q.item[0].selected && s.q.valid);
         }
     }
     // The wake schedule asks for the ring's frames while it fills and for the moment it completes.
     focus_setup(); habitat_touch(true,233,300,1000);
     assert(nf_hold_wait(1000)==200 && nf_hold_wait(1300)>0 && nf_hold_wait(1300)<=30 && nf_hold_wait(1649)==1);
     habitat_touch_cancel(); assert(!s.nf_hold_step && !nf_hold_wait(1300));
-    puts("long press: hold anywhere opens the session list; mic, voice, creature tabs and questions keep theirs PASS");
+    puts("long press: hold anywhere opens the hub; mic, voice, creature tabs and questions keep theirs PASS");
+    reset();
+}
+
+// Slice 5: the hub. The hold opens it; each wedge opens its screen; the centre or a swipe closes it.
+static void hub_tap(int i, uint32_t t) { int x,y; nixfred_hub_centre(i,5,&x,&y); tap(t,x,y); }
+static void hub_setup(int from) {
+    focus_setup();
+    notice_add("b","Agent B","M2","Finished the refactor.",false,false);
+    s.nf_plan_count=2; strcpy(s.nf_plan_name[0],"claude"); strcpy(s.nf_plan_name[1],"kimi");
+    s.nf_plan_used[0]=620; s.nf_plan_used[1]=310; s.nf_plan_banked[1]=80; s.nf_plan_pick=2;
+    s.nf_clock_s=14*3600+7*60; s.nf_clock_at=1|1;
+    strcpy(s.nf_fleet.machine_id,"gus"); s.nf_fleet.load=630; s.nf_fleet.vram=380; s.nf_fleet.battery=-1;
+    if (from!=HOME) { view((view_t)from); scene_take(); }
+    hold_at(233,300,1000,1700); assert(s.view==NF_HUB && s.nf_hub_return==from);
+    habitat_touch(false,233,300,1750); scene_take(); assert(s.view==NF_HUB);
+}
+static bool scene_has(const char *t) { for (int i=0;i<scene.count;i++) if (!strcmp(scene.runs[i].text,t)) return true; return false; }
+static void hub_checks(const char *dir) {
+    // Opened by the hold, the contact consumed: lifting on a wedge opens nothing.
+    hub_setup(HOME);
+    assert(s.hit_count==7 && scene.count<=HT_RUNS && !starts && !switches);
+    // Live readouts: sessions, the next plan and its banked share, the inbox, the clock and the summary.
+    assert(scene_has("SESSIONS") && scene_has("PLANS") && scene_has("MACHINES") && scene_has("SWARMS") && scene_has("INBOX"));
+    assert(scene_has("2 agents") && scene_has("KIMI +8%") && scene_has("4 tabs") && scene_has("1 unread") && scene_has("14:07") && scene_has("load 63%"));
+    // STOP ALL is not on the hub: the firmware has no stop-everything request to send (panic is host to dial).
+    assert(!scene_has("STOP ALL") && !scene_has("STOP"));
+    fake_ms=5000; scene_take(); fake_ms=0; portrait(dir,"nixfred-hub");
+    // Each wedge opens its screen.
+    const int want[5]={AGENTS,NF_PLANS,MACHINES,TABS,INBOX};
+    for (int i=0;i<5;i++) {
+        hub_setup(HOME); hub_tap(i,3000); assert(s.view==want[i] && !starts && !switches);
+    }
+    // The centre closes it back to where the hold began; so does a swipe, either way.
+    hub_setup(HOME); tap(3000,233,233); assert(s.view==HOME);
+    hub_setup(AGENT); tap(3000,233,233); assert(s.view==AGENT);
+    hub_setup(HOME); habitat_touch(true,300,233,3000); habitat_touch(true,200,233,3050); habitat_touch(false,150,233,3100);
+    scene_take(); assert(s.view==HOME);
+    hub_setup(HOME); habitat_touch(true,233,300,3000); habitat_touch(true,233,200,3050); habitat_touch(false,233,150,3100);
+    scene_take(); assert(s.view==HOME && !switches);
+    // A tap on the glass between the wedges and the centre closes it too, opening nothing.
+    hub_setup(HOME); tap(3000,233,330); assert(s.view==HOME);
+    // Holding inside the hub does not arm another hold: no ring, still the hub, nothing opened on release.
+    hub_setup(HOME); { int x,y; nixfred_hub_centre(1,5,&x,&y); hold_at(x,y,3000,3800); assert(s.view==NF_HUB && !s.nf_hold_step);
+        habitat_touch(false,x,y,3850); scene_take(); assert(s.view==NF_HUB); }
+    // An empty inbox: its wedge is drawn dim and opens nothing.
+    focus_setup(); hold_at(233,300,1000,1700); habitat_touch(false,233,300,1750); scene_take();
+    assert(s.view==NF_HUB && scene_has("all read")); hub_tap(4,3000); assert(s.view==NF_HUB);
+    // The hub NEVER answers a question or permission: opened over one, every wedge and the centre leave
+    // it open and unanswered, and the centre returns to it.
+    for (int permission=0; permission<2; permission++) {
+        for (int i=-1;i<5;i++) {
+            question_setup(permission); question_sends=0;
+            hold_at(305,393,1000,1700); habitat_touch(false,305,393,1750); scene_take();
+            assert(s.view==NF_HUB && s.nf_hub_return==QUESTION);
+            if (i<0) { tap(3000,233,233); assert(s.view==QUESTION); }
+            else hub_tap(i,3000);
+            assert(!question_sends && !s.q.pending && !s.q.item[0].selected && s.q.valid);
+        }
+    }
+    // The home face's bottom corners no longer open the plans face (the compose control lives there);
+    // the plan arcs stay as display only.
+    focus_setup(); s.nf_plan_count=2; s.nf_plan_used[0]=500; s.nf_plan_used[1]=200; scene_take();
+    assert(!action_enabled(A_NF_PLANS));
+    tap(3000,84,402); assert(s.view!=NF_PLANS);
+    focus_setup(); s.nf_plan_count=2; scene_take(); tap(3000,382,402); assert(s.view!=NF_PLANS);
+    puts("hub: hold opens it; sessions, plans, machines, swarms, inbox open their screens; centre and swipe close; questions never answered; corners no longer open plans PASS");
     reset();
 }
 int main(int argc, char **argv) {
@@ -2155,6 +2238,7 @@ int main(int argc, char **argv) {
     habitat_touch(false,233,220,2800); assert(!stops && !reviews && recording);
     tap(3400,233,220); assert(stops==1 && !reviews);
     longpress_checks();
+    hub_checks(argc>1 ? argv[1] : NULL);
     puts("touch UI: PASS (production contacts/renderers; voice start/finish/discard, target pinning, sensor cancellation, immediate scroll, swipes, round trips, congestion and holds)");
 }
 '''

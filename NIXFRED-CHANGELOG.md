@@ -5,6 +5,57 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Device firmware: the hub, hold anywhere for every screen, 2026-10-01 (branch nixfred/firmware-hub)
+
+Sits on nixfred/main 8a428937. Firmware `0.0.86-nixfred.5`, ESP-IDF v5.5.0, 1,730,480 B against an 8 MB
+slot (79% free), DIRAM 45.21% used (unchanged from slice 3).
+
+- Fred: "We need a slick way to get to the menu with all the info like the banked subscription." The
+  plans face was only reachable by the bottom-corner arcs, which the stock compose control covered.
+- The slice 4 hold (650 ms still finger, the same rim ring filling from 200 ms, the same exceptions)
+  now opens THE HUB instead of the session list. Five wedges clockwise from 12 o'clock, each a rim arc,
+  a glyph, a label and one live line:
+  - SESSIONS: "9 agents", or "2/9 need you" glowing red (a permission) or yellow (a question). Opens the
+    session list (Focus AGENTS view, what the hold opened before).
+  - PLANS: the next plan and its banked share ("KIMI +8%"), its weekly use as a gauge. Opens NF_PLANS.
+  - MACHINES: "load 63%", load and VRAM (battery without a GPU) as two arcs. Opens machines.
+  - SWARMS: "4 tabs", a ring of rings. Opens the tab list with the swarm overlay.
+  - INBOX: "3 unread" glowing (yellow when a question waits), or "all read" drawn dim and inert. Opens it.
+  - The centre: the clock (from `nixfred.fleet`, "--:--" until one arrives), the "! 1/9" fleet summary
+    and "close".
+- STOP ALL is NOT on the hub. The dial has no request that stops every agent: `nixfred.panic` runs host to
+  dial only (after `harness stop-all`), and A_STOP_YES stops one agent's turn. So no wedge was drawn
+  rather than one that does something else. Adding it needs a new dial-to-host frame and a daemon handler.
+- Closing: a tap on the centre, a tap on the glass between the wedges, or a swipe either way returns to
+  the view the hold began on (the home face when that cannot be re-entered: a message, a transfer, a
+  question answered meanwhile). Holding inside the hub arms nothing.
+- Opening: a 380 ms bloom. The rim arcs light in turn as a sweep passes from 12 o'clock, then each wedge
+  fades in (plus slice 3's view sweep). 30 ms frames during it; afterwards one frame a second for the
+  clock, a damage diff of the clock text.
+- Never answers: every wedge only changes the view. A hold over a question or permission opens the hub
+  and the question stays open and unanswered; the centre returns to it.
+- Removed: the two bottom-corner A_NF_PLANS tap targets on the home face. The plan arcs stay there as
+  display only. The tap on the agent's name still opens the session list directly.
+- Changed: a hold on the session list (AGENTS) now opens the hub too (it was not armed there, as the hold
+  used to lead there).
+- Renderer: `nixfred_hub` in nixfred_art.c on the habitat compositor, ht_ring/ht_box/ht_text runs only,
+  no allocation. 39 runs whatever the readouts, the bloom step or the pressed wedge (budget 56, with
+  room for the view sweep and the hold ring), so every frame is a damage diff. Seven hits (of 24).
+- Verified: full test/run.sh passes on gus with the slice 2 cc wrapper, with and without IDF_PATH.
+  New test_nixfred_hub.c: constant runs across the bloom, partial redraw equals full, readouts drawn,
+  glow red only when someone waits, tap targets inside the glass. test_touch_ui gains hub_checks (Tim
+  and Tux): the hold opens the hub and consumes the contact; each wedge opens its screen; centre, the
+  glass between and swipes close it back to where it began; an empty inbox wedge swallows its tap;
+  ten hold-and-tap paths over a question and a permission never send; the home corners no longer open
+  plans. longpress_checks now expects the hub (and arms AGENTS and NF_PLANS).
+  nixfred/firmware-graphics-5-host-render.png is a HOST render (bloom at 36%, settled from the production
+  ui_habitat.c through the touch harness, urgent, nothing known yet), not a photo of the glass.
+  Flashed over USB with the slice 1-4 method (same four images and offsets, NVS untouched); the daemon
+  logged `dial 80:45:6B:35:06:CC on fw 0.0.86-nixfred.5 proto 3`, no offer.
+- Not verified: the hold and the wedge taps by a real finger on the glass, the bloom by eye on the
+  device, the live readouts against a real `nixfred.fleet` and `nixfred.subs` on the glass, the hub over
+  a live question or permission on the device.
+
 ## Device firmware: hold anywhere for the session list, 2026-10-01 (branch nixfred/firmware-longpress)
 
 Sits on nixfred/main 1ad301b6. Firmware `0.0.86-nixfred.4`, ESP-IDF v5.5.0, 1,726,640 B against an 8 MB
