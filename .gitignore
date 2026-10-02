@@ -118,3 +118,4 @@ mobile/docs/
 work/experience-evidence/
 mobile/OTA.md
 mobile/scripts/ota-ios.sh
+__pycache__/
