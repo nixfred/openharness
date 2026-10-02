@@ -5,6 +5,10 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## Flashing rule (2026-10-02)
+
+Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
+
 ## Upstream sync: 40 commits from autonomous-ai/openharness main (30d2381b), 2026-10-02
 
 Merges upstream/main 30d2381b4 into nixfred/main c60b38ba. Firmware `0.0.86-nixfred.8`, ESP-IDF v5.5.0,
