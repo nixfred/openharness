@@ -3,7 +3,8 @@ import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS 
 import { RelayConnectError } from '../lib/relayFrames.js'
 import { decodeTerminalLocal, encodeTerminalLocal, TerminalBinaryKind, type TerminalBinaryClear } from '../lib/terminalBinary.js'
 import type { GatewayEvents, LaneSeal } from './api.js'
-import { createGatewayLink, GATEWAY_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
+import { createGatewayLink, GATEWAY_BUFFER_LIMIT, LANE_WAIT_MS, laneOf, OWED_MAX, PAIR_WAIT_MS, WINDOW_GATEWAY_GONE } from './gatewayLink.js'
+import { ON_DEMAND_START_MS } from './serviceLinks.js'
 
 const STREAM = '00000000-0000-4000-8000-000000000001'
 const bytesOf = (text: string): TerminalBinaryClear => ({ kind: TerminalBinaryKind.output, streamId: STREAM, seq: 1, compressed: false, bytes: new TextEncoder().encode(text) })
@@ -16,29 +17,34 @@ function events(): { [K in keyof GatewayEvents]: ReturnType<typeof vi.fn> } {
   }
 }
 
-function setup(over: { buffered?: number; call?: (type: string, payload: Record<string, unknown>, waitMs?: number) => Promise<Record<string, unknown>> } = {}) {
+function setup(over: { buffered?: number; call?: (type: string, payload: Record<string, unknown>, waitMs?: number) => Promise<Record<string, unknown>>; startWaitMs?: number; start?: () => Record<string, unknown> } = {}) {
   const heard = events()
   const sent: Array<Record<string, unknown>> = []
   const binary: Uint8Array[] = []
   let buffered = over.buffered ?? 0
+  let writable = true
   const log = vi.fn()
   let clock = 1_000_000
   const call = vi.fn(over.call ?? (async () => ({ status: 200, body: { ok: true } })))
   const tokens = { accessToken: vi.fn(async () => 'token-1') }
   const backend = vi.fn(async () => ({ status: 200, body: { data: { seen: {} } } }))
+  const want = vi.fn()
+  const machines = vi.fn()
   const link = createGatewayLink({
     events: heard as unknown as GatewayEvents,
-    notify: (frame) => { sent.push(frame.payload as Record<string, unknown>); return true },
+    notify: (frame) => { sent.push(frame.payload as Record<string, unknown>); return writable },
     notifyBinary: (bytes) => { binary.push(bytes); return true },
     buffered: () => buffered,
     call,
-    start: () => ({ machineId: 'm1', computerId: 'c1', autonomousEnv: 'prod', signedIn: true }),
-    tokens, backend, log, now: () => clock,
+    start: over.start ?? (() => ({ machineId: 'm1', computerId: 'c1', autonomousEnv: 'prod', signedIn: true })),
+    machines,
+    tokens, backend, log, now: () => clock, want, ...(over.startWaitMs ? { startWaitMs: over.startWaitMs } : {}),
   })
   return {
-    link, heard, sent, binary, call, tokens, backend, log,
+    link, heard, sent, binary, call, tokens, backend, log, want, machines,
     kinds: () => sent.map((payload) => payload.kind),
     setBuffered: (bytes: number) => { buffered = bytes },
+    setWritable: (value: boolean) => { writable = value },
     tick: (ms: number) => { clock += ms },
   }
 }
@@ -52,7 +58,7 @@ describe('the gateway in its own process, as the core sees it', () => {
     const { link, sent, kinds } = setup()
     link.port.connect()
     link.port.holdRequests()
-    link.port.localClients(2)
+    link.port.localClients({ desktop: 1, tui: 1 })
     link.ops.wifiService(true)
     link.ops.account({ machineId: 'm1', signIn: null })
     link.ops.reachable(['m2'])
@@ -61,7 +67,7 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(kinds()).toEqual(['start'])
     expect(sent[0]).toEqual({
       kind: 'start', machineId: 'm1', computerId: 'c1', autonomousEnv: 'prod', signedIn: true,
-      requestsOpen: false, dial: 'connect', localClients: 2, wifiService: true, reachable: ['m2'],
+      requestsOpen: false, dial: 'connect', localClients: { desktop: 1, tui: 1 }, wifiService: true, reachable: ['m2'],
     })
     link.port.openRequests()
     link.port.serveThisComputerOnly()
@@ -90,7 +96,7 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(link.port.observer('observer:1', 'observer_frame', { b: 2 })).toBe(true)
     expect(link.port.device('phone-1', 'autonomous_device_result', { c: 3 })).toBe(true)
     link.port.deviceClient('phone-1', 'PUB')
-    link.port.windowOpened()
+    link.port.windowOpened('tui')
     await link.port.local('local:w', { type: 'e2ee_pairings_list', payload: {} })
     expect(link.port.terminalBinary('phone-1', bytesOf('hi'))).toBe(true)
     // An id the binary frame cannot carry: refused, never sent half-framed.
@@ -226,14 +232,85 @@ describe('the gateway in its own process, as the core sees it', () => {
     expect(call).toHaveBeenCalledWith(GATEWAY_CALLS.devicesRebaseline, { confirm: false }, undefined)
   })
 
-  it('reads the gateway\'s status, with nothing to show while it is down', async () => {
+  it('reads the gateway\'s status, with nothing to show while it is down, and never starts it for that', async () => {
     const said = { fingerprint: 'AB12', pairs: [{ fingerprint: 'CD34' }], pending: { label: 'Phone' } }
     let answer: Record<string, unknown> = said
-    const { link, call } = setup({ call: async () => answer })
+    const { link, call, want } = setup({ call: async () => answer })
+    // Never started: `/api/status` is answered without it, and does not ask for it.
+    expect(await link.ops.status()).toEqual({ fingerprint: null, pairs: [], pending: null })
+    expect(call).not.toHaveBeenCalled()
+    expect(want).not.toHaveBeenCalled()
+    link.connected()
     expect(await link.ops.status()).toEqual(said)
     expect(call).toHaveBeenCalledWith(GATEWAY_CALLS.status, {}, 2_000)
+    link.disconnected()
     answer = { error: 'SERVICE_UNAVAILABLE' }
     expect(await link.ops.status()).toEqual({ fingerprint: null, pairs: [], pending: null })
+  })
+
+  it('is asked for once, by the first thing that needs it, and tells it what waited, in order, after its start', () => {
+    const { link, sent, kinds, want } = setup()
+    // What only says how things stand asks for nothing: it is told in the start.
+    link.port.localClients({ desktop: 1, tui: 0 })
+    link.ops.wifiService(false)
+    expect(want).not.toHaveBeenCalled()
+    // A window's E2EE request: asked for, and held.
+    void link.port.local('conn-1', { type: 'e2ee_pairings_list', payload: { requestId: 'r1' } })
+    expect(want).toHaveBeenCalledTimes(1)
+    void link.port.local('conn-2', { type: 'phone_pair', payload: { requestId: 'r2' } })
+    link.port.connect()
+    link.ops.wifiService(true)
+    expect(want).toHaveBeenCalledTimes(1)
+    expect(sent).toEqual([])
+    link.connected()
+    expect(kinds()).toEqual(['start', 'localFrame', 'localFrame'])
+    expect(sent[1]).toEqual({ kind: 'localFrame', connId: 'conn-1', frame: { type: 'e2ee_pairings_list', payload: { requestId: 'r1' } } })
+    expect(sent[2]).toMatchObject({ connId: 'conn-2' })
+    // Gone later, it is the master's to restart: nothing waits for it, and it is not asked for again.
+    link.disconnected()
+    void link.port.local('conn-3', { type: 'e2ee_pairings_list', payload: {} })
+    link.connected()
+    expect(kinds()).toEqual(['start', 'localFrame', 'localFrame', 'start'])
+    expect(want).toHaveBeenCalledTimes(1)
+  })
+
+  it('is asked for by a sign-in\'s dial and by the Wi-Fi device\'s service, each once', () => {
+    const dialed = setup()
+    dialed.link.port.connect()
+    expect(dialed.want).toHaveBeenCalledTimes(1)
+    const wifi = setup()
+    wifi.link.ops.wifiService(true)
+    wifi.link.port.connect()
+    expect(wifi.want).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets go of what waited when it does not start in time, the oldest first when too much waits', async () => {
+    vi.useFakeTimers()
+    try {
+      const { link, sent } = setup({ startWaitMs: 20_000 })
+      const select = { type: 'machine_select', payload: {} }
+      const sink = { sendFrame: vi.fn(() => true), sendBinary: vi.fn(() => true) }
+      const opening = link.windowRelay.acquire('m2', 'prod', select, sink, vi.fn())
+      void link.port.local('conn-1', { type: 'e2ee_pairings_list', payload: {} })
+      vi.advanceTimersByTime(20_000)
+      await expect(opening).rejects.toEqual(new RelayConnectError('the relay did not start', WINDOW_GATEWAY_GONE))
+      // No late E2EE request goes to a gateway that came after the startup deadline.
+      link.connected()
+      expect(sent.map((payload) => payload.kind)).toEqual(['start'])
+
+      const crowded = setup()
+      const first = crowded.link.windowRelay.acquire('m2', 'prod', select, sink, vi.fn())
+      for (let i = 0; i < OWED_MAX; i++) void crowded.link.port.local(`conn-${i}`, { type: 'e2ee_pairings_list', payload: {} })
+      await expect(first).rejects.toEqual(new RelayConnectError('the relay did not start', WINDOW_GATEWAY_GONE))
+      crowded.link.connected()
+      expect(crowded.sent).toHaveLength(1 + OWED_MAX)
+      // The default wait, when none is given.
+      const plain = setup()
+      void plain.link.port.local('conn-1', { type: 'e2ee_pairings_list', payload: {} })
+      vi.advanceTimersByTime(ON_DEMAND_START_MS)
+      plain.link.connected()
+      expect(plain.sent).toHaveLength(1)
+    } finally { vi.useRealTimers() }
   })
 
   it('carries the Wi-Fi device\'s requests, a refusal as the device\'s local API words it', async () => {
@@ -412,12 +489,13 @@ describe('a window here working on another machine, through the gateway', () => 
   })
 
   it('watches a harness shared with this account through the gateway, and is told 4403 when the share ended', async () => {
-    const { link, sent } = setup()
-    // The gateway not there: out of reach just now, as the Share relay said when it could not dial.
-    await expect(link.windowRelay.acquireShare!('owner', 'share-1', sink(), vi.fn())).rejects.toMatchObject({ closeCode: WINDOW_GATEWAY_GONE })
-    link.connected()
+    const { link, sent, want } = setup()
+    // The gateway not started yet: asked for, and the window opened once it has.
     const window = sink()
     const watching = link.windowRelay.acquireShare!('owner', 'share-1', window, vi.fn())
+    expect(want).toHaveBeenCalledTimes(1)
+    expect(sent).toEqual([])
+    link.connected()
     expect(sent.at(-1)).toEqual({ kind: 'windowOpen', id: 'window-1', machineId: 'owner', share: 'share-1' })
     link.notice({ kind: 'windowOpened', id: 'window-1' })
     await watching
@@ -430,6 +508,9 @@ describe('a window here working on another machine, through the gateway', () => 
 
   it('the gateway gone: a window waiting to open and one open are both told to try again', async () => {
     const { link } = setup()
+    link.connected()
+    link.disconnected()
+    // Gone, out of reach just now, as the relay said when it could not dial.
     await expect(link.windowRelay.acquire('m2', 'prod', select, sink(), vi.fn())).rejects.toMatchObject({ closeCode: WINDOW_GATEWAY_GONE })
     link.connected()
     const onClosed = vi.fn()
@@ -443,4 +524,172 @@ describe('a window here working on another machine, through the gateway', () => 
     // Its bytes go nowhere now: the gateway is not there to take them.
     await session.sendBinary(bytesOf('x'))
   })
+})
+
+describe('local requests when the gateway cannot answer', () => {
+  const request = (requestId: string, type = 'e2ee_pairings_list') => ({ type, payload: { requestId } })
+  const refusal = (requestId: string, type = 'e2ee_pairings_list') => ({
+    type: `${type}_result`, payload: { requestId, error: 'SERVICE_UNAVAILABLE', service: 'gateway', retryable: true },
+  })
+
+  it('refuses in-flight and new requests on disconnection, without failing an answered request or replaying one', async () => {
+    const { link, heard, kinds } = setup()
+    link.connected()
+    await link.port.local('a', request('done'))
+    await link.port.local('a', request('waiting'))
+    await link.port.local('b', request('waiting'))
+    link.notice({ kind: 'toLocal', connId: 'a', frame: { type: 'e2ee_pairings_list_result', payload: { requestId: 'done', pairs: [] } } })
+    // Neither an unrelated request type nor another connection can complete this request.
+    link.notice({ kind: 'toLocal', connId: 'a', frame: { type: 'phone_pair_result', payload: { requestId: 'waiting' } } })
+    link.notice({ kind: 'toLocal', connId: 'other', frame: { type: 'e2ee_pairings_list_result', payload: { requestId: 'waiting' } } })
+    heard.toLocal.mockClear()
+    link.disconnected()
+    expect(heard.toLocal.mock.calls).toEqual([['a', refusal('waiting')], ['b', refusal('waiting')]])
+    await link.port.local('a', request('down'))
+    expect(heard.toLocal).toHaveBeenLastCalledWith('a', refusal('down'))
+    link.connected()
+    expect(kinds()).toEqual(['start', 'localFrame', 'localFrame', 'localFrame', 'start'])
+  })
+
+  it('answers when a connected socket refuses the frame', async () => {
+    const { link, heard, setWritable } = setup()
+    link.connected()
+    setWritable(false)
+    await link.port.local('a', request('failed-send'))
+    expect(heard.toLocal.mock.calls).toEqual([['a', refusal('failed-send')]])
+    link.disconnected()
+    expect(heard.toLocal).toHaveBeenCalledOnce()
+  })
+
+  it('bounds the unanswered wait, gives interactive pairing its own deadline, and coalesces an identical pending request', async () => {
+    vi.useFakeTimers()
+    try {
+      const { link, heard, kinds } = setup()
+      link.connected()
+      await link.port.local('a', request('list'))
+      await link.port.local('a', request('list'))
+      await link.port.local('a', request('phone', 'phone_pair'))
+      await link.port.local('a', request('device', 'device_e2ee_pair'))
+      expect(kinds()).toEqual(['start', 'localFrame', 'localFrame', 'localFrame'])
+      vi.advanceTimersByTime(LANE_WAIT_MS)
+      expect(heard.toLocal.mock.calls).toEqual([['a', refusal('list')]])
+      vi.advanceTimersByTime(PAIR_WAIT_MS - LANE_WAIT_MS)
+      expect(heard.toLocal.mock.calls.slice(1)).toEqual([['a', refusal('phone', 'phone_pair')], ['a', refusal('device', 'device_e2ee_pair')]])
+      link.disconnected()
+      expect(heard.toLocal).toHaveBeenCalledTimes(3)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('bounds in-flight requests and refuses excess work before it can mutate pairing state', async () => {
+    const { link, heard, kinds } = setup()
+    link.connected()
+    for (let i = 0; i < OWED_MAX; i++) await link.port.local('a', request(String(i)))
+    await link.port.local('a', request('excess', 'e2ee_pairings_unpair_all'))
+    expect(heard.toLocal.mock.calls).toEqual([['a', refusal('excess', 'e2ee_pairings_unpair_all')]])
+    expect(kinds().filter((kind) => kind === 'localFrame')).toHaveLength(OWED_MAX)
+    link.disconnected()
+    expect(heard.toLocal).toHaveBeenCalledTimes(OWED_MAX + 1)
+  })
+
+  it('refuses queued requests on startup expiry and eviction, never sending refused mutations later', async () => {
+    vi.useFakeTimers()
+    try {
+      const { link, heard, sent } = setup()
+      for (let i = 0; i <= OWED_MAX; i++) await link.port.local('a', request(String(i), 'e2ee_pairing_unpair'))
+      expect(heard.toLocal.mock.calls).toEqual([['a', refusal('0', 'e2ee_pairing_unpair')]])
+      vi.advanceTimersByTime(ON_DEMAND_START_MS)
+      expect(heard.toLocal).toHaveBeenCalledTimes(OWED_MAX + 1)
+      link.connected()
+      expect(sent.map((payload) => payload.kind)).toEqual(['start'])
+    } finally { vi.useRealTimers() }
+  })
+})
+
+describe('account HTTP owned by the gateway', () => {
+  it('forwards methods and optional bodies, and bounds the answer', async () => {
+    const { link, call } = setup()
+    expect(await link.ops.backend('GET', '/api/auth/me')).toEqual({ status: 200, body: { ok: true } })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.backend, { method: 'GET', path: '/api/auth/me' }, 25_000)
+    await link.ops.backend('PATCH', '/api/machines/m1', { name: 'Laptop' })
+    expect(call).toHaveBeenLastCalledWith(GATEWAY_CALLS.backend, { method: 'PATCH', path: '/api/machines/m1', body: { name: 'Laptop' } }, 25_000)
+    call.mockResolvedValueOnce({ name: 'private-grid' })
+    expect(await link.ops.mintGridName()).toBe('private-grid')
+    call.mockResolvedValueOnce({})
+    expect(await link.ops.mintGridName()).toBeNull()
+    call.mockResolvedValueOnce({ error: 'SERVICE_UNAVAILABLE' })
+    await expect(link.ops.mintGridName()).rejects.toThrow('SERVICE_UNAVAILABLE')
+  })
+
+  it('answers the guest list without waking a gateway or reading a previous account', async () => {
+    const { link, call, want, machines } = setup({ start: () => ({ signedIn: true, account: { machineId: null }, computerId: 'computer', machineName: 'Laptop', hostname: 'host' }) })
+    expect(await link.ops.machines()).toMatchObject({ status: 200, body: { data: { guest: true, stale: false, machines: [
+      { machineId: 'computer', computerId: 'computer', name: 'Laptop', hostname: 'host', status: 'online' },
+    ] } } })
+    expect(call).not.toHaveBeenCalled()
+    expect(want).not.toHaveBeenCalled()
+    expect(machines).toHaveBeenCalledWith(expect.objectContaining({ owner: null }))
+  })
+
+  it('retains reported rows across a crash, but never hides a sign-out or crosses accounts', async () => {
+    let owner = 'account-a'
+    const { link, call, machines } = setup({ start: () => ({ signedIn: true, account: { machineId: owner } }) })
+    const body = { success: true, data: { machines: [{ machineId: 'm2' }] } }
+    link.notice({ kind: 'machines', owner, body, fetchedAt: 1000 })
+    expect(machines).toHaveBeenLastCalledWith({ owner, body, fetchedAt: 1000 })
+    call.mockResolvedValue({ error: 'SERVICE_UNAVAILABLE' })
+    link.disconnected()
+    expect(await link.ops.machines(true)).toEqual({ status: 200, body: { success: true, data: { machines: [{ machineId: 'm2' }], stale: true, staleSince: new Date(1000).toISOString() } } })
+    expect((await link.ops.machines()).status).toBe(503)
+    owner = 'account-b'
+    expect((await link.ops.machines(true)).status).toBe(503)
+    owner = ''
+    expect(await link.ops.machines(true)).toMatchObject({ status: 200, body: { data: { guest: true, stale: false } } })
+    owner = 'account-a'
+    call.mockResolvedValueOnce({ status: 401, body: { error: 'NOT_SIGNED_IN' } })
+    expect((await link.ops.machines(true)).status).toBe(401)
+    expect((await link.ops.machines(true)).status).toBe(503)
+    link.notice({ kind: 'machines', owner, body, fetchedAt: 1000 })
+    call.mockResolvedValueOnce({ status: 403, body: {} })
+    expect((await link.ops.machines(true)).status).toBe(403)
+    expect((await link.ops.machines(true)).status).toBe(503)
+    link.notice({ kind: 'machines', owner, body: null, fetchedAt: 1000 })
+    expect((await link.ops.machines(true)).status).toBe(503)
+  })
+
+  it('accepts empty notices and bounds malformed timestamps before a stale response uses one', () => {
+    const { link, machines } = setup()
+    for (const fetchedAt of [undefined, Infinity, 1e30]) {
+      link.notice({ kind: 'machines', owner: null, body: [], fetchedAt })
+      expect(machines).toHaveBeenLastCalledWith({ owner: null, body: null, fetchedAt: 1_000_000 })
+    }
+    link.notice({ kind: 'machines' })
+    expect(machines).toHaveBeenLastCalledWith({ owner: null, body: null, fetchedAt: 1_000_000 })
+  })
+})
+
+it('rejects a reply when the core changed accounts while the gateway was answering', async () => {
+  let owner = 'a'
+  const { link } = setup({ start: () => ({ signedIn: true, account: { machineId: owner } }),
+    call: async () => { owner = 'b'; return { status: 200, body: { machines: ['a'] } } } })
+  expect(await link.ops.machines(true)).toMatchObject({ status: 409, body: { error: { code: 'ACCOUNT_CHANGED' } } })
+})
+
+it('forgets reported presence when accounts change and ignores notices already in flight from the old account', () => {
+  let owner = 'a'
+  const { link, machines } = setup({ start: () => ({ account: { machineId: owner } }) })
+  const body = { machines: [{ machineId: 'private-a' }] }
+  link.notice({ kind: 'machines', owner, body, fetchedAt: 1000 })
+  link.ops.account({ machineId: owner, signIn: null })
+  expect(machines).toHaveBeenCalledTimes(1)
+  owner = 'b'
+  link.ops.account({ machineId: owner, signIn: null })
+  expect(machines).toHaveBeenLastCalledWith({ owner, body: null, fetchedAt: 1_000_000 })
+  link.notice({ kind: 'machines', owner: 'a', body, fetchedAt: 1001 })
+  expect(machines).toHaveBeenCalledTimes(2)
+})
+
+it('uses fresh account facts rather than the relay startup sign-in flag', async () => {
+  const { link, call } = setup({ start: () => ({ signedIn: false, account: { machineId: 'new-account' } }) })
+  expect(await link.ops.machines()).toEqual({ status: 200, body: { ok: true } })
+  expect(call).toHaveBeenCalledWith(GATEWAY_CALLS.machines, { fallback: false }, 25_000)
 })

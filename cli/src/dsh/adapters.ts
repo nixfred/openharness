@@ -4,6 +4,8 @@
  * support is an optional optimization rather than a condition for running a harness.
  * Contracts and primary sources: store/spec/portability.md.
  */
+import { harnessAdapters } from '../engines/launches.js'
+export { codexEnvArgs } from '../engines/launches.js'
 import type { AgentEngine, ProcessEngine } from '../engines/types.js'
 
 export interface HarnessAdapter {
@@ -14,26 +16,8 @@ export interface HarnessAdapter {
   envArgs?: (env: Record<string, string>) => string[]
 }
 
-/** What `-c a.b.NAME=…` can address: Codex splits the key on dots, so a name must be a bare key. */
-const CODEX_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
-
-/**
- * Codex runs a session's commands in a shared app server (`codex app-server --managed-daemon`, codex-cli
- * 0.159.3), not under the process Harness launched, so they never see that process's environment.
- * Measured: HARNESS_CONTEXT_FILE and every manifest variable were unset in the agent's shell, and the
- * Model Manager ran without its instructions. `shell_environment_policy.set` is what Codex itself gives
- * every command, and `-c` carries it to whichever process runs them. The value is a JSON string, which
- * TOML reads as the same string.
- */
-export function codexEnvArgs(env: Record<string, string>): string[] {
-  return Object.entries(env)
-    .filter(([name]) => CODEX_ENV_NAME.test(name))
-    .flatMap(([name, value]) => ['-c', `shell_environment_policy.set.${name}=${JSON.stringify(value)}`])
-}
-
 export const HARNESS_ADAPTERS = {
-  claude: { instructionFiles: ['CLAUDE.md'], contextArgs: (file: string) => ['--append-system-prompt', `Read the harness context at ${JSON.stringify(file)} before working.`] },
-  codex: { instructionFiles: ['AGENTS.override.md', 'AGENTS.md'], envArgs: codexEnvArgs },
+  ...harnessAdapters,
   cursor: { instructionFiles: ['AGENTS.md'] },
   opencode: { instructionFiles: ['AGENTS.md', 'CLAUDE.md'] },
   pi: { instructionFiles: ['AGENTS.md', 'CLAUDE.md'], contextArgs: (file: string) => ['--append-system-prompt', file] },
@@ -47,6 +31,16 @@ export const HARNESS_ADAPTERS = {
   agy: { instructionFiles: ['AGENTS.md', 'GEMINI.md'] },
   copilot: { instructionFiles: ['AGENTS.md'] },
 } satisfies Record<ProcessEngine, HarnessAdapter>
+
+/**
+ * Every project file Harness itself may write into: any adapter's instruction files (the session
+ * bootstrap, `runtime.ts`) and the files the saved-API notes go in (`lib/apiInstructions.ts`). Asked of
+ * the workspace's SCM before those writes (`prepareScmWrite`), for an SCM that holds tracked files
+ * read-only. Not every name exists in a given workspace.
+ */
+export const PROJECT_INSTRUCTION_FILES: readonly string[] = [...new Set([
+  ...Object.values(HARNESS_ADAPTERS).flatMap(adapter => adapter.instructionFiles), 'AGENTS.md', 'CLAUDE.md', 'GEMINI.md',
+])]
 
 /** A terminal has no instruction loader or agent tools. It remains a Coding-only choice. */
 export function harnessAdapter(engine: AgentEngine): HarnessAdapter {

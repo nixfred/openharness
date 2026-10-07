@@ -53,9 +53,9 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 |---|---|---|---|
 | `search` | search | native `node:sqlite`, the index's memory | always |
 | `viewers` | viewers, store | the viewer servers, the remote viewer streams and rendered surfaces, minutes-long installs | always |
-| `edge` | workspaces, usage, monitor, projects, handoff, recaps | light pure-JS services: isolated from the core, not from each other | always |
-| `gateway` | gateway | network, crypto and pure-JS WebRTC: the attack surface | always |
-| `models` | models | grid's installs, downloads and commands | always |
+| `edge` | workspaces, usage, monitor, projects, handoff, recaps, windowNames, shell | light pure-JS services: isolated from the core, not from each other | always |
+| `gateway` | gateway | network, crypto and pure-JS WebRTC: the attack surface | on demand |
+| `models` | models | grid's installs, downloads and commands | on demand |
 | `devices` | devices, wifi | the dials' serial ports, the fleet's lane, the voice router's worker, the Wi-Fi device | on demand |
 | `orchestrator` | orchestrator | an experiment | on demand |
 | `teams` | teams, collaboration | an experiment: Tab collaboration beside the prompt scopes | on demand |
@@ -65,7 +65,7 @@ that process. A process per risk, not per feature (`SERVICE_HOSTS` in `src/harne
 A fault in one of the edge host's services can cost the others in it, never the core. Every service in
 `KNOWN_SERVICES` runs out of the core's process by default, unless `HARNESSD_SERVICES` names a subset, by
 service (`search,usage`) or by process (`edge`). `HARNESSD_SERVICES=none` runs them all inside the core's
-process (for debugging or a quick way back). The shell service always runs in the core's process.
+process (for debugging or a quick way back). The shell service runs in the edge host too.
 
 The updater is not in `SERVICE_HOSTS`: the core neither routes to it nor runs it, and `HARNESSD_SERVICES` does
 not turn it off. The master runs it (`UPDATER_HOST`, `src/services/updaterProcess.ts`) for the installed copy,
@@ -91,6 +91,9 @@ master too old to run it starts it beside itself, still in its own process (`src
   pulled in for a constant brought zod to search and workspaces, 8 MiB each (`src/dsh/id.ts`). A
   failing import fails the service's start, loudly, and the master parks it. `src/leanEntry.spec.ts`
   holds each process to its own code, and the master, search, the updater and the edge host to no zod.
+  It also keeps the native `node:sqlite` binding out of the edge host until a service there reads a store
+  that opencode, kilo, hermes or devin keeps a conversation in. `lib/sqliteRead.ts` imports the binding
+  (`lib/sqliteBuiltin.ts`) only at the first read, so import `sqliteReadAll` and never the binding itself.
 - `src/services/process.ts` is the process's side: `hostServices` beats to the master and stops every
   service before the process exits; `runServiceProcess` is each service's own connection to the core,
   with the master's token, reconnecting after core restarts. `<host>.crash` and `<host>.leak`, or a
@@ -132,6 +135,14 @@ master too old to run it starts it beside itself, still in its own process (`src
   (`service_notice`) and carries terminal bytes as binary frames on its link. The core drops what would
   pile up on a gateway that reads nothing, and the gateway gone is the relay gone: every remote client
   with it, never a window on this computer. `e2e/gatewayProcess.e2e.ts` proves it, with a phone.
+- The shell service (`shellProcess.ts`) owns validation, setup replies and durable creation receipts in
+  the edge host. It asks the core to launch literal argv or read live terminal identity through
+  `core.terminals` (`core/shellQueries.ts`). A lost launch reply leaves an unconfirmed receipt and is
+  never retried as a new launch. `e2e/shell.e2e.ts` keeps an attached terminal working across an edge crash.
+- The gateway owns account/backend HTTP and the single writer of `machines.json` (`gateway/accountHttp.ts`).
+  The core retains its reported list for stale replies during a restart, bound to the current account.
+  The Store prepares bundled harnesses before reporting `prepared`; the core waits at most five seconds
+  before restore. The lean bundle shares one asset file, loaded by the Store and never by the core.
 - A service that writes turns into agents (a team's question, the orchestrator's guidance) delivers each
   under an id of its own through `core.turns.deliver`, hears what became of it through `onDelivery`, and
   takes one back with `cancelDelivery` (core/deliveries.ts). In its own process `services/turnsLink.ts`
@@ -176,14 +187,21 @@ like any other. Named in `HARNESSD_SERVICES`, it starts with the others.
   `src/core/main.ts`) asks for it and waits for it, within the request's own wait. The service is welcomed
   before its queued requests are delivered. Each experiment with saved state in the data folder is
   asked for as the core starts (`src/core/experiments.ts`). The devices are asked for once there is a device:
-  a dial's port in /dev, a paired Wi-Fi device, or its session (`src/core/devicesWake.ts`).
+  a dial's port in /dev, a paired Wi-Fi device, or its session (`src/core/devicesWake.ts`). Models is asked
+  for as the core starts when grid is in use here: a managed grid, whose pin it follows, saved grid pictures,
+  which agents' grid notes are read from, or local models (`src/core/modelsWake.ts`); otherwise its first
+  request asks for it. The gateway is asked for as the core starts, before it binds, when this machine is
+  signed in or has anything paired or linked directly (`src/core/gatewayWake.ts`), so the relay comes up
+  beside the core as before; otherwise by what needs it (`src/core/gatewayLink.ts`): a pairing, a window's
+  E2EE request or session to another machine, which wait for its first start, a key or device command, or
+  the Wi-Fi device's service. `/api/status` never starts it.
 - **Older cores.** `askedSince` is the core protocol (`HARNESSD_PROTOCOL`, `src/harnessd/protocol.ts`) from
   which a core asks for this process. A core that speaks an older one never asks, so the master starts the
   process as that core binds (`ServiceSupervisor.unasked`). It is 3 by default, the experiments'; the
-  devices became on demand at protocol 4. Making another process on demand needs a protocol bump, and that
+  devices, models and the gateway became on demand at protocol 4, which may also ask before it binds. Making another process on demand needs a protocol bump, and that
   number in its `askedSince`.
-- **Proof.** `e2e/experiments.e2e.ts` and `e2e/devicesOnDemand.e2e.ts`: off, it has no process; asked for, it
-  starts and answers.
+- **Proof.** `e2e/experiments.e2e.ts`, `e2e/devicesOnDemand.e2e.ts`, `e2e/modelsOnDemand.e2e.ts` and
+  `e2e/gatewayOnDemand.e2e.ts`: off, it has no process; asked for, it starts and answers.
 
 ## Experiments
 

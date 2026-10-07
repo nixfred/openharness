@@ -156,8 +156,9 @@ function runHook(opts: RunHookOpts): Promise<string> {
 }
 
 /** A throwaway localhost adapter that records every hook POST. */
-async function collect(response: Record<string, unknown> = {}, credential?: string): Promise<{ port: number; requests: Array<{ url: string; body: Record<string, unknown> }> }> {
+async function collect(response: Record<string, unknown> = {}, credential?: string): Promise<{ port: number; requests: Array<{ url: string; body: Record<string, unknown> }>; firedAts: Array<string | undefined> }> {
   const requests: Array<{ url: string; body: Record<string, unknown> }> = []
+  const firedAts: Array<string | undefined> = []
   const server = createServer((req, res) => {
     // Local service discovery may probe a test port. Only hook POSTs belong to this fixture.
     if (req.method !== 'POST') { res.writeHead(405).end(); return }
@@ -166,6 +167,7 @@ async function collect(response: Record<string, unknown> = {}, credential?: stri
     req.on('data', (chunk) => { raw += chunk.toString() })
     req.on('end', () => {
       requests.push({ url: req.url ?? '', body: JSON.parse(raw) as Record<string, unknown> })
+      firedAts.push(req.headers['x-harness-hook-fired-at'] as string | undefined)
       res.end(JSON.stringify(response))
     })
   })
@@ -176,7 +178,7 @@ async function collect(response: Record<string, unknown> = {}, credential?: stri
   })
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('test server did not bind a TCP port')
-  return { port: address.port, requests }
+  return { port: address.port, requests, firedAts }
 }
 
 describe('hook notify terminal scope', () => {
@@ -208,6 +210,18 @@ describe('hook notify terminal scope', () => {
     expect(requests[0]?.body.prompt).toBe(input.prompt)
     expect(await runHook({ port, engine, tmuxPane: '%42', input: { ...input, hook_event_name: 'SessionStart' } })).toBe('')
   })
+  // What tells a late Stop from the turn the next prompt opened (src/hookServer.ts hookFiredAt).
+  it('says when its engine ran it: its own start, no later than it sends', async () => {
+    const { port, firedAts } = await collect()
+    const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
+    const before = Date.now()
+    await runHook({ port, engine: 'claude', tmuxPane: '%42', input: recordings.claude.input })
+    const firedAt = Number(firedAts[0])
+    expect(Number.isSafeInteger(firedAt)).toBe(true)
+    expect(firedAt).toBeGreaterThanOrEqual(before - 1_000)
+    expect(firedAt).toBeLessThanOrEqual(Date.now())
+  })
+
   it.each(['claude', 'codex', 'grok'] as const)('forwards the actual %s accepted prompt without changing the model input', async engine => {
     const { port, requests } = await collect()
     const recordings = JSON.parse(readFileSync(new URL('./lib/__fixtures__/swarm-prompt-hooks.json', import.meta.url), 'utf8'))
@@ -756,11 +770,13 @@ describe('hook notify terminal scope', () => {
       hermesHome: join(dir, 'hermes'),
       dataDir,
       hermesSource: 'cli',
-      // 1.5 s against the shipped 3 s limit: a store slower than the old 1 s limit still binds. Twice the
-      // shipped budget doubles both (3 s against 6 s), and leaves a loaded machine 3 s to start sqlite3,
-      // rather than the 20 s limit and 10 s wait the suite's 30 s budget would make of them.
-      hermesDelaySeconds: 1.5,
-      env: { HARNESS_HOOK_DEADLINE_MS: '9000' },
+      // 1.2 s against the shipped 3 s limit: a store slower than the old 1 s limit still binds. Four times
+      // the shipped budget stretches all three (4.8 s against 12 s; the old limit would be 4 s, so this
+      // still tells them apart) and leaves a loaded machine over 7 s for what is not the store: starting
+      // the hook's fake tmux, ps and sqlite3. At twice the budget (3 s against 6 s, 9 s in all) the earlier
+      // steps under a full run at load 110 left sqlite3 less than its 3 s, and nothing was registered.
+      hermesDelaySeconds: 1.2,
+      env: { HARNESS_HOOK_DEADLINE_MS: '18000' },
       input: { hook_event_name: 'on_session_start', session_id: '20260810_120003_a1b2c3' },
     })
     expect(JSON.parse(readFileSync(join(dataDir, 'registry.json'), 'utf8'))).toMatchObject([{

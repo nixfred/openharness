@@ -11,6 +11,7 @@
  * that kept its socket opens a new session, as it did when both ran in one process.
  */
 import type { GatewayAccount, GatewayEvents, WindowRelaySession } from '../core/api.js'
+import { localWindowsOf, windowSurfaceOf } from '../lib/windowSurfaces.js'
 import { decodeGatewayBinary, encodeGatewayBinary, GatewayBinary, GATEWAY_CALLS } from '../lib/gatewayWire.js'
 import { RelayConnectError } from '../lib/relayFrames.js'
 import { decodeTerminalLocal, encodeTerminalLocal } from '../lib/terminalBinary.js'
@@ -90,17 +91,14 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
       autonomousEnv: text(payload.autonomousEnv) || 'prod',
       signedIn: payload.signedIn === true,
       tokens: { accessToken },
-      backend: async (method, path) => {
-        if (!core) return { status: 502, body: { success: false, error: { code: 'BACKEND_UNREACHABLE', message: 'not connected to the core' } } }
-        const answer = await core.query('backend', { method, path })
-        return { status: typeof answer.status === 'number' ? answer.status : 502, body: record(answer.body) }
-      },
+      machineName: text(payload.machineName), hostname: text(payload.hostname),
+      machines: (state) => notice('machines', { ...state }),
       account: (payload.account as GatewayAccount | null) ?? { machineId: null, signIn: null },
     })
     running = started
     // Held first, so that nothing the link brings in is answered before the core is ready.
     if (payload.requestsOpen === false) started.port.holdRequests()
-    started.port.localClients(Number(payload.localClients) || 0)
+    started.port.localClients(localWindowsOf(payload.localClients))
     if (Array.isArray(payload.reachable)) started.ops.reachable(payload.reachable as string[])
     if (payload.wifiService === true) started.ops.wifiService(true)
     if (payload.dial === 'connect') started.port.connect()
@@ -168,8 +166,8 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
       case 'target': port.target(connId, text(payload.type), record(payload.payload)); return
       case 'terminal': port.terminal(connId, text(payload.type), record(payload.payload)); return
       case 'observer': port.observer(connId, text(payload.type), record(payload.payload)); return
-      case 'windowOpened': port.windowOpened(); return
-      case 'localClients': port.localClients(Number(payload.count) || 0); return
+      case 'windowOpened': port.windowOpened(windowSurfaceOf(payload.surface)); return
+      case 'localClients': port.localClients(localWindowsOf(payload.windows)); return
       case 'localFrame': void port.local(connId, record(payload.frame)); return
       case 'device': port.device(connId, text(payload.type), record(payload.payload)); return
       case 'deviceClient': port.deviceClient(connId, typeof payload.identity === 'string' ? payload.identity : null); return
@@ -203,6 +201,9 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
     return running.ops
   }
   const requests = {
+    [GATEWAY_CALLS.backend]: async (p: Payload) => ({ ...await ops().backend(text(p.method), text(p.path), p.body) }),
+    [GATEWAY_CALLS.machines]: async (p: Payload) => ({ ...await ops().machines(p.fallback === true) }),
+    [GATEWAY_CALLS.mintGridName]: async () => ({ name: await ops().mintGridName() }),
     [GATEWAY_CALLS.status]: async () => ({ ...await ops().status() }),
     [GATEWAY_CALLS.pair]: async (p: Payload) => ({ ...await ops().pair(text(p.code)) }),
     [GATEWAY_CALLS.listPairs]: async () => ({ ...await ops().listPairs() }),
