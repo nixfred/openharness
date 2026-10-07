@@ -9,6 +9,60 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## Upstream sync: 70 commits from autonomous-ai/openharness main (7305140e), and go-live, 2026-10-07
+
+Merges upstream/main 7305140e0 into the harnessd sync branch (51c6ba67, the 404-commit port below) as 1ed0916d,
+then fast-forwards nixfred/main 6ce9b08a to it. This is the first nixfred/main on upstream's harnessd. Firmware
+`0.0.86-nixfred.10`, ESP-IDF v5.5.0, 3,056,480 B against an 8 MB slot (63% free); .9 was never flashed.
+
+- Upstream brought: architecture.spec drops its line budgets for an informational size report (the import
+  boundaries are still gated), so the fork's +5,400/+20 allowances are gone; the shell service may run out of
+  the core and the remaining daemon feature boundaries moved into services (#1008); SQLite loads lazily in the
+  edge services (#981); the gateway and models processes start only when needed (#971, #972); engine contracts
+  for Claude Code and Codex (#1010); a Stop hook closes only its own turn (#970); a turn that ended while the
+  daemon was stopped (an update, a dial flash) still gets its recap, quietly (`settled` in attach); window auto
+  rename from the daemon's `window_name` (#992, #994; off by default, it spends a small model's tokens); SCM
+  launch records on registry rows (`scmLaunch`) and `scm_project_info`; device dictation no longer follows a
+  stale pane focus (#1005); the desktop pane roster survives a closed connection (#996); false Codex
+  suggestion-menu holds (#1003) and answered dialogs above the live composer (#1012) fixed; hn 0.1.15/0.1.16;
+  Harness OS 0.1.1 and Apple Silicon installer media; Ollama decision models; daemon soak and chaos tests.
+  On the dial (#989, 877dc87e): the 12 o'clock unread dot is gone; the pet holds a blue bell bubble with the
+  unread count, rings for about 5 s on a new notice, and a tap on it opens the inbox; the recap card grows with
+  its lines.
+- Conflicts (7): architecture.spec.ts (upstream's); core/main.ts (upstream's out-of-process shell guard plus the
+  `nixfredClip` served request; hook handlers keep the gate verdict and turn-stop attention wrappers beside
+  upstream's `onPromptHook` and `stopHookDelayMs`); core/transcripts/attach.ts (nixfred `current` beside
+  upstream `settled`); applicationFrames.ts (`clip_push` beside `scm_project_info`); registry.ts (hosted and
+  external row fields beside `scmLaunch`; hosted rows still never written to registry.json); ui_habitat.c
+  (upstream's bell bubble and its hit target with the nixfred done slide, fleet rim and grab notch, which no
+  longer has a dot on it); test_touch_ui.py (nixfred function list without upstream's removed `focus_dot`).
+- Verified on the branch: cli npm ci, tsc clean. vitest, first run with TMPDIR=/tmp: 98 failed, 90 of them
+  because an empty /tmp/.git (created 15:19 on 2026-10-07 by something else on gus) makes agentHandoff's
+  `dotGitAbove` read every temp folder as "unknown"; rerun with TMPDIR=/dev/shm/ohs2-vtmp: 11,101 passed,
+  5 failed, 108 skipped (last sync 10,843/8). The 5 are all from the known 8 (dsh shell and engineLaunch node
+  PATH, tmuxStream.decode, processName hard link, master link name); localModels x2 and tmuxPaneInfo pass now.
+  test:core 1,309 passed with its coverage gates; architecture.spec 6/6. Desktop: flutter analyze 0 errors
+  0 warnings (16 infos, upstream's), nixfred and settings tests 115 passed, boot_flow 36 passed, linux release
+  build. Firmware: idf.py build; full test/run.sh passes with the cc wrapper (unchanged, with -lm). Scratch
+  daemon (HOME, XDG_RUNTIME_DIR, TMUX_TMPDIR under /tmp/claude-1000/ohs2, port 28474, CABLE_DISABLE,
+  DISABLE_HOOK_INSTALL=true, updates off): status, orca, subs, attention, spend (enabled false), gate,
+  capabilities, loops, collisions, hermes; a simulated Orca row (ORCA_TERMINAL_HANDLE set, no TMUX_PANE)
+  through dist/notify.mjs SessionStart, UserPromptSubmit, permission Notification, Stop and SessionEnd went
+  idle, working, permission, done and offline, carrying its Orca terminal.
+- Go-live: nixfred/main 1ed0916d pushed; `install-cli.sh --no-updates --no-restart`, then `systemctl --user
+  restart harness.service`. `harness status` says v0.3.64-dev.1ed0916da, backend connected; the journal shows
+  the master, the core ready, search, viewers, edge, gateway, models and shell services connected (windowNames
+  too), `[orca] watch mode ON · answers ON (file) · orca CLI found`, and the live Claude sessions rediscovered.
+  `harness orca` lists 8 live sessions and `harness subs` reads Claude, Codex, Grok and Kimi. The desktop
+  release bundle was rebuilt in this checkout (not launched).
+- NOT flashed: the dial is not on USB (no /dev/ttyACM*, no Espressif device on the bus; the journal last saw it
+  on 2026-10-05 16:28). The devices process is on demand since the 404-commit sync, so it did not start
+  either, and the dial frames through it are unverified. fw .10 is built in this checkout; flash it with the
+  rule above once the dial is plugged in. It is still on .8.
+- Not verified: anything on the glass; the dial end to end through the devices process; Orca answers and
+  prompts into a real Orca terminal; clip_push and dispatch between two machines; the gate verdict through a
+  real PreToolUse hook.
+
 ## Upstream sync: 404 commits from autonomous-ai/openharness main (b9bbc76f), 2026-10-06
 
 Merges upstream/main b9bbc76fc into nixfred/main 6ce9b08a (branch nixfred/sync-upstream-2026-10-06). Firmware

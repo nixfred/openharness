@@ -29,7 +29,7 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
 [PLAN.md](PLAN.md), [nixfred/README.md](nixfred/README.md) (every command),
 [nixfred/DESIGN.md](nixfred/DESIGN.md) (the visual system).
 
-**The Harness dial (firmware `0.0.86-nixfred.9`, flashed over USB; see NIXFRED-CHANGELOG.md)**
+**The Harness dial (firmware `0.0.86-nixfred.10`, flashed over USB; see NIXFRED-CHANGELOG.md)**
 
 - **Open the menu (the hub):** pull down from the top edge (the small notch at 12 o'clock), or hold a
   still finger 650 ms anywhere (a ring fills). Neither ever starts voice or answers a question; a press
@@ -43,6 +43,9 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
   brings its real host window forward (tmux, herdr, Orca, the app). A notification card opens that
   agent's recap. A machine tap selects it and stays on machines. **Plans:** the plans face shows each
   subscription's weekly use and banked share.
+- **Unread notices (upstream, fw .10):** while an agent works, the pet holds a bell bubble with the unread
+  count ("9+" past nine); a new notice rings it for about 5 s. Tap the bubble to open the inbox. The old
+  blue dot at 12 o'clock is gone, so the notch there is only the shade's grab handle now.
 
 **Knowing what needs you**
 
