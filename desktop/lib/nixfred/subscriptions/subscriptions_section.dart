@@ -9,9 +9,10 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/app_theme.dart' as grid;
@@ -24,22 +25,67 @@ abstract class SubscriptionsSource {
   Future<void> setEnabled(String id, bool on);
 }
 
+/// The local daemon over plain `dart:io`, owned by one section and closed with it ([close]).
+///
+/// Not Dio: a request still in flight when the section goes (a daemon that is down or slow) must end
+/// with the section, and Dio finishes a cancelled request through a timer of its own that outlives the
+/// widget tree. Since upstream's test/flutter_test_config.dart lets widget tests reach loopback for real
+/// (it used to answer every request 400 at once), that timer failed every Settings render test. Here the
+/// connect timeout is the client's own, the read timeout is a timer this source holds, and [close]
+/// cancels both and drops the connection.
 class DaemonSubscriptionsSource implements SubscriptionsSource {
-  DaemonSubscriptionsSource(String baseUrl)
-      : _dio = Dio(BaseOptions(baseUrl: baseUrl, connectTimeout: const Duration(seconds: 3), receiveTimeout: const Duration(seconds: 30)));
-  final Dio _dio;
+  DaemonSubscriptionsSource(String baseUrl) : _base = Uri.parse(baseUrl) {
+    _http.connectionTimeout = const Duration(seconds: 3);
+  }
+  final Uri _base;
+  final HttpClient _http = HttpClient();
+  final Set<Timer> _timers = {};
+  bool _closed = false;
+
+  Future<Object?> _request(String method, String path, {Object? body, Map<String, String> headers = const {}}) async {
+    if (_closed) throw StateError('closed');
+    final request = await _http.openUrl(method, _base.resolve(path));
+    // The whole answer within 30 s, as before; abort() ends a stalled read.
+    final timer = Timer(const Duration(seconds: 30), () => request.abort(TimeoutException('daemon read')));
+    _timers.add(timer);
+    try {
+      headers.forEach(request.headers.set);
+      if (body != null) {
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode(body));
+      }
+      final response = await request.close();
+      final text = await response.transform(utf8.decoder).join();
+      if (response.statusCode >= 400) throw HttpException('HTTP ${response.statusCode}', uri: _base.resolve(path));
+      return text.isEmpty ? null : jsonDecode(text);
+    } finally {
+      timer.cancel();
+      _timers.remove(timer);
+    }
+  }
 
   @override
-  Future<SubsPayload> fetch() async => SubsPayload.fromJson((await _dio.get<Object?>('/api/subscriptions')).data);
+  Future<SubsPayload> fetch() async => SubsPayload.fromJson(await _request('GET', '/api/subscriptions'));
 
   @override
   Future<void> setEnabled(String id, bool on) async {
-    await _dio.post<Object?>(
+    await _request(
+      'POST',
       '/api/nixfred',
-      data: {'action': 'subs-set', 'id': id, 'enabled': on ? 'on' : 'off'},
+      body: {'action': 'subs-set', 'id': id, 'enabled': on ? 'on' : 'off'},
       // The daemon's same-origin gate for local mutations.
-      options: Options(headers: {'x-adapter-local': '1'}),
+      headers: {'x-adapter-local': '1'},
     );
+  }
+
+  /// The section is gone: every timer cancelled, every connection dropped, nothing new started.
+  void close() {
+    _closed = true;
+    for (final timer in _timers) {
+      timer.cancel();
+    }
+    _timers.clear();
+    _http.close(force: true);
   }
 }
 
@@ -74,6 +120,8 @@ class _SubscriptionsSectionState extends State<SubscriptionsSection> {
   void dispose() {
     _poll?.cancel();
     _tick?.cancel();
+    final source = widget.source;
+    if (source is DaemonSubscriptionsSource) source.close();
     super.dispose();
   }
 

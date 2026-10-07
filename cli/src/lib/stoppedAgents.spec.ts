@@ -223,6 +223,38 @@ describe('stopped harness persistence', () => {
     expect(registry.byAgent(saved.agentId)?.lastOpenedAt).toBe(opened)
   })
 
+  it('T1 keeps a fork origin with its parent session through save, get and list', async () => {
+    const { registry, StoppedAgentStore, store } = await fixture()
+    const origin = { agentId: 'p', name: 'Parent', sessionId: 'p-sess', transcriptPath: '/x/p-sess.jsonl' }
+    const fork = registry.openPendingAgent({ engine: 'claude', runtimes: [{ backend: 'tmux', paneId: '%9' }], cwd: '/tmp/work', forkedFrom: origin })!
+    store.save({ ...fork, sessionId: 'fork-sess', active: false })
+    const fresh = new StoppedAgentStore(join(directory, 'stopped-agents'))
+    expect(fresh.get(fork.agentId)?.forkedFrom).toEqual(origin)
+    expect(fresh.list().find(row => row.agentId === fork.agentId)?.forkedFrom).toEqual(origin)
+  })
+
+  it('reads a stopped fork saved by an older daemon, and drops a malformed origin without failing the read', async () => {
+    const { registry, StoppedAgentStore, store } = await fixture()
+    const fork = registry.openPendingAgent({ engine: 'claude', runtimes: [{ backend: 'tmux', paneId: '%10' }], cwd: '/tmp/work',
+      forkedFrom: { agentId: 'p', name: 'Parent' } })!
+    store.save({ ...fork, active: false })
+    const file = join(directory, 'stopped-agents', `${fork.agentId}.json`)
+    const rewrite = (forkedFrom: unknown) => {
+      const record = JSON.parse(readFileSync(file, 'utf8'))
+      record.session.forkedFrom = forkedFrom
+      writeFileSync(file, JSON.stringify(record), { mode: 0o600 })
+    }
+    const fresh = () => new StoppedAgentStore(join(directory, 'stopped-agents'))
+    expect(fresh().get(fork.agentId)?.forkedFrom).toEqual({ agentId: 'p', name: 'Parent' })
+    rewrite({ agentId: 'p', name: 'Parent', sessionId: 'p-sess', transcriptPath: 'relative.jsonl', extra: 'x' })
+    expect(fresh().get(fork.agentId)?.forkedFrom).toEqual({ agentId: 'p', name: 'Parent', sessionId: 'p-sess' })
+    rewrite({ agentId: 7 })
+    const malformed = fresh().get(fork.agentId)
+    expect(malformed?.agentId).toBe(fork.agentId)
+    expect(malformed && 'forkedFrom' in malformed).toBe(false)
+    expect(fresh().list().find(row => row.agentId === fork.agentId)).toBeTruthy()
+  })
+
   it('hides a running identity or conversation, without discarding its archive', async () => {
     const { saved, store } = await fixture()
     store.save(saved)
@@ -393,4 +425,63 @@ it.each(['engine', 'missing', 'previous missing', 'pid', 'start', 'executable'])
   if (mode === 'start') next.processIdentity!.startMarker = 'new'
   if (mode === 'executable') next.processIdentity!.executable = 'other'
   store.save(next); expect(store.get(saved.agentId)?.sessionId).toBe('')
+})
+
+it('lists the id of every saved record, unreadable ones included, and none before the folder exists', async () => {
+  const { saved, store } = await fixture()
+  expect(store.ids()).toEqual([])
+  store.save(saved)
+  writeFileSync(join(directory, 'stopped-agents', 'broken.json'), '{not json')
+  expect(store.ids().sort()).toEqual([saved.agentId, 'broken'].sort())
+  expect(store.list().map((s) => s.agentId)).toEqual([saved.agentId])
+})
+
+// The handoff asks whether any stopped record holds a conversation (handoffDiscovery `ownedByOther`) and
+// fails closed when it cannot tell. An unreadable folder answered "no records" would let a handoff bind a
+// conversation a stopped harness still owns.
+it('says it cannot list the records when the folder cannot be read, never that there are none', async () => {
+  const { saved, store } = await fixture()
+  store.save(saved)
+  chmodSync(join(directory, 'stopped-agents'), 0o000)
+  try {
+    // Root reads through any mode: there is no unreadable folder to show.
+    if (process.getuid?.() !== 0) expect(() => store.ids()).toThrow(expect.objectContaining({ code: 'EACCES' }))
+  } finally { chmodSync(join(directory, 'stopped-agents'), 0o700) }
+  // A file where the folder should be is not "none yet" either.
+  const elsewhere = new (await import('./stoppedAgents.js')).StoppedAgentStore(join(directory, 'stopped-agents', `${saved.agentId}.json`))
+  expect(() => elsewhere.ids()).toThrow(expect.objectContaining({ code: 'ENOTDIR' }))
+})
+
+// Purging a stopped harness's saved session (purgeAgentService) is the one permanent deletion: Stop keeps
+// the record, this removes it.
+it('permanently deletes a stopped record, at once for every reader, and refuses an identity that is not one', async () => {
+  const { saved, StoppedAgentStore, store } = await fixture()
+  store.save(saved)
+  store.save({ ...saved, agentId: 'kept' })
+  // Warm the catalog, as a status snapshot does: the deletion must not be served from it afterwards.
+  expect(store.list().map((row) => row.agentId).sort()).toEqual([saved.agentId, 'kept'].sort())
+  store.remove(saved.agentId)
+  expect(store.get(saved.agentId)).toBeNull()
+  expect(store.list().map((row) => row.agentId)).toEqual(['kept'])
+  expect(store.ids()).toEqual(['kept'])
+  expect(new StoppedAgentStore(join(directory, 'stopped-agents')).get(saved.agentId)).toBeNull()
+  // Removing it again, or one never saved, is nothing to do; a path is never an identity.
+  expect(() => store.remove(saved.agentId)).not.toThrow()
+  expect(() => store.remove('never-saved')).not.toThrow()
+  expect(() => store.remove('../kept')).toThrow('Invalid stopped harness identity.')
+  expect(store.get('kept')?.agentId).toBe('kept')
+})
+
+// Only a harness identity names a record: a name in the folder that is not one is never read as a saved
+// harness, and an identity that is a path never reaches outside the folder.
+it('lists only files named by a harness identity, and never looks outside its folder for a reservation', async () => {
+  const { saved, store } = await fixture()
+  store.save(saved)
+  const base = join(directory, 'stopped-agents')
+  writeFileSync(join(base, 'not an id.json'), JSON.stringify({ version: 1, session: { ...saved, agentId: 'not an id' } }), { mode: 0o600 })
+  expect(store.list().map((row) => row.agentId)).toEqual([saved.agentId])
+  // A reservation beside the folder, where `../escape` would point.
+  writeFileSync(join(directory, 'escape.resume'), '{}', { mode: 0o600 })
+  expect(store.resumeReservedAt('../escape')).toBeNull()
+  expect(store.resumeReservedAt(saved.agentId)).toBeNull()
 })

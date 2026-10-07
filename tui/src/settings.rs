@@ -27,9 +27,10 @@ pub fn is_panel(kind: &PickerKind) -> bool {
 
 /// Whether [kind]'s list reads top-down (↑ toward its first row): fzf's under --layout=reverse,
 /// and the panel's menus; the launcher's lists read bottom-up in the panel too, their query
-/// under them, as fzf's do.
+/// under them, as fzf's do — except Models, which reads from the top as the desktop's picker does
+/// (its sections in the desktop's order, and no blank space over a short list).
 pub fn top_down(kind: &PickerKind) -> bool {
-    if is_panel(kind) { !crate::modal::is_launcher(kind) } else { theme::fzf().reverse }
+    if is_panel(kind) { !crate::modal::is_launcher(kind) || matches!(kind, PickerKind::Models) } else { theme::fzf().reverse }
 }
 
 /// Step into [section]: its options in the same list, the cursor on the one in use.
@@ -509,8 +510,10 @@ pub fn draw(buf: &mut Buffer, app: &App, body: Rect, kind: &PickerKind, picker: 
     let side = inner_w >= 64 && kind.size() == PanelSize::Large && (settings || (picker.preview && !matches!(kind, PickerKind::Commands | PickerKind::Theme)));
     // (A list's preview gets at least half: a harness's screen, a machine's, a model's facts —
     // the list room for a row's name and what it says, a harness's doing.)
-    let list_w = if !side { inner_w } else if settings { (inner_w * 2 / 5).clamp(28, 40) } else { (inner_w / 2).clamp(30, 56) };
-    list_from(buf, picker, Rect::new(x, top, list_w, rows as u16), &c, !side, launcher);
+    // (Models: a model's name, its size and speed, and its word side by side, as the desktop's rows.)
+    let widest = if matches!(kind, PickerKind::Models) { 72 } else { 56 };
+    let list_w = if !side { inner_w } else if settings { (inner_w * 2 / 5).clamp(28, 40) } else { (inner_w / 2).clamp(30, widest) };
+    list_from(buf, picker, Rect::new(x, top, list_w, rows as u16), &c, !side, !top_down(kind));
     picker.preview_area.set(None);
     picker.bar.set(None);
     let mut shown = None;
@@ -664,9 +667,10 @@ pub fn list_from(buf: &mut Buffer, picker: &mut Picker, r: Rect, c: &Chrome, det
         }
         // The right column as the row has it for this width (its short form in a narrow list:
         // a harness's age, not its project and machine), and never more than a third of the
-        // row — so it can not run off the panel or over the name.
+        // row — so it can not run off the panel or over the name. (Half, in a list that asks: the
+        // Models view's size, speed and word, side by side as the desktop's rows have them.)
         let right_text = row.right_at(r.width as usize);
-        let right_w = (right_text.width() as u16).min(r.width / 3);
+        let right_w = (right_text.width() as u16).min(if picker.right_half { r.width / 2 } else { r.width / 3 });
         // (The last column is the scroll mark's, with a blank before it.)
         let end = r.right().saturating_sub(if right_w > 0 { right_w + 3 } else { 2 });
         // The hint after the name, in a column of its own, where there is room for both.
@@ -707,6 +711,10 @@ pub struct Look {
     pub boxes: bool,
     /// The panes you are not in, a little quieter (`@hn-dim`).
     pub dim: bool,
+    /// How the current tab is marked: `star` (`*`) | `filled` (a filled block, no `*`).
+    pub window_active: String,
+    /// How a tab's name is shown: `tmux` (short) | `pane` (full).
+    pub window_name: String,
 }
 
 impl Look {
@@ -727,6 +735,8 @@ impl Look {
             bar: match o.status_bar() { "bottom" if app.status_top => "top".into(), b => b.into() },
             boxes: o.border_style() == "box",
             dim: o.dim_others(),
+            window_active: get("@hn-window-active", "star"),
+            window_name: get("@hn-window-name", "tmux"),
         }
     }
 
@@ -745,6 +755,9 @@ impl Look {
             "status_bar" => self.bar = value.into(),
             "border_style" => self.boxes = value == "box",
             "dim" => self.dim = value == "on",
+            // ── status bar tabs ──
+            "window_active" => self.window_active = value.into(),
+            "window_name" => self.window_name = value.into(),
             _ => {}
         }
         self
@@ -889,17 +902,19 @@ pub fn preview(buf: &mut Buffer, r: Rect, look: &Look, c: &Chrome) {
         for y in p.y..p.bottom() { for x in p.x..p.right() { if let Some(cell) = buf.cell_mut((x, y)) { cell.reset(); cell.set_style(Style::default().bg(pbg)); } } }
         let mut content = *p;
         // ── status bar ──
-        // A box: the focused pane's frame in the accent, the next one's as a harness waiting on
-        // you draws it, the rest quiet; the title in the frame's top or bottom line.
+        // A box: the focused pane's frame in the status bar's background colour (the theme's
+        // foreground, as the real bar draws it), every other pane its quiet theme border colour —
+        // a pane that is working never draws the attention colour here, only a pane that is
+        // actually waiting on you does, as box_style draws it; the title in the frame's line.
         if boxed && p.width >= 3 && p.height >= 3 {
-            let frame = Style::default().fg(if here { accent } else if i == 1 { theme::paint(theme::ATTENTION) } else { pal.border }).bg(pbg);
+            let frame = Style::default().fg(if here { fg } else { pal.border }).bg(pbg);
             let (x1, y1) = (p.right() - 1, p.bottom() - 1);
             for x in p.x + 1..x1 { buf.set_string(x, p.y, joint(&look.lines, false, false, true, true), frame); buf.set_string(x, y1, joint(&look.lines, false, false, true, true), frame) }
             for y in p.y + 1..y1 { buf.set_string(p.x, y, joint(&look.lines, true, true, false, false), frame); buf.set_string(x1, y, joint(&look.lines, true, true, false, false), frame) }
             for (x, y, g) in [(p.x, p.y, joint(&look.lines, false, true, false, true)), (x1, p.y, joint(&look.lines, false, true, true, false)), (p.x, y1, joint(&look.lines, true, false, false, true)), (x1, y1, joint(&look.lines, true, false, true, false))] { buf.set_string(x, y, g, frame) }
             if look.status != "off" {
                 let ty = if look.status == "bottom" { y1 } else { p.y };
-                let ls = if here { frame.add_modifier(Modifier::BOLD) } else if i == 1 { frame } else { Style::default().fg(pfg).bg(pbg) };
+                let ls = if here { frame.add_modifier(Modifier::BOLD) } else { Style::default().fg(pfg).bg(pbg) };
                 put(buf, p.x + 1, ty, p.width.saturating_sub(2), &format!(" {} {} ", i + 1, names[i]), ls);
             }
             content = Rect::new(p.x, p.y + 1, p.width, p.height - 2);
@@ -936,14 +951,19 @@ pub fn preview(buf: &mut Buffer, r: Rect, look: &Look, c: &Chrome) {
         }
     }
 
-    // The status line, as hn's own sits under the panes (or over them).
+    // The status line, as hn's own sits under the panes (or over them) — its background the theme's
+    // foreground, its lettering the theme's background, exactly as the real bar swaps them.
     if let Some(status_row) = status_row {
-        let sstyle = Style::default().fg(pal.status_foreground).bg(pal.status);
+        let sstyle = Style::default().fg(pal.background).bg(pal.foreground);
         for x in screen.x..screen.right() { buf.set_string(x, status_row, " ", sstyle) }
         let mut x = screen.x + 1;
+        let filled = look.window_active == "filled";
         for (i, n) in names.iter().take(panes.len()).enumerate() {
-            let s = if i == 0 { sstyle.fg(accent).add_modifier(Modifier::BOLD) } else { sstyle };
-            x += put(buf, x, status_row, screen.right().saturating_sub(x), &format!("{}:{}{} ", i, n, if i == 0 { "*" } else { "" }), s);
+            let (s, star) = if i == 0 {
+                if filled { (Style::default().fg(pal.foreground).bg(pal.background).add_modifier(Modifier::BOLD), "") }
+                else { (sstyle.fg(accent).add_modifier(Modifier::BOLD), "*") }
+            } else { (sstyle, "") };
+            x += put(buf, x, status_row, screen.right().saturating_sub(x), &format!("{}:{}{} ", i, n, star), s);
         }
         put(buf, screen.right().saturating_sub(7), status_row, 6, "studio", sstyle);
     }
@@ -1175,8 +1195,8 @@ mod tests {
 
     /// The preview draws where the status bar goes — the line at the bottom or top, or the bar
     /// down a side: the windows with the current one's panes and their repos, then the machines —
-    /// and the panes as boxes: the focused one's frame in the accent, one waiting on you in the
-    /// attention colour.
+    /// and the panes as boxes: the focused one's frame in the status bar's background colour, one
+    /// waiting on you in the attention colour.
     #[test]
     fn the_preview_draws_the_status_bar_where_it_goes_and_the_boxes_in_their_colours() {
         let app = app((150, 42));
@@ -1201,16 +1221,31 @@ mod tests {
         assert_eq!(left[(16, 2)].symbol(), "┌", "{s}");
         let right = draw(&look.clone().with(Some("status_bar:right")));
         assert_eq!(right[(64 - 16, 5)].symbol(), "│");
-        // Boxes: each pane its own frame; the focused one's in the accent, the next the attention colour.
-        // (The accent as this draw had it: the current window's name on the status line.)
-        let accent = bottom[(1, 19)].fg;
+        // Boxes: each pane its own frame; the focused one's in the status bar's background
+        // colour (the theme's foreground), every other pane its quiet theme border colour.
         let panes = tiles(Rect::new(0, 2, 64, 17), &look.layout, &look.split);
         assert_eq!(bottom[(panes[0].x, panes[0].y)].symbol(), "┌");
         assert_eq!(bottom[(panes[1].x, panes[1].y)].symbol(), "┌");
-        assert_eq!(bottom[(panes[0].x, panes[0].y)].fg, accent);
-        assert_ne!(accent, bottom[(panes[1].x, panes[1].y)].fg);
-        assert_eq!(bottom[(panes[1].x, panes[1].y)].fg, theme::paint(theme::ATTENTION));
+        let foreground = theme::native_pane_palette().foreground;
+        let border = theme::native_pane_palette().border;
+        assert_eq!(bottom[(panes[0].x, panes[0].y)].fg, foreground);
+        assert_ne!(foreground, bottom[(panes[1].x, panes[1].y)].fg);
+        assert_eq!(bottom[(panes[1].x, panes[1].y)].fg, border);
         let line = draw(&look.clone().with(Some("border_style:line")));
         assert_ne!(line[(panes[1].x, panes[1].y)].symbol(), "┌", "tmux's shared lines");
+    }
+
+    #[test]
+    fn a_filled_current_tab_drops_the_star() {
+        let app = app((150, 42));
+        let r = Rect::new(0, 0, 64, 20);
+        let show = |look: &Look| { let mut buf = Buffer::empty(r); preview(&mut buf, r, look, &chrome()); buf };
+        let row = |buf: &Buffer, y: u16| (0..r.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        let star = show(&Look::of(&app));
+        assert!(row(&star, 19).contains("0:claude*"), "{}", text(&star));
+        let filled = show(&Look::of(&app).with(Some("window_active:filled")));
+        // `with` read the knob, and the filled tab has no `*` beside its name.
+        assert_eq!(Look::of(&app).with(Some("window_active:filled")).window_active, "filled");
+        assert!(row(&filled, 19).contains("0:claude") && !row(&filled, 19).contains("0:claude*"), "{}", text(&filled));
     }
 }

@@ -11,6 +11,7 @@
 //   - the burn-in drift moves the whole ambient face by exactly the drift.
 #include "../main/ui/habitat/terminal.h"
 #include "../main/ui/habitat/nixfred_art.h"
+#include "../main/ui/habitat/focus_faces.h"
 #include "../main/ui/habitat/character.h"
 #include <assert.h>
 #include <stdio.h>
@@ -169,7 +170,7 @@ int main(void)
 
     // MACHINES: four hexagon tiles; this machine carries load and VRAM arcs, the selected one glows.
     ht_scene_clear(&a, BLACK);
-    centre(&a, 24, &ht_lv_geist_reg_20.base, DIMI, "machines");
+    centre(&a, 24, &ht_lv_inter_20.base, DIMI, "machines");
     const char *names[4] = {"workstation", "laptop", "build-box", "mini"};
     const int cxs[4] = {150, 316, 150, 316}, cys[4] = {140, 140, 290, 290};
     for (int i = 0; i < 4; i++) {
@@ -196,8 +197,8 @@ int main(void)
     }
     ht_scene_clear(&a, BLACK);
     nixfred_swarm(&a, 233, 233, 116, 176, kids, 9, 3, &P);
-    centre(&a, 24, &ht_lv_geist_reg_20.base, DIMI, "tabs");
-    centre(&a, 214, &ht_lv_geist_med_32.base, P.accent, "release-train");
+    centre(&a, 24, &ht_lv_inter_20.base, DIMI, "tabs");
+    centre(&a, 214, &ht_lv_inter_30.base, P.accent, "release-train");
     render(&a);
     inside_glass();
     shot("swarm");
@@ -252,8 +253,8 @@ int main(void)
     }
     ht_scene_clear(&a, BLACK);
     nixfred_collision(&a, "api-server", NIXFRED_WORKING, "migrations", NIXFRED_WAITING, 8, &P);
-    centre(&a, 318, &ht_lv_geist_reg_20.base, INK, "Both edited src/db/schema.ts");
-    centre(&a, 346, &ht_lv_geist_reg_20.base, DIMI, "inside the last hour");
+    centre(&a, 318, &ht_lv_inter_20.base, INK, "Both edited src/db/schema.ts");
+    centre(&a, 346, &ht_lv_inter_20.base, DIMI, "inside the last hour");
     render(&a);
     assert(px(full, 148, 216 - 54) == P.accent);
     inside_glass();

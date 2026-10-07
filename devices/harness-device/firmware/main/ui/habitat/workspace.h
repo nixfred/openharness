@@ -26,7 +26,8 @@ void ht_workspace_cancel_request(ht_workspace_t *);
 bool ht_workspace_tick(ht_workspace_t *, uint32_t now);
 
 // Thumb-driven tab pages. Position is in glass pixels; all easing is integer.
-// Browsing never sends a request. Only a subsequent, settled tap may open a tab.
+// The UI sends the centered tab as it changes, including during drag and settling.
+// The return from end only identifies a settled tap; Done closes the picker.
 enum { HT_TAB_PITCH = 228, HT_TAB_DRAG_GAIN = 2, HT_TAB_SETTLE_MS = 192 };
 typedef struct {
     int count, position, from, target, origin, x, last_x, velocity;
@@ -40,3 +41,5 @@ void ht_tab_carousel_begin(ht_tab_carousel_t *, int x, uint32_t now);
 bool ht_tab_carousel_move(ht_tab_carousel_t *, int x, uint32_t now);
 bool ht_tab_carousel_end(ht_tab_carousel_t *, int x, bool horizontal, uint32_t now);
 bool ht_tab_carousel_tick(ht_tab_carousel_t *, uint32_t now);
+// Settle on `index` from wherever it is (an arrow's tap), the way a swipe settles.
+void ht_tab_carousel_go(ht_tab_carousel_t *, int index, uint32_t now);

@@ -26,11 +26,14 @@ import '../shared/widgets/app_dialog.dart';
 import '../state/app_state.dart';
 import '../state/swarm_navigation.dart';
 import '../state/session_content_search.dart';
+import '../state/session_activity.dart';
 import '../state/swarm_search.dart';
 import '../models/model_search_catalog.dart';
-import '../state/harness_sessions.dart' show SessionFilter, harnessActivityAge;
+import '../state/harness_sessions.dart'
+    show SessionFilter, harnessActivityTooltip;
 import '../store/store_mark.dart';
 import 'engine_identity.dart';
+import 'session_activity_label.dart';
 import 'swarm_icon.dart';
 import 'swarm_search_preview.dart';
 import 'swarm_resource_preview.dart';
@@ -510,6 +513,7 @@ class SwarmSearchResults extends StatefulWidget {
     this.header,
     this.previewBuilder,
     this.showPreview = true,
+    this.now = DateTime.now,
   });
   final SwarmSearchController search;
   final ValueChanged<SwarmSearchSelection> onChoose;
@@ -524,6 +528,7 @@ class SwarmSearchResults extends StatefulWidget {
   final Widget? header;
   final Widget Function()? previewBuilder;
   final bool showPreview;
+  final DateTime Function() now;
   @override
   State<SwarmSearchResults> createState() => _SwarmSearchResultsState();
 }
@@ -538,41 +543,68 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
   String? _announced;
   final _scroll = ScrollController();
   Timer? _activityClock;
+  late SessionActivityController _activity;
   final _resultsKey = GlobalKey();
   double _rowHeight = 56;
   double _modelHeadingHeight = 28;
+  double _modelGroupHeadingHeight = 36;
+  double _twoLineRowHeight = 56;
   bool _desktopRows = false;
   bool _revealScheduled = false;
+
+  /// The selection and query the list last brought into view.
+  (String?, String)? _revealed;
   bool _createPinned = false;
   int _lastPage = 0;
   (Size, double)? _geometry;
   SwarmSearchController get search => widget.search;
 
-  /// The model list as drawn: each section's heading, then its rows. [key] is the section's own
-  /// label, which stays put while a heading such as `Get for this Mac · 64 GB` follows its machine.
+  /// The model list as drawn: each section's heading, then its rows — under a heading for its group,
+  /// Chat models or Decision models, whenever a decision model is listed. [key] is the section's own
+  /// ([ModelSearchSection.key]), which stays put while a heading such as `Get for this Mac · 64 GB`
+  /// follows its machine; a group's is [_groupKey] and its label.
   List<({int? index, String? heading, String? key})> get _modelRows {
     if (!search.isModelMode) return const [];
-    final items = <({int? index, String? heading, String? key})>[];
+    final shown = <ModelSearchSection, List<int>>{};
     for (final section in ModelSearchSection.values) {
       final indices = [
         for (final (index, row) in search.rows.indexed)
           if (search.modelSection(row) == section) index,
       ];
       // An empty section still says it is there, so there is somewhere to add to — except the
-      // downloads, which a machine with the whole catalog, or none, has nothing under, and what is
-      // shared with you while Grid is not set up: the Set up row under Your models stands for it.
+      // downloads, which a machine with the whole catalog, or none, has nothing under, what is
+      // shared with you while Grid is not set up (the Set up row under Your models stands for
+      // it), and decision models, which nobody adds from here.
       if (indices.isEmpty &&
           (search.matchQuery.trim().isNotEmpty ||
               section == ModelSearchSection.catalog ||
+              section.group == ModelSearchGroup.decision ||
               (section == ModelSearchSection.shared &&
                   search.gridSetupOffered))) {
         continue;
       }
+      shown[section] = indices;
+    }
+    // One kind alone needs no heading for it: the list reads as it did before decision models.
+    final grouped = shown.keys.any(
+      (section) => section.group == ModelSearchGroup.decision,
+    );
+    final items = <({int? index, String? heading, String? key})>[];
+    ModelSearchGroup? group;
+    for (final MapEntry(key: section, value: indices) in shown.entries) {
       if (items.isNotEmpty) items.add((index: null, heading: null, key: null));
+      if (grouped && section.group != group) {
+        group = section.group;
+        items.add((
+          index: null,
+          heading: group.label,
+          key: '$_groupKey${group.label}',
+        ));
+      }
       items.add((
         index: null,
         heading: search.modelSectionLabel(section),
-        key: section.label,
+        key: section.key,
       ));
       items.addAll(
         indices.map((index) => (index: index, heading: null, key: null)),
@@ -581,12 +613,26 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
     return items;
   }
 
-  double _modelItemHeight(({int? index, String? heading, String? key}) item) =>
-      !_desktopRows || item.index != null
-      ? _rowHeight
-      : item.heading == null
-      ? 8
-      : _modelHeadingHeight;
+  static const _groupKey = 'group:';
+
+  bool _isGroupHeading(({int? index, String? heading, String? key}) item) =>
+      item.key?.startsWith(_groupKey) == true;
+
+  double _modelItemHeight(({int? index, String? heading, String? key}) item) {
+    if (!_desktopRows) return _rowHeight;
+    final index = item.index;
+    if (index == null) {
+      return item.heading == null
+          ? 8
+          : _isGroupHeading(item)
+          ? _modelGroupHeadingHeight
+          : _modelHeadingHeight;
+    }
+    // A shared model's row is two lines: its name, and the machine serving it under it.
+    return search.modelRowNameEnd(search.rows[index]) != null
+        ? _twoLineRowHeight
+        : _rowHeight;
+  }
 
   double _fittedHeight(
     BoxConstraints constraints, {
@@ -620,12 +666,17 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
   @override
   void initState() {
     super.initState();
-    if (widget.bios) {
-      _activityClock = Timer.periodic(const Duration(minutes: 1), (_) {
-        if (mounted) setState(() {});
-      });
-    }
+    _activity = SessionActivityController(search.app)
+      ..addListener(_activityChanged);
+    _scroll.addListener(_watchActivity);
+    _watchActivity();
+    _activityClock = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && search.rows.any((row) => row.lastActivityAt != null)) {
+        setState(() {});
+      }
+    });
     search.addListener(_changed);
+    _revealed = (search.selected?.id, search.query);
     terminalFontStore.addListener(_fontChanged);
     _lastPage = search.resultPage.value;
     search.resultPage.addListener(_pageResults);
@@ -635,6 +686,10 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
   void didUpdateWidget(SwarmSearchResults oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.search != search) {
+      _activity.dispose();
+      _activity = SessionActivityController(search.app)
+        ..addListener(_activityChanged);
+      _watchActivity();
       oldWidget.search.removeListener(_changed);
       oldWidget.search.resultPage.removeListener(_pageResults);
       search.addListener(_changed);
@@ -642,6 +697,7 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
       _lastPage = search.resultPage.value;
       _announced = null;
       _rowWidgets.clear();
+      _revealed = (search.selected?.id, search.query);
       _revealSelection();
     }
   }
@@ -668,9 +724,17 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
   }
 
   void _changed() {
+    _watchActivity();
     setState(() {});
-    _scrollToSelection();
-    _revealSelection();
+    // Only a new selection or query brings the selection into view. A refresh that leaves both
+    // as they were keeps the list where it was scrolled: the picker re-reads its models every few
+    // seconds, and each read pulled a list scrolled by the wheel back up to the selection.
+    final shown = (search.selected?.id, search.query);
+    if (shown != _revealed) {
+      _revealed = shown;
+      _scrollToSelection();
+      _revealSelection();
+    }
     // Focus stays in the input while the arrows move a highlight the screen
     // reader never visits; say the row it landed on.
     final row = search.selected;
@@ -688,6 +752,20 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
         );
       });
     }
+  }
+
+  void _activityChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _watchActivity() {
+    final start = _scroll.hasClients
+        ? (_scroll.offset / _rowHeight).floor().clamp(0, search.rows.length)
+        : 0;
+    final count = _scroll.hasClients
+        ? (_scroll.position.viewportDimension / _rowHeight).ceil() + 2
+        : 12;
+    _activity.watch([...search.rows.skip(start).take(count), ?search.selected]);
   }
 
   void _revealSelection() {
@@ -716,7 +794,9 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
               .take(index)
               .fold(0.0, (height, item) => height + _modelItemHeight(item))
         : index * _rowHeight;
-    final bottom = top + _rowHeight;
+    final bottom =
+        top +
+        (search.isModelMode ? _modelItemHeight(modelRows[index]) : _rowHeight);
     final position = _scroll.position;
     final offset = top < position.pixels
         ? top
@@ -748,6 +828,8 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
   @override
   void dispose() {
     _activityClock?.cancel();
+    _activity.dispose();
+    _scroll.removeListener(_watchActivity);
     search.removeListener(_changed);
     terminalFontStore.removeListener(_fontChanged);
     search.resultPage.removeListener(_pageResults);
@@ -816,14 +898,16 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
           // is still a resource row, and keeps the 44-point target every one of those has — the
           // slot is 4 points taller than the row it holds.
           final oneLine = scale.scale(14) * 1.5 + 16;
+          _twoLineRowHeight = scale.scale(14) * 2.8 + 16;
           _rowHeight = search.isCommandMode
               ? oneLine
               : search.isModelMode
               ? oneLine.clamp(48, double.infinity)
-              : scale.scale(14) * 2.8 + 16;
+              : _twoLineRowHeight;
         }
         _desktopRows = desktop;
         _modelHeadingHeight = scale.scale(12) * 1.45 + 12;
+        _modelGroupHeadingHeight = scale.scale(16) * 1.45 + 26;
         final height = widget.fitRows
             ? _fittedHeight(
                 constraints,
@@ -851,14 +935,9 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
           final canSubmit = search.canSubmit(row);
           final unavailableReason = search.sessionUnavailable(row);
           final alreadyHere = search.alreadyHere(row);
-          // As of this opening, like the order: the list does not move while
-          // it is open. Under a minute is "now", not "0m".
-          final activity = widget.bios ? search.activityOf(row) : null;
-          final activityAge = activity == null
-              ? null
-              : search.openedAt.difference(activity).inMinutes < 1
-              ? 'now'
-              : harnessActivityAge(activity, search.openedAt);
+          // Live display metadata is independent of the ranking snapshot.
+          final activity = _activity.read(row);
+          final activityAge = sessionActivityLabel(activity, widget.now());
           final presentation = (
             row,
             selected,
@@ -879,6 +958,7 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
             desktop,
             stacked,
             activityAge,
+            activity,
             row.isModel ? search.modelRowAction(row) : null,
             row.isModel ? search.canSelectModel(row) : null,
             row.isModel ? search.canGetModel(row) : null,
@@ -917,6 +997,7 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                       enabled: canSubmit,
                       cellSize: cell,
                       activityAge: activityAge,
+                      activity: activity,
                       unavailableReason: unavailableReason,
                     ),
                   ),
@@ -1049,6 +1130,8 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                     terminal: widget.terminal,
                     stacked: desktop || stacked,
                     highlighted: desktop && highlighted,
+                    activityAge: activityAge,
+                    activity: activity,
                   ),
                   trailing: desktop
                       ? row.shortcut == null
@@ -1259,6 +1342,16 @@ class _SwarmSearchResultsState extends State<SwarmSearchResults> {
                                 }
                                 if (item.heading == null) {
                                   return const SizedBox();
+                                }
+                                if (desktop && _isGroupHeading(item)) {
+                                  return _ModelGroupHeading(
+                                    key: ValueKey('model-section:${item.key}'),
+                                    label: item.heading!,
+                                    decision:
+                                        item.key ==
+                                        '$_groupKey${ModelSearchGroup.decision.label}',
+                                    first: index == 0,
+                                  );
                                 }
                                 return Semantics(
                                   header: true,
@@ -1578,6 +1671,7 @@ class _SearchRowContent extends StatefulWidget {
     this.enabled = true,
     this.cellSize,
     this.activityAge,
+    this.activity = (at: null, status: null),
     this.unavailableReason,
   });
 
@@ -1591,6 +1685,7 @@ class _SearchRowContent extends StatefulWidget {
   final bool enabled;
   final Size? cellSize;
   final String? activityAge;
+  final SessionActivity activity;
   final String? unavailableReason;
 
   @override
@@ -1715,6 +1810,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
           ? widget.search.modelRowStatus(row)
           : null;
       final status = unavailable ?? api?.hint ?? modelStatus;
+      final spokenStatus = status ?? widget.activity.status?.label;
       // One line a model: a local model's size and speed sit muted before its word at the right.
       final facts = row.isModel
           ? widget.search
@@ -1726,6 +1822,11 @@ class _SearchRowContentState extends State<_SearchRowContent> {
       final subscription = row.isModel
           ? widget.search.models?.entries[row.modelId]?.subscription
           : null;
+      // A shared model's machine goes on a second line under its name, where it cannot be read as
+      // part of the name: "DeepSeek-V4-Flash · zeus" on one line read as one long model name.
+      final nameEnd = row.isModel && title == row.title
+          ? widget.search.modelRowNameEnd(row)
+          : null;
       final account = '${subscription?['account'] ?? ''}'.trim();
       final subscriptionAccount = subscription != null && account.isNotEmpty
           ? (
@@ -1733,12 +1834,8 @@ class _SearchRowContentState extends State<_SearchRowContent> {
               account: account,
             )
           : null;
-      final activity = widget.search.activityOf(row);
-      final age = activity == null
-          ? null
-          : widget.search.openedAt.difference(activity).inMinutes < 1
-          ? 'now'
-          : harnessActivityAge(activity, widget.search.openedAt);
+      final activity = widget.activity.at;
+      final age = widget.activityAge;
       final detail = row.terminalDetail ?? row.detail;
       Widget trailingLabel(String text) => Text(
         text,
@@ -1764,8 +1861,8 @@ class _SearchRowContentState extends State<_SearchRowContent> {
       );
       return Semantics(
         label:
-            '$title\n$detail${status == null ? '' : ', $status'}'
-            '${status == null && activity != null ? ', Last active ${activity.toLocal()}' : ''}'
+            '$title\n$detail${spokenStatus == null ? '' : ', $spokenStatus'}'
+            '${activity != null ? ', ${harnessActivityTooltip(activity)}' : ''}'
             '${snippet == null ? '' : ', Found in conversation: ${snippet.plainSnippet}'}',
         excludeSemantics: true,
         child: Column(
@@ -1811,6 +1908,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                         )
                       : SearchResultText(
                           title,
+                          to: nameEnd,
                           matches: matches.where((match) => match.title),
                           style: DesktopChrome.text(
                             color: unavailable == null ? ink : muted,
@@ -1831,14 +1929,19 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                     ),
                   ),
                 ],
-                if (status ?? age case final trailing?) ...[
+                if (!row.isModel &&
+                    (activity != null || widget.activity.status != null)) ...[
                   const SizedBox(width: 12),
-                  if (status == null && activity != null)
-                    Tooltip(
-                      message: 'Last active ${activity.toLocal()}',
-                      child: trailingLabel(trailing),
-                    )
-                  else if (row.isModel && api == null)
+                  SessionActivityLabel(
+                    activity: widget.activity,
+                    age: age,
+                    style: DesktopChrome.metadata(color: muted),
+                    markColor: widget.highlighted ? muted : null,
+                    reason: unavailable,
+                  ),
+                ] else if (status ?? age case final trailing?) ...[
+                  const SizedBox(width: 12),
+                  if (row.isModel && api == null)
                     SizedBox(
                       width: MediaQuery.textScalerOf(context).scale(96),
                       child: trailingLabel(trailing),
@@ -1848,6 +1951,16 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                 ],
               ],
             ),
+            if (nameEnd != null) ...[
+              const SizedBox(height: 2),
+              SearchResultText(
+                title,
+                key: ValueKey('model-row-machine:${row.id}'),
+                from: nameEnd + modelMachineSeparator.length,
+                matches: matches.where((match) => match.title),
+                style: DesktopChrome.metadata(color: muted),
+              ),
+            ],
             if (!widget.search.isModelMode &&
                 !row.isCommand &&
                 !underApi &&
@@ -1889,6 +2002,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                       !widget.search.isModelDownloadsRow(row) &&
                       !widget.search.isGridSetupRow(row) &&
                       !widget.search.canExpandApi(row) &&
+                      !widget.search.isJevRow(row) &&
                       !widget.search.canSelectModel(row) &&
                       !widget.search.canGetModel(row))
             ? theme.foreground.withValues(alpha: .28)
@@ -1919,7 +2033,7 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                   '${modelAction == null ? '' : ', $modelAction'}'
                   '${widget.unavailableReason == null ? '' : ', ${widget.unavailableReason}'}'
                   '${row.shortcut == null ? '' : ', Shortcut ${row.shortcut}'}'
-                  '${widget.activityAge == null ? '' : ', Last used ${widget.activityAge} ago'}',
+                  '${widget.activityAge == null ? '' : ', ${sessionActivityTooltip(widget.activity)}'}',
         excludeSemantics: true,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2050,16 +2164,14 @@ class _SearchRowContentState extends State<_SearchRowContent> {
                           style: terminalContentStyle(color: muted),
                         ),
                       ),
-                    ] else if (widget.activityAge case final age?) ...[
+                    ] else if (widget.activity.at != null ||
+                        widget.activity.status != null) ...[
                       SizedBox(width: cell.width * 2),
-                      Tooltip(
-                        message: 'Last active ${row.lastActivityAt!.toLocal()}',
-                        child: Text(
-                          age,
-                          maxLines: 1,
-                          style: terminalContentStyle(
-                            color: theme.foreground.withValues(alpha: .38),
-                          ),
+                      SessionActivityLabel(
+                        activity: widget.activity,
+                        age: widget.activityAge,
+                        style: terminalContentStyle(
+                          color: theme.foreground.withValues(alpha: .38),
                         ),
                       ),
                     ],
@@ -2369,6 +2481,61 @@ class SwarmSearchCount extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// A kind of model at the head of its sections — Chat models, Decision models — set apart from the
+/// section headings under it so the list reads as two parts: its mark, a larger and heavier label, and
+/// a rule above every kind after the first.
+class _ModelGroupHeading extends StatelessWidget {
+  const _ModelGroupHeading({
+    super.key,
+    required this.label,
+    required this.decision,
+    required this.first,
+  });
+
+  final String label;
+  final bool decision;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) {
+    grid.AppTheme.watch(context);
+    return Semantics(
+      header: true,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 14),
+        padding: EdgeInsets.only(top: first ? 6 : 14),
+        decoration: first
+            ? null
+            : BoxDecoration(
+                border: Border(top: BorderSide(color: DesktopChrome.rim)),
+              ),
+        alignment: Alignment.centerLeft,
+        child: Row(
+          children: [
+            Icon(
+              decision ? AppIcons.signpost : AppIcons.messagesSquare,
+              size: 18,
+              color: DesktopChrome.foreground,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: DesktopChrome.text(
+                  size: 16,
+                  color: DesktopChrome.foreground,
+                ).copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

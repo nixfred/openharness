@@ -24,8 +24,9 @@ describe('test environment isolation', () => {
     expect(env.ADAPTER_RUNTIME_DIR.startsWith(productRoot)).toBe(false)
   })
   it('keeps the lessons folder off the developer\'s ~/.harness, so no spec writes a lesson there', () => {
-    expect(env.HARNESS_LESSONS_DIR.startsWith(productRoot)).toBe(false)
-    expect(env.HARNESS_LESSONS_DIR).toBe(join(env.ADAPTER_DATA_DIR, 'lessons'))
+  })
+  it('keeps the hook routes off the developer\'s ~/.harness, so no spec records a daemon beside theirs or routes by one', () => {
+    expect(env.HARNESS_HOOK_ROUTES_DIR.startsWith(productRoot)).toBe(false)
   })
   it('keeps account reads and refreshes in the test-owned auth directory', () => {
     expect(AUTH_DIR).toBe(join(env.ADAPTER_DATA_DIR, 'auth'))

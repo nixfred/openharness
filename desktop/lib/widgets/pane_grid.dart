@@ -15,6 +15,7 @@ import '../core/dsh_catalog.dart' show DshEntry;
 import '../core/models.dart' show Agent, kUntitledPane;
 import '../clipboard/native_clipboard.dart';
 import '../shared/theme/app_theme.dart' as grid;
+import '../shared/theme/appearance_prefs_store.dart';
 // `hide TerminalKey`: this file's own shortcut-label class, unused here, collides with xterm's
 // `TerminalKey` (needed for the local image-drop Ctrl+V nudge — see `_dropImage`).
 import '../shortcuts/app_shortcuts.dart' hide TerminalKey;
@@ -30,6 +31,7 @@ import 'agent_drag.dart';
 import 'harness_join_guide_screen.dart';
 import 'link_machine_screen.dart';
 import 'new_agent_dialog.dart';
+import 'new_device_notice.dart' show DeviceListReviewLine, showDeviceListReview;
 import 'delete_agent_dialog.dart';
 import 'restart_agent_action.dart';
 import 'terminal_panel.dart';
@@ -1271,22 +1273,28 @@ class _PaneCell extends StatelessWidget {
   Widget build(BuildContext context) {
     TerminalFontScope.watch(context);
     return RepaintBoundary(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          if (visible) pane.lastViewSize = constraints.biggest;
-          return _build(context);
-        },
+      child: ValueListenableBuilder<AppearancePrefs>(
+        valueListenable: appearancePrefsStore,
+        builder: (context, prefs, _) => LayoutBuilder(
+          builder: (context, constraints) {
+            if (visible) pane.lastViewSize = constraints.biggest;
+            return _build(context, prefs);
+          },
+        ),
       ),
     );
   }
 
-  Widget _build(BuildContext context) {
+  Widget _build(BuildContext context, AppearancePrefs prefs) {
     grid.AppTheme.watch(context);
     final focused = visible && notifier.isPaneFocused(pane.id);
     final remote = notifier.stateOf(pane.machineId)?.isLocalMachine == false;
     // Keep the selected harness's terminal and viewers clear, including while
     // a menu owns input. This changes paint, never the keyboard's destination.
-    final dimmed = !_single && !notifier.isPaneEmphasized(pane);
+    final dimmed =
+        prefs.shadeInactivePanes &&
+        !_single &&
+        !notifier.isPaneEmphasized(pane);
     final agentId = pane.agentId;
     final blocked =
         agentId != null &&
@@ -1458,8 +1466,12 @@ class _PaneContent extends StatelessWidget {
   Widget build(BuildContext context) {
     TerminalFontScope.watch(context);
     final machine = notifier.stateOf(pane.machineId);
+    final swarmId = notifier.activeSwarmId;
     void close() {
-      notifier.requestClosePane(pane.id);
+      // A tab switch can precede the frame that replaces this callback. Shared
+      // panes keep their identity, so the pane id alone cannot identify its tab.
+      if (notifier.activeSwarmId != swarmId) return;
+      unawaited(notifier.requestClosePane(pane.id));
     }
 
     VoidCallback? split(PaneResizeAxis axis) =>
@@ -1567,11 +1579,15 @@ class _PaneContent extends StatelessWidget {
               : 'Waiting for this machine. Retained output is read only.',
         );
       } else if (needsLink) {
+        // A frozen device list may be why it asks: the band says so, beside
+        // the password.
+        final review = notifier.deviceListNeedsReview;
         notice = terminalNotice(
           label: 'Link required',
           icon: AppIcons.unlink,
-          detail:
-              '${machine.machine.displayName} needs linking. Retained output is read only.',
+          detail: review
+              ? '${machine.machine.displayName} needs linking. Your device list needs a review.'
+              : '${machine.machine.displayName} needs linking. Retained output is read only.',
           // A tile still showing its last screen gets the same way out as an
           // empty one — the band's button asks for the remote password.
           actionLabel: 'Link…',
@@ -1580,6 +1596,11 @@ class _PaneContent extends StatelessWidget {
             notifier,
             pane.machineId,
           ).ignore(),
+          secondaryLabel: review ? 'Your devices' : null,
+          onSecondary: review
+              ? () => showDeviceListReview(context, notifier)
+              : null,
+          banner: review,
         );
       } else if (offline) {
         notice = terminalNotice(
@@ -1587,6 +1608,19 @@ class _PaneContent extends StatelessWidget {
           icon: AppIcons.cloudOff,
           detail:
               '${machine.machine.displayName} is offline. Retained output is read only.',
+        );
+      } else if (agent?.isStopped == true) {
+        final opening = notifier.pendingAgentRestart(
+          pane.machineId,
+          wantedAgentId!,
+        );
+        notice = terminalNotice(
+          label: opening?.busy == true ? 'Opening' : 'Stopped',
+          icon: AppIcons.terminal,
+          detail: opening?.result?.error ?? 'Open to continue your saved conversation. Retained output is read only.',
+          actionLabel: opening?.busy == true ? null : 'Open',
+          onAction: () => notifier.openSavedPane(pane.id).ignore(),
+          banner: true,
         );
       } else if (agent == null || !agent.terminalAvailable) {
         notice = terminalNotice(
@@ -1742,6 +1776,7 @@ class _PaneContent extends StatelessWidget {
           notifier,
           pane.machineId,
         ).ignore(),
+        footer: DeviceListReviewLine(notifier: notifier, center: true),
       );
     }
     if (offline) {
@@ -1789,6 +1824,24 @@ class _PaneContent extends StatelessWidget {
         icon: AppIcons.circleHelp,
         message: 'This harness is no longer on ${machine.machine.displayName}.',
         onClose: close,
+      );
+    }
+    if (agent?.isStopped == true) {
+      final opening = notifier.pendingAgentRestart(
+        pane.machineId,
+        wantedAgentId,
+      );
+      return _PaneStatus(
+        activity: activityMark,
+        title: agentName,
+        icon: AppIcons.terminal,
+        message: opening?.busy == true
+            ? 'Opening saved conversation…'
+            : opening?.result?.error ?? 'This harness is stopped. Open it to continue your saved conversation.',
+        onClose: close,
+        busy: opening?.busy == true,
+        actionLabel: opening?.busy == true ? null : 'Open',
+        onAction: () => notifier.openSavedPane(pane.id).ignore(),
       );
     }
     if (agent != null && !agent.terminalAvailable) {
@@ -2280,6 +2333,7 @@ class _PaneStatus extends StatelessWidget {
     this.busy = false,
     this.actionLabel,
     this.onAction,
+    this.footer,
   });
 
   final String title;
@@ -2293,6 +2347,10 @@ class _PaneStatus extends StatelessWidget {
   /// reporting a failure the user can retry does, and it reads the same as the error strip's RETRY.
   final String? actionLabel;
   final VoidCallback? onAction;
+
+  /// Anything more under the way out — a machine asking for its password:
+  /// a device list to review.
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -2335,6 +2393,7 @@ class _PaneStatus extends StatelessWidget {
                     const SizedBox(height: 4),
                     TextButton(onPressed: onAction, child: Text(actionLabel!)),
                   ],
+                  ?footer,
                 ],
               ),
             ),

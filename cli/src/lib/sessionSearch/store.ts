@@ -20,6 +20,8 @@ import type { IndexedTurn } from './turns.js'
 const SCHEMA_VERSION = '11'
 
 /** The row that holds a session's name, title and folder: searchable beside its turns. */
+export const SESSION_SEARCH_FILE = 'session-search.db'
+
 export const HEADER_TURN = -1
 
 interface Statement {
@@ -66,6 +68,8 @@ export interface ExternalHit {
   origin: string
   /** Open in a running process elsewhere (a terminal, the engine's app): not to be opened twice. */
   open?: boolean
+  /** Confirmed mid-turn, idle, or omitted when the engine cannot report its current work state. */
+  working?: boolean
   /** Where it is open: a terminal, which Harness can take it over from; an app, which it cannot; or
    *  one of Harness's own panes, an agent the daemon is still binding; or `maybe` a terminal whose
    *  process was started on it and may have moved on. */

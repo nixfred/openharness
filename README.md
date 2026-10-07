@@ -29,7 +29,7 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
 [PLAN.md](PLAN.md), [nixfred/README.md](nixfred/README.md) (every command),
 [nixfred/DESIGN.md](nixfred/DESIGN.md) (the visual system).
 
-**The Harness dial (firmware `0.0.86-nixfred.7`, flashed over USB; see NIXFRED-CHANGELOG.md)**
+**The Harness dial (firmware `0.0.86-nixfred.9`, flashed over USB; see NIXFRED-CHANGELOG.md)**
 
 - **Open the menu (the hub):** pull down from the top edge (the small notch at 12 o'clock), or hold a
   still finger 650 ms anywhere (a ring fills). Neither ever starts voice or answers a question; a press
@@ -161,14 +161,14 @@ for workloads, slow tails, connection failures and raw data.
 ## How it works
 
 In the workspace, a **harness** is one running session of an agent such as Codex
-or Claude Code, with its own conversation and working context. A **swarm** groups
-harnesses. Use **New Harness** to start one and **New Swarm** to group work.
-Enable **Settings → Experimental → Swarm collaboration** to let their agents
-consult peers in the same swarm; it is off by default.
+or Claude Code, with its own conversation and working context. A **tab** groups
+harnesses. Use **New Harness** to start one and **New Tab** to group work.
+Enable **Settings → Experimental → Tab collaboration** to let their agents
+consult peers in the same tab; it is off by default.
 
 The Store offers **harnesses** with instructions, tools, and optional viewers for
 specific crafts. Install a harness, then start it in your workspace. See the
-[terminology guide](docs/terminology.md) for the complete naming rules.
+[Naming System](docs/naming-system.md) for the complete naming rules.
 
 One daemon per machine runs your agents in tmux. It dials out, so no machine opens a port.
 

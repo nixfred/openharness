@@ -17,6 +17,7 @@ import '../clipboard/native_clipboard.dart';
 import '../core/models.dart';
 import '../core/runtime_platform.dart';
 import '../state/app_state.dart';
+import '../state/harness_activity.dart';
 import '../state/model_start_watch.dart';
 
 import 'agent_drag.dart';
@@ -71,6 +72,11 @@ typedef TerminalNotice = ({
   String? actionLabel,
   VoidCallback? onAction,
 
+  /// A second way out, offered on the band only ([banner]) — a machine asking
+  /// for its password while this app's device list waits for a review.
+  String? secondaryLabel,
+  VoidCallback? onSecondary,
+
   /// Whether this one also earns a band above the terminal output.
   /// Startup and failure guidance needs to be read, not hovered.
   /// An offline machine is neither confusing nor rare, and a band on every one
@@ -89,6 +95,8 @@ TerminalNotice terminalNotice({
   required IconData icon,
   String? actionLabel,
   VoidCallback? onAction,
+  String? secondaryLabel,
+  VoidCallback? onSecondary,
   bool banner = false,
 }) => (
   label: label,
@@ -96,6 +104,8 @@ TerminalNotice terminalNotice({
   icon: icon,
   actionLabel: actionLabel,
   onAction: onAction,
+  secondaryLabel: secondaryLabel,
+  onSecondary: onSecondary,
   banner: banner,
 );
 
@@ -322,6 +332,7 @@ class _TerminalPanelState extends State<TerminalPanel>
     WidgetsBinding.instance.addObserver(this);
     widget.session.attachViewport(this);
     widget.session.addListener(_onSessionChanged);
+    widget.session.remoteCursorVisibility.addListener(_syncCursorBlink);
     terminalFontStore.addListener(_onFontChanged);
     // Colours repaint the view in place — no relayout, no resize frame — but
     // they still need a rebuild to reach it, and this widget reads the store
@@ -413,9 +424,11 @@ class _TerminalPanelState extends State<TerminalPanel>
       _previewProgress = null;
       oldWidget.session.setCursorBlinkPhase(true);
       oldWidget.session.removeListener(_onSessionChanged);
+      oldWidget.session.remoteCursorVisibility.removeListener(_syncCursorBlink);
       oldWidget.session.detachViewport(this);
       widget.session.attachViewport(this);
       widget.session.addListener(_onSessionChanged);
+      widget.session.remoteCursorVisibility.addListener(_syncCursorBlink);
       _composerFocusPending = false;
       _cancelDialInertia();
       _controller.clearSelection();
@@ -502,6 +515,7 @@ class _TerminalPanelState extends State<TerminalPanel>
     _observeLinkModifiers(false);
     widget.session.setCursorBlinkPhase(true);
     widget.session.removeListener(_onSessionChanged);
+    widget.session.remoteCursorVisibility.removeListener(_syncCursorBlink);
     widget.session.detachViewport(this);
     terminalFontStore.removeListener(_onFontChanged);
     terminalThemeStore.removeListener(_onFontChanged);
@@ -949,6 +963,7 @@ class _TerminalPanelState extends State<TerminalPanel>
         !widget.readOnly &&
         _focusNode.hasFocus &&
         widget.session.acceptsInput &&
+        widget.session.remoteCursorVisibility.value &&
         (_tickerMode?.value.enabled ?? false) &&
         (lifecycle == null || lifecycle == AppLifecycleState.resumed);
     if (!enabled) {
@@ -970,8 +985,9 @@ class _TerminalPanelState extends State<TerminalPanel>
   void _setCursorBlinkVisible(bool visible) {
     if (visible == _cursorBlinkVisible) return;
     _cursorBlinkVisible = visible;
-    widget.session.setCursorBlinkPhase(visible);
-    _repaintTerminalCursor();
+    if (widget.session.setCursorBlinkPhase(visible)) {
+      _repaintTerminalCursor();
+    }
   }
 
   void _repaintTerminalCursor() {
@@ -2818,10 +2834,36 @@ class _TerminalHeader extends StatelessWidget {
                     // shortened to "…" beside a short name with half the header empty.
                     constraints.maxWidth - titleRoom(),
                   );
-            // The name/status retain space while model and project text yield.
+            // Budget the title's fixed neighbours too. An activity mark and
+            // connection status must not consume the name's entire flex width
+            // when the model/agent controls share a narrow split pane.
+            final hasActivity =
+                harnessActivity(notifier, session.machineId, session.agentId) !=
+                null;
+            final activityWidth = hasActivity
+                ? workspaceBarCellSizeOf(context).width * 2
+                : 0.0;
+            final leadingWidth = leadingStatus
+                ? 34.0
+                : showIdentityMark
+                ? 27.0
+                : 0.0;
+            final statusWidth = status != null && !leadingStatus
+                ? 36.0
+                : starting != null
+                ? 8 +
+                      paneStartingChipWidth(
+                        starting,
+                        MediaQuery.textScalerOf(context),
+                        narrow: narrow,
+                      )
+                : 0.0;
+            final minimumLeftWidth = compact
+                ? 56 + leadingWidth + activityWidth + statusWidth + 8
+                : 99.0;
             final rightWidth = math.min(
               compact ? actionsWidth : desiredRightWidth,
-              math.max(0.0, constraints.maxWidth - (compact ? 56 : 99)),
+              math.max(0.0, constraints.maxWidth - minimumLeftWidth),
             );
             return Row(
               children: [
@@ -3015,6 +3057,7 @@ class _TerminalHeader extends StatelessWidget {
                             constraints: BoxConstraints(maxWidth: badgeWidth),
                             child: PullRequestBadge(
                               compact: narrow,
+                              foreground: notifier.foreground,
                               identity: (
                                 session.machineId,
                                 agent.id,
@@ -3396,7 +3439,7 @@ class _ControlBanner extends StatelessWidget {
                     ],
                   ),
                 );
-                final button = notice != null
+                final primary = notice != null
                     ? (notice!.actionLabel == null
                           ? null
                           : _ControlBannerButton(
@@ -3407,6 +3450,31 @@ class _ControlBanner extends StatelessWidget {
                     : busy
                     ? null
                     : _ControlBannerButton(onPressed: onTakeControl);
+                final secondary = notice?.secondaryLabel;
+                final button = secondary == null
+                    ? primary
+                    : Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: notice!.onSecondary,
+                            style: TextButton.styleFrom(
+                              minimumSize: const Size(0, 28),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: VisualDensity.compact,
+                            ),
+                            child: Text(
+                              secondary,
+                              style: grid.AppType.mono(
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          ?primary,
+                        ],
+                      );
                 if (narrow) {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,

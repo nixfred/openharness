@@ -13,7 +13,7 @@
  * Module singleton (like the ws `clients` set) — imported by routes + reaper.
  */
 
-import { DSH_ID_RE } from '../dsh/manifest.js'
+import { DSH_ID_RE } from '../dsh/id.js'
 import { AGENT_NAME_RE } from './engineLaunch.js'
 import { resumesConversation } from './resumeCapability.js'
 import { namingTitle } from './sessionTitle.js'
@@ -36,13 +36,14 @@ import {
   writeFileSync,
 } from 'fs'
 import { randomUUID } from 'crypto'
+import { join, basename, dirname, relative, isAbsolute } from 'path'
+import { machineNames } from './machineNames.js'
 
 /** Hermes session ids: `YYYYMMDD_HHMMSS_<6hex>`; the only shape a hosted row may carry. */
 const HOSTED_SESSION_ID_RE = /^\d{8}_\d{6}_[0-9a-f]{6}$/
-import { join, basename, dirname, relative } from 'path'
-import { hostname, uptime } from 'os'
 import { cursorDataDir } from '../engines/cursor/home.js'
 import { env } from '../config/env.js'
+import { claudeProjectsRoots, codexHomeRoots, sessionCodexHome } from './engineHomes.js'
 import { readCodexRolloutMeta, resolveCodexRollout } from '../engines/codex/rollout.js'
 import { ENGINES, isTerminalEngine, type AgentEngine } from '../engines/types.js'
 import type { GridAssignment } from './gridAssignment.js'
@@ -50,6 +51,7 @@ import { parseGridLaunchOverride, type GridLaunchOverride, type GridLaunchRecord
 import { commandcodeTranscriptPath } from '../engines/commandcode/transcript.js'
 import { agyTranscriptPath } from '../engines/agy/session.js'
 import { copilotTranscriptPath } from '../engines/copilot/session.js'
+import { bootChanged, currentBootId } from './bootId.js'
 import { lockOwnerAlive, lockStartMarker, processLockIdentity } from './processLiveness.js'
 import { hardenPrivateStateFileIfPresent, readPrivateStateFile, secureStateDirectory } from './secureState.js'
 import { mergeTerminalRuntimes, processIdentityKey, terminalPlacementKey, terminalRouteKey } from './terminalRuntime.js'
@@ -220,9 +222,11 @@ export interface RegisteredSession {
    * The agent this one was FORKED from (`agent_fork`): a new session opened with the source's whole
    * history, the source left as it was. Recorded once at creation so the pane can say "forked from X"
    * and link back; `name` is the source's name at that moment, kept because the source may be renamed
-   * or gone by the time anyone reads it. Absent on every other agent.
+   * or gone by the time anyone reads it. The source's session at that moment is kept too (see `ForkOrigin`),
+   * so a Change agent before the fork's first answer can hand over the history it inherited. Absent on every
+   * other agent.
    */
-  forkedFrom?: { agentId: string; name: string } | null
+  forkedFrom?: ForkOrigin | null
   /** Legacy launcher-owned snapshots may still contain this field. New records never write it. */
   launcherId?: string
   transcriptPath: string | null
@@ -451,8 +455,12 @@ function rowId(row: unknown): string {
     : typeof candidate.launcherId === 'string' ? candidate.launcherId : ''
 }
 
+// Key order carries no meaning but differs between load()'s literal, register(), strictPersistedRow and
+// setters that add keys (`launch`); compared as JSON text it rewrote registry.json (lock, 3 fsyncs, rename)
+// every 5 s on an unchanged row, ~720 writes/hour measured 2026-10-06. Array order still counts.
 function rowFingerprint(row: unknown): string {
-  return JSON.stringify(row)
+  return JSON.stringify(row, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value)
 }
 
 export function atomicWriteJson(file: string, value: unknown, exclusive = false): void {
@@ -571,7 +579,8 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   if (new Set(placements).size !== placements.length) return null
   // Taken out of the spread and put back only when it is a real moment: the spread would otherwise
   // carry a hand-edited string or a negative number straight into the frame's `toISOString()`.
-  const { lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, ...rest } = row
+  // `forkedFrom` is out too, so an invalid one is dropped rather than spread back in as-is.
+  const { lastOpenedAt: rawOpenedAt, closePlan: rawClosePlan, forkedFrom: rawForkedFrom, ...rest } = row
   const lastOpenedAt = normalizedOpenedAt(rawOpenedAt)
   return {
     ...rest,
@@ -587,7 +596,7 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
     projectDir: row.projectDir,
     defaultName: normalizedDefaultName(row.defaultName),
     agent: normalizedAgentName((row as { agent?: unknown }).agent),
-    ...(normalizedForkedFrom((row as { forkedFrom?: unknown }).forkedFrom)),
+    ...normalizedForkedFrom(rawForkedFrom),
     cwd: typeof row.cwd === 'string' ? row.cwd : null,
     runtimes,
     primaryRuntimeKey: normalizedPrimary,
@@ -606,12 +615,42 @@ export function strictPersistedRow(raw: unknown): RegisteredSession | null {
   }
 }
 
-/** `forkedFrom` as written by this daemon, or nothing: a row from before the field, or a hand-edited one. */
-function normalizedForkedFrom(value: unknown): { forkedFrom: { agentId: string; name: string } } | Record<string, never> {
+/**
+ * Where a fork came from. `sessionId` / `transcriptPath` are the PARENT's conversation at the moment of the
+ * fork; they let a fork that has not started its own conversation yet still say whose history it carries.
+ * Both are absent on forks recorded before the fields existed, and on forks of an unbound parent.
+ */
+export interface ForkOrigin {
+  agentId: string
+  name: string
+  sessionId?: string
+  transcriptPath?: string
+}
+
+const FORK_SESSION_ID_MAX = 256
+const FORK_TRANSCRIPT_PATH_MAX = 4096
+
+/**
+ * `forkedFrom` as written by this daemon, or nothing: a row from before the field, or a hand-edited one.
+ * Rebuilt key by key so nothing unknown rides along; a transcript path is kept only with its session id.
+ */
+function normalizedForkedFrom(value: unknown): { forkedFrom: ForkOrigin } | Record<string, never> {
   if (!value || typeof value !== 'object') return {}
-  const v = value as { agentId?: unknown; name?: unknown }
+  const v = value as { agentId?: unknown; name?: unknown; sessionId?: unknown; transcriptPath?: unknown }
   if (typeof v.agentId !== 'string' || !v.agentId) return {}
-  return { forkedFrom: { agentId: v.agentId, name: typeof v.name === 'string' ? v.name.slice(0, 120) : '' } }
+  const sessionId = typeof v.sessionId === 'string' && v.sessionId.length > 0 && v.sessionId.length <= FORK_SESSION_ID_MAX
+    ? v.sessionId : null
+  const transcriptPath = sessionId && typeof v.transcriptPath === 'string'
+    && v.transcriptPath.length <= FORK_TRANSCRIPT_PATH_MAX && isAbsolute(v.transcriptPath)
+    ? v.transcriptPath : null
+  return {
+    forkedFrom: {
+      agentId: v.agentId,
+      name: typeof v.name === 'string' ? v.name.slice(0, 120) : '',
+      ...(sessionId ? { sessionId } : {}),
+      ...(sessionId && transcriptPath ? { transcriptPath } : {}),
+    },
+  }
 }
 
 function normalizedLaunch(value: unknown): AgentLaunch | undefined {
@@ -696,9 +735,23 @@ function threeWayRow(
     if (!(key in current)) delete merged[key]
   }
   for (const [key, value] of Object.entries(current)) {
-    if (JSON.stringify(value) !== JSON.stringify(baseline[key])) merged[key] = value
+    if (rowFingerprint(value) !== rowFingerprint(baseline[key])) merged[key] = value
   }
   return merged
+}
+
+/** `candidate` with each intended field as `current` has it: set, or removed when `current` has none. */
+function withIntended(
+  candidate: Record<string, unknown>,
+  current: Record<string, unknown>,
+  intended: ReadonlySet<string>,
+): Record<string, unknown> {
+  const row = { ...candidate }
+  for (const key of intended) {
+    if (Object.hasOwn(current, key)) row[key] = current[key]
+    else delete row[key]
+  }
+  return row
 }
 
 function selectedRuntimeKey(runtimes: readonly TerminalRuntimeRef[], requested: unknown): string {
@@ -750,15 +803,26 @@ export function engineKeepsTranscriptFile(engine: AgentEngine): boolean {
   return TRANSCRIPT_ROOT[engine] !== null
 }
 
+/**
+ * The folders an engine's transcripts may be in: its own, and for Claude Code and Codex each home the
+ * person moved in their shell profile (lib/engineHomes.ts). An agent's own CODEX_HOME profile is its
+ * only one.
+ */
+function transcriptRoots(engine: AgentEngine, rootFor: (codexHome?: string) => string, codexHome?: string): string[] {
+  if (engine === 'claude') return claudeProjectsRoots(rootFor())
+  if (engine === 'codex' && !codexHome) return codexHomeRoots(env.CODEX_HOME).map((home) => join(home, 'sessions'))
+  return [rootFor(codexHome)]
+}
+
 export function validTranscriptPath(engine: AgentEngine, filePath: string, codexHome?: string, allowMissing = false): boolean {
   const rootFor = TRANSCRIPT_ROOT[engine]
   if (!rootFor) return false
   try {
     const missing = allowMissing && !existsSync(filePath)
     const actual = missing ? join(realpathSync(dirname(filePath)), basename(filePath)) : realpathSync(filePath)
-    const root = realpathSync(rootFor(codexHome))
+    const within = (root: string): boolean => { try { return isWithin(realpathSync(root), actual) } catch { return false } }
     const st = statSync(missing ? dirname(actual) : actual)
-    if (!(missing ? st.isDirectory() : st.isFile()) || !isWithin(root, actual)) return false
+    if (!(missing ? st.isDirectory() : st.isFile()) || !transcriptRoots(engine, rootFor, codexHome).some(within)) return false
     if (engine === 'cursor') {
       const id = basename(actual).replace(/\.jsonl$/, '')
       if (!id || basename(dirname(actual)) !== id || basename(dirname(dirname(actual))) !== 'agent-transcripts') return false
@@ -770,18 +834,7 @@ export function validTranscriptPath(engine: AgentEngine, filePath: string, codex
   }
 }
 
-/** Prefer the kernel boot UUID; retain numeric marker compatibility for one migration. */
-const BOOT_TOLERANCE_SEC = 120 // clock/NTP drift is seconds; a reboot shifts boot time by the whole uptime
-function bootTimeSec(): number {
-  return Math.round(Date.now() / 1000 - uptime())
-}
-function currentBootId(): string {
-  try {
-    const value = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-    if (/^[0-9a-f-]{36}$/i.test(value)) return `linux:${value}`
-  } catch { /* non-Linux fallback below */ }
-  return `time:${bootTimeSec()}`
-}
+/** The boot the registry was last loaded in (lib/bootId.ts says how a boot is named). */
 function readSavedBoot(): string | null {
   try {
     const raw = readPrivateStateFile(BOOT_FILE, 256).trim()
@@ -791,13 +844,6 @@ function readSavedBoot(): string | null {
       return typeof parsed === 'string' ? parsed : raw
     } catch { return raw }
   } catch { return null }
-}
-function bootChanged(saved: string | null, current: string): boolean {
-  if (!saved) return false
-  if (saved.startsWith('linux:')) return saved !== current
-  const savedNumber = Number(saved.replace(/^time:/, ''))
-  const currentNumber = current.startsWith('time:') ? Number(current.slice(5)) : bootTimeSec()
-  return !Number.isFinite(savedNumber) || Math.abs(currentNumber - savedNumber) > BOOT_TOLERANCE_SEC
 }
 function writeBoot(bootId: string): void {
   try {
@@ -832,6 +878,14 @@ class Registry {
   private persistedBaseline = new Map<string, string>()
   /** Exact bytes of our last durable save; checked against the file, never just its mtime. */
   private persistedContents: string | null = null
+  /**
+   * Fields a caller set on purpose since the last save, by agent: written as they are now, whatever the
+   * file says. The merge alone keeps the file's value wherever this view matches what it last saved, so
+   * a view that had never seen another process's close plan matched while cancelling it: the cancel was
+   * dropped and the plan stayed (CI's registry-observation contract, 2026-10-05). A close retried over
+   * another process's cancel was dropped the same way.
+   */
+  private intended = new Map<string, Set<string>>()
   private rebooted = false
 
   /** True when the last `load()` found the machine had rebooted since the previous daemon run. */
@@ -888,6 +942,7 @@ class Registry {
     this.rebooted = false
     this.persistedBaseline.clear()
     this.persistedContents = null
+    this.intended.clear()
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
     } catch (error) {
@@ -903,8 +958,7 @@ class Registry {
     try {
       const stored = JSON.parse(readPrivateStateFile(FILE)) as unknown
       if (!Array.isArray(stored)) {
-        this.writeBlocked = true
-        console.error('[registry] registry root is not an array; refusing to overwrite it')
+        this.quarantine('root is not an array')
         return
       }
       const { rows: parsed, dropped, changed: strippedRetired } = withoutRetiredRows(stored)
@@ -916,15 +970,13 @@ class Registry {
       }
       const legacyRows = parsed.filter((row) => !row || typeof row !== 'object' || !Object.hasOwn(row, 'schemaVersion'))
       if (legacyRows.some((row) => !validLegacyRegistryRow(row))) {
-        this.writeBlocked = true
-        console.error('[registry] registry contains a malformed legacy row; refusing to overwrite it')
+        this.quarantine('contains a malformed legacy row')
         return
       }
       const v2Rows = parsed.filter((row) => !!row && typeof row === 'object'
         && (row as { schemaVersion?: unknown }).schemaVersion === 2)
       if (v2Rows.length && !validatedRows(v2Rows)) {
-        this.writeBlocked = true
-        console.error('[registry] registry contains a malformed v2 row; refusing to overwrite it')
+        this.quarantine('contains a malformed v2 row')
         return
       }
       const arr = parsed as Array<Partial<RegisteredSession>>
@@ -963,7 +1015,7 @@ class Registry {
           const meta = readCodexRolloutMeta(transcriptPath)
           if (meta?.isSubagent) {
             const repaired = meta.parentThreadId === rawSessionId
-              ? resolveCodexRollout(rawSessionId, join(rawCodexHome || env.CODEX_HOME, 'sessions'))
+              ? resolveCodexRollout(rawSessionId, join(sessionCodexHome({ codexHome: rawCodexHome, transcriptPath }), 'sessions'))
               : null
             if (!repaired || !validTranscriptPath('codex', repaired, rawCodexHome) || readCodexRolloutMeta(repaired)?.isSubagent) {
               changed = true
@@ -1013,6 +1065,7 @@ class Registry {
           grid: normalizedGridAssignment(raw.grid),
           codexHome: typeof rawCodexHome === 'string' && rawCodexHome ? rawCodexHome : null,
           hermesHome: typeof raw?.hermesHome === 'string' && raw.hermesHome ? raw.hermesHome : null,
+          ...normalizedForkedFrom((raw as { forkedFrom?: unknown }).forkedFrom),
           dsh: normalizedDshId((raw as { dsh?: unknown }).dsh),
           dshRuntime: typeof raw.dshRuntime === 'string' && raw.dshRuntime ? raw.dshRuntime : null,
           agent: normalizedAgentName((raw as { agent?: unknown }).agent),
@@ -1069,32 +1122,50 @@ class Registry {
           || legacyLauncherId !== ''
         ) changed = true
         if (this.agents.has(s.agentId)) {
-          this.agents.clear()
-          this.sessionIndex.clear()
-          this.runtimeIndex.clear()
-          this.processIndex.clear()
-          this.writeBlocked = true
-          console.error('[registry] registry contains duplicate agent identities; refusing to load or overwrite it')
+          this.quarantine('contains duplicate agent identities')
           return
         }
         this.index(s)
       }
       if (!validatedRows(this.list().map(persistedRow))) {
-        this.agents.clear()
-        this.sessionIndex.clear()
-        this.runtimeIndex.clear()
-        this.processIndex.clear()
-        this.writeBlocked = true
-        console.error('[registry] registry violates global identity invariants; refusing to load or overwrite it')
+        this.quarantine('violates global identity invariants')
         return
       }
       if (changed) this.save()
     } catch (error) {
-      if (existsSync(FILE)) {
+      if (error instanceof SyntaxError) this.quarantine(`is not JSON (${error.message})`)
+      else if (existsSync(FILE)) {
         this.writeBlocked = true
         console.error('[registry] registry is unreadable; refusing to overwrite it:', error instanceof Error ? error.message : error)
       }
-      // A genuinely absent file starts empty. Any existing unreadable file is preserved byte-for-byte.
+      // A genuinely absent file starts empty. A file that cannot be opened safely (a symlink, another
+      // owner, open permissions) is left exactly as it is, and nothing is written over it.
+    }
+  }
+
+  /**
+   * Bytes no version of the registry can load — not JSON, the wrong shape, malformed or contradictory
+   * rows — are moved aside, kept byte-for-byte for an operator, and the daemon starts empty: discovery
+   * finds the agents still running in tmux again. Refusing every write instead left a daemon that could
+   * not start a single agent until someone repaired the file by hand. A newer version's rows (an
+   * unknown schema) are not corruption, and are still never touched.
+   */
+  private quarantine(reason: string): void {
+    this.agents.clear()
+    this.sessionIndex.clear()
+    this.runtimeIndex.clear()
+    this.processIndex.clear()
+    this.persistedBaseline.clear()
+    this.persistedContents = null
+    this.intended.clear()
+    const aside = `${FILE}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+    try {
+      renameSync(FILE, aside)
+      this.writeBlocked = false
+      console.error(`[registry] registry ${reason}; moved it aside to ${aside} and started empty`)
+    } catch (error) {
+      this.writeBlocked = true
+      console.error(`[registry] registry ${reason}, and it could not be moved aside (${error instanceof Error ? error.message : error}); refusing to overwrite it`)
     }
   }
 
@@ -1283,7 +1354,7 @@ class Registry {
     /** Who the agent is, for the name Harness gives it: a DSH's own name ("Blender"); the engine's by default. */
     label?: string | null
     /** The agent this one is a fork of — see RegisteredSession.forkedFrom. */
-    forkedFrom?: { agentId: string; name: string } | null
+    forkedFrom?: ForkOrigin | null
   }): RegisteredSession | null {
     if (this.writeBlocked) return null
     const runtimes = normalizedRuntimes(input.runtimes)
@@ -1314,7 +1385,7 @@ class Registry {
       ...(input.bypassPermission ? { bypassPermission: true } : {}),
       ...(permissionModeName(input.permissionMode) ? { permissionMode: input.permissionMode } : {}),
       ...(isTerminalEngine(input.engine) ? { terminalHost: true } : {}),
-      ...(input.forkedFrom ? { forkedFrom: { agentId: input.forkedFrom.agentId, name: input.forkedFrom.name } } : {}),
+      ...normalizedForkedFrom(input.forkedFrom),
       transcriptPath: null,
       projectDir: basename(input.cwd ?? '') || agentId,
       cwd: input.cwd ?? null,
@@ -1699,16 +1770,16 @@ class Registry {
    * The engine in this pane has exited and the pane is a shell now: the row is a terminal.
    *
    * For every agent, not only one that began as a terminal — an engine the app launched runs
-   * inside its pane's shell too (engineLaunch.ts `harness_engine`), and `/exit` or Ctrl-C leaves
+   * inside its pane's shell too (engineLaunch.ts `engineRunScript`), and `/exit` or Ctrl-C leaves
    * that shell at its prompt with the engine's last screen above it.
    *
    * What goes is what described the PROCESS and its session — session id, transcript, pid,
    * gateway, grid assignment, model, title — because the next thing typed into this shell may be a
-   * different engine, and `unboundRouteOwner` only claims a route for a row with no session. What
-   * stays is what describes the PANE's launch — `gridLaunch`, `codexHome`, `dsh`, `agent`, the
-   * permission choice: the tmux session's environment still carries the grid endpoint and the
-   * Codex profile, the workspace is still that harness's, and a restart or a relaunch after a
-   * reboot puts the same engine back with the same shape. Dropping `gridLaunch` in particular made
+   * different engine, and the reconciler hands a pane's engine to a row by its route only when the row
+   * lacks a session or a process (`unboundRouteObservation`). What stays is what describes the PANE's
+   * launch — `gridLaunch`, `codexHome`, `dsh`, `agent`, the permission choice: the tmux session's
+   * environment still carries the grid endpoint and the Codex profile, the workspace is still that
+   * harness's, and a restart or a relaunch after a reboot puts the same engine back with the same shape. Dropping `gridLaunch` in particular made
    * a released grid agent unrestorable ("credential not persisted"). The row itself, its id, its
    * pane and its name stay: this is the opposite of dormant, the terminal is live. `terminalHost`
    * is set from here on, since that is what the pane now is.
@@ -1801,9 +1872,14 @@ class Registry {
     const previous = entry.closePlan
     if (plan) entry.closePlan = normalizedClosePlan(plan)
     else delete entry.closePlan
+    const intended = this.intended.get(agentId) ?? new Set<string>()
+    intended.add('closePlan')
+    this.intended.set(agentId, intended)
     try { this.save(true) } catch (error) {
       if (previous) entry.closePlan = previous
       else delete entry.closePlan
+      intended.delete('closePlan')
+      if (!intended.size) this.intended.delete(agentId)
       throw error
     }
     return entry
@@ -1969,8 +2045,8 @@ class Registry {
    * the caller — a phone and a laptop whose clocks disagree would otherwise order the same agents
    * differently, which is the one thing this field exists to prevent.
    *
-   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (the webui's "when" column,
-   * `session_get`'s timestamp), and looking at an agent changes nothing about the agent. The save
+   * `updatedAt` is left alone on purpose. That is the row's bookkeeping (`session_get`'s timestamp),
+   * and looking at an agent changes nothing about the agent. The save
    * still happens: a row is written whenever its bytes differ from the last write, whichever field
    * moved.
    */
@@ -2190,16 +2266,35 @@ class Registry {
     return { agentId: entry.agentId, isNew: true }
   }
 
-  async transaction<T>(apply: () => T | Promise<T>): Promise<T> {
+  /**
+   * Saves are held back while [apply] runs, and made once when it is done. [holdSavesMs] bounds the
+   * hold: a transaction whose apply has not finished by then stops holding saves back — what it has
+   * changed so far is saved, and what it changes after is saved as it changes — instead of the
+   * registry going unsaved for as long as it runs. A reconcile pass stuck on an engine's files did
+   * that (RECONCILE_PASS_DEADLINE_MS).
+   */
+  async transaction<T>(apply: () => T | Promise<T>, options: { holdSavesMs?: number } = {}): Promise<T> {
     this.transactionDepth++
-    try {
-      return await apply()
-    } finally {
+    let holding = true
+    const release = (): void => {
+      if (!holding) return
+      holding = false
       this.transactionDepth--
       if (this.transactionDepth === 0 && this.savePending) {
         this.savePending = false
         this.save()
       }
+    }
+    const timer = options.holdSavesMs === undefined ? undefined : setTimeout(() => {
+      console.warn(`[registry] a transaction has held saves back for ${options.holdSavesMs} ms; saving without waiting for it`)
+      release()
+    }, options.holdSavesMs)
+    timer?.unref?.()
+    try {
+      return await apply()
+    } finally {
+      clearTimeout(timer)
+      release()
     }
   }
 
@@ -2219,6 +2314,7 @@ class Registry {
       console.error('[registry] save skipped because the loaded registry requires operator repair')
       return
     }
+    if (this.namesUnsaved) this.saveNames()
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
       // nixfred: hosted rows (Hermes, watch-mode external) are memory-only and never persisted.
@@ -2265,10 +2361,14 @@ class Registry {
         }
         for (const [agentId, current] of currentRows) {
           const baseline = this.persistedBaseline.get(agentId)
-          if (baseline === rowFingerprint(current)) continue
+          const intended = this.intended.get(agentId)
+          // An intent on a row this view otherwise left alone never brings back a row another process
+          // removed: that agent is gone, and its close plan with it.
+          if (baseline === rowFingerprint(current) && (!intended || !latest.has(agentId))) continue
           let candidate = latest.has(agentId)
             ? threeWayRow(baseline, current, latest.get(agentId)!)
             : current
+          if (intended) candidate = withIntended(candidate, current, intended)
           const process = strictPersistedRow(candidate)?.processIdentity
           const engine = candidate.engine
           const sessionId = typeof candidate.sessionId === 'string' ? candidate.sessionId : ''
@@ -2305,6 +2405,7 @@ class Registry {
         const serialized = rows.map(persistedRow)
         atomicWriteJson(FILE, serialized)
         this.persistedContents = JSON.stringify(serialized, null, 2)
+        this.intended.clear()
 
         // Refresh external daemon-down writes into the in-memory revision without replacing object
         // identities already held by controllers.
@@ -2339,6 +2440,14 @@ class Registry {
     }
   }
 
+  /**
+   * A names write that failed, tried again on every save until it lands. The rows heal on their own,
+   * because the next save sees them differ from what is on disk; names are written only on a rename,
+   * so a rename the daemon answered while the disk was full was lost to a restart that came before the
+   * next rename (found end to end, e2e/diskfull.e2e.ts).
+   */
+  private namesUnsaved = false
+
   private saveNames(): void {
     try {
       secureStateDirectory(env.ADAPTER_DATA_DIR)
@@ -2350,7 +2459,9 @@ class Registry {
         // no file yet / unreadable — write the in-memory overrides
       }
       atomicWriteJson(NAMES_FILE, { ...existing, ...Object.fromEntries(NAME_OVERRIDES) })
+      this.namesUnsaved = false
     } catch (err) {
+      this.namesUnsaved = true
       console.error('[registry] save names failed:', err)
     }
   }
@@ -2364,29 +2475,6 @@ function defaultProjectDisplayName(s: RegisteredSession): string {
 }
 
 /**
- * The machine's own name, in the forms a terminal title is likely to carry it.
- *
- * Computed once: a rename mid-run would at worst let one title through, and reading it per title
- * would run a syscall for every agent on every title sweep.
- */
-const SELF_NAMES: ReadonlySet<string> = (() => {
-  const names = new Set<string>()
-  try {
-    const host = hostname().trim().toLowerCase()
-    if (host) {
-      names.add(host)
-      // `MacBookPro2021.local` and `MacBookPro2021` are the same machine wearing two names, and an
-      // engine may print either.
-      const short = host.split('.')[0]
-      if (short) names.add(short)
-    }
-  } catch {
-    // No hostname is not a reason to reject nothing else; the set simply stays empty.
-  }
-  return names
-})()
-
-/**
  * A pane title, as an agent NAME — or null when the title says nothing about this agent.
  *
  * Two rejections, and the second is the interesting one.
@@ -2397,7 +2485,10 @@ const SELF_NAMES: ReadonlySet<string> = (() => {
  * identically for every one of them. A name that is the same for every agent on a machine is worse
  * than no name: `defaultProjectDisplayName` at least says which folder and which session. This is
  * about the machine, not the engine, so it is refused by what it SAYS rather than by who sent it —
- * any engine that adopts the same convention is covered without a table to keep in step.
+ * any engine that adopts the same convention is covered without a table to keep in step. tmux titles
+ * a new pane with the machine's name too, kept by any engine that sets no title of its own. Every
+ * name the machine has had while the daemon ran counts (lib/machineNames.ts): a laptop's name follows
+ * its network, and a pane keeps the name it was made under.
  */
 export function titleDisplayName(title: string | null | undefined): string | null {
   const cleaned = title
@@ -2406,7 +2497,7 @@ export function titleDisplayName(title: string | null | undefined): string | nul
     .trim()
     .slice(0, 80)
   if (!cleaned) return null
-  return SELF_NAMES.has(cleaned.toLowerCase()) ? null : cleaned
+  return machineNames.owns(cleaned) ? null : cleaned
 }
 
 function validProcessIdentity(value: unknown): value is ProcessIdentity {

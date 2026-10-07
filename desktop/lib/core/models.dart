@@ -353,18 +353,6 @@ class Agent {
   /// the field.
   final DateTime? lastOpenedAt;
 
-  /// What harness lists sort by: the later of [lastActivityAt] and
-  /// [lastOpenedAt], so a harness someone just looked at rises even while it
-  /// is quiet. The order is global — every client and machine reads the same
-  /// daemon stamps.
-  DateTime? get lastUsedAt {
-    final activity = lastActivityAt;
-    final opened = lastOpenedAt;
-    if (activity == null) return opened;
-    if (opened == null) return activity;
-    return opened.isAfter(activity) ? opened : activity;
-  }
-
   /// Cached conversation usage reported by this agent's owning machine.
   final int? tokensUsed;
   final DateTime? tokensUpdatedAt;
@@ -1186,11 +1174,17 @@ class GridModel {
   /// for every other row, and always from a daemon that predates it.
   final GridModelUnavailable? unavailable;
 
+  /// A Jev (System One) decision model (`kind: decision`): it answers typed questions at
+  /// `/v1/systemone` and cannot chat, so no harness runs on it — the picker lists it apart and
+  /// shows how to call it instead. False for every chat model, and from a daemon that predates it.
+  final bool decision;
+
   const GridModel({
     required this.id,
     required this.node,
     this.grid,
     this.unavailable,
+    this.decision = false,
   });
 }
 
@@ -1415,6 +1409,7 @@ class GridModels {
                 node: m['node'] is String ? m['node'] as String : '',
                 grid: grid,
                 unavailable: GridModelUnavailable.fromWire(m['unavailable']),
+                decision: m['kind'] == 'decision',
               ),
             )
             .where((m) => m.id.isNotEmpty)

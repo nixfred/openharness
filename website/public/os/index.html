@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/os/">
+  <link rel="canonical" href="https://harness.autonomous.ai/os">
+  <meta name="theme-color" content="#11110f">
+  <meta name="description" content="Harness. The operating system built by agents, for agents. An open-source Linux operating system that boots straight into your agents.">
+  <meta property="og:title" content="Harness — The operating system built by agents, for agents">
+  <meta property="og:description" content="An open-source Linux operating system that boots straight into your agents.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://harness.autonomous.ai/os">
+  <title>Harness — The operating system built by agents, for agents</title>
+  <link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/geist-mono.woff" as="font" type="font/woff" crossorigin>
+  <link rel="stylesheet" href="style.css?v=655c60ec55d3">
+  <script src="demo.js?v=5aa0cbec5e22" defer></script>
+</head>
+<body>
+  <main>
+  <div class="page">
+    <header class="brand">Harness<span aria-hidden="true">_</span></header>
+    <section class="intro" aria-labelledby="headline">
+      <h1 id="headline">The operating system<br>built by agents, for agents</h1>
+      <nav class="actions" aria-label="Get Harness">
+        <a class="install" href="https://harness.autonomous.ai/os/latest" aria-label="Install Harness — downloads and instructions">[ Install <span aria-hidden="true">↓</span> ]</a>
+        <a class="source" href="https://github.com/autonomous-ai/openharness/tree/main/os">[ Open Source <span aria-hidden="true">↗</span> ]</a>
+      </nav>
+    </section>
+    <figure class="screen">
+      <img id="demo-poster" src="assets/workspace.png" width="1280" height="800" fetchpriority="high" alt="The Harness operating system: OpenCode in the left pane, two terminals on the right, and a single tab bar along the bottom.">
+      <div id="os-demo" class="os-demo" data-scene="boot" role="group" aria-label="Animated demonstration of Harness: boot into agents, build a project, preview it in the browser, and return to work. This is an illustration, not a live session." hidden>
+        <div class="demo-boot" aria-hidden="true">
+          <pre>█ █ ▄▀█ █▀█ █▄ █ █▀▀ █▀ █▀
+█▀█ █▀█ █▀▄ █ ▀█ ██▄ ▄█ ▄█</pre>
+          <p>Starting your workspace<span class="cursor">▋</span></p>
+        </div>
+        <div class="demo-workspace" aria-hidden="true">
+          <div class="demo-panes">
+            <section class="pane pane-main">
+              <header class="pane-title"><span>OpenCode · website</span><span>~/projects/orbit</span></header>
+              <div class="terminal-content">
+                <p class="agent-name">OpenCode</p>
+                <p class="prompt">› <span data-type="1600" data-speed="31">Build a landing page for our space game.</span><span class="cursor" data-caret="1600:3100">▋</span></p>
+                <p class="terminal-line muted" data-at="3400">Reading the project…</p>
+                <p class="terminal-line" data-at="4300"><span class="muted">→</span> Create index.html</p>
+                <p class="terminal-line" data-at="5300"><span class="muted">→</span> Create style.css</p>
+                <p class="terminal-line" data-at="6500"><span class="muted">→</span> Start the local preview</p>
+                <p class="terminal-line success" data-at="8200">✓ Your page is ready.</p>
+                <p class="terminal-line" data-at="8500">http://localhost:3000</p>
+                <p class="prompt follow-up" data-at="9000">› <span class="cursor">▋</span></p>
+              </div>
+            </section>
+            <section class="pane pane-upper">
+              <header class="pane-title"><span>Codex · game</span></header>
+              <div class="terminal-content">
+                <p class="prompt">› <span data-type="2700" data-speed="35">Add keyboard controls.</span><span class="cursor" data-caret="2700:3600">▋</span></p>
+                <p class="terminal-line muted" data-at="4600">Reading game.js…</p>
+                <p class="terminal-line" data-at="6000">Edited controls.js</p>
+                <p class="terminal-line" data-at="7300">Running tests…</p>
+                <p class="terminal-line success" data-at="9100">✓ Controls work. Tests pass.</p>
+              </div>
+            </section>
+            <section class="pane pane-lower">
+              <header class="pane-title"><span>Claude Code · docs</span></header>
+              <div class="terminal-content">
+                <p class="prompt">› <span data-type="3800" data-speed="35">Write the setup guide.</span><span class="cursor" data-caret="3800:4700">▋</span></p>
+                <p class="terminal-line muted" data-at="5500">Reading the project…</p>
+                <p class="terminal-line" data-at="7200">Writing README.md</p>
+                <p class="terminal-line success" data-at="9400">✓ Ready for the next developer.</p>
+              </div>
+            </section>
+          </div>
+          <div class="demo-status"><span><b>0:orbit*</b>　1:api　2:notes</span><span>harness</span></div>
+        </div>
+        <div class="demo-browser" aria-hidden="true">
+          <div class="browser-toolbar"><span>←　→　↻</span><span class="address">localhost:3000</span></div>
+          <div class="orbit-page">
+            <header><span>ORBIT</span><span>A small game. A big universe.</span></header>
+            <div class="orbit-hero">
+              <pre>       .         +
+   +      .              .
+            /\
+      .    /  \    .
+          | () |       +
+         /|    |\
+        /_|____|_\
+           /\/\
+     .     :  :      .</pre>
+              <p>One more adventure.</p>
+              <span class="orbit-play">[ Play Orbit → ]</span>
+            </div>
+            <footer>← → move　·　space to launch</footer>
+          </div>
+        </div>
+        <span id="demo-shortcut" class="demo-shortcut" aria-hidden="true" hidden>Super + b</span>
+        <button id="demo-motion" class="demo-motion" type="button" aria-label="Pause animation" title="Pause animation">Ⅱ</button>
+      </div>
+    </figure>
+  </div>
+  <section class="chapter" aria-labelledby="agents-heading">
+    <h2 id="agents-heading">Goodbye apps.<br>Hello agents.</h2>
+    <div class="chapter-copy">
+      <p>Harness is a Linux operating system that boots straight into your agents. No desktop to arrange. No app launcher to navigate. Just the work.</p>
+      <p>Start with OpenCode. Add Claude Code, Codex or pi. Give each agent a project and work side by side. Build on this computer, connect another one, and open the browser when you need to see the result.</p>
+      <p>Your files. Your tools. Your hardware.</p>
+    </div>
+  </section>
+  <section class="chapter chapter-metrics" aria-labelledby="speed-heading">
+    <h2 id="speed-heading">Fast to install.<br>Light to run.</h2>
+    <div class="chapter-copy">
+      <dl class="metrics" aria-label="Preview 14 performance measured in a 1 GiB virtual machine; idle RAM excludes OpenCode and the browser">
+        <div><dt>Install time</dt><dd>57 s</dd></div>
+        <div><dt>Boot time</dt><dd>18 s</dd></div>
+        <div><dt>Idle RAM</dt><dd>402 MiB</dd></div>
+        <div><dt>Footprint</dt><dd>2.05 GiB</dd></div>
+      </dl>
+    </div>
+  </section>
+  </main>
+</body>
+</html>

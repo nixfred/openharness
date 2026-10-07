@@ -41,12 +41,11 @@ static void compare(const char *text, int edge, bool partial)
 // never a blank label. `raw_peak` is the worst mask a label needed before any mask-driven re-fit.
 static uint16_t sweep_px[HT_WIDTH*HT_HEIGHT], sweep_blank[HT_WIDTH*HT_HEIGHT];
 static unsigned sweep_peak, sweep_raw_peak, sweep_refit;
-static void hard_label(const char *label,int edge)
+static void hard_label(const char *label,int edge,const ht_arc_face_t *pf)
 {
-    const ht_arc_face_t *pf=&ht_arc_geist_prop;
     ht_scene_t scene;ht_scene_clear(&scene,ht_rgb(0x101018));
     char fitted[HT_TEXT_BYTES];
-    arc_prop_fit(fitted,sizeof fitted,pf->prop,label);
+    arc_prop_fit(fitted,sizeof fitted,pf->prop,label,pf->bare);
     if(edge) ht_arc_status_face(&scene,ht_rgb(0xeaeaf0),label,pf); else ht_arc_title_face(&scene,ht_rgb(0xeaeaf0),label,pf);
     const ht_run_t *run=&scene.runs[0];
     assert(scene.count==1 && ht_arc_measure(pf,run->text)<=HT_ARC_SPAN);
@@ -65,7 +64,7 @@ static void hard_label(const char *label,int edge)
     for(int i=0;i<HT_WIDTH*HT_HEIGHT;i++) ink+=sweep_px[i]!=sweep_blank[i];
     assert(ink>0);
 }
-static void hard_labels(void)
+static void hard_labels(const ht_arc_face_t *pf,int edges)
 {
     ht_scene_t empty;ht_scene_clear(&empty,ht_rgb(0x101018));
     ht_raster(&empty,(ht_rect_t){0,0,HT_WIDTH,HT_HEIGHT},sweep_blank);
@@ -73,32 +72,33 @@ static void hard_labels(void)
         "\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xae\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\xa2\xe1\xba\xa8\xc4\x9c\xc4\xb4",
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","MWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMW",
         "gjpqy gjpqy gjpqy gjpqy gjpqy gjpqy gjpqy gjpqy","M2 harness-pro-firmware-release-candidate"};
-    for(int edge=0;edge<2;edge++) for(unsigned i=0;i<sizeof fixed/sizeof fixed[0];i++) hard_label(fixed[i],edge);
+    for(int edge=0;edge<edges;edge++) for(unsigned i=0;i<sizeof fixed/sizeof fixed[0];i++) hard_label(fixed[i],edge,pf);
     // Stacked capitals (two-mark Vietnamese), descenders and wide capitals, mixed at random to the maximum length.
     static const unsigned pool[]={0x1ea8,0x1eae,0x1eb2,0x1eac,0x1ec6,0x1ed4,0x1ed8,0x1eaa,0x122,0x11c,0x134,0x1b0,'W','M','g','j','y','Q',' ','A'};
     for(int trial=0;trial<600;trial++) {
         char text[HT_TEXT_BYTES];size_t n=0;unsigned length=1+next()%40;
         for(unsigned i=0;i<length&&n<sizeof text-4;i++) n+=encode(text+n,pool[next()%(sizeof pool/sizeof pool[0])]);
-        text[n]=0;hard_label(text,trial&1);
+        text[n]=0;hard_label(text,(trial&1)%edges,pf);
     }
     assert(sweep_peak<=ARC_MASK_BYTES);
     // The re-fit step: each trim drops one glyph, keeps the "…" and only shrinks the mask, down to "…" alone.
     {
         ht_scene_t scene;ht_scene_clear(&scene,ht_rgb(0x101018));
-        ht_arc_title_face(&scene,ht_rgb(0xeaeaf0),fixed[0],&ht_arc_geist_prop);
+        ht_arc_title_face(&scene,ht_rgb(0xeaeaf0),fixed[0],pf);
         ht_run_t run=scene.runs[0];
         arc_span_t spans[HT_ARC_HEIGHT][2];
-        unsigned last=arc_prop_geometry(&run,ht_arc_geist_prop.prop,spans);
+        unsigned last=arc_prop_geometry(&run,pf->prop,spans);
         int steps=0;
-        while(arc_prop_trim(run.text)) {
-            unsigned now=arc_prop_geometry(&run,ht_arc_geist_prop.prop,spans);
+        while(arc_prop_trim(run.text,false)) {   // the "…" path; a bare face drops glyphs the same way
+            unsigned now=arc_prop_geometry(&run,pf->prop,spans);
             assert(now<=last && !strcmp(run.text+strlen(run.text)-3,"\xe2\x80\xa6") && ++steps<64);
             last=now;
         }
-        assert(!strcmp(run.text,"\xe2\x80\xa6") && steps>=20);
+        assert(!strcmp(run.text,"\xe2\x80\xa6") && steps>=12);   // Inter is wide: few glyphs fit the span
     }
-    printf("Hard proportional labels: mask <=%u/%uB after fit (raw worst %u B, %u re-fitted shorter), every label inks PASS\n",
-           sweep_peak,ARC_MASK_BYTES,sweep_raw_peak,sweep_refit);
+    printf("Hard proportional labels (%s): mask <=%u/%uB after fit (raw worst %u B, %u re-fitted shorter), every label inks PASS\n",
+           pf==&ht_arc_inter_prop ? "Inter Medium 26, upper arc" : "Inter Medium 26, lower face",sweep_peak,ARC_MASK_BYTES,sweep_raw_peak,sweep_refit);
+    sweep_peak=sweep_raw_peak=sweep_refit=0;
 }
 int main(void)
 {
@@ -136,6 +136,7 @@ int main(void)
         }
         text[n]=0;compare(text,trial&1,trial%3!=0);
     }
-    hard_labels();
+    hard_labels(&ht_arc_inter_lower,2);
+    hard_labels(&ht_arc_inter_prop,1);
     printf("Packed arcs: all %u geometries <=%u/%uB; 227 glyphs at every angle, 4000 mixed/clipped labels match dense pixels; caches=%zuB PASS\n",2*HT_ARC_COLS,peak,ARC_MASK_BYTES,sizeof arc_caches);
 }

@@ -67,7 +67,7 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_nixfred_ring" "$here/test_nixfred_ring.c" "$here/../main/ui/habitat/nixfred_art.c" \
    "$here/../main/ui/habitat/nixfred_logo.c" "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" \
-   "$here/../main/ui/habitat/lvgl_fonts.c" -lm
+   "$here/../main/ui/habitat/lvgl_fonts.c" "$here/../main/ui/habitat/focus_faces.c" -lm
 "$out/test_nixfred_ring"
 
 # nixfred graphics slice 2: the fleet rim over the real skin faces, done, failed, voice, panic, plans.
@@ -141,6 +141,16 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    "$here/../main/ui/habitat/focus_faces.c" "$here/../main/ui/habitat/lvgl_fonts.c" \
    "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c"
 "$out/test_arc_bounds"
+
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main/ui/habitat" -o "$out/test_arc_ring" "$here/test_arc_ring.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_arc_ring"
+
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main/ui/habitat" -o "$out/test_cell_zoom" "$here/test_cell_zoom.c" \
+   "$here/../main/ui/habitat/terminal.c" "$here/../main/ui/habitat/fonts.c" -lm
+"$out/test_cell_zoom"
 
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_voice_buffer" "$here/test_voice_buffer.c" "$here/../main/voice_buffer.c"

@@ -51,15 +51,12 @@ static uint32_t cell_alias(uint32_t cp)
 }
 const ht_arc_face_t ht_arc_geist = {
     &ht_mono_24, &ht_viet_24, &ht_open_24, &ht_right_24, &ht_bell_24,
-    ht_mono_24_ink, ht_open_24_ink, ht_right_24_ink, ht_bell_24_ink, NULL};
-const ht_arc_face_t ht_arc_roboto = {
-    &ht_rmono_24, &ht_rviet_24, &ht_open_24, &ht_right_24, &ht_bell_24,
-    ht_rmono_24_ink, ht_open_24_ink, ht_right_24_ink, ht_bell_24_ink, NULL};
+    ht_mono_24_ink, ht_open_24_ink, ht_right_24_ink, ht_bell_24_ink, NULL, 0, false};
 // The arc face whose mono atlas is `font`, or NULL. A curved run carries its face as that atlas
 // (run.font), so every font comparison in the damage code already tells two faces apart.
 static const ht_arc_face_t *arc_face_of(const ht_font_t *font)
 {
-    static const ht_arc_face_t *const faces[] = {&ht_arc_geist, &ht_arc_roboto};
+    static const ht_arc_face_t *const faces[] = {&ht_arc_geist};
     for (unsigned i = 0; i < sizeof faces / sizeof faces[0]; i++) if (faces[i]->mono == font) return faces[i];
     return NULL;
 }
@@ -541,7 +538,41 @@ bool ht_cell_sprite(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f)
     memset(r, 0, sizeof *r);
     r->x = x; r->y = y; r->w = f->cols * f->cell; r->font = &ht_mono_16;
     r->sprite = (ht_sprite_t){.width = r->w, .height = f->rows * f->cell, .cells = f->cells,
-                              .palette = f->palette, .cell = f->cell};
+                              .palette = f->palette, .row_at = f->row_at, .cell = f->cell};
+    return true;
+}
+// A frame's row `sy` (in cells) as `cols` palette indices: the plain grid's own row, or a packed row unpacked
+// into `buf`.
+static const uint8_t *cell_row(const uint8_t *cells, const uint16_t *row_at, int cols, int sy, uint8_t *buf)
+{
+    if (!row_at) return cells + (size_t)sy * cols;
+    const uint8_t *p = cells + row_at[sy];
+    for (int x = 0; x < cols;) {
+        int skip = *p++, n = *p++;
+        memset(buf + x, 0, (size_t)skip);
+        x += skip;
+        memcpy(buf + x, p, (size_t)n);
+        p += n; x += n;
+    }
+    return buf;
+}
+uint8_t ht_cell_at(const ht_cell_frame_t *f, int col, int row)
+{
+    uint8_t buf[256];
+    if (!f || col < 0 || row < 0 || col >= f->cols || row >= f->rows) return 0;
+    return cell_row(f->cells, f->row_at, f->cols, row, buf)[col];
+}
+bool ht_cell_sprite_zoom(ht_scene_t *s, int x, int y, const ht_cell_frame_t *f, unsigned zoom)
+{
+    if (zoom >= 8) return ht_cell_sprite(s, x, y, f);
+    if (!zoom || !ht_cell_sprite(s, x, y, f)) return false;
+    ht_run_t *r = &s->runs[s->count - 1];
+    r->sprite.src_w = (uint16_t)(f->cols * f->cell);
+    r->sprite.src_h = (uint16_t)(f->rows * f->cell);
+    r->sprite.zoom = (uint8_t)zoom;
+    r->w = (int16_t)((r->sprite.src_w * zoom + 7) / 8);
+    r->sprite.width = (uint16_t)r->w;
+    r->sprite.height = (uint16_t)((r->sprite.src_h * zoom + 7) / 8);
     return true;
 }
 bool ht_box(ht_scene_t *s, int x, int y, int w, int h, int radius, uint16_t fill, uint16_t border)
@@ -564,9 +595,9 @@ bool ht_ring(ht_scene_t *s, int cx, int cy, int inner, int outer, int start, int
     memset(r, 0, sizeof *r);
     // Not text; the compositor reads every run's font, so it carries one it never draws (as ht_box).
     r->x = (int16_t)cx; r->y = (int16_t)cy; r->font = &ht_mono_16; r->fg = r->bg = color;
-    r->ring.inner = (uint16_t)inner; r->ring.outer = (uint16_t)outer;
-    r->ring.start = (uint16_t)(((start % HT_TURN) + HT_TURN) % HT_TURN);
-    r->ring.sweep = (uint16_t)(sweep > HT_TURN ? HT_TURN : sweep);
+    r->nring.inner = (uint16_t)inner; r->nring.outer = (uint16_t)outer;
+    r->nring.start = (uint16_t)(((start % HT_TURN) + HT_TURN) % HT_TURN);
+    r->nring.sweep = (uint16_t)(sweep > HT_TURN ? HT_TURN : sweep);
     return true;
 }
 bool ht_mask(ht_scene_t *s, int x, int y, int w, int h, const uint8_t *alpha, uint16_t color)
@@ -580,13 +611,80 @@ bool ht_mask(ht_scene_t *s, int x, int y, int w, int h, const uint8_t *alpha, ui
 }
 
 /*
- * A PROPORTIONAL ARC LABEL (Focus: Geist Medium 26). Each glyph keeps its own advance and kerning, in
+ * A RING ARC (the listening scene's sound waves). sin() of whole degrees 0..90 in Q14, the rest by symmetry;
+ * no floating point, no heap. The bounds are the annulus slice's, one pixel wider all round (anti-aliasing),
+ * computed once at creation from the slice's two straight edges and the axis points it spans.
+ */
+static const int16_t ring_sin[91] = {
+    0,286,572,857,1143,1428,1713,1997,2280,2563,2845,3126,3406,
+    3686,3964,4240,4516,4790,5063,5334,5604,5872,6138,6402,6664,6924,
+    7182,7438,7692,7943,8192,8438,8682,8923,9162,9397,9630,9860,10087,
+    10311,10531,10749,10963,11174,11381,11585,11786,11982,12176,12365,12551,12733,
+    12911,13085,13255,13421,13583,13741,13894,14044,14189,14330,14466,14598,14726,
+    14849,14968,15082,15191,15296,15396,15491,15582,15668,15749,15826,15897,15964,
+    16026,16083,16135,16182,16225,16262,16294,16322,16344,16362,16374,16382,16384,
+};
+static void ring_trig(int deg, int *cs, int *sn)
+{
+    deg %= 360;
+    if (deg < 0) deg += 360;
+    int q = deg / 90, a = deg % 90;
+    int s = ring_sin[a], c = ring_sin[90 - a];
+    switch (q) {
+    case 0: *cs = c; *sn = s; break;
+    case 1: *cs = -s; *sn = c; break;
+    case 2: *cs = -c; *sn = -s; break;
+    default: *cs = s; *sn = -c; break;
+    }
+}
+bool ht_ring_arc(ht_scene_t *s, int cx16, int cy16, int radius16, int width16, int mid_deg, int half_deg,
+                 uint16_t colour)
+{
+    if (s->count >= HT_RUNS || radius16 < 0 || width16 < 0 || width16 > 0xFFFF || radius16 > 0x7FFF ||
+        half_deg < 0 || cx16 < -0x7FFF || cx16 > 0x7FFF || cy16 < -0x7FFF || cy16 > 0x7FFF) return false;
+    if (half_deg > 180) half_deg = 180;
+    ht_run_t *r = &s->runs[s->count++];
+    memset(r, 0, sizeof *r);
+    // Not text, but the rest of the compositor reads every run's font; it is never drawn. The place is the
+    // centre's pixel, so equal slots stay equal as the radius moves (ht_damage's reshape test reads x, y, w).
+    r->x = (int16_t)(cx16 >> 4); r->y = (int16_t)(cy16 >> 4); r->font = &ht_mono_16;
+    r->ring.set = 1; r->ring.cx16 = (int16_t)cx16; r->ring.cy16 = (int16_t)cy16;
+    if (width16 == 0) return true;
+    int ux, uy, cs, sn;
+    ring_trig(mid_deg, &ux, &uy);
+    ring_trig(half_deg, &cs, &sn);
+    r->ring.colour = colour; r->ring.r16 = (uint16_t)radius16; r->ring.w16 = (uint16_t)width16;
+    r->ring.ux = (int16_t)ux; r->ring.uy = (int16_t)uy; r->ring.cosh = (int16_t)cs;
+    int rin = imax(0, radius16 - width16 / 2 - 16), rout = radius16 + (width16 + 1) / 2 + 16;
+    // The slice's extremes: its two edges at both radii, and every axis it spans at the outer radius.
+    int x0 = cx16, x1 = cx16, y0 = cy16, y1 = cy16;
+#define RING_PT(R, ANG) do { int pc, ps; ring_trig(ANG, &pc, &ps); \
+        int px = cx16 + ((R) * pc >> 14), py = cy16 - ((R) * ps >> 14); \
+        x0 = imin(x0, px); x1 = imax(x1, px); y0 = imin(y0, py); y1 = imax(y1, py); } while (0)
+    for (int e = -1; e <= 1; e += 2) { RING_PT(rin, mid_deg + e * half_deg); RING_PT(rout, mid_deg + e * half_deg); }
+    for (int axis = 0; axis < 360; axis += 90) {
+        int d = ((axis - mid_deg) % 360 + 540) % 360 - 180;   // the axis from mid, -180..179
+        if (d >= -half_deg && d <= half_deg) RING_PT(rout, axis);
+    }
+    if (rin > 0) RING_PT(rin, mid_deg);
+#undef RING_PT
+    // Whole pixels, a pixel of margin for the ramp and the integer rounding above.
+    int bx0 = (x0 >> 4) - 1, by0 = (y0 >> 4) - 1, bx1 = ((x1 + 15) >> 4) + 1, by1 = ((y1 + 15) >> 4) + 1;
+    r->ink = 1;
+    r->ink_box = (ht_rect_t){(int16_t)bx0, (int16_t)by0, (int16_t)(bx1 - bx0), (int16_t)(by1 - by0)};
+    return true;
+}
+
+/*
+ * A PROPORTIONAL ARC LABEL (Focus: Inter Medium 26 for the name and the lower status). Each glyph keeps its own advance and kerning, in
  * 1/16 px like the straight text, and stands upright at its own place on the 205 px curve: the arc
  * length from the label's centre to the glyph's advance centre, divided by 205, is its angle (the Q14
  * table in arc_geometry.inc steps 1 px of arc; the 1/16 between entries is interpolated). The curve
- * carries the middle of the caps, ARC_PROP_MID above the baseline, at 205 (the baseline on 194, as in
+ * carries the middle of the caps, ARC_PROP_MID above the baseline (a face's own `mid`, when it has one), at 205 (the baseline on 194, as in
  * mockup/focus-v2.html) so the tallest stacked Vietnamese letter ends inside the 128 px canvas at
  * 12 o'clock; the lower arc sits 3 px nearer the centre, so its descenders end inside it as well.
+ * Inter's stacked marks stand tall (mid 14 clips them, 15 just fits), so its upper-arc face carries mid 16; its lower-arc face keeps
+ * mid 11 (its descenders would leave the canvas at 16).
  * The three walks over a label — bounds, mask geometry, mask paint — share one placement, so the
  * bounds can never be smaller than the ink.
  */
@@ -644,7 +742,7 @@ static void arc_prop_walk(const ht_run_t *r, const ht_pfont_t *f,
         pl.cy = (233 - r->y) * 256 + (lower ? 1 : -1) * (radius * pl.cs * 256 >> 14);
         if (lower) pl.sn = -pl.sn;   // the lower arc reads left to right with upright letters
         pl.left = gl->ox * 256 - gl->adv * 8;
-        pl.top = (ARC_PROP_MID + gl->oy - g.face->ascent) * 256;
+        pl.top = ((r->arc_mid ? r->arc_mid : ARC_PROP_MID) + gl->oy - g.face->ascent) * 256;
         // The ink box and one pixel of bilinear halo, rotated about the pivot.
         int u0 = pl.left - 256, u1 = pl.left + gl->w * 256 + 256;
         int v0 = pl.top - 256, v1 = pl.top + gl->h * 256 + 256;
@@ -665,8 +763,9 @@ static void arc_prop_walk(const ht_run_t *r, const ht_pfont_t *f,
     }
 }
 // `text` cut to what fits the span: whole, else at the last word when that keeps at least half the span
-// (as the mono rule keeps half the columns), else per character, before "…". Newlines are spaces.
-static void arc_prop_fit(char *dst, size_t cap, const ht_pfont_t *f, const char *text)
+// (as the mono rule keeps half the columns), else per character, before "…" (none when `bare`).
+// Newlines are spaces.
+static void arc_prop_fit(char *dst, size_t cap, const ht_pfont_t *f, const char *text, bool bare)
 {
     char flat[HT_TEXT_BYTES];
     size_t len = strlen(text), n = len < sizeof flat - 4 ? len : sizeof flat - 4;
@@ -679,7 +778,7 @@ static void arc_prop_fit(char *dst, size_t cap, const ht_pfont_t *f, const char 
     for (;;) {
         memcpy(dst, flat, n);
         dst[n] = 0;
-        if (cut) strcpy(dst + n, "\xe2\x80\xa6");
+        if (cut && !bare) strcpy(dst + n, "\xe2\x80\xa6");
         if (arc_prop_width16(f, dst) <= ARC_PROP_SPAN16 || !n) return;
         size_t k = n, word = 0;
         while (k && flat[k - 1] != ' ') k--;
@@ -696,15 +795,16 @@ static void arc_prop_fit(char *dst, size_t cap, const ht_pfont_t *f, const char 
         cut = true;
     }
 }
-// One glyph shorter, still ending "…"; false once only "…" is left.
-static bool arc_prop_trim(char *text)
+// One glyph shorter, still ending "…" (unless `bare`); false once nothing but "…" is left.
+static bool arc_prop_trim(char *text, bool bare)
 {
     size_t n = strlen(text);
     if (n >= 3 && !strcmp(text + n - 3, "\xe2\x80\xa6")) n -= 3;
     size_t kept = n;
     if (n) do n--; while (n && ((uint8_t)text[n] & 0xc0) == 0x80);
     while (n && text[n - 1] == ' ') n--;
-    strcpy(text + n, "\xe2\x80\xa6");
+    if (bare) text[n] = 0;
+    else strcpy(text + n, "\xe2\x80\xa6");
     return kept != 0;
 }
 enum { ARC_HALF = HT_ARC_WIDTH / 2, ARC_MASK_BYTES = 9216 };
@@ -755,7 +855,7 @@ static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom,
     char visible[HT_TEXT_BYTES];
     if (face->prop) {
         // The run carries the pfont's base as its font; a proportional run is fitted by the caller.
-        arc_prop_fit(visible, sizeof visible, face->prop, text);
+        arc_prop_fit(visible, sizeof visible, face->prop, text, face->bare);
         if (!ht_text(s, HT_ARC_X, HT_ARC_Y, HT_ARC_WIDTH, &face->prop->base, fg, s->background, visible)) return;
     } else {
         bool complete = ht_display_text(visible,sizeof visible,text,face->mono);
@@ -773,9 +873,10 @@ static void arc_text(ht_scene_t *s, uint16_t fg, const char *text, bool bottom,
     r->y = bottom ? HT_HEIGHT - HT_ARC_Y - HT_ARC_HEIGHT : HT_ARC_Y;
     r->w = HT_ARC_WIDTH;
     if (face->prop) {
+        r->arc_mid = face->mid;
         // A mask that would not fit would blank the label: cut it shorter instead, until it does.
         arc_span_t spans[HT_ARC_HEIGHT][2];
-        while (arc_prop_geometry(r, face->prop, spans) > ARC_MASK_BYTES && arc_prop_trim(r->text)) {}
+        while (arc_prop_geometry(r, face->prop, spans) > ARC_MASK_BYTES && arc_prop_trim(r->text, face->bare)) {}
         // The tight bounds, laid out once here: a pure function of the run's text, face and position.
         arc_union_t u = {HT_ARC_WIDTH, HT_ARC_HEIGHT, 0, 0};
         arc_prop_walk(r, face->prop, arc_union_visit, &u);
@@ -918,14 +1019,14 @@ static int turn_of(int dx, int dy)
     return uy < 0 ? 2048 + base : (4096 - base) & (HT_TURN - 1);
 }
 // The sector's box: its two end points on both radii, plus every cardinal point the sweep passes.
-static ht_rect_t ring_bounds(const ht_run_t *r)
+static ht_rect_t nring_bounds(const ht_run_t *r)
 {
-    int cx = r->x, cy = r->y, ro = r->ring.outer, ri = r->ring.inner;
-    if (r->ring.sweep >= HT_TURN) return (ht_rect_t){cx - ro - 2, cy - ro - 2, 2 * ro + 5, 2 * ro + 5};
+    int cx = r->x, cy = r->y, ro = r->nring.outer, ri = r->nring.inner;
+    if (r->nring.sweep >= HT_TURN) return (ht_rect_t){cx - ro - 2, cy - ro - 2, 2 * ro + 5, 2 * ro + 5};
     int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20);
 #define RING_PT(t, rad) do { int px_ = cx + ((rad) * turn_sin(t) >> 14), py_ = cy - ((rad) * turn_cos(t) >> 14); \
         x0 = imin(x0, px_); x1 = imax(x1, px_); y0 = imin(y0, py_); y1 = imax(y1, py_); } while (0)
-    int a = r->ring.start, b = a + r->ring.sweep;
+    int a = r->nring.start, b = a + r->nring.sweep;
     RING_PT(a, ro); RING_PT(b, ro); RING_PT(a, ri); RING_PT(b, ri);
     for (int k = (a / 1024 + 1) * 1024; k < b; k += 1024) RING_PT(k, ro);
 #undef RING_PT
@@ -933,9 +1034,10 @@ static ht_rect_t ring_bounds(const ht_run_t *r)
 }
 ht_rect_t ht_run_bounds(const ht_run_t *r)
 {
+    if (r->ring.set) return r->ink ? r->ink_box : (ht_rect_t){0, 0, 0, 0};
     if (r->sprite.width) return (ht_rect_t){r->x,r->y,r->sprite.width,r->sprite.height};
     if (r->box.h) return (ht_rect_t){r->x, r->y, r->w, (int16_t)r->box.h};
-    if (r->ring.outer) return ring_bounds(r);
+    if (r->nring.outer) return nring_bounds(r);
     if (r->arc && ht_pfont(r->font)) {
         if (r->ink) return r->ink_box;   // laid out once, by arc_text
         // A hand-built run (no stored bounds): lay it out here.
@@ -1109,7 +1211,7 @@ void ht_damage(const ht_scene_t *a, const ht_scene_t *b, ht_damage_t *d)
                 // Fixed-cell text only: a proportional run's glyphs move when one before them
                 // changes width, and a box has no cells. Both repaint their whole bounds instead.
                 if (!old->sprite.width && !next->sprite.width && !old->arc && !next->arc &&
-                    !old->box.h && !next->box.h && !old->ring.outer && !next->ring.outer && !ht_pfont(old->font) && !ht_pfont(next->font) &&
+                    !old->ring.set && !next->ring.set && !old->nring.outer && !next->nring.outer && !old->box.h && !next->box.h && !ht_pfont(old->font) && !ht_pfont(next->font) &&
                     old->x == next->x && old->y == next->y && old->w == next->w &&
                     old->font == next->font && old->fg == next->fg && old->bg == next->bg) {
                     const char *p = old->text, *q = next->text;
@@ -1250,7 +1352,7 @@ static const uint16_t *glyph_cached(uint32_t c, const uint8_t *glyph,
 // Scenes retain immutable text, allowing old scenes to rasterize correctly.
 // A proportional label's mask keeps its 4-bit coverage (two pixels a byte, `bpp` 4) instead of the mono
 // atlases' two bits, so the same cache entry holds either. 9216 holds every label arc_text lets through:
-// the worst real one (stacked Vietnamese capitals, 24 glyphs) needs 8904, and arc_text re-fits any label
+// the worst real one (stacked Vietnamese capitals, 24 glyphs) needs 9070 in Inter, and arc_text re-fits any label
 // whose mask would not fit shorter (with "…") rather than drawing nothing; the mono ones need 4538.
 typedef struct {
     uint8_t mask[ARC_MASK_BYTES];
@@ -1261,6 +1363,7 @@ typedef struct {
     const ht_arc_face_t *face; // the face the mask was built for; NULL = empty
     const ht_pfont_t *prop;    // its pfont when proportional (the run's font is that face's base)
     uint8_t bpp;               // 2 for the mono faces, 4 for a proportional one
+    uint8_t mid;               // a proportional mask's mid-caps offset (the face's `mid`: the curve carries the glyphs there)
     uint8_t gain[HT_ARC_GAINS];   // a proportional mask's per-glyph gains (255 = plain)
 } arc_cache_t;
 _Static_assert(ARC_HALF <= UINT8_MAX, "arc span coordinates must fit in a byte");
@@ -1383,9 +1486,10 @@ static void arc_prepare_prop(const ht_run_t *r, arc_cache_t *cache, const ht_pfo
 {
     uint8_t gain[HT_ARC_GAINS];
     for (int i = 0; i < HT_ARC_GAINS; i++) gain[i] = r->gained ? r->gain[i] : 255;
-    if (cache->prop == pf && cache->bpp == 4 && !strcmp(cache->text, r->text) &&
+    if (cache->prop == pf && cache->bpp == 4 && cache->mid == r->arc_mid && !strcmp(cache->text, r->text) &&
         !memcmp(cache->gain, gain, sizeof gain)) return;
     strcpy(cache->text, r->text);
+    cache->mid = r->arc_mid;
     memcpy(cache->gain, gain, sizeof gain);
     cache->face = NULL; cache->prop = pf; cache->bpp = 4; cache->columns = 0; arc_builds++;
     unsigned used = arc_prop_geometry(r, pf, cache->spans);
@@ -1566,11 +1670,43 @@ static void sprite_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
     }
     int left=imax(clip.x,r->x),right=imin(clip.x+clip.w,r->x+s->width);
     int top=imax(clip.y,r->y),bottom=imin(clip.y+clip.h,r->y+s->height);
+    if(s->cells&&s->zoom){
+        // Zoomed: in units where a frame pixel is `zoom` wide and a glass pixel 8, each glass pixel is the mean of the
+        // frame pixels it overlaps, weighted by the overlap (a transparent one counts as the black ground).
+        int cols=s->src_w/s->cell,z=s->zoom;
+        static uint8_t unpacked[9][256];   // the frame rows one glass row covers (8 / zoom + 1 at most)
+        for(int y=top;y<bottom;y++){
+            int v0=(y-r->y)*8,v1=v0+8;
+            uint16_t *dst=out+(y-clip.y)*clip.w+left-clip.x;
+            const uint8_t *rows[9];
+            for(int sy=v0/z,k=0;sy*z<v1&&sy<s->src_h&&k<9;sy++,k++)
+                rows[k]=cell_row(s->cells,s->row_at,cols,sy/s->cell,unpacked[k]);
+            for(int x=left;x<right;x++,dst++){
+                int u0=(x-r->x)*8,u1=u0+8;
+                unsigned rr=0,gg=0,bb=0,cover=0;
+                for(int sy=v0/z;sy*z<v1&&sy<s->src_h;sy++){
+                    int wy=imin(v1,(sy+1)*z)-imax(v0,sy*z);
+                    const uint8_t *row=rows[sy-v0/z];
+                    for(int sx=u0/z;sx*z<u1&&sx<s->src_w;sx++){
+                        unsigned i=row[sx/s->cell];
+                        if(!i)continue;
+                        unsigned w=(unsigned)(wy*(imin(u1,(sx+1)*z)-imax(u0,sx*z)));
+                        uint16_t c=panel16(s->palette[i]);
+                        rr+=(c>>11)*w;gg+=((c>>5)&63)*w;bb+=(c&31)*w;cover+=w;
+                    }
+                }
+                if(cover*4<64)continue;
+                *dst=panel16((uint16_t)(((rr+32)/64)<<11|((gg+32)/64)<<5|((bb+32)/64)));
+            }
+        }
+        return;
+    }
     if(s->cells){
         // Cells: a run of `cell` px per palette index, 0 leaves the frame as it is.
         int cols=s->width/s->cell;
+        static uint8_t unpacked[256];
         for(int y=top;y<bottom;y++){
-            const uint8_t *row=s->cells+(size_t)((y-r->y)/s->cell)*cols;
+            const uint8_t *row=cell_row(s->cells,s->row_at,cols,(y-r->y)/s->cell,unpacked);
             uint16_t *dst=out+(y-clip.y)*clip.w+left-clip.x;
             for(int x=left;x<right;){
                 int c=(x-r->x)/s->cell,end=imin(right,r->x+(c+1)*s->cell),n=end-x;
@@ -1715,13 +1851,13 @@ static void box_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
  * against both radii, so the rim is antialiased inside and out. Each row visits only its two chords of the
  * band (the hole is skipped with one isqrt), which keeps a full-face ring cheap enough for a boot frame.
  */
-static void ring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
+static void nring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
 {
-    ht_rect_t b = ring_bounds(r);
-    int cx = r->x, cy = r->y, ro = r->ring.outer * 16 + 8, ri = r->ring.inner ? r->ring.inner * 16 - 8 : 0;
+    ht_rect_t b = nring_bounds(r);
+    int cx = r->x, cy = r->y, ro = r->nring.outer * 16 + 8, ri = r->nring.inner ? r->nring.inner * 16 - 8 : 0;
     int y1 = imax(clip.y, b.y), y2 = imin(clip.y + clip.h, b.y + b.h);
     int bx1 = imax(clip.x, b.x), bx2 = imin(clip.x + clip.w, b.x + b.w);
-    bool whole = r->ring.sweep >= HT_TURN;
+    bool whole = r->nring.sweep >= HT_TURN;
     for (int y = y1; y < y2; y++) {
         int dy = y * 16 + 8 - cy * 16;
         if (dy >= ro || -dy >= ro) continue;
@@ -1735,8 +1871,39 @@ static void ring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
             int o = ro - d, in = ri ? d - ri : 16;
             if (o <= 0 || in <= 0) continue;
             unsigned cov = (unsigned)imin(16, imin(o, in));
-            if (!whole && (unsigned)((turn_of(dx, dy) - r->ring.start) & (HT_TURN - 1)) >= r->ring.sweep) continue;
+            if (!whole && (unsigned)((turn_of(dx, dy) - r->nring.start) & (HT_TURN - 1)) >= r->nring.sweep) continue;
             row[x] = cov == 16 ? panel16(r->fg) : panel16(mix(r->fg, panel16(row[x]), cov, 16));
+        }
+    }
+}
+/*
+ * A RING ARC, analytically: each pixel's centre against the band (its distance from the circle's centre within
+ * half the width of the radius; a one-pixel linear ramp is the coverage, in sixteenths) and against the slice
+ * (the squared dot product with the middle direction against |d|^2 cos^2(half), so no angle is ever computed). Blended
+ * onto what is there; one isqrt per pixel of the bounds, a few thousand at most, nothing on the heap.
+ */
+static void ring_raster(const ht_run_t *r, ht_rect_t clip, uint16_t *out)
+{
+    ht_rect_t b = r->ink_box;
+    int x1 = imax(clip.x, b.x), x2 = imin(clip.x + clip.w, b.x + b.w);
+    int y1 = imax(clip.y, b.y), y2 = imin(clip.y + clip.h, b.y + b.h);
+    int half = r->ring.w16 / 2, rad = r->ring.r16;
+    for (int y = y1; y < y2; y++) {
+        uint16_t *row = out + (y - clip.y) * clip.w - clip.x;
+        int vy = r->ring.cy16 - (y * 16 + 8);
+        for (int x = x1; x < x2; x++) {
+            int vx = x * 16 + 8 - r->ring.cx16;
+            int d = (int)isqrt((uint32_t)(vx * vx + vy * vy));
+            int cov = half - (d > rad ? d - rad : rad - d) + 8;   // 16 inside the band, 0 a pixel out
+            if (cov <= 0) continue;
+            // Inside the slice when cos(angle from mid) >= cos(half), compared squared and exactly (no truncated
+            // distance): (ux, uy) is unit to 1e-5, hence the 1/4096 of slack at the two ends.
+            int64_t dot = (int64_t)vx * r->ring.ux + (int64_t)vy * r->ring.uy;
+            int64_t lhs = dot * dot, rhs = (int64_t)(vx * vx + vy * vy) * r->ring.cosh * r->ring.cosh;
+            bool in = r->ring.cosh >= 0 ? dot >= 0 && lhs + (lhs >> 12) >= rhs : dot >= 0 || lhs <= rhs + (rhs >> 12);
+            if (!in) continue;
+            if (cov >= 16) row[x] = panel16(r->ring.colour);
+            else row[x] = panel16(mix(r->ring.colour, panel16(row[x]), (unsigned)cov, 16));
         }
     }
 }
@@ -1750,8 +1917,9 @@ void ht_raster(const ht_scene_t *s, ht_rect_t clip, uint16_t *out)
         if (!intersect(box, clip))
             continue;
         if (r->sprite.width) { sprite_raster(r, clip, out); continue; }
+        if (r->ring.set) { ring_raster(r, clip, out); continue; }
         if (r->box.h) { box_raster(r, clip, out); continue; }
-        if (r->ring.outer) { ring_raster(r, clip, out); continue; }
+        if (r->nring.outer) { nring_raster(r, clip, out); continue; }
         if (r->arc) { arc_raster(r, clip, out); continue; }
         if (ht_pfont(f)) { prop_raster(r, clip, out); continue; }
         int y1 = imax(clip.y, r->y), y2 = imin(clip.y + clip.h, r->y + f->height),

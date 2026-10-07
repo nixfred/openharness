@@ -9,6 +9,66 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## Upstream sync: 404 commits from autonomous-ai/openharness main (b9bbc76f), 2026-10-06
+
+Merges upstream/main b9bbc76fc into nixfred/main 6ce9b08a (branch nixfred/sync-upstream-2026-10-06). Firmware
+`0.0.86-nixfred.9`, ESP-IDF v5.5.0, 3,218,208 B against an 8 MB slot (61% free); the growth is upstream's Inter
+faces and pet art.
+
+- Upstream re-architected the daemon (harnessd): a master (`harness start -f`) runs the core and services in
+  processes of their own (search; viewers and the Store; the edge host with workspaces, usage, monitor, projects,
+  handoff and recaps; the gateway with the relay and its E2EE; models; and on demand the devices: the dials,
+  window bridges, fleet and Wi-Fi device). The updater left the core for a process the master runs, the old web
+  dashboard is gone, the orchestrator, Tab collaboration, Share and the command bar are experiments started on
+  demand. runForeground moved from cli.ts to core/main.ts and into core modules, held to line and import budgets
+  by architecture.spec.ts. Also: Harness OS on Apple Silicon (Asahi) and T2 Macs, hn 0.1.14, coding memory
+  isolated from the core, many end-to-end hardening rounds, Codex 0.160 support.
+- HOW THE FORK WAS PORTED (not resurrected): the fork's daemon side lives in cli/src/nixfred/coreWiring.ts, built
+  by one call from runForeground, and reaches the core modules only through optional dependencies the fork added:
+  core/input.ts `externalPrompt` (voice and typed prompts into Orca) and `brake` (spend cap, then loop policy);
+  core/questions.ts `route` (Orca dialogs read and answered through the ExternalTerminalRouter) and `attention`;
+  core/transcripts/attach.ts (a hosted row attaches without a terminal; Hermes `resolveDbPath` for a late profile
+  home). The funnel, announceTurnAborted, the tool-start and turn-stop hooks, cancel and onAgentSeen are wrapped
+  in main.ts for attention and the gate. The dial's `nixfred.*` frames go through a new `DevicesPort.nixfred`
+  member (core/api.ts, devicesLink, devicesProcess, services/devices.ts), so they reach the dial in the devices'
+  own process. cable/cableHost.ts reads external rows and the reveal target from `wiring.sessions()` instead of
+  the registry module (an empty copy in the devices' process). `clip_push` left backendSocket's switch for a
+  served request (nixfred/clipPush.ts, `serviceHost.serve('nixfredClip', ...)`). withPermissionFlag moved to
+  nixfred/permissionFlag.ts so the core does not import the cable host. architecture.spec.ts gets two labelled
+  fork allowances (core closure +5,400 lines, runForeground +20) instead of edits to upstream's budgets.
+  FOLLOW-UP: move subscriptions, audit and checkpoints into a nixfred service in the edge host.
+- Conflicts: notify.mjs (watch-mode branch before upstream's routeToPaneOwner; gate verdict output kept, memory
+  output gone with upstream's memory routes), hookServer.ts (nixfred routes kept, upstream's dashboard and memory
+  routes removed), backendSocket.ts and cli.ts (upstream's; the CLI-side `harness <nixfred command>` survives in
+  cli.ts), registry.ts (imports), tmuxAgentDiscovery.ts (adopted panes kept, unless another daemon tagged them),
+  applicationFrames.ts (clip_push beside agent_handoff_prepare and SHELL_REQUESTS), specs (both sides),
+  desktop_workspace.dart (FleetOverviewHost around upstream's CommunityForkHost), firmware terminal.c/.h (the
+  nixfred ring renamed `nring` beside upstream's new `ring`), ui_habitat.c (nixfred boot face drawn in Inter on
+  Focus, hub agents_open plus upstream's pane reset, the shade owns the release before the carousels),
+  test_touch_ui.py. Firmware also: upstream dropped the Geist faces (mapped to Inter), Focus allows one font
+  (three nixfred labels draw in Inter on Focus; the machines back arrow is the word "back"), upstream's unread dot
+  sits over the notch at 12 o'clock.
+- Fixes found on the way: desktop Subscriptions used Dio, whose timers outlived a test now that upstream's
+  flutter_test_config allows loopback; it uses dart:io HttpClient and closes on dispose. machineCapabilities.ts
+  called `require` in ESM: `harness capabilities` and `harness loops` failed with "require is not defined"
+  whenever HOSTNAME was not exported.
+- Verified: cli npm ci, tsc clean; vitest 10,843 passed, 8 failed, 101 skipped (last sync 9,054/4). The 4 known
+  (dsh shell and engineLaunch node PATH, tmuxPaneInfo, tmuxStream.decode) plus 4 new that fail identically on
+  pristine upstream/main here (localModels x2, master link name, processName hard link). test:core 1,242 passed at
+  100% per-file coverage; architecture.spec 7/7. Desktop: flutter analyze 0 errors 0 warnings (16 infos in
+  third_party/xterm), nixfred/settings tests 117 passed, boot_flow 36 passed, release build. Firmware: idf.py
+  build; full test/run.sh passes with the cc wrapper, which now also needs `-lm` (upstream's focus.c calls sinf
+  and its run.sh links test_character without -lm): `exec /usr/bin/cc "$@" -D_DEFAULT_SOURCE
+  -Wno-format-truncation -Wno-misleading-indentation -Wno-restrict -Wno-clobbered -Wno-sign-compare -lm`.
+  Scratch daemon (HOME, XDG_RUNTIME_DIR, TMUX_TMPDIR in /tmp, port 28473, CABLE_DISABLE, DISABLE_HOOK_INSTALL,
+  updates off) under the new master with every service process: `harness status`, `orca`, `subs`, `attention`,
+  `spend` (off by default), `gate`, `capabilities`, `loops`, `collisions`, `hermes`; a simulated notify.mjs
+  SessionStart, UserPromptSubmit, permission Notification, Stop and SessionEnd moved one external row through
+  working, permission, done and offline.
+- Not verified: anything on the glass (fw .9 not flashed); the dial frames end to end through the devices'
+  process; Orca answers and prompts into a real Orca terminal; clip_push and dispatch between two machines;
+  the gate verdict through a real Claude Code PreToolUse hook; the release bundle (`install-cli.sh`).
+
 ## Upstream sync: 40 commits from autonomous-ai/openharness main (30d2381b), 2026-10-02
 
 Merges upstream/main 30d2381b4 into nixfred/main c60b38ba. Firmware `0.0.86-nixfred.8`, ESP-IDF v5.5.0,

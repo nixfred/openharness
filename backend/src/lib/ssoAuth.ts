@@ -11,6 +11,8 @@ import {
 } from './autonomousEnvironment.js'
 import { createSsoProfileCache, type SharedProfileStore } from './ssoProfileCache.js'
 import { isHarnessAccessToken } from './harnessTokenFormat.js'
+import { scheduleGoogleSubjectFill } from './googleSubject.js'
+import type { SignInAttribution } from './signInAttribution.js'
 
 /** Internal identity attached to authenticated backend requests and user WebSockets. */
 export interface AuthUser {
@@ -188,7 +190,20 @@ function accessTokenMetadata(token: string): { name?: string; roles?: string[] }
 export async function authenticateAccessToken(
   token: string,
   autonomousEnv: AutonomousEnvironment = 'prod',
-  { enforceEnv = true, allowHarnessSession = true }: { enforceEnv?: boolean; allowHarnessSession?: boolean | 'computer' } = {},
+  {
+    enforceEnv = true,
+    allowHarnessSession = true,
+    signUpAttribution,
+    learnGoogleSubject = true,
+  }: {
+    enforceEnv?: boolean
+    allowHarnessSession?: boolean | 'computer'
+    /** The sign-in's tags (lib/signInAttribution.ts), kept on the account only if this creates it. */
+    signUpAttribution?: SignInAttribution
+    /** FALSE where the caller reads the profile live itself (`GET /api/grid/profile`), so one request
+     *  is one read and one stored-versus-live line, not two. */
+    learnGoogleSubject?: boolean
+  } = {},
 ): Promise<AuthUser> {
   // A sign-in Harness issued itself — a phone signed in by scanning a computer's QR. It names its
   // user outright, so there is no account plane to choose and nothing to ask the account service.
@@ -230,6 +245,11 @@ export async function authenticateAccessToken(
     email,
     autonomousEnv,
     ...metadata,
+    ...(signUpAttribution ? { signUpAttribution } : {}),
   })
+  // Learn the account's Google subject while an Autonomous token is in hand, so a computer of the same
+  // account signed in by QR can be answered later (lib/googleSubject.ts). Not awaited, never throws.
+  // Here and not in the REST hook, because a daemon that only holds a socket authenticates here too.
+  if (learnGoogleSubject) scheduleGoogleSubjectFill(token, user, autonomousEnv)
   return { sub: user.id, email: user.email, role: user.role, autonomousEnv }
 }

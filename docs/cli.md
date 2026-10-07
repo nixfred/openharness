@@ -25,13 +25,15 @@ works the same on a headless Linux server; the app is not required on a machine,
 | `harness remote` | From a Harness terminal tile: choose another of your machines (linking it on the spot if needed), open a terminal there and move this tile to it. |
 | `harness devices [list] [--json]` · `show <#\|fp>` · `remove <fp>` · `history [--json]` · `dismiss [<#\|fp>]` · `rebaseline [--yes]` | The account's devices as this machine verified them (below): list · one in full · take one out on every device · every add and removal, newest first · mark new ones seen · review and trust a frozen list again. |
 | `harness grid login [--force] [--json]` · `harness grid logout` | Sign the `grid` CLI in with this computer's account, no second browser. |
+| `harness grid env <grid>` | `<grid>`'s relay address and key as shell exports, through the harness's own `grid`: `eval "$(harness grid env <grid>)"` before calling a Jev model at `$OPENAI_BASE_URL/systemone`. |
 | `harness flash [flags]` | Re-flash a plugged-in Harness device over USB. Flags pass straight to the flasher. |
 | `harness autonomous-device discover\|status\|list\|pair\|revoke` | Pair Autonomous OS devices found on the LAN, directly, with no relay. |
 
 Interactive prompts read one line from stdin with `--stdin`; `--json` switches any of them to NDJSON.
 
-The daemon also serves a loopback dashboard at `http://127.0.0.1:18473`: health, this machine's
-fingerprint, paired clients, stop. It never renders a transcript. Configuration is environment
+The daemon answers on loopback at `http://127.0.0.1:18473` (`harness status` prints it as `local api`):
+`/api/status` gives its health, this machine's fingerprint and its paired clients. It serves no web
+page and never a transcript. Configuration is environment
 variables (`BACKEND_WS_URL`, `WEB_URL`, `ADAPTER_DATA_DIR`, `ADAPTER_COMPUTER_ID`, `PORT`, and the
 per-engine home directories); [`cli/README.md`](cli/README.md) has the full table and the
 `.env.example`.
@@ -45,11 +47,39 @@ and answers them with `<type>_result`. Selecting one of your other machines prox
 through this daemon's link to it.
 
 What it answers: `agents_list`, `agent_create`, `agent_restart`, `agent_retarget`, `agent_delete`,
-`agent_update`, `agent_recent`, `agent_read_file` (media previews, in 128 KiB chunks),
+`agent_update`, `agent_recent`, `agent_handoff_prepare`, `agent_read_file` (media previews, in 128 KiB chunks),
 `fs_list_dir`, `engines_probe`, `codex_profiles_list`, `codex_profile_link`, `models_list`,
-`usage_read`, `question_response`, `voice_route`, `message`, `cancel`, and `terminal_open` for a
+`usage_read`, `question_response`, `message`, `cancel`, and `terminal_open` for a
 binary terminal channel with scroll, resync and paste. The same frames travel from the web client
 over the relay.
+
+`agent_handoff_prepare` (`{ agentId, changeId, targetEngine }`, owner-only, sealed over the relay)
+runs before the app's Change agent closes the old engine. It writes
+`.harness/handoff/<agent>-<change>.md` and `.transcript.md` into the agent's project: the person's
+requests, the last answer, git state and the tool calls already run, secrets redacted, files 0600
+in 0700 folders. In a git repository it first adds `**/.harness/handoff/` to `.git/info/exclude`,
+or writes nothing. The reply is `{ agentId, file, gitRepo, cwd, degraded }` (`file` is null when
+there was nothing to hand off or it could not be written) and never carries prompt text; the app
+writes the new engine's prompt itself. Errors: `MISSING_AGENT_ID`, `BAD_CHANGE_ID`, `BAD_ENGINE`,
+`UNKNOWN_AGENT`, `NO_PROJECT`, `BUSY`, `TIMEOUT` (5 s, nothing written), `OWNER_REQUIRED`,
+`UNSUPPORTED`, `INTERNAL`.
+
+Whose history goes in: the agent's own session first. A fork that has not answered on its own yet
+(no session, or one that read fine and was empty) inherits the conversation it was forked from, cut
+at the moment of the fork, and both files say so. A fork records its source's session when it is
+made, and exactly that session is read; a fork recorded before that reads the source's current
+session only when the source was bound to it by the fork. Up to 5 fork links are followed, each
+parent must still exist and work in the same folder, and the walk stops on a cycle. Forks of
+database-backed engines (OpenCode, Kilo, Hermes, Devin), and transcripts without timestamps, inherit
+nothing. A live agent that is not a fork and is not bound to a session yet may have its session
+found: for Claude only through the process record Claude keeps for its pid, for the other file
+engines only a session born to that process; never one another agent holds, or one just deleted.
+
+`degraded` lists what fell short: `transcript` (the session could not be read and the mirror's
+newest requests and recaps were used instead, or no history was found), `git` (not a repository,
+its state was unclear, or the exclude line could not be added), `file` (nothing was written: the
+repository state was unclear, the exclude line or the files could not be written, or `.harness`
+is not a plain folder).
 
 `question_response` carries the `requestId` of the `commander_question` it answers, and its
 `question_response_result` comes back under that same id, to that client alone (sealed, over the relay):

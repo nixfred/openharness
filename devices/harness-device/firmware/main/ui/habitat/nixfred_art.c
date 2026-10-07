@@ -4,6 +4,7 @@
 // moves), how far is the transfer (the rim fills), who is it waiting on and is it asking permission
 // (the ring's colour, the badge and the lock). Black canvas; colours come in from the theme.
 #include "nixfred_art.h"
+#include "focus_faces.h"
 #include <string.h>
 
 // `c` at `pct` percent over `under`, in RGB565: the glow's falloff without a blend per pixel.
@@ -18,7 +19,20 @@ static uint16_t over(uint16_t c, uint16_t under, unsigned pct)
 
 enum { CX = HT_WIDTH / 2, CY = HT_HEIGHT / 2, LOGO_CY = 196 };
 
+static void text_centred(ht_scene_t *f, int cx, int y, const ht_font_t *font, uint16_t ink, uint16_t bg,
+                         const char *s, int max_w);
+// A line centred in `font`: a fixed-cell face through ht_center, a proportional one measured (text_centred).
+static void boot_line(ht_scene_t *f, int y, const ht_font_t *font, uint16_t ink, const char *s)
+{
+    if (ht_pfont(font)) text_centred(f, CX, y, font, ink, f->background, s, HT_WIDTH - 80);
+    else ht_center(f, y, font, ink, s);
+}
 void nixfred_boot_face(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, int scan_step)
+{
+    nixfred_boot_face_in(f, accent, ink, pct, scan_step, &ht_mono_28, &ht_mono_20);
+}
+void nixfred_boot_face_in(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, int scan_step,
+                          const ht_font_t *word, const ht_font_t *small)
 {
     // The glow: three soft bands just outside the mark's own circle (r 67 at this size), fading out.
     ht_ring(f, CX, LOGO_CY, 69, 75, 0, HT_TURN, dim(accent, 38));
@@ -26,7 +40,7 @@ void nixfred_boot_face(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, in
     ht_ring(f, CX, LOGO_CY, 83, 95, 0, HT_TURN, dim(accent, 7));
     ht_mask(f, CX - NIXFRED_LOGO_W / 2, LOGO_CY - NIXFRED_LOGO_H / 2, NIXFRED_LOGO_W, NIXFRED_LOGO_H,
             nixfred_logo_alpha, accent);
-    ht_center(f, 306, &ht_mono_28, ink, "Harness");
+    boot_line(f, 306, word, ink, "Harness");
     // The rim: a faint track, then either the transfer's percentage or the scanner.
     ht_ring(f, CX, CY, NIXFRED_RIM_IN + 2, NIXFRED_RIM_OUT - 2, 0, HT_TURN, dim(accent, 14));
     if (pct >= 0) {
@@ -38,7 +52,7 @@ void nixfred_boot_face(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, in
         else if (pct >= 10) { label[0] = (char)('0' + pct / 10); label[1] = (char)('0' + pct % 10); label[2] = '%'; n = 3; }
         else { label[0] = (char)('0' + pct); label[1] = '%'; n = 2; }
         label[n] = 0;
-        ht_center(f, 352, &ht_mono_20, dim(ink, 70), label);
+        boot_line(f, 352, small, dim(ink, 70), label);
     } else {
         int step = ((scan_step % NIXFRED_SCAN_STEPS) + NIXFRED_SCAN_STEPS) % NIXFRED_SCAN_STEPS;
         ht_ring(f, CX, CY, NIXFRED_RIM_IN, NIXFRED_RIM_OUT, step * HT_TURN / NIXFRED_SCAN_STEPS,
@@ -342,7 +356,7 @@ void nixfred_ambient(ht_scene_t *f, const uint8_t *state, int n, int orbit, int 
         polar(cx, cy, r, a, &x, &y);
         ht_ring(f, x, y, 0, state[k] == NIXFRED_WORKING ? 6 : 4, 0, HT_TURN, c);
     }
-    const ht_font_t *big = &ht_lv_geist_med_38.base, *small = &ht_lv_geist_reg_20.base;
+    const ht_font_t *big = &ht_lv_inter_36.base, *small = &ht_lv_inter_20.base;
     text_centred(f, cx, cy - 36, big, p->ink, bg, clock && *clock ? clock : "--:--", 160);
     text_centred(f, cx, cy + 14, small, over(p->ink, bg, 55), bg, line, 150);
 }
@@ -504,7 +518,7 @@ void nixfred_card(ht_scene_t *f, int y, uint16_t edge, const char *name, const c
     uint16_t fill = over(ink, bg, 9);
     ht_box(f, x, y, w, h, 18, fill, over(edge, bg, 40));
     ht_box(f, x + 10, y + 14, 6, h - 28, 3, edge, edge);    // the state colour on the left edge
-    const ht_font_t *head = &ht_lv_geist_med_28.base, *body = &ht_lv_geist_reg_20.base;
+    const ht_font_t *head = &ht_lv_inter_28.base, *body = &ht_lv_inter_20.base;
     char line[HT_TEXT_BYTES];
     snprintf(line, sizeof line, "%s", name && *name ? name : "Harness");
     ht_text(f, x + 30, y + 8, w - 48, head, ink, fill, line);
@@ -527,7 +541,7 @@ void nixfred_collision(ht_scene_t *f, const char *a, uint8_t sa, const char *b, 
         uint16_t c = nixfred_state_color(st[i], phase, bg, p);
         ht_ring(f, x, RY, 58, 68, 0, HT_TURN, over(p->red, bg, 14));   // both are in the alert's glow
         ht_ring(f, x, RY, 50, 58, 0, HT_TURN, c);
-        text_centred(f, x, RY - 14, &ht_lv_geist_reg_20.base, p->ink, bg, name[i] && *name[i] ? name[i] : "?", 92);
+        text_centred(f, x, RY - 14, &ht_lv_inter_20.base, p->ink, bg, name[i] && *name[i] ? name[i] : "?", 92);
     }
     draw_mask(f, CX, 126, &tri_mask, over(p->red, bg, 60 + tri(phase) * 40 / 8));
 }
@@ -554,7 +568,7 @@ void nixfred_plans_face(ht_scene_t *f, const nixfred_plan_t *plan, int n, int pi
     uint16_t bg = f->background;
     if (n > NIXFRED_PLANS_MAX) n = NIXFRED_PLANS_MAX;
     if (n <= 0) {
-        ht_center(f, 214, &ht_lv_geist_reg_20.base, dim_ink, "No plans yet");
+        ht_center(f, 214, &ht_lv_inter_20.base, dim_ink, "No plans yet");
         return;
     }
     // A gauge: from 7:30 clockwise to 4:30, the gap at the bottom holds the verdict.
@@ -695,7 +709,7 @@ void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, 
         hub_glyph(f, &w[i], x, y - 28, over(wt, bg, pct), pct);
         text_centred(f, x, y - 8, &ht_mono_16, over(down ? wt : w[i].live ? p->ink : wt, bg, pct), bg,
                      w[i].label ? w[i].label : "", NIXFRED_HUB_HIT_W);
-        text_centred(f, x, y + 14, &ht_lv_geist_reg_20.base,
+        text_centred(f, x, y + 14, &ht_lv_inter_20.base,
                      over(w[i].glow ? wt : w[i].live ? over(p->ink, bg, 75) : wt, bg, pct), bg,
                      w[i].line[0] ? w[i].line : " ", NIXFRED_HUB_HIT_W + 6);
     }
@@ -713,7 +727,7 @@ void nixfred_hub(ht_scene_t *f, const nixfred_hub_wedge_t *w, int n, int bloom, 
             0, HT_TURN, over(urgent ? tone : p->accent, bg, (urgent ? 90 : 30) * cp / 100));
     // Each line stays inside the core ring's chord at its height, with a margin, so nothing touches the ring.
     text_centred(f, CX, CY - 54, &ht_mono_20, over(p->ink, bg, 55 * cp / 100), bg, clock && clock[0] ? clock : "--:--", 120);
-    text_centred(f, CX, CY - 16, &ht_lv_geist_reg_20.base, over(tone, bg, cp), bg, title && title[0] ? title : "close", 156);
+    text_centred(f, CX, CY - 16, &ht_lv_inter_20.base, over(tone, bg, cp), bg, title && title[0] ? title : "close", 156);
     text_centred(f, CX, CY + 16, &ht_mono_16, over(p->ink, bg, 80 * cp / 100), bg, detail && detail[0] ? detail : " ", 136);
 }
 
@@ -746,7 +760,7 @@ void nixfred_toast(ht_scene_t *f, const char *line, const char *hint, uint16_t e
     uint16_t bg = f->background;
     ht_box(f, CX - NIXFRED_TOAST_W / 2, NIXFRED_TOAST_Y, NIXFRED_TOAST_W, NIXFRED_TOAST_H, NIXFRED_TOAST_H / 2,
            over(edge, bg, 10), edge);
-    text_centred(f, CX, NIXFRED_TOAST_Y + 9, &ht_lv_geist_reg_20.base, ink, over(edge, bg, 10),
+    text_centred(f, CX, NIXFRED_TOAST_Y + 9, &ht_lv_inter_20.base, ink, over(edge, bg, 10),
                  line && line[0] ? line : " ", NIXFRED_TOAST_W - 40);
     text_centred(f, CX, NIXFRED_TOAST_Y + 39, &ht_mono_16, dimc, over(edge, bg, 10),
                  hint && hint[0] ? hint : " ", NIXFRED_TOAST_W - 60);

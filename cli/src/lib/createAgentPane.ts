@@ -14,7 +14,7 @@
 import { homedir } from 'node:os'
 import type { AgentEngine } from '../engines/types.js'
 import type { GridLaunchRecord } from './gridLaunch.js'
-import type { RegisteredSession } from './registry.js'
+import type { ForkOrigin, RegisteredSession } from './registry.js'
 import type { TerminalBackend } from './terminalBackend.js'
 import type { TerminalCreateResult, TmuxRuntimeRef } from './terminalTypes.js'
 import { terminalRouteKey } from './terminalRuntime.js'
@@ -38,7 +38,7 @@ export interface CreateAgentPaneDeps {
     permissionMode?: string | null
     defaultName?: string | null
     label?: string | null
-    forkedFrom?: { agentId: string; name: string } | null
+    forkedFrom?: ForkOrigin | null
   }) => RegisteredSession | null }
   engine: AgentEngine
   cwd?: string | null
@@ -52,6 +52,8 @@ export interface CreateAgentPaneDeps {
   /** Base tmux session name (`-s`). Retries append `-r<attempt>` — see module doc. */
   sessionLabel: string
   argv: string[]
+  /** Explicit-argv terminals start here; engine wrappers still enter cwd after rc files. */
+  spawnCwd?: string
   env?: Record<string, string>
   grid?: { baseUrl: string; model: string | null } | null
   /** The grid launch behind `grid` (credential included — what restore/restart relaunch the pane with)
@@ -66,7 +68,7 @@ export interface CreateAgentPaneDeps {
    *  relaunch opens as it again. Already in `argv` — this is the record, not the launch. */
   agent?: string | null
   /** The agent this pane is a fork of (`agent_fork`), recorded on the row; null otherwise. */
-  forkedFrom?: { agentId: string; name: string } | null
+  forkedFrom?: ForkOrigin | null
   maxAttempts?: number
 }
 
@@ -82,7 +84,7 @@ export async function createAndRegisterPane(deps: CreateAgentPaneDeps): Promise<
       // The login shell starts somewhere stable; its argv enters the requested workspace after rc
       // files. `deps.cwd` still travels below, into the registry entry — this is only about where
       // the pane's OWN shell starts, not the workspace the agent ends up in.
-      cwd: homedir(),
+      cwd: deps.spawnCwd ?? homedir(),
       label,
       command: deps.argv,
       ...(deps.env ? { env: deps.env } : {}),

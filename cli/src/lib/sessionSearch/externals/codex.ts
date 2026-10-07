@@ -95,7 +95,7 @@ export function codexServer(row: RunningProcess | undefined): boolean {
  * `turn_aborted` event near its end says. What was said can name the events; only events count.
  * A file that cannot say counts as busy.
  */
-export async function codexTurnOpen(path: string): Promise<boolean> {
+export async function codexTurnOpen(path: string, unknown: boolean | null = true): Promise<boolean | null> {
   for (const bytes of [256 * 1024, 4 * 1024 * 1024]) {
     const lines = (await readTail(path, bytes)).split('\n')
     for (let i = lines.length - 1; i > 0; i--) {
@@ -106,26 +106,29 @@ export async function codexTurnOpen(path: string): Promise<boolean> {
       if (kind === 'task_complete' || kind === 'turn_aborted') return false
     }
   }
-  return true
+  return unknown
 }
 
-export function codexProvider(options: { home: string }): ExternalProvider {
+export function codexProvider(options: { home: string; roots?: () => string[] }): ExternalProvider {
   return {
     engine: 'codex',
     async scan(ctx: ScanContext): Promise<ExternalSession[]> {
-      const titles = await codexTitles(join(options.home, 'session_index.jsonl'), ctx)
       const found: ExternalSession[] = []
-      for (const path of [
-        ...await rollouts(join(options.home, 'sessions')),
-        ...await rollouts(join(options.home, 'archived_sessions')),
-      ]) {
-        const stamp = await fileStamp(path)
-        if (!stamp) continue
-        // A rollout's first line never changes: read once, however the file grows.
-        const head = await ctx.head(`codex:${path}`, stamp.stamp, () => readCodexHead(path))
-        await ctx.pace()
-        if (!head || ctx.excluded(head.cwd)) continue
-        found.push({ ...head, engine: 'codex', title: titles.get(head.sessionId) ?? '', mtime: stamp.mtime, transcriptPath: path })
+      for (const home of options.roots?.() ?? [options.home]) {
+        const titles = await codexTitles(join(home, 'session_index.jsonl'), ctx)
+        const archived = new Set(await rollouts(join(home, 'archived_sessions')))
+        for (const path of [...await rollouts(join(home, 'sessions')), ...archived]) {
+          const stamp = await fileStamp(path)
+          if (!stamp) continue
+          // A rollout's first line never changes: read once, however the file grows.
+          const head = await ctx.head(`codex:${path}`, stamp.stamp, () => readCodexHead(path))
+          await ctx.pace()
+          if (!head || ctx.excluded(head.cwd)) continue
+          found.push({
+            ...head, engine: 'codex', title: titles.get(head.sessionId) ?? '', mtime: stamp.mtime, transcriptPath: path,
+            ...(archived.has(path) ? { archived: true as const } : {}),
+          })
+        }
       }
       return found
     },
@@ -145,6 +148,6 @@ export function codexProvider(options: { home: string }): ExternalProvider {
       }
       return claims
     },
-    busy: (owner) => codexTurnOpen(owner.record),
+    busy: (owner) => codexTurnOpen(owner.record, null),
   }
 }

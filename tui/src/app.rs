@@ -433,8 +433,10 @@ impl Tab {
     }
 }
 
+/// Account (Harness OS): the desk while this computer is signed in, as the desktop app shows it;
+/// signed out, this computer's own sessions, as Off keeps them.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DeskMode { Off, Read, Sync }
+pub enum DeskMode { Off, Read, Sync, Account }
 
 struct LinkState {
     link: Option<Link>,
@@ -518,19 +520,10 @@ pub struct App {
     /// When the prefix was pressed: a pause after it shows the keys (which-key).
     pub prefix_at: Option<Instant>,
     pub tick: u64,
-    pub home_cursor: usize,
-    /// The home page's selection moved by you (until then Enter, like any key, starts a shell).
-    pub home_moved: bool,
     /// More commands of the same line or binding wait behind the one running.
     pub chain_follows: bool,
-    /// The Claude Code and Codex conversations Harness did not start that the home page offers
-    /// (each machine's session index, asked once each time the page shows), and the machines
-    /// asked so far.
+    /// Saved conversations discovered on connected machines for the welcome composer.
     pub home_external: Vec<External>,
-    pub home_asked: HashSet<String>,
-    home_shown: bool,
-    /// The pane C-b c was pressed from: the machine and folder the home page's shell (t) takes.
-    pub home_from: Option<(String, String)>,
     /// C-b s's search by what was said (each machine's session_search): the query wanted and when
     /// to ask (a moment after the last key), the query the hits answer, and the hits.
     pub said_want: String,
@@ -544,6 +537,9 @@ pub struct App {
     pub tails: HashMap<String, Value>,
     pub tails_asked: HashSet<String>,
     pub desk_mode: DeskMode,
+    /// The daemon on this computer is signed in (its `/api/status`): with DeskMode::Account, the
+    /// desk is in front, with this computer's windows joined to it.
+    pub signed_in: bool,
     pub desk_revision: i64,
     /// The desk session's windows' own state as the last client left it (their options, zoom,
     /// pane titles), put back as the desk's tabs come.
@@ -555,8 +551,7 @@ pub struct App {
     pub dsh: HashMap<String, Vec<Value>>,
     /// A dismissed New Harness draft, including any pending creation receipt.
     pub new_harness_draft: Option<Box<crate::new_harness::Form>>,
-    /// Each harness's selectable models (`models_list`), for ⌥I.
-    pub models: HashMap<(String, String), Vec<Value>>,
+    pub welcome: crate::new_harness::Welcome,
     /// ── models: the Models view's replies (local models, grids, APIs) and a Use under way ──
     pub models_view: crate::models::Models,
     /// Each machine's last measured round trip (the live roster request), for `@`.
@@ -669,6 +664,13 @@ pub struct App {
     /// No terminal (--headless): tmux's server with no client attached, holding sessions for
     /// the commands of a script until a client takes them.
     pub headless: bool,
+    /// The OS's primary screen: keep a home screen when empty and refuse client detach/suspend.
+    /// This controls the interface, not the user's ability to administer their machine.
+    pub os_session: bool,
+    /// A disposable USB session offers direct try, install and network actions on its home.
+    pub os_live: bool,
+    pub os_welcome: crate::os_welcome::State,
+    pub os_first_use: bool,
     /// While a command runs in another session (`-t work:2`): the session to come back to.
     pub swap_back: Option<u32>,
     /// The session asked for at start (`hn new -A -s main`, `hn attach -t work`).
@@ -699,6 +701,9 @@ pub struct App {
     pub seen_since: u64,
     pub seen_dirty: bool,
     pub seen_rostered: HashSet<String>,
+    /// This computer's machine id when the sessions file was last written (its `local`). A sign-in
+    /// or sign-out since changes it, and the windows saved under it are this computer's still.
+    saved_local: Option<String>,
     /// The turns that ended in an error, not looked at since (when, and the error's line): kept
     /// in seen.json, so a failure is still ✗ after hn starts again.
     pub agent_errors: HashMap<(String, String), (u64, String)>,
@@ -834,6 +839,9 @@ pub struct App {
 impl App {
     pub fn new(port: u16, sink: UnboundedSender<Event>, size: (u16, u16)) -> App {
         let desk_mode = match std::env::var("HARNESS_TUI_DESK").as_deref() {
+            // Off until signed in (Harness OS). Said beside `off` rather than as a mode of its own:
+            // an older hn the OS rolls its runtime back to reads `off` alone, never as sync.
+            Ok("off") if std::env::var("HARNESS_TUI_DESK_SIGNED_IN").as_deref() == Ok("sync") => DeskMode::Account,
             Ok("off") => DeskMode::Off,
             Ok("read") => DeskMode::Read,
             _ => DeskMode::Sync,
@@ -864,7 +872,8 @@ impl App {
             sessions: Vec::new(),
             session_id: 0,
             // desk=off: the first session is a session like any other (tmux's `0`).
-            session_desk: desk_mode != DeskMode::Off,
+            // Account: this computer's sessions until a signed-in daemon brings the desk.
+            session_desk: matches!(desk_mode, DeskMode::Sync | DeskMode::Read),
             session_created: epoch_secs(),
             session_activity: epoch_secs(),
             session_used: use_order(),
@@ -874,6 +883,10 @@ impl App {
             handed_over: false,
             sessions_sig: String::new(),
             headless: false,
+            os_session: std::env::var("HARNESS_OS").as_deref() == Ok("1"),
+            os_live: std::env::var("HARNESS_OS").as_deref() == Ok("1") && std::env::var("HARNESS_OS_LIVE").as_deref() == Ok("1"),
+            os_welcome: Default::default(),
+            os_first_use: std::env::var("HARNESS_OS_FIRST_USE").as_deref() == Ok("1"),
             wait_channels: HashMap::new(),
             cli_held: std::collections::VecDeque::new(),
             last_cli: Instant::now(),
@@ -910,6 +923,7 @@ impl App {
             seen_since: 0,
             seen_dirty: false,
             seen_rostered: HashSet::new(),
+            saved_local: None,
             agent_errors: HashMap::new(),
             announced: HashMap::new(),
             asking_burst: None,
@@ -982,13 +996,8 @@ impl App {
             hup_parent: false,
             prefix: false,
             tick: 0,
-            home_cursor: 0,
-            home_moved: false,
             chain_follows: false,
             home_external: Vec::new(),
-            home_asked: HashSet::new(),
-            home_shown: false,
-            home_from: None,
             said_want: String::new(),
             said_due: None,
             said_pending: 0,
@@ -998,6 +1007,7 @@ impl App {
             tails: HashMap::new(),
             tails_asked: HashSet::new(),
             desk_mode,
+            signed_in: false,
             desk_revision: -1,
             desk_windows_saved: HashMap::new(),
             desk_active_saved: None,
@@ -1009,7 +1019,7 @@ impl App {
             daemon_down: false,
             dsh: HashMap::new(),
             new_harness_draft: None,
-            models: HashMap::new(),
+            welcome: Default::default(),
             models_view: Default::default(),
             rtt: HashMap::new(),
             homes: HashMap::new(),
@@ -1165,6 +1175,14 @@ impl App {
                 if app.fleet.machine(&id).is_none() {
                     app.fleet.machines.insert(0, Machine { id: id.clone(), name: fleet::machine_display_name(&id, None), local: true, status: "running".into(), reach: Reach::Unknown });
                 }
+                // Signed out, this computer is its computer id; signed in, the account's machine id.
+                // Windows saved under the other one stayed `Connecting…` (after a sign-in) or `not
+                // linked` (after a sign-out) to a machine that no longer answers to it.
+                let computer = status.get("computerId").and_then(Value::as_str).unwrap_or("").to_string();
+                for old in [computer, app.saved_local.take().unwrap_or_default()] {
+                    if !old.is_empty() && old != id && !crate::local::is_local(&old) { app.move_machine(&old, &id) }
+                }
+                app.follow_account(status.get("signedIn").and_then(Value::as_bool).unwrap_or(false));
                 app.connect(&id);
                 app.refresh_machines();
             }
@@ -1249,6 +1267,66 @@ impl App {
         if let Some(machine) = self.fleet.machine_mut(machine_id) { machine.reach = Reach::Connecting }
     }
 
+    /// This computer's daemon can come back under another machine id: `harness login` restarts it
+    /// on the account, and the signed-out id (the computer id) gives way to the account's. hn kept
+    /// dialling the old id and showed `daemon down` beside a running daemon until it was restarted
+    /// (seen on Harness OS after a phone sign-in). Ask the daemon who it is now, and follow it.
+    fn recheck_local_identity(&mut self) {
+        let port = self.port;
+        self.spawn(async move { http_json(port, "GET", "/api/status", None).await }, |app, status| {
+            let Ok(status) = status else { return };
+            let id = status.get("machineId").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() || id == app.fleet.local_id || crate::local::is_local(&app.fleet.local_id) { return }
+            app.adopt_local_identity(id.to_string());
+            app.follow_account(status.get("signedIn").and_then(Value::as_bool).unwrap_or(false));
+        });
+    }
+
+    /// Everything hn held under this computer's old id moves to the new one: its panes reopen
+    /// there, and its harnesses are listed again from the daemon, which kept them.
+    pub(crate) fn adopt_local_identity(&mut self, id: String) {
+        let old = std::mem::replace(&mut self.fleet.local_id, id.clone());
+        // A link to the new id made while it looked like another machine is dropped with the old
+        // one: the fresh link's Connected is what clears `daemon down` and reopens the panes.
+        if let Some(state) = self.links.remove(&id) { if let Some(link) = state.link { link.close() } }
+        for pane in self.panes.values_mut().filter(|p| p.machine_id == id) {
+            pane.stream = None;
+            pane.opening = false;
+            pane.takeover_pending = false;
+            pane.open_token += 1;
+            pane.dirty = true;
+        }
+        self.move_machine(&old, &id);
+        for machine in &mut self.fleet.machines { machine.local = machine.id == id || crate::local::is_local(&machine.id) }
+        if self.fleet.machine(&id).is_none() {
+            self.fleet.machines.insert(0, Machine { id: id.clone(), name: fleet::machine_display_name(&id, None), local: true, status: "running".into(), reach: Reach::Unknown });
+        }
+        self.connect(&id);
+        self.refresh_machines();
+    }
+
+    /// What hn holds under machine `old` becomes `id`'s: its panes, which of them are shells and
+    /// what was read in them. Its link and harness rows go; the daemon lists them again under `id`.
+    fn move_machine(&mut self, old: &str, id: &str) {
+        if let Some(state) = self.links.remove(old) { if let Some(link) = state.link { link.close() } }
+        self.rtt.remove(old);
+        self.homes.remove(old);
+        self.seen_rostered.remove(old);
+        self.fleet.agents.retain(|(machine, _), _| machine != old);
+        self.fleet.machines.retain(|m| m.id != old);
+        let moved = |key: (String, String)| if key.0 == old { (id.to_string(), key.1) } else { key };
+        self.shells = std::mem::take(&mut self.shells).into_iter().map(moved).collect();
+        self.seen_at = std::mem::take(&mut self.seen_at).into_iter().map(|(key, at)| (moved(key), at)).collect();
+        for pane in self.panes.values_mut().filter(|p| p.machine_id == old) {
+            pane.machine_id = id.to_string();
+            pane.stream = None;
+            pane.opening = false;
+            pane.takeover_pending = false;
+            pane.open_token += 1;
+            pane.dirty = true;
+        }
+    }
+
     fn schedule_reconnect(&mut self, machine_id: &str) {
         let Some(state) = self.links.get_mut(machine_id) else { return };
         if let Some(link) = state.link.take() { link.close(); }
@@ -1326,6 +1404,7 @@ impl App {
                     self.daemon_down = true;
                     self.ensure_local_shells();
                 }
+                if machine_id == self.fleet.local_id && !crate::local::is_local(&machine_id) { self.recheck_local_identity() }
                 for pane in self.panes.values_mut().filter(|p| p.machine_id == machine_id) {
                     pane.stream = None;
                     pane.opening = false;
@@ -1593,7 +1672,7 @@ impl App {
             "machines_changed" => self.refresh_machines(),
             "desk_changed" => {
                 let revision = payload.get("revision").and_then(Value::as_i64).unwrap_or(i64::MAX);
-                if revision > self.desk_revision && self.desk_mode != DeskMode::Off { self.fetch_desk() }
+                if revision > self.desk_revision && self.desk_on() { self.fetch_desk() }
             }
             "terminal_restarted" => {
                 let stream = payload["streamId"].as_str().and_then(|s| Uuid::parse_str(s).ok());
@@ -3140,7 +3219,11 @@ impl App {
         let current = if self.forget_sessions { Value::Null }
             else if how == Save::Stay || how == Save::Leave { if self.session_desk { Value::Null } else { json!(self.session_name()) } }
             else { doc.get("current").cloned().unwrap_or(Value::Null) };
-        let doc = json!({ "current": current, "sessions": rows });
+        // Which machine id the windows' panes name as this computer's. Not while the daemon is
+        // down (the local-shells stand-in): the file keeps the id it had.
+        let local = if self.fleet.local_id.is_empty() || crate::local::is_local(&self.fleet.local_id) { doc.get("local").cloned().unwrap_or(Value::Null) }
+            else { json!(self.fleet.local_id) };
+        let doc = json!({ "current": current, "local": local, "sessions": rows });
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
         let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         if std::fs::write(&temp, doc.to_string()).is_ok() { let _ = std::fs::rename(temp, &path); }
@@ -3318,6 +3401,7 @@ impl App {
     /// one in front when the last client left — unless another client has it.
     pub fn load_sessions(&mut self) {
         let mut doc = read_sessions(&Self::sessions_path());
+        self.saved_local = doc.get("local").and_then(Value::as_str).map(str::to_string);
         let me = crate::ipc::here().map(|p| p.display().to_string());
         // A headless hn (tmux's server with no client) hands everything to the first client that
         // attaches: one holder of the sessions again, as tmux has one server.
@@ -3494,7 +3578,7 @@ impl App {
             return;
         }
         // (hn with no terminal is tmux's server, not a client: it keeps the sessions it has.)
-        let how = if self.headless { "off".to_string() } else { self.options.get("detach-on-destroy", "", None).unwrap_or_default() };
+        let how = if self.headless || self.os_session { "off".to_string() } else { self.options.get("detach-on-destroy", "", None).unwrap_or_default() };
         let others: Vec<u32> = self.sessions.iter().map(|s| s.id).collect();
         let next = match how.as_str() {
             "off" | "no-detached" => self.last_session.filter(|l| others.contains(l)).or_else(|| self.sessions.iter().max_by_key(|s| s.created).map(|s| s.id)),
@@ -3509,8 +3593,12 @@ impl App {
                 self.last_session = None;
                 if !desk { self.sessions.retain(|s| s.id != gone) }
             }
-            // hn with no terminal (tmux's server) and exit-empty off: it stays, with no session.
-            None if self.headless && !desk && self.options.get("exit-empty", "", None).as_deref() == Some("off") => {
+            None if self.os_session && desk => {
+                self.tabs = vec![Tab::home()];
+                self.active = 0;
+            }
+            // The OS surface stays on home, as does a headless server with exit-empty off.
+            None if !desk && (self.os_session || (self.headless && self.options.get("exit-empty", "", None).as_deref() == Some("off"))) => {
                 self.session_id = UNNUMBERED;
                 self.session_alias = None;
                 self.tabs = vec![Tab::home()];
@@ -3753,8 +3841,9 @@ impl App {
         // swaps the theme's own colours — its background the terminal's foreground, its text the
         // terminal's background — so the bar is the theme's text colour with the theme's
         // background as its lettering (an ivory bar with dark text on a dark terminal), not a
-        // transparent one, and not tmux's stock green.
-        if !own && !self.options.pane_look() && !self.options.tmux_look() {
+        // transparent one, and not tmux's stock green. (Whichever focus style: blurred panes keep
+        // the same bar as border ones.)
+        if !own && !self.options.tmux_look() {
             let (bg, fg, _) = crate::theme::palette();
             s = s.bg(fg).fg(bg);
         }
@@ -4776,8 +4865,6 @@ impl App {
         let at = self.tabs.iter().position(|t| self.nums.get(&t.id).map(|m| *m > n).unwrap_or(false)).unwrap_or(self.tabs.len());
         self.tabs.insert(at, tab);
         self.active = at;
-        self.home_cursor = 0;
-        self.home_moved = false;
         self.home_order.borrow_mut().clear();
         self.fit_panes();
     }
@@ -4804,7 +4891,6 @@ impl App {
         let at = self.tabs.iter().position(|t| self.nums.get(&t.id).map(|m| *m > n).unwrap_or(false)).unwrap_or(self.tabs.len());
         self.tabs.insert(at, tab);
         self.active = at;
-        self.home_cursor = 0;
         self.home_order.borrow_mut().clear();
         self.fit_panes();
     }
@@ -5227,16 +5313,47 @@ impl App {
             }
             "border_style" => ("@hn-border", format!("border style: {value}")),
             "dim" => ("@hn-dim", format!("dim other panes: {value}")),
+            // ── status bar tabs ──
+            // The two tab options decide the window-status-* format and current-tab style; set the
+            // remembered choice now, then reconcile those derived options the way `[look]` would
+            // at boot, so a live change and a restart agree.
+            "window_active" | "window_name" => {
+                let opt = if knob == "window_active" { "@hn-window-active" } else { "@hn-window-name" };
+                let _ = self.options.set(opt, Some(value), &global, "", 0);
+                self.sync_window_status();
+                (opt, if knob == "window_active" { format!("current tab: {value}") } else { format!("tab name: {value}") })
+            }
             _ => return format!("unknown: {value}"),
         };
         let _ = self.options.set(name, Some(value), &global, "", 0);
         self.sync_accent();
         // (The bar and the frames change the panes' room: every program is told its size.)
-        if matches!(knob, "status_bar" | "border_style") { self.redraw_all = true; self.fit_panes() }
+        if matches!(knob, "status_bar" | "border_style" | "window_active" | "window_name") { self.redraw_all = true }
+        if matches!(knob, "status_bar" | "border_style") { self.fit_panes() }
         let i = self.active;
         self.view_layout_changed(i);
         self.persist_look();
         message
+    }
+
+    /// Recompute the status bar's `window-status-*` overrides from `@hn-window-name` and
+    /// `@hn-window-active` (which together decide them), the same pair `[look]` emits at boot.
+    fn sync_window_status(&mut self) {
+        let name = self.options.get("@hn-window-name", "", None).unwrap_or_else(|| "tmux".into());
+        let active = self.options.get("@hn-window-active", "", None).unwrap_or_else(|| "star".into());
+        let overrides = crate::options::window_status_overrides(&name, &active);
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        let unset = crate::options::SetFlags { global: true, unset: true, ..Default::default() };
+        let mut present = std::collections::HashSet::new();
+        for (opt, val) in overrides {
+            let _ = self.options.set(&opt, Some(&val), &global, "", 0);
+            present.insert(opt);
+        }
+        for opt in ["window-status-format", "window-status-current-format", "window-status-current-style"] {
+            if !present.contains(opt) {
+                let _ = self.options.set(opt, None, &unset, "", 0);
+            }
+        }
     }
 
     /// Write the current look (as the options hold it) to tui.toml's `[look]`, best-effort.
@@ -5255,6 +5372,8 @@ impl App {
         look.border_style = self.options.get("@hn-border", "", None);
         look.status_bar_width = self.options.get("@hn-status-bar-width", "", None);
         look.dim = self.options.get("@hn-dim", "", None);
+        look.window_active = self.options.get("@hn-window-active", "", None);
+        look.window_name = self.options.get("@hn-window-name", "", None);
         if let Err(e) = crate::config::write_look(&look) { self.say(format!("could not write tui.toml: {e}"), crate::theme::DANGER) }
     }
 
@@ -5262,8 +5381,99 @@ impl App {
 
     fn load_desk(&mut self) {
         self.desk_loaded = true;
-        if self.desk_mode == DeskMode::Off { self.desk_answered = true; self.maybe_start_shell(); return }
+        if !self.desk_on() { self.desk_answered = true; self.maybe_start_shell(); return }
         self.fetch_desk();
+    }
+
+    /// The desk is read: always but with desk=off, and with Account only while signed in.
+    pub fn desk_on(&self) -> bool {
+        match self.desk_mode { DeskMode::Off => false, DeskMode::Account => self.signed_in, DeskMode::Read | DeskMode::Sync => true }
+    }
+
+    /// This client's changes to the desk's windows are written to it.
+    fn desk_syncs(&self) -> bool {
+        self.desk_mode == DeskMode::Sync || self.desk_mode == DeskMode::Account && self.signed_in
+    }
+
+    /// Account: the daemon on this computer signed in or out. Signed in, this computer's windows
+    /// join the account's shared tabs, as the desktop app's do at sign-in, and those tabs are in
+    /// front. Signed out, what runs on this computer stays, in its windows, and the account's
+    /// other harnesses go with the account.
+    pub(crate) fn follow_account(&mut self, signed_in: bool) {
+        let was = std::mem::replace(&mut self.signed_in, signed_in);
+        if self.desk_mode != DeskMode::Account || (was == signed_in && self.session_desk == signed_in) { return }
+        if signed_in { self.enter_desk() } else { self.leave_desk() }
+    }
+
+    fn enter_desk(&mut self) {
+        if !self.session_desk {
+            // The session in front becomes the desk's, with every other one of this client's
+            // windows, so each of them is published to the account below.
+            for desk in self.sessions.iter().filter(|s| s.desk).flat_map(|s| s.tabs.iter().flat_map(|t| t.panes())).collect::<Vec<_>>() { self.drop_pane(desk) }
+            self.sessions.retain(|s| !s.desk);
+            let (others, kept): (Vec<Stash>, Vec<Stash>) = std::mem::take(&mut self.sessions).into_iter().partition(|s| s.mirror.is_none());
+            self.sessions = kept;
+            for stash in others {
+                for tab in stash.tabs.into_iter().filter(|t| t.root.is_some()) {
+                    let num = self.nums.values().max().map_or(self.base_index(), |n| n + 1);
+                    self.nums.insert(tab.id.clone(), num);
+                    self.tabs.push(tab);
+                }
+            }
+            self.tabs.retain(|t| t.root.is_some());
+            if self.tabs.is_empty() { self.tabs.push(Tab::home()) }
+            self.active = self.active.min(self.tabs.len() - 1);
+            self.session_desk = true;
+            self.session_id = crate::ids::desk(crate::ids::Kind::Session, "desk") as u32;
+            self.session_alias = None;
+            let windows: Vec<(String, Vec<(String, String)>)> = self.tabs.iter().filter(|t| t.root.is_some())
+                .map(|t| (t.id.clone(), t.panes().iter().filter_map(|p| self.panes.get(p)).map(|p| (p.machine_id.clone(), p.agent_id.clone())).collect())).collect();
+            for (tab, panes) in windows {
+                for (machine, agent) in panes { self.desk_pane_added(&tab, &machine, &agent) }
+            }
+        }
+        // Read afresh, after what was just published: the link's Connected loads it (or now).
+        self.desk_revision = 0;
+        self.desk_loaded = false;
+        if self.link(&self.fleet.local_id).is_some() { self.load_desk() }
+        self.save_sessions();
+    }
+
+    fn leave_desk(&mut self) {
+        if let Some(i) = self.sessions.iter().position(|s| s.desk) {
+            let desk = self.sessions.remove(i);
+            for pane in desk.tabs.iter().flat_map(|t| t.panes()) { self.drop_pane(pane) }
+        }
+        if self.session_desk {
+            // Only this computer's harnesses stay: another machine's need the account to reach.
+            let here = self.fleet.local_id.clone();
+            for i in 0..self.tabs.len() {
+                for pid in self.tabs[i].panes() {
+                    if self.panes.get(&pid).is_some_and(|p| p.machine_id == here || crate::local::is_local(&p.machine_id)) { continue }
+                    let tab = &mut self.tabs[i];
+                    tab.root = tab.root.take().and_then(|r| r.remove(pid));
+                    tab.order.retain(|p| *p != pid);
+                    self.drop_pane(pid);
+                }
+                let tab = &mut self.tabs[i];
+                let left = tab.panes();
+                if tab.focus.is_some_and(|f| !left.contains(&f)) { tab.focus = left.first().copied() }
+            }
+            let gone: Vec<String> = self.tabs.iter().filter(|t| t.root.is_none()).map(|t| t.id.clone()).collect();
+            self.tabs.retain(|t| t.root.is_some());
+            for id in gone { self.nums.remove(&id); }
+            if self.tabs.is_empty() { self.tabs.push(Tab::home()) }
+            self.active = self.active.min(self.tabs.len() - 1);
+            self.keep_local_shell_session();
+            self.fit_panes();
+            self.redraw_all = true;
+        }
+        self.desk_revision = 0;
+        self.desk_windows_saved.clear();
+        self.desk_active_saved = None;
+        self.desk_layouts.clear();
+        self.desk_pending.clear();
+        self.save_sessions();
     }
 
     /// tmux starts in a shell: when hn opens with no window of its own to show (the desk had
@@ -5274,6 +5484,19 @@ impl App {
         if self.shell_asked || !self.desk_answered || self.capture.is_some() { return }
         // A headless client makes only the sessions it is asked for.
         if self.headless { self.shell_asked = true; return }
+        // The OS opens on the agent launcher. An explicit `hn new ...` still gets
+        // its requested shell; reconnecting to existing work is handled by the desk.
+        if self.os_session && self.start_session.is_none() {
+            if (self.os_live || self.os_first_use) && self.tabs.len() == 1 && self.tabs[0].root.is_none() {
+                if self.link(&self.fleet.local_id).is_none() { return }
+                self.shell_asked = true;
+                // The welcome reply may arrive after another terminal is requested.
+                // Fill its original tab instead of whichever tab is now active.
+                let tab = self.tab().id.clone();
+                crate::input::new_shell_from(self, None, Placement::Fill(tab), None, Some("/usr/bin/hn-os welcome".into()));
+            } else { self.shell_asked = true; }
+            return;
+        }
         // `hn new -s work` (a session besides the desk's): made here, with its shell.
         if self.start_session.as_ref().map(|s| s.create && self.session_alias.as_deref() != s.name.as_deref()).unwrap_or(false) {
             if self.link(&self.fleet.local_id).is_none() { return }
@@ -5288,8 +5511,16 @@ impl App {
         // The desk's first shell: where hn was started (-c: where it was asked to), running what
         // `hn new` asked for.
         let start = self.start_session.take().unwrap_or_default();
+        let welcome = start.command.is_none() && start.cwd.is_none() && start.window.is_none()
+            && !start.create && self.options.get("@hn-new-window", "", None).as_deref() != Some("shell")
+            && self.options.get("@hn-look", "", None).as_deref() != Some("tmux");
         let cwd = start.cwd.or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string()));
-        crate::input::new_shell_from(self, None, Placement::Auto(None), cwd, start.command);
+        if welcome {
+            self.tab_mut().home = true;
+            crate::new_harness::ensure_welcome(self, None, cwd.clone());
+            let tab = self.tab().id.clone();
+            crate::input::new_shell_from(self, None, Placement::Fill(tab), cwd, start.command);
+        } else { crate::input::new_shell_from(self, None, Placement::Auto(None), cwd, start.command); }
     }
 
     fn fetch_desk(&mut self) {
@@ -5328,7 +5559,9 @@ impl App {
             if id.is_empty() || panes.is_empty() { continue }
             seen.push(id.clone());
             let name = row.get("name").and_then(Value::as_str).unwrap_or("tab").to_string();
-            let named = row.get("nameIsCustom").and_then(Value::as_bool).unwrap_or(false);
+            // On Harness OS a tab is called what the desktop app calls it, not what its window runs:
+            // the same tabs side by side on two computers read the same.
+            let named = row.get("nameIsCustom").and_then(Value::as_bool).unwrap_or(false) || self.desk_mode == DeskMode::Account;
             let layout_doc = row.get("layout").cloned().unwrap_or(json!({}));
             match self.tabs.iter().position(|t| t.id == id) {
                 Some(index) => {
@@ -5464,13 +5697,13 @@ impl App {
         let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) else { return };
         let mut ops = Vec::new();
         // The ids this client gave them are every client's for them (%N, @N).
-        if self.desk_mode == DeskMode::Sync && self.session_desk {
+        if self.desk_syncs() && self.session_desk {
             if let Some(p) = self.tabs[index].panes().into_iter().find(|p| self.panes.get(p).map(|x| x.machine_id == machine_id && x.agent_id == agent_id).unwrap_or(false)) {
                 crate::ids::desk_set(crate::ids::Kind::Pane, &format!("{machine_id}:{agent_id}"), p);
             }
             if !self.tabs[index].on_desk { let wid = self.tabs[index].wid(); crate::ids::desk_set(crate::ids::Kind::Window, tab_id, wid) }
         }
-        if !self.tabs[index].on_desk && self.desk_mode == DeskMode::Sync && self.session_desk {
+        if !self.tabs[index].on_desk && self.desk_syncs() && self.session_desk {
             self.tabs[index].on_desk = true;
             let tab = &self.tabs[index];
             let mut op = json!({ "op": "tab.create", "id": tab.id, "name": tab.name, "index": index });
@@ -5487,7 +5720,7 @@ impl App {
     /// Preserve input order across writes, including the retry for an older desk schema.
     /// Only reconcile once the queue drains, so an earlier reply cannot undo a later edit.
     pub fn desk_ops(&mut self, ops: Vec<Value>) {
-        if self.desk_mode != DeskMode::Sync || !self.session_desk || ops.is_empty() { return }
+        if !self.desk_syncs() || !self.session_desk || ops.is_empty() { return }
         self.desk_pending.extend(ops);
         self.send_desk_ops();
     }
@@ -5676,31 +5909,6 @@ impl App {
     /// The home page is on screen: a window with nothing in it, nothing over it.
     pub fn home_visible(&self) -> bool { self.modal.is_none() && self.tabs.get(self.active).map(|t| t.home || t.root.is_none()).unwrap_or(false) }
 
-    /// The home page's conversations Harness did not start: each connected machine asked once
-    /// while the page shows (`session_search` with a time and no words: the last 30 days), as the
-    /// desktop's welcome page asks; one that connects meanwhile is asked too. Read afresh the next
-    /// time the page shows.
-    fn ask_home_external(&mut self) {
-        let shown = self.home_visible();
-        if shown && !self.home_shown { self.home_asked.clear(); self.home_external.clear() }
-        self.home_shown = shown;
-        if !shown { return }
-        let now = fleet::now_ms();
-        let machines: Vec<String> = self.fleet.machines.iter().filter(|m| m.usable() && !self.home_asked.contains(&m.id)).map(|m| m.id.clone()).collect();
-        for machine in machines {
-            let Some(link) = self.link(&machine) else { continue };
-            self.home_asked.insert(machine.clone());
-            let payload = json!({ "query": "", "from": now.saturating_sub(30 * 86_400_000), "to": now, "limit": 30 });
-            self.spawn(async move { link.rpc("session_search", payload, Duration::from_secs(10)).await }, move |app, reply| {
-                // (A daemon without session search has none to offer.)
-                let Ok(reply) = reply else { return };
-                for x in externals(&machine, &reply) {
-                    if !x.open && !app.home_external.iter().any(|y| y.machine == x.machine && y.session_id == x.session_id) { app.home_external.push(x) }
-                }
-            });
-        }
-    }
-
     /// C-b s's query, a moment after its last key: every connected machine asked what was said
     /// (its hits kept while the query is still the one they answer; the list filled again).
     fn ask_said(&mut self) {
@@ -5767,8 +5975,9 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        crate::os_welcome::tick(self);
         self.run_start_then();
-        self.ask_home_external();
+        crate::new_harness::welcome_tick(self);
         self.ask_said();
         self.ask_tails();
         self.tick += 1;
@@ -6023,6 +6232,51 @@ mod recovery_tests {
     use super::*;
 
     #[tokio::test]
+    async fn os_starts_at_the_agent_launcher_without_creating_an_unused_shell() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (80, 24));
+        app.handed_over = true;
+        app.os_session = true;
+        app.desk_answered = true;
+        app.maybe_start_shell();
+        assert!(app.shell_asked);
+        assert!(app.starting_shell.is_none());
+        assert!(app.tabs.iter().all(|tab| tab.root.is_none()));
+        assert!(!app.quit);
+    }
+
+    #[tokio::test]
+    async fn os_surface_stays_home_after_its_last_session_closes() {
+        for desk in [false, true] {
+            let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(19789, sink, (80, 24));
+            app.handed_over = true; // This state fixture must not persist a session.
+            app.os_session = true;
+            app.session_desk = desk;
+            app.tabs.clear();
+            app.session_gone_quiet();
+            assert!(!app.quit);
+            assert!(!app.exited);
+            assert_eq!(app.tabs.len(), 1);
+            assert!(app.tabs[0].root.is_none());
+            assert_eq!(app.active, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_client_still_exits_after_its_last_session_closes() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19789, sink, (80, 24));
+        app.handed_over = true;
+        app.os_session = false;
+        app.session_desk = false;
+        app.tabs.clear();
+        app.session_gone_quiet();
+        assert!(app.quit);
+        assert!(app.exited);
+    }
+
+    #[tokio::test]
     async fn respawn_reply_and_fast_exit_deliver_one_death_hook_in_either_order() {
         for exit_before_reply in [false, true] {
             let (sink, _) = tokio::sync::mpsc::unbounded_channel();
@@ -6072,6 +6326,100 @@ mod recovery_tests {
         app.panes.get_mut(&3).unwrap().stream = None;
         app.shells.insert(("test-peer".into(), "agent-2".into()));
         app
+    }
+
+    /// `harness login` restarts this computer's daemon under the account's machine id. hn follows
+    /// it: the panes reopen on the new id, the old one is gone, and `daemon down` clears once the
+    /// new link connects.
+    #[tokio::test]
+    async fn a_sign_in_moves_this_computer_to_its_new_machine_id() {
+        let mut app = fixture();
+        app.fleet.machines[0].local = true;
+        app.fleet.local_id = "test-peer".into();
+        // The account's id was already listed, as if another machine, with a link of its own.
+        app.fleet.machines.push(Machine { id: "account-id".into(), name: "harness".into(), local: false, status: "running".into(), reach: Reach::Ready });
+        app.links.insert("account-id".into(), LinkState { link: Some(Link::spawn(app.port, "account-id", 2, app.sink.clone())), generation: 2, attempts: 0, retry_at: None });
+        app.daemon_down = true;
+        app.generation = 2;
+        app.adopt_local_identity("account-id".into());
+        assert_eq!(app.fleet.local_id, "account-id");
+        assert!(app.fleet.machine("test-peer").is_none());
+        assert!(app.fleet.machine("account-id").is_some_and(|m| m.local));
+        assert!(!app.links.contains_key("test-peer"));
+        let generation = app.links["account-id"].generation;
+        assert!(generation > 2, "a fresh link, not the one made for another machine");
+        for id in 1..=3 {
+            assert_eq!(app.panes[&id].machine_id, "account-id");
+            assert!(app.panes[&id].stream.is_none());
+            assert_eq!(app.panes[&id].open_token, 8);
+        }
+        assert_eq!(app.panes[&4].machine_id, "other-peer");
+        assert!(app.shells.contains(&("account-id".into(), "agent-2".into())));
+        app.on_machine("account-id".into(), generation, MachineEvent::Connected);
+        assert!(!app.daemon_down);
+    }
+
+    /// Account (Harness OS), as the desktop app: at sign-in this computer's windows join the
+    /// account's shared tabs; at sign-out what runs on this computer stays in its windows, and a
+    /// harness on another machine goes with the account.
+    #[tokio::test]
+    async fn the_os_joins_its_windows_to_the_account_and_keeps_its_own_harnesses_after() {
+        let mut app = fixture();
+        app.desk_mode = DeskMode::Account;
+        app.fleet.local_id = "test-peer".into();
+        app.session_desk = false;
+        // An ordinary session's number, as Account starts with (the fixture began on the desk's).
+        app.session_id = app.alloc_session_id();
+        app.session_alias = Some("0".into());
+        let mut tab = Tab::with_wid("own work", 1);
+        tab.root = Some(Node::new(1, 80, 23));
+        tab.focus = Some(1);
+        app.tabs = vec![tab];
+        app.active = 0;
+
+        app.follow_account(true);
+        assert!(app.session_desk && app.signed_in && app.desk_on());
+        assert!(app.tabs.iter().any(|t| t.name == "own work" && t.on_desk), "this computer's window joins the account's tabs");
+        assert!(!app.sessions.iter().any(|s| !s.desk && s.mirror.is_none()));
+
+        // A tab from the account: this computer's harness beside another machine's.
+        let mut mixed = Tab::with_wid("discussion", 2);
+        let mut root = Node::new(3, 80, 23);
+        root.split(3, 4, Dir::Horizontal);
+        mixed.root = Some(root);
+        mixed.focus = Some(4);
+        mixed.on_desk = true;
+        let mut remote = Tab::with_wid("bubu", 3);
+        remote.root = Some(Node::new(2, 80, 23));
+        remote.on_desk = true;
+        app.panes.get_mut(&2).unwrap().machine_id = "other-peer".into();
+        app.tabs.push(mixed);
+        app.tabs.push(remote);
+
+        app.follow_account(false);
+        assert!(!app.session_desk && !app.signed_in && !app.desk_on());
+        let names: Vec<&str> = app.tabs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["own work", "discussion"], "a tab with nothing of this computer's goes");
+        let kept = &app.tabs[1];
+        assert_eq!(kept.panes(), vec![3], "the local harness stays, the remote one goes");
+        assert_eq!(kept.focus, Some(3));
+        assert!(app.panes.contains_key(&1) && app.panes.contains_key(&3));
+        assert!(!app.panes.contains_key(&4) && !app.panes.contains_key(&2));
+        assert!(app.tabs.iter().all(|t| !t.on_desk));
+    }
+
+    /// Windows saved before the sign-in name the computer id; hn started after it moves them to the
+    /// machine id the daemon now answers to, instead of leaving them `Connecting…` to nobody.
+    #[tokio::test]
+    async fn windows_saved_before_a_sign_in_reopen_on_the_account_machine() {
+        let mut app = fixture();
+        app.fleet.local_id = "account-id".into();
+        app.move_machine("test-peer", "account-id");
+        assert!(app.fleet.machine("test-peer").is_none());
+        assert!(!app.links.contains_key("test-peer"));
+        for id in 1..=3 { assert_eq!(app.panes[&id].machine_id, "account-id"); assert!(app.panes[&id].stream.is_none()) }
+        assert_eq!(app.panes[&4].machine_id, "other-peer");
+        assert!(app.shells.contains(&("account-id".into(), "agent-2".into())));
     }
 
     #[tokio::test]

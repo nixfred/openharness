@@ -4,6 +4,9 @@ The canonical system for everything around terminal panes. This supersedes
 older BIOS, bracket-button and mixed desktop recipes. The user-approved
 direction is the authority: refine one system, then use it everywhere.
 
+Product names, meanings, and action labels follow the
+[Naming System](../../docs/naming-system.md), shared across the OS, apps, and device.
+
 ## Character
 
 A calm, precise Mac workspace. Content supplies the personality: an agent's
@@ -348,6 +351,10 @@ of the strip. Pane frames use the related 10-point radius, with a 9-point clippe
 inner edge beneath their 1-point rim. Only their frame changes: terminal content,
 input, selection and status typography remain the terminal's own. AppKit mirrors
 these shared geometry values; Flutter uses AppDesktop directly.
+
+Closing a tab leaves the remaining tab in its normal selected appearance.
+Show a focus outline when a tab control is deliberately reached by keyboard
+navigation; the temporary input hold after Close does not add one.
 
 **Pane header** — terminal panes show agent, model and close at every width.
 Splitting is revealed at the pane edges; zoom remains available through menus,

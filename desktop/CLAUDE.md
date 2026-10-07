@@ -42,7 +42,7 @@ back to CocoaPods and rewrites tracked files (`project.pbxproj`, `contents.xcwor
 ```bash
 flutter pub get
 flutter analyze                                   # lints: package:flutter_lints, no custom rules
-flutter test                                      # whole unit/widget suite (test/)
+make -C .. desktop-test                           # bounded VM suite, workers + receipt
 flutter test test/terminal_session_test.dart      # one file
 flutter test test/ws_conn_test.dart --plain-name "reconnects"   # one test by name substring
 flutter run -d macos                              # or: flutter run -d linux
@@ -138,6 +138,11 @@ PKCE transaction; conditional adapters handle storage and native-only services.
 `platform_auth_web.dart` serializes shared login/refresh/logout with Web Locks
 and reloads other tabs when the account changes. Auth and E2EE keys persist in
 origin-local storage; only the OAuth transaction is in session storage.
+Each relay connection also negotiates a WebRTC data channel to the machine
+(`web/p2p/`, the phone's `../mobile/lib/p2p` on the browser's own
+`RTCPeerConnection` — no `flutter_webrtc`, so native builds gain no plugin);
+terminal frames take it when it is up and fall back to the relay. Keep
+`terminal_p2p_{plugin,link,policy}.dart` in step with the phone's copies.
 Shared sessions use `ObserverRelayCodec` and `/api/observer-ws`, verifying the
 owner and permitting only observation and authenticated comments. `/s/:id#key=…`
 opens `SharedAgentPage` without restoring the visitor's workspace. Public links
@@ -194,6 +199,13 @@ The native desktop target uses the CLI for cloud access and SSO tokens:
   `LocalCliDiscovery`, which runs `harness start` when needed). The CLI terminates E2EE for relayed
   machines; the app carries no crypto. Close code `4404`/`NO_PEER_LINK` means the machine needs
   `harness link import` — surfaced as `MachineState.needsLink` and polled via `_linkRetryTimers`.
+  A viewer build settles its own `NO_PEER_LINK`/`E2E_DENIED` first (`_settleTrust`): it joins the
+  device log if it is not in it (`ViewerDeviceLog.ensureRegistered`), reads it and dials again,
+  showing the machine as connecting; only a refusal that outlasts two rounds (~15s), or a frozen
+  log, asks for the password. The desk frames (`app_focus`, `app_panes`, `app_swarms`, `app_unread`,
+  `agent_seen`) are for this computer's daemon and only ride a loopback connection. A viewer with no
+  machine connected hears no push, so it re-reads the machine list every 20s while that lasts
+  (`deafMachineListInterval`) and when the tab comes back to the front.
 - **Both REST and the local WS prefer the daemon's Unix socket** (`lib/ws/local_daemon_transport.dart`;
   CLI `lib/localSocket.ts`): `~/.harness/cli/data/daemon-<port>.sock`, 0600, named for the port in
   `localCliBaseUrl` so it always leads to the same daemon as the TCP fallback. The loopback port takes
@@ -245,11 +257,14 @@ both themes and enlarged text at the minimum window size without running an inst
 
 Read-only dependency probes own their subprocesses and have a ten-second deadline covering startup,
 exit, and output-pipe closure. A timeout reports a failed check, not a missing tool; Retry after the
-initial check stays read-only. Only an explicit install action permits automatic installation to
-continue after a Terminal handoff, and a failed recheck stops that continuation. Readiness requires
-the final ready phase and every required step, so old successful step values cannot flash a ready
-screen during a new verification. The preflight status is a live region and uses a static waiting
-icon when Reduce Motion is enabled.
+initial check probes read-only first. When every item in the probed plan installs in-app (no
+`requiresTerminal` — always the case on macOS), the app installs it straight after the probe, at
+launch and after an automatic-mode Retry, without showing the review or its Install button; a plan
+that needs Terminal (Linux apt) waits on that button, and manual mode never installs. Only an
+install the app or the person started may continue after a Terminal handoff, and a failed recheck
+stops that continuation. Readiness requires the final ready phase and every required step, so old
+successful step values cannot flash a ready screen during a new verification. The preflight status
+is a live region and uses a static waiting icon when Reduce Motion is enabled.
 
 ### Boot and state
 
@@ -286,10 +301,12 @@ waiting-for-input, draft, or unknown sessions share one confirmation for the who
 their names, activity, and the number of sessions that will stop. Its only choices are Cancel
 and Stop; Cancel is the default. Stop saves and stops every reviewed session before the tab
 closes. Idle-only closes retain the daemon's activity guard; newly active work gets one review
-of the remaining sessions. Failures keep the view and identify confirmed stops separately
-from uncertain ones. Previously queued daemon close
-plans remain compatible. Layout cleanup, moving panes, switching tabs, and sign-out retain their view-only behavior. A failed save
-or unconfirmed close keeps the pane. Older daemons retain their existing behavior until updated.
+of the remaining sessions. Failures identify confirmed stops separately from uncertain ones
+and default to Keep open. Close pane / Close Tab dismisses the captured views through the
+normal recently-closed history path without another stop request; unconfirmed sessions may
+still be running, and their views in other tabs remain open. Previously queued daemon close
+plans remain compatible. Layout cleanup, moving panes, switching tabs, and sign-out retain
+their view-only behavior. Older daemons retain their existing behavior until updated.
 
 `HarnessMonitor` supplies the global running-harness count without process sampling
 in the footer. Clicking it opens the reusable `autonomous/harness-monitor` DSH tab

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness/core/models.dart';
@@ -36,7 +37,7 @@ SessionContentHit hit(
 
 /// A daemon that answers only `session_search`, from [answers] by query.
 class SearchConnection extends WsConn {
-  SearchConnection(this.answers)
+  SearchConnection(this.answers, {this.replies = const []})
     : super(
         wsBaseUrl: 'ws://fixture.invalid',
         autonomousEnv: 'test',
@@ -48,6 +49,7 @@ class SearchConnection extends WsConn {
       );
 
   final Map<String, List<Map<String, dynamic>>> answers;
+  final List<Map<String, dynamic>> replies;
   final asked = <String>[];
 
   @override
@@ -59,6 +61,9 @@ class SearchConnection extends WsConn {
     if (type != 'session_search') return {'error': 'UNSUPPORTED'};
     final query = payload['query'] as String;
     asked.add(query);
+    if (replies.isNotEmpty) {
+      return replies[(asked.length - 1).clamp(0, replies.length - 1)];
+    }
     return {'hits': answers[query] ?? const [], 'indexed': 3, 'pending': 0};
   }
 }
@@ -178,38 +183,43 @@ void main() {
   });
 
   group('SessionContentSearch', () {
-    test('asks every machine once per pause in typing and keeps the best hit per harness', () async {
-      final asked = <(String, String)>[];
-      final gate = Completer<void>();
-      final search = SessionContentSearch(
-        machines: () => ['m', 'n'],
-        debounce: const Duration(milliseconds: 5),
-        ask: (machine, query, _) async {
-          asked.add((machine, query));
-          if (machine == 'n') await gate.future;
-          return machine == 'm'
-              ? [
-                  hit('a1', together: false, score: .9),
-                  hit('a1', together: true, score: .2),
-                ]
-              : [hit('b1', machineId: 'n')];
-        },
-      );
-      addTearDown(search.dispose);
-      search.search('d');
-      search.search('di');
-      search.search('dia');
-      search.search('dial');
-      await settle();
-      expect(asked, [('m', 'dial'), ('n', 'dial')]);
-      // One harness, its best conversation: all words together beats spread.
-      expect(search.hits.keys, [agentDestinationId('m', 'a1')]);
-      expect(search.hits.values.single.together, isTrue);
-      expect(search.answered, 'dial');
-      gate.complete();
-      await settle();
-      expect(search.hits.keys, hasLength(2));
-    });
+    test(
+      'asks every machine once per pause in typing and keeps the best hit per harness',
+      () => fakeAsync((clock) {
+        final asked = <(String, String)>[];
+        final gate = Completer<void>();
+        final search = SessionContentSearch(
+          machines: () => ['m', 'n'],
+          debounce: const Duration(milliseconds: 5),
+          ask: (machine, query, _) async {
+            asked.add((machine, query));
+            if (machine == 'n') await gate.future;
+            return machine == 'm'
+                ? [
+                    hit('a1', together: false, score: .9),
+                    hit('a1', together: true, score: .2),
+                  ]
+                : [hit('b1', machineId: 'n')];
+          },
+        );
+        addTearDown(search.dispose);
+        search.search('d');
+        search.search('di');
+        search.search('dia');
+        search.search('dial');
+        clock.elapse(const Duration(milliseconds: 4));
+        expect(asked, isEmpty);
+        clock.elapse(const Duration(milliseconds: 1));
+        expect(asked, [('m', 'dial'), ('n', 'dial')]);
+        // One harness, its best conversation: all words together beats spread.
+        expect(search.hits.keys, [agentDestinationId('m', 'a1')]);
+        expect(search.hits.values.single.together, isTrue);
+        expect(search.answered, 'dial');
+        gate.complete();
+        clock.flushMicrotasks();
+        expect(search.hits.keys, hasLength(2));
+      }),
+    );
 
     test(
       'drops a late answer to an older question and clears for new words',

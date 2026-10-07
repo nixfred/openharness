@@ -1,0 +1,8 @@
+[Unit]
+Description=Lock before suspend
+ConditionPathExists=!/etc/harness-live
+PartOf=harness-os.target
+
+[Service]
+ExecStart=/usr/bin/swayidle -w timeout 600 /usr/lib/harness-os/lock before-sleep /usr/lib/harness-os/lock
+Restart=on-failure

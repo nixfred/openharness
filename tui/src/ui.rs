@@ -16,13 +16,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::fleet::ago;
-use crate::format::clip_middle;
 use crate::keys;
 use crate::modal::{Modal, PickerKind, PromptKind};
 use crate::pane::{Pane, Phase};
 use crate::picker::Picker;
-use crate::theme::{self, bold, fg, engine_mark, state_mark};
-use crate::input::{home_rows, HomeRow};
+use crate::theme::{self, bold, fg};
 
 /// Time-dependent content asks for its next repaint; a static surface asks for
 /// none. Hints and messages are deadlines, independent of reduced motion.
@@ -141,6 +139,41 @@ mod repaint_tests {
     }
 }
 
+#[cfg(test)]
+mod border_style_tests {
+    use super::*;
+
+    fn app() -> App {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        App::new(19789, sink, (100, 30))
+    }
+
+    /// The selected pane's border/status colour is the theme's when nothing is set, and the pane's
+    /// own when the style is set anyhow — in tmux.conf, by a set-option, or the config's `[look]`,
+    /// all of which reach the options store. (Setting it only in a tmux.conf that `app.look` reads
+    /// must not be the only way the user's colour wins.)
+    #[test]
+    fn a_border_style_set_anywhere_wins_over_the_theme() {
+        let mut a = app();
+        let (_, fg, _) = crate::theme::palette();
+        // Nothing set: the active pane's border is the theme's readable foreground, not tmux's green.
+        assert_eq!(border_style(&a, true).fg, Some(fg), "default active border is the theme's foreground");
+
+        // Give the window a focused pane, and set pane-active-border-style through the options
+        // store (a live set-option, or the config's `[look]`) — not only via a tmux.conf.
+        a.tabs[a.active].focus = Some(1);
+        let tid = a.tab().id.clone();
+        let global = crate::options::SetFlags { global: true, ..Default::default() };
+        let _ = a.options.set("pane-active-border-style", Some("fg=red"), &global, &tid, 1);
+        assert_eq!(border_style(&a, true).fg, Some(Color::Red), "a set pane-active-border-style is respected, not overridden by the theme");
+        assert_eq!(box_style(&a, 1).fg, Some(Color::Red), "a box pane's focused frame takes the set pane-active-border-style");
+
+        // The non-active border, set the same way, is respected too.
+        let _ = a.options.set("pane-border-style", Some("fg=blue"), &global, &tid, 1);
+        assert_eq!(border_style(&a, false).fg, Some(Color::Blue), "a set pane-border-style is respected for the quiet panes");
+    }
+}
+
 /// screen_write_box_border_set: a box's corners, sides and its rule's joins, for tmux's box
 /// lines (single, double, heavy, simple, rounded, padded, none).
 fn box_set(lines: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
@@ -173,7 +206,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     // The status lines (tmux's status: off, on, 2 … 5), at the bottom or (status-position) the top.
     let lines = app.status_lines().max(1).min(area.height);
-    let status = Rect::new(0, if app.status_top { 0 } else { area.height - lines }, area.width, lines);
+    let status = Rect::new(0, if app.status_top { 0 } else { area.height.saturating_sub(lines) }, area.width, lines);
     let body = app.body();
     // The window in front at the terminal's size, whatever brought it there.
     let window_area = app.window_area(app.tab());
@@ -184,7 +217,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // (The settings panel is not one: it floats over the panes, as the New Harness form does.)
     let full_screen = matches!(&app.modal, Some(Modal::Picker { kind, .. }) if theme::fzf_opts().height.is_none() && !crate::settings::is_panel(kind));
     if !full_screen {
-        if app.tab().home || app.tab().root.is_none() { empty_window(buf, app, body) }
+        if app.tab().home || app.tab().root.is_none() { cursor = empty_window(buf, app, body); themed_home(buf, body); }
         else { cursor = window(buf, app, body) }
     }
     // Panes in clock mode: the time over each (its cursor hidden).
@@ -256,6 +289,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let hidden = app.status_lines() == 0;
     let speaking = matches!(app.modal, Some(Modal::Prompt(_)) | Some(Modal::Confirm { .. })) || app.toast.as_ref().map(|(_, _, at)| at.elapsed() < Duration::from_millis(app.toast_ms())).unwrap_or(false);
     if !hidden || speaking { if let Some(pos) = status_line(buf, app, status) { cursor = Some(pos) } }
+    crate::os_welcome::draw_dock(buf, app);
     // A menu is tmux's overlay: over the status line too, where it is kept on the screen.
     if let Some(Modal::Menu(m)) = &app.modal { menu(buf, app, m) }
     if let Some(Modal::NewHarness(form)) = &mut app.modal { cursor = crate::new_harness::draw(buf, body, form); }
@@ -412,6 +446,13 @@ fn window(buf: &mut Buffer, app: &mut App, body: Rect) -> Option<Position> {
             if let Some(pane) = app.panes.get_mut(id) { pane.dirty = false }
             continue;
         }
+        // choose-file's file manager, likewise.
+        if app.panes.get(id).map(|p| p.files_top()).unwrap_or(false) {
+            if let Some(bg) = window.1 { buf.set_style(content, Style::default().bg(bg)) }
+            crate::files::draw(app, *id, buf, content);
+            if let Some(pane) = app.panes.get_mut(id) { pane.dirty = false }
+            continue;
+        }
         if app.panes.get(id).map(|p| p.copy_top()).unwrap_or(false) {
             let (styles, ctx) = (crate::copy::styles(app, *id), crate::copy::ctx(app, *id));
             if let Some(m) = app.panes.get(id).and_then(|p| p.modes.last()) {
@@ -499,10 +540,17 @@ fn borders(buf: &mut Buffer, app: &App, body: Rect) {
 /// hn leaves a stock border — tmux's green active border — alone only when you set one yourself;
 /// otherwise it takes the theme's readable foreground (the active pane dimmed), so the selected
 /// pane reads as the theme rather than tmux's green.
+/// Whether the user set a pane *-border-style for the current window — in tmux.conf, by a
+/// set-option, or in the config's `[look]` (any of which reaches the options store) — so its
+/// colour is theirs, not the theme's.
+fn border_owned(app: &App, active: bool) -> bool {
+    let name = if active { "pane-active-border-style" } else { "pane-border-style" };
+    app.options.has_window_override(name, &app.tab().id, app.focused().unwrap_or(0))
+}
+
 fn border_style(app: &App, active: bool) -> Style {
     let mut s = app.style_of(if active { "pane-active-border-style" } else { "pane-border-style" }, app.active, app.focused());
-    let own = if active { app.look.active_border.is_some() } else { app.look.border.is_some() };
-    if !own && !app.options.tmux_look() {
+    if !border_owned(app, active) && !app.options.tmux_look() {
         let (_, fg, _) = crate::theme::palette();
         s = s.fg(fg);
         if !active { s = s.add_modifier(Modifier::DIM) }
@@ -527,10 +575,11 @@ fn title_line(buf: &mut Buffer, app: &App, id: u64, area: Rect, style: Style) {
 // ── box panes ──
 
 /// Box panes (`@hn-border box`, the default): every pane its own frame in pane-border-lines' box
-/// lines — the accent around the focused one, the attention colour around one whose harness waits
-/// on you (a question, a permission, its input), as the app colours its line; the quiet border
-/// colour elsewhere (or your pane-border-style / pane-active-border-style). The pane's title is
-/// drawn into the frame's top or bottom line as ` title `, in the accent and bold when focused.
+/// lines — the status bar's background colour around the focused one, the attention colour around
+/// one whose harness waits on you (a question, a permission, its input), as the app colours its
+/// line; the quiet border colour elsewhere (or your pane-border-style / pane-active-border-style).
+/// The pane's title is drawn into the frame's top or bottom line as ` title `, in the status bar's
+/// background colour and bold when focused.
 fn boxes(buf: &mut Buffer, app: &App) {
     let tab = app.tab();
     let (canvas, status) = (app.window_area(tab), app.pane_status(tab));
@@ -538,8 +587,8 @@ fn boxes(buf: &mut Buffer, app: &App) {
     let hz = box_set(&lines).4;
     let inner = app.box_inner(tab);
     let frames: Vec<(u64, crate::pane_frame::Frame)> = app.rects.iter().map(|(id, r)| (*id, crate::pane_frame::boxed_in(*r, canvas, inner, status))).filter(|(_, f)| f.content != f.surface).collect();
-    // Each box its own line, in its own colour — boxes side by side touch (`││`), never sharing a
-    // line or joining at a corner.
+    // Each box its own line, in its own colour, never sharing a cell with another (see
+    // `pane_frame::boxed`: `│ │` side by side, touching stacked).
     for (id, f) in &frames {
         let (r, style) = (f.surface, box_style(app, *id));
         let edge: std::collections::HashSet<(u16, u16)> = (r.x..r.right()).flat_map(|x| [(x, r.y), (x, r.bottom() - 1)]).chain((r.y..r.bottom()).flat_map(|y| [(r.x, y), (r.right() - 1, y)])).collect();
@@ -567,120 +616,88 @@ fn boxes(buf: &mut Buffer, app: &App) {
     }
 }
 
-/// A box's frame colour: focused → the accent, waiting on you → the attention colour, else the
-/// quiet border colour; your own pane-(active-)border-style where you set one (and tmux's own
-/// under `@hn-look tmux`, which draws no boxes). The marked pane's frame is bold.
+/// A box's frame colour: focused → the status bar's background colour, waiting on you → the attention
+/// colour, else the quiet border colour; your own pane-(active-)border-style where you set one (and
+/// tmux's own under `@hn-look tmux`, which draws no boxes). The marked pane's frame is bold.
 fn box_style(app: &App, id: u64) -> Style {
     let active = Some(id) == app.focused();
-    let own = if active { app.look.active_border.is_some() } else { app.look.border.is_some() };
-    let style = if own { border_style(app, active) }
-        else if active { Style::default().fg(theme::paint(theme::accent())).add_modifier(if theme::no_color() { Modifier::BOLD } else { Modifier::empty() }) }
+    let style = if border_owned(app, active) { border_style(app, active) }
+        // The focused frame is the status bar's own background colour, so the active pane's box
+        // always sits in the same colour as the bar — not the accent, and not the pane text.
+        else if active { Style::default().fg(theme::paint(app.status_style().bg.unwrap_or(Color::Reset))).add_modifier(if theme::no_color() { Modifier::BOLD } else { Modifier::empty() }) }
         else if app.pane_state(id) == Some(crate::fleet::State::NeedsInput) { Style::default().fg(theme::paint(theme::ATTENTION)) }
         else { Style::default().fg(theme::paint(theme::pane_palette().border)) };
     if app.marked == Some(id) { style.add_modifier(Modifier::BOLD) } else { style }
 }
 
-/// A window with no harness in it: the harnesses you were just with, one key away.
 const WORDMARK: [&str; 2] = ["█ █ ▄▀█ █▀█ █▄ █ █▀▀ █▀ █▀", "█▀█ █▀█ █▀▄ █ ▀█ ██▄ ▄█ ▄█"];
 
-fn empty_window(buf: &mut Buffer, app: &App, area: Rect) {
-    let rows = home_rows(app);
-    let (_, theme_fg, _) = crate::theme::palette();
-    let width = area.width.min(84).saturating_sub(4);
-    let left = area.x + (area.width.saturating_sub(width)) / 2;
-    let compact = area.height < 22;
-    let mut lines: Vec<Line> = Vec::new();
-    if !compact { for w in WORDMARK { lines.push(Line::styled(w, fg(theme::accent()))) } lines.push(Line::raw("")) }
-    else { lines.push(Line::styled("harness", bold(theme::accent()))) }
-    let local = app.fleet.local_machine_name();
-    let up = app.fleet.visible_machines().filter(|m| m.usable()).count();
-    let total = app.fleet.visible_machines().count();
-    let sub = if total > 1 { format!("{local} · {up}/{total} machines connected") } else { local };
-    lines.push(Line::styled(sub, fg(theme::MUTED)));
+fn empty_window(buf: &mut Buffer, app: &mut App, area: Rect) -> Option<Position> {
+    if crate::input::os_home(app) { os_welcome(buf, app, area); None }
+    else { crate::new_harness::draw_welcome(buf, app, area) }
+}
+
+fn os_welcome(buf: &mut Buffer, app: &App, area: Rect) {
+    let mut lines = Vec::new();
+    if area.height >= 24 {
+        for word in WORDMARK { lines.push(Line::styled(word, fg(theme::accent()))) }
+    } else { lines.push(Line::styled("harness", bold(theme::accent()))) }
     lines.push(Line::raw(""));
     let centered = lines.len();
-    if app.daemon_down {
-        lines.push(Line::styled("The Harness daemon is not running here.", bold(theme::DANGER)));
-        lines.push(Line::styled("Run `harness start` — this screen connects by itself.", fg(theme::SOFT)));
-    } else if app.fleet.agents.is_empty() && app.started.elapsed().as_secs() < 3 {
-        lines.push(Line::styled(format!("{} Finding your harnesses…", theme::spinner(app.tick)), fg(theme::SOFT)));
-    } else if rows.is_empty() {
-        lines.push(Line::styled("Nothing running.", fg(theme::SOFT)));
-        let hint = |c: &str| app.keymap.hint(c).unwrap_or_default();
-        lines.push(Line::from(vec![Span::styled(hint("new-harness"), bold(theme::accent())), Span::styled(" starts a harness · ", fg(theme::MUTED)), Span::styled(hint("choose-tree -Zs"), bold(theme::accent())), Span::styled(" opens a paused one", fg(theme::MUTED))]));
-    } else {
-        let many = up > 1;
-        for (index, row) in rows.iter().enumerate() {
-            // A harness as its state says; a conversation Harness did not start as a paused one
-            // would be (nothing running), its folder where the project goes.
-            let (m, dot, color, engine, title, recency, detail) = match row {
-                HomeRow::Harness(m, a) => {
-                    let Some(agent) = app.fleet.agent(m, a) else { continue };
-                    let (dot, _, color) = state_mark(app.fleet.state_of(agent), app.tick);
-                    let detail = agent.question.as_ref().map(|q| (q.prompt.clone(), theme::ATTENTION)).unwrap_or((if agent.project.is_empty() { agent.cwd.clone() } else { agent.project.clone() }, theme::MUTED));
-                    (m.clone(), dot, color, agent.engine.clone(), agent.name.clone(), agent.recency(), detail)
-                }
-                HomeRow::External(x) => {
-                    let (dot, _, color) = state_mark(crate::fleet::State::Paused, app.tick);
-                    let folder = x.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
-                    (x.machine.clone(), dot, color, x.engine.clone(), if x.title.is_empty() { folder.clone() } else { x.title.clone() }, x.last_at, (folder, theme::MUTED))
-                }
-            };
-            let m = &m;
-            let (mark, mark_color) = engine_mark(&engine);
-            // Narrow: the machine goes before the title gives way (then the age).
-            let right = if width < 56 { String::new() } else { format!("{}{}", if many && width >= 70 { format!("{}  ", app.fleet.machine_name(m)) } else { String::new() }, ago(recency)) };
-            let name_w = if width < 56 { (width as usize).saturating_sub(10).min(28) } else { 28 };
-            // Widths are display widths: a CJK or emoji title keeps the columns straight.
-            let name = clip_middle(&title, name_w);
-            let name = format!("{name}{}", " ".repeat(name_w.saturating_sub(name.width())));
-            let detail_room = (width as usize).saturating_sub(name_w + right.width() + 12);
-            let detail_text = clip(&detail.0, detail_room);
-            let used = 2 + 2 + 2 + name_w + 2 + detail_text.width();
-            let pad = (width as usize).saturating_sub(used + right.width());
-            let selected = app.home_moved && index == app.home_cursor;
-            // The chosen row as fzf draws its current line (reverse video where there is no colour).
-            let bg = match (selected, theme::fzf().bw) { (true, true) => Style::default().add_modifier(Modifier::REVERSED), (true, false) => Style::default().bg(theme::fzf().bg_plus), _ => Style::default() };
-            let tint = |c: Color| if c == theme::MUTED || c == theme::SOFT { bg.fg(theme::paint(theme_fg)).add_modifier(Modifier::DIM) } else { bg.fg(theme::paint(c)) };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", index + 1), tint(theme::accent())),
-                Span::styled(format!("{dot} "), tint(color)),
-                Span::styled(format!("{mark} "), tint(mark_color)),
-                Span::styled(format!("{name}  "), bg.fg(theme::paint(theme_fg)).add_modifier(Modifier::BOLD)),
-                Span::styled(detail_text, tint(detail.1)),
-                Span::styled(" ".repeat(pad), bg),
-                Span::styled(right, tint(theme::MUTED)),
-            ]));
-        }
+    let actions = if app.os_live { vec![("Enter", "Install Harness"), ("t", "Try without installing")] }
+        else { vec![("Enter", "Start OpenCode"), ("t", "New terminal"), ("w", "Connect to Wi-Fi")] };
+    for (key, action) in actions {
+        lines.push(Line::from(vec![Span::styled(format!("{key:7}"), bold(theme::accent())), Span::styled(action, bold(theme::TEXT))]));
+        lines.push(Line::raw(""));
     }
     lines.push(Line::raw(""));
-    // Typing here is a shell's (as after tmux's C-b c); the rows by number, or the arrows and Enter;
-    // the rest on the prefix's keys, as everywhere.
-    let hint = |c: &str| app.keymap.hint(c).unwrap_or_default();
-    let keys: Vec<(String, &str)> = vec![("1-9".into(), "open"), ("↑↓ enter".into(), "choose"), ("type".into(), "a shell here"), (hint("choose-tree -Zs"), "harnesses"), (hint("new-harness"), "new"), (hint("choose-tree -a"), "waiting"), (hint("choose-tree -m"), "machines")];
-    let keys: Vec<(String, &str)> = keys.into_iter().filter(|(k, _)| !k.is_empty()).collect();
-    let mut row: Vec<Span> = Vec::new();
-    let mut row_w = 0;
-    for (k, w) in keys {
-        let piece_w = k.width() + w.width() + 4;
-        if row_w + piece_w > width as usize { lines.push(Line::from(std::mem::take(&mut row))); row_w = 0 }
-        row.push(Span::styled(k.clone(), bold(theme::accent())));
-        row.push(Span::styled(format!(" {w}   "), fg(theme::SOFT)));
-        row_w += piece_w;
-    }
-    if !row.is_empty() { lines.push(Line::from(row)) }
-    lines.push(Line::raw(""));
-    let prefix = crate::keys::name(&app.keymap.prefix);
-    lines.push(Line::from(vec![Span::styled(format!("{prefix} ?"), bold(theme::accent())), Span::styled(" every key   ", fg(theme::SOFT)), Span::styled(format!("{prefix} d"), bold(theme::accent())), Span::styled(" detach — everything keeps running", fg(theme::SOFT))]));
+    lines.push(Line::styled("Super+t terminal · Super+w Wi-Fi · Super+b browser", fg(theme::MUTED)));
+    if app.os_live { lines.push(Line::styled("Super+i install", fg(theme::MUTED))) }
+    let width = area.width.saturating_sub(4).min(58);
+    let left = area.x + area.width.saturating_sub(width) / 2;
     let top = area.y + area.height.saturating_sub(lines.len() as u16) / 2;
     for (index, line) in lines.iter().enumerate() {
         let y = top + index as u16;
         if y >= area.y + area.height { break }
-        let w = line.width() as u16;
-        let x = if index < centered { area.x + area.width.saturating_sub(w) / 2 } else { left };
+        let x = if index < centered { area.x + area.width.saturating_sub(line.width() as u16) / 2 } else { left };
         buf.set_line(x, y, line, area.width.saturating_sub(x - area.x));
     }
-    themed_home(buf, area);
+}
+
+#[cfg(test)]
+mod os_welcome_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ordinary_hn_installed_os_and_live_usb_have_separate_homes() {
+        for (width, height) in [(80, 24), (60, 18), (120, 40)] {
+            let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(19789, sink, (width, height));
+            app.handed_over = true;
+            for (os, live) in [(false, false), (false, true), (true, false), (true, true)] {
+                app.os_session = os;
+                app.os_live = live;
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                empty_window(&mut buf, &mut app, area);
+                let text = (0..height).map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+                if !os {
+                    for action in ["Install Harness", "Try without installing", "Wi-Fi", "Super+b"] {
+                        assert!(!text.contains(action), "ordinary hn must not offer {action}: {text}");
+                    }
+                    assert!(text.contains("Task"), "{text}");
+                } else if live {
+                    assert!(text.contains("Enter  Install Harness"), "{text}");
+                    assert!(text.contains("t      Try without installing"), "{text}");
+                    assert!(!text.contains("Nothing running"), "{text}");
+                } else {
+                    assert!(text.contains("Start OpenCode"), "{text}");
+                    assert!(text.contains("New terminal"), "{text}");
+                    assert!(!text.contains("Install Harness"), "{text}");
+                }
+            }
+        }
+    }
 }
 
 // ── a theme over the panes ──
@@ -2950,9 +2967,9 @@ mod theme_render_tests {
         crate::input::modal_key(&mut app, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE));
         crate::input::refill(&mut app);
         let s = screen(&mut app);
-        for v in ["off", "top", "bottom"] { assert!(s.contains(v), "{v} missing after a refresh:\n{s}") }
         let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
-        assert_eq!(picker.theme_in.as_deref(), Some("status"));
+        assert!(picker.rows.iter().all(|r| r.id.starts_with("theme:")), "shows the theme options after a refresh:\n{s}");
+        assert_eq!(picker.theme_in.as_deref(), Some("theme"));
         let _ = modal::theme_sections(&app);
     }
 
@@ -3007,7 +3024,7 @@ mod theme_render_tests {
         assert_eq!(buf[(2, 0)].fg, Color::Rgb(1, 2, 3));
     }
 
-    /// The home screen follows a chosen theme: the wordmark in its accent, the screen on its
+    /// The home screen follows a chosen theme: the task pointer in its accent, the screen on its
     /// background; with no theme, the terminal's own background stays.
     #[test]
     fn the_home_screen_follows_the_theme() {
@@ -3017,7 +3034,7 @@ mod theme_render_tests {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(150, 42)).unwrap();
             term.draw(|f| draw(f, app)).unwrap();
             let buf = term.backend().buffer().clone();
-            (buf[(1, 1)].bg, (0..42).flat_map(|y| (0..150).map(move |x| (x, y))).find(|p| buf[*p].symbol() == "█").map(|p| buf[p].fg))
+            (buf[(1, 1)].bg, (0..42).flat_map(|y| (0..150).map(move |x| (x, y))).find(|p| buf[*p].symbol() == "›").map(|p| buf[p].fg))
         };
         let (plain, _) = bg_at(&mut app);
         assert_eq!(plain, Color::Reset, "no theme: the terminal's own background");
@@ -3025,7 +3042,7 @@ mod theme_render_tests {
         let t = crate::terminal_themes::TERMINAL_THEMES.iter().find(|t| t.name == "Adwaita Dark").unwrap();
         let (themed, logo) = bg_at(&mut app);
         assert_eq!(themed, theme::depth_fit(Color::Rgb(t.background[0], t.background[1], t.background[2])));
-        assert_eq!(logo, Some(theme::depth_fit(theme::accent())), "the wordmark in the theme's accent");
+        assert_eq!(logo, Some(theme::depth_fit(theme::accent())), "the task pointer in the theme's accent");
         let _ = app.set_look("theme", "");
     }
 
@@ -3067,8 +3084,8 @@ mod theme_render_tests {
         let mut app = app();
         let _ = app.set_look("theme", "Aizen Dark");
         crate::input::run(&mut app, "theme");
-        // (Theme is the third section: Pane titles, Focus, Theme.)
-        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right] { crate::input::modal_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE)) }
+        // (Theme is the first section now: the cursor starts on it.)
+        crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         {
             let Some(Modal::Picker { picker, .. }) = &app.modal else { panic!("closed") };
             assert_eq!(picker.current_id().as_deref(), Some("theme:Aizen Dark"), "a section opens on the value in use");
@@ -3239,6 +3256,7 @@ mod theme_render_tests {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = app();
         app.keymap.prefix = crate::keys::parse("`").unwrap();
+        app.tab_mut().root = Some(crate::layout::Node::new(0, 150, 41));
         let key = |app: &mut App, code: KeyCode, mods: KeyModifiers| crate::input::handle(app, Event::Key(KeyEvent::new(code, mods)));
         key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
         assert!(app.prefix, "over the panes, ` is the prefix");
@@ -3301,7 +3319,7 @@ mod theme_render_tests {
         assert!(matches!(kind, PickerKind::Commands));
         assert_eq!(picker.current_id().as_deref(), Some("cmd:keybinds"));
         // Alt-k on a command in the list: the same — a key in use is named first.
-        if let Some(Modal::Picker { picker, .. }) = &mut app.modal { picker.select("cmd:split-down") }
+        if let Some(Modal::Picker { picker, .. }) = &mut app.modal { picker.select("cmd:tab") }
         crate::input::modal_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
         assert!(app.capturing.is_some());
         key(&mut app, KeyCode::Char('n'));

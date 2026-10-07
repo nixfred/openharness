@@ -32,8 +32,8 @@ typedef struct {
     int8_t ox, oy;     // ink box from the pen's x, and from the top of the line
 } ht_glyph_t;
 /*
- * A PROPORTIONAL FACE — the Focus skin's Geist and Montserrat, the LVGL firmware's own fonts copied
- * glyph for glyph (scripts/gen_lvgl_assets.py). It IS an ht_font_t, as its first member, so a run
+ * A PROPORTIONAL FACE — the Focus skin's Inter (scripts/gen_focus_faces.py) and the two Montserrat icon
+ * glyphs copied from the LVGL firmware (scripts/gen_lvgl_assets.py). It IS an ht_font_t, as its first member, so a run
  * carries it like any other font; `first > last` is what marks it, a range no fixed-cell atlas can
  * have. A separate type rather than fields appended to ht_font_t so every fixed-cell atlas keeps its
  * positional initializer. `base.width` is the space's advance and `base.height` the line; pass
@@ -55,17 +55,23 @@ static inline const ht_pfont_t *ht_pfont(const ht_font_t *f)
     return f && f->first > f->last ? (const ht_pfont_t *)f : NULL;
 }
 extern const ht_font_t ht_mono_16, ht_mono_20, ht_mono_24, ht_mono_28, ht_pixel_40;
-// The Focus skin's faces: the LVGL firmware's own (lvgl_fonts.c; see assets/lvgl/SPEC.md).
-extern const ht_pfont_t ht_lv_geist_med_38, ht_lv_geist_med_32, ht_lv_geist_med_28, ht_lv_geist_reg_38,
-    ht_lv_geist_reg_25, ht_lv_geist_reg_20, ht_lv_montserrat_24, ht_lv_montserrat_22, ht_lv_montserrat_14;
-// FontAwesome in LVGL's Montserrat: the bell and the close cross.
+// The Focus skin's icon faces (lvgl_fonts.c; see assets/lvgl/SPEC.md): Montserrat cut down to a space and one
+// FontAwesome symbol each. Every word and number on Focus is Inter (focus_faces.h).
+extern const ht_pfont_t ht_lv_montserrat_22, ht_lv_montserrat_14;
+// FontAwesome in LVGL's Montserrat: the bell (montserrat_14) and the close cross (montserrat_22).
 #define HT_LV_BELL  "\xef\x83\xb3"
 #define HT_LV_CROSS "\xef\x80\x8d"
 // A full-colour icon from the LVGL firmware (lvgl_icons.c): RGB565 in panel order plus alpha.
 typedef struct { uint16_t w, h; const uint16_t *px; const uint8_t *a; } ht_icon_t;
 // A CELL SPRITE (the pets' large scenes, scripts/gen_pets.py): cols x rows cells of `cell` px, one byte
 // each — a palette index, 0 transparent — and the palette in RGB565 panel order, entry 0 unused.
-typedef struct { uint8_t cols, rows, cell; const uint16_t *palette; const uint8_t *cells; } ht_cell_frame_t;
+// Packed when `row_at` is set (owner, 2026-10-06: transparent runs cost bytes): row r starts at cells + row_at[r]
+// and is pairs of (transparent cells to skip, opaque cells that follow) bytes, each pair followed by those cells'
+// indices, until the row's `cols` are covered. Unset, `cells` is the plain cols x rows grid.
+typedef struct { uint8_t cols, rows, cell; const uint16_t *palette; const uint8_t *cells; const uint16_t *row_at; }
+    ht_cell_frame_t;
+// One cell of a frame, plain or packed (0 transparent).
+uint8_t ht_cell_at(const ht_cell_frame_t *frame, int col, int row);
 // The engines' marks in focus.c's ENGINES order: 20 px as the inbox drew them, and 27 px — LVGL's
 // own 28/20 scaling of the same 20 px art, as the header drew it. And the microphone.
 extern const ht_icon_t ht_icon_engine20[14], ht_icon_engine28[14], ht_icon_mic;
@@ -105,10 +111,6 @@ extern const ht_font_t ht_lock_dot;
 // the letters that live outside it (A-breve, D-stroke, O-horn, U-horn and their lowercase).
 // Same fixed cell as the mono face they stand in for; terminal.c routes them in glyph_font().
 extern const ht_font_t ht_viet_16, ht_viet_20, ht_viet_24, ht_viet_28;
-// Roboto Mono for the Focus skin's curved name: 24 px in the same 15 x 32 cell, Vietnamese from the
-// same face (ht_rviet_24, the 0x1EA0 block + tail like ht_viet_24 — one atlas cannot span both ranges).
-extern const ht_font_t ht_rmono_24, ht_rviet_24;
-extern const uint8_t ht_rmono_24_ink[224][4];
 typedef struct {
     int16_t x, y, w, h;
 } ht_rect_t;
@@ -125,7 +127,12 @@ typedef struct {
     // A cell sprite instead of pixels (ht_cell_sprite): width x height px of `cell`-px squares.
     const uint8_t *cells;
     const uint16_t *palette;
+    const uint16_t *row_at;   // packed cells (ht_cell_frame_t), NULL plain
     uint8_t cell;
+    // A cell sprite drawn smaller (ht_cell_sprite_zoom): width x height is the frame's src_w x src_h px times zoom / 8,
+    // each pixel the area-weighted mean of the frame pixels it covers, over black. 0 = drawn at its own size.
+    uint8_t zoom;
+    uint16_t src_w, src_h;
 } ht_sprite_t;
 typedef struct {
     int16_t x, y, w;
@@ -142,9 +149,9 @@ typedef struct {
     // optional 1 px border (border == fill for none), antialiased at the corners. ht_box() makes one.
     struct { uint16_t h, fill, border; uint8_t radius; } box;
     // A RING (nixfred): an antialiased annulus, or an arc of one, centred on x, y, drawn in `fg` when
-    // `ring.outer` is set. Angles are in 1/4096 of a turn, 0 at 12 o'clock, clockwise; a sweep of 4096
+    // `nring.outer` is set. Angles are in 1/4096 of a turn, 0 at 12 o'clock, clockwise; a sweep of 4096
     // (or more) is the whole ring. ht_ring() makes one. Integer only, no tables beyond one quarter sine.
-    struct { uint16_t inner, outer, start, sweep; } ring;
+    struct { uint16_t inner, outer, start, sweep; } nring;
     // A proportional arc label's tight bounds, set once by ht_arc_*_face (`ink` 1) from its text and
     // place, so equal runs hold equal bounds; ht_run_bounds returns them.
     uint8_t ink;
@@ -153,6 +160,11 @@ typedef struct {
     // the text is drawn at gain[i] / 255 of its coverage, a glyph past HT_ARC_GAINS at full.
     uint8_t gained;
     uint8_t gain[16];
+    uint8_t arc_mid;   // a proportional arc label's face's `mid`, copied by ht_arc_*_face (0 = the default)
+    // A RING ARC rather than text when `ring.set`: a band `w16` wide around radius `r16` from the centre
+    // (cx16, cy16), over the angles mid +- half, in sixteenths of a pixel; (ux, uy) is the unit vector of mid
+    // and `cosh` the cosine of half, all Q14 (y up). `w16` 0 draws nothing. ht_ring_arc() makes one.
+    struct { uint8_t set; uint16_t colour, r16, w16; int16_t cx16, cy16, ux, uy, cosh; } ring;
 } ht_run_t;
 typedef struct {
     uint16_t background;
@@ -179,13 +191,24 @@ void ht_center(ht_scene_t *scene, int y, const ht_font_t *font, uint16_t fg, con
 bool ht_icon(ht_scene_t *scene, int x, int y, const ht_icon_t *icon);
 // A cell sprite (ht_cell_frame_t) as one run; its frame pointer is what ht_damage compares.
 bool ht_cell_sprite(ht_scene_t *scene, int x, int y, const ht_cell_frame_t *frame);
+// The frame at zoom / 8 of its size (1..8; 8 = ht_cell_sprite), box-filtered so one picture drawn large reads sharp at
+// every smaller size (the pets: one 2x drawing shown at 1x, 1.5x, 1.75x and 2x). Edges darken toward the black ground,
+// as the art's own anti-aliasing does; a pixel less than a quarter covered is left as it was.
+bool ht_cell_sprite_zoom(ht_scene_t *scene, int x, int y, const ht_cell_frame_t *frame, unsigned zoom);
 // A rounded box — the Focus skin's pills and cards. Colours are already mixed over what they sit on.
 bool ht_box(ht_scene_t *scene, int x, int y, int w, int h, int radius, uint16_t fill, uint16_t border);
-// A ring or arc (nixfred graphics): see ht_run_t.ring. `sweep` >= HT_TURN draws the whole annulus.
+// A ring or arc (nixfred graphics): see ht_run_t.nring. `sweep` >= HT_TURN draws the whole annulus.
 enum { HT_TURN = 4096 };
 bool ht_ring(ht_scene_t *scene, int cx, int cy, int inner, int outer, int start, int sweep, uint16_t color);
 // A one-colour ALPHA MASK drawn in `color`: the sprite path with no pixel array (nixfred logo).
 bool ht_mask(ht_scene_t *scene, int x, int y, int w, int h, const uint8_t *alpha, uint16_t color);
+// A RING ARC — a piece of a circle's band, drawn in one colour (already mixed over the ground), anti-aliased
+// across the band, hard at its two ends. The centre, radius and width are in sixteenths of a pixel; the span
+// is `mid_deg` +- `half_deg` whole degrees, counted anticlockwise from 3 o'clock (0 = right, 180 = left).
+// `width16` 0 makes an empty placeholder (nothing drawn, no bounds) that keeps the run's slot: its place
+// (the centre) never depends on the radius, so a ring that comes and goes does not reshape the damage.
+bool ht_ring_arc(ht_scene_t *scene, int cx16, int cy16, int radius16, int width16, int mid_deg, int half_deg,
+                 uint16_t colour);
 // PROPORTIONAL TEXT. The width `text` would take in `font` (mono: glyphs x width). A line of it that
 // fits `width` px, breaking after a word where it can (the cursor moves past the spaces it ends on).
 // And `text` fitted to `width`: whole if it fits, else as much as does and "…"; returns its width.
@@ -214,19 +237,27 @@ typedef struct {
     // out by advance and kerning in 1/16 px and each glyph stands upright at its own place on the curve.
     // The curved run's font is this face's base, as it is the mono atlas for the other faces.
     const ht_pfont_t *prop;
+    // A proportional face's mid-caps offset above the baseline on the curve, px; 0 = terminal.c's
+    // ARC_PROP_MID. Inter's taller stacked marks need it larger (focus_faces.c).
+    uint8_t mid;
+    // A proportional label too long for the span ends at a word with no "…" (the Focus name: owner,
+    // 2026-10-03); false keeps the "…".
+    bool bare;
 } ht_arc_face_t;
-extern const ht_arc_face_t ht_arc_geist, ht_arc_roboto;
-// Geist Medium 26 on the same arcs (focus_faces.c, which holds the face): the Focus name and status.
-extern const ht_arc_face_t ht_arc_geist_prop;
+extern const ht_arc_face_t ht_arc_geist;
+// Inter Medium 26 on the same arcs (focus_faces.c, which holds the face): ht_arc_inter_prop is the Focus
+// name on the upper arc; ht_arc_inter_lower the lower-arc status and the Listening sweep.
+extern const ht_arc_face_t ht_arc_inter_prop, ht_arc_inter_lower;
 // The arc length a proportional label may span, in px: the 26 cells the mono arcs allow.
 enum { HT_ARC_SPAN = HT_ARC_COLS * HT_ARC_CELL_WIDTH };
 void ht_arc_title(ht_scene_t *scene, uint16_t fg, const char *text);
 void ht_arc_title_face(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face);
-// The lower arc, in GeistMono; ht_arc_status_face takes any face, like ht_arc_title_face.
+// The lower arc, in GeistMono (the non-Focus skins); ht_arc_status_face takes any face, like ht_arc_title_face.
 void ht_arc_status(ht_scene_t *scene, uint16_t fg, const char *text);
 void ht_arc_status_face(ht_scene_t *scene, uint16_t fg, const char *text, const ht_arc_face_t *face);
 // What `text` takes of the arc in `face`, in px of arc length (a proportional face rounds up; fits when
-// <= HT_ARC_SPAN). A proportional title or status longer than that ends at a word and "…".
+// <= HT_ARC_SPAN). A proportional title or status longer than that ends at a word and "…" (no "…"
+// for a `bare` face).
 int ht_arc_measure(const ht_arc_face_t *face, const char *text);
 // The lower arc with a brightness per glyph (the voice screen's "Listening" sweep): `gain` is
 // HT_ARC_GAINS entries, 0..255 for each glyph of `text` in order (the glyph's coverage scales by it; the

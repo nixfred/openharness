@@ -3,12 +3,13 @@ import { execFileSync } from 'node:child_process'
 import { PROCESS_ENGINES } from '../engines/types.js'
 import { ENGINE_INSTALL } from './engineInstall.js'
 import { buildEngineLaunchArgv } from './engineLaunch.js'
+import { launchScriptOf } from '../testing/launchScript.js'
 
 const OFFICIAL_COMMANDS = {
   claude: 'npm install -g @anthropic-ai/claude-code',
   codex: 'npm install -g @openai/codex',
   cursor: 'curl https://cursor.com/install -fsS | bash',
-  opencode: 'npm install -g opencode-ai',
+  opencode: 'curl -fsSL https://opencode.ai/install | bash',
   pi: 'npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
   hermes: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash',
   commandcode: 'npm i -g command-code',
@@ -41,11 +42,12 @@ describe('ENGINE_INSTALL', () => {
 
   it('generates valid POSIX pane scripts for every recipe', () => {
     for (const engine of PROCESS_ENGINES) {
-      const script = buildEngineLaunchArgv(
+      const script = launchScriptOf(buildEngineLaunchArgv(
         engine,
         { installIfMissing: ENGINE_INSTALL[engine] },
         '/bin/sh',
-      )[2]
+      ))
+      expect(script).toContain('harness_find_engine')
       expect(() => execFileSync('/bin/sh', ['-n', '-c', script])).not.toThrow()
     }
   })

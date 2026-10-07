@@ -2,8 +2,8 @@
  * Find the session a live discovered engine process is running, when no hook has bound one yet.
  *
  * Process discovery can see an engine immediately, including after a daemon restart, but a session id is
- * owned by the engine and may not be present in argv. Ask the engine's own store which session belongs to
- * that pane's directory and process start time.
+ * owned by the engine and may not be present in argv. Prefer the engine's process evidence; when no
+ * exact process lookup applies, narrow the engine's store by directory and process start time.
  *
  * Two rules keep it honest:
  *   - **Started after the engine process did.** A session older than the process cannot be the one it is
@@ -14,8 +14,9 @@
  *     unbound until its next turn, which is recoverable — mis-binding is not.
  */
 
-import { open, readdir, readFile, realpath, stat } from 'fs/promises'
-import { basename, dirname, join, sep } from 'path'
+import { execFile } from 'child_process'
+import { open, readdir, readFile, readlink, realpath, stat } from 'fs/promises'
+import { basename, dirname, join, relative, sep } from 'path'
 import { env } from '../config/env.js'
 import { museEvent, museWorkspaceRoot } from '../engines/muse/normalizer.js'
 import type { AgentEngine } from '../engines/types.js'
@@ -25,6 +26,9 @@ import { copilotSessionCwd, copilotSessionForPid, findCopilotTranscript } from '
 import { hermesDbPath, listHermesHomes } from '../engines/hermes/home.js'
 import { sqlitePreflightMessage } from './sqliteAvailability.js'
 import { sqliteReadAll, type SqliteParam } from './sqliteRead.js'
+import { piSessionFolder, readPiHead } from './sessionSearch/externals/pi.js'
+import { claudeProjectsRoots, codexHomeRoots } from './engineHomes.js'
+import { argvTokens, engineProcessMatchScore, processRows, type ProcessRow } from './tmux.js'
 
 /**
  * Clock granularity only. `ps` reports start time to the second, so a file created in the same second
@@ -77,18 +81,62 @@ async function transcripts(root: string, depth = 0): Promise<TranscriptFile[]> {
  * line one; scanning a few lines covers all three without knowing which is which.
  */
 const CWD_SCAN_LINES = 20
+const CWD_SCAN_CHARS = 256 * 1024
 
-async function readTranscriptMeta(path: string): Promise<TranscriptMeta | null> {
+/**
+ * The first `cwd` in a transcript's head and, when asked, its opening `isSidechain` flag. One bounded read
+ * (256 KB — transcripts run to hundreds of MB) shared by every file engine that declares its cwd in-file.
+ * Without `wantSide` it stops at the first cwd, exactly as it always did.
+ */
+async function readTranscriptHead(path: string, wantSide: boolean): Promise<{ cwd: string; side: boolean | undefined } | null> {
   try {
-    const head = (await readFile(path, 'utf-8')).slice(0, 256 * 1024)
+    // Preserve the existing UTF-16 character budget, including non-ASCII paths. Four
+    // UTF-8 bytes per code unit is sufficient even when the cutoff splits a surrogate
+    // pair; a byte budget equal to the character budget would silently shrink the scan.
+    const head = (await headBytes(path, CWD_SCAN_CHARS * 4)).toString('utf-8').slice(0, CWD_SCAN_CHARS)
+    let cwd = ''
+    let side: boolean | undefined
     for (const line of head.split('\n', CWD_SCAN_LINES)) {
       if (!line.trim()) continue
       let obj: Record<string, unknown>
       try { obj = JSON.parse(line) as Record<string, unknown> } catch { continue }
-      if (typeof obj.cwd === 'string' && obj.cwd) return { cwd: obj.cwd }
+      if (!cwd && typeof obj.cwd === 'string' && obj.cwd) cwd = obj.cwd
+      if (wantSide && side === undefined && typeof obj.isSidechain === 'boolean') side = obj.isSidechain
+      if (cwd && (!wantSide || side !== undefined)) break
     }
-    return null
+    return { cwd, side }
   } catch { return null }
+}
+
+async function readTranscriptMeta(path: string): Promise<TranscriptMeta | null> {
+  const head = await readTranscriptHead(path, false)
+  return head?.cwd ? { cwd: head.cwd } : null
+}
+
+/**
+ * `readTranscriptMeta` for Claude, which also refuses a SUBAGENT transcript.
+ *
+ * Claude's subagents (the Task tool, background agents) write transcripts of their own in the same project
+ * directory tree, and a scan by directory cannot tell them from a conversation. Two layouts exist:
+ *
+ *   <projects>/<proj>/<parentSession>/subagents/agent-<id>.jsonl   (current)
+ *   <projects>/<proj>/agent-<id>.jsonl                             (older builds)
+ *
+ * Both open with `{type:'user', isSidechain:true, cwd, sessionId:<parent>}` — the cwd and the PARENT's
+ * session id — whereas a main transcript carries `isSidechain:false`. Left in the scan, the youngest
+ * subagent file of a parent that is still running was picked as the session of the agent born next to it
+ * (a fork): the sweep bound the fork to its parent's subagent, and Stop capture then recorded that id.
+ * So: a path with a `subagents` segment below the projects root is out before it is read, and so is a
+ * file whose FIRST record carrying a boolean `isSidechain` says true. Later records are not consulted for
+ * the flag — a main transcript can hold sidechain records, and only its opening says what the file is.
+ */
+async function readClaudeTranscriptMeta(path: string): Promise<TranscriptMeta | null> {
+  // Relative to the projects root it is under (the daemon's own, or a moved home's): the root itself may
+  // legitimately sit under a folder of that name.
+  const root = claudeProjectsRoots(env.CLAUDE_PROJECTS_DIR).find((one) => !relative(one, path).startsWith('..'))
+  if (root !== undefined && relative(root, path).split(sep).includes('subagents')) return null
+  const head = await readTranscriptHead(path, true)
+  return head && head.side !== true && head.cwd ? { cwd: head.cwd } : null
 }
 
 /** Session id from `<id>.jsonl`, or from pi's `<timestamp>_<id>.jsonl`. */
@@ -144,7 +192,7 @@ function hasRun(lines: string[]): boolean {
 }
 
 async function fileEngineSession(
-  root: string,
+  root: string | string[],
   cwd: string,
   startedAtMs: number,
   readMeta: (path: string) => Promise<TranscriptMeta | null>,
@@ -153,7 +201,10 @@ async function fileEngineSession(
   const since = startedAtMs - START_SLACK_MS
   const born: RepairedSession[] = []
   const wrote: RepairedSession[] = []
-  for (const file of await transcripts(root)) {
+  // Several roots are one pool, newest first: one conversation in each of two homes is two agents, as in one.
+  const files = typeof root === 'string' ? await transcripts(root)
+    : (await Promise.all(root.map((one) => transcripts(one)))).flat().sort((a, b) => b.mtimeMs - a.mtimeMs)
+  for (const file of files) {
     if (file.mtimeMs < since) break // sorted newest-first: everything after is older still
     const meta = await readMeta(file.path)
     if (!meta?.cwd || !await sameDir(meta.cwd, cwd)) continue
@@ -245,18 +296,28 @@ export async function findLiveSession(
     case 'claude': {
       // Native Claude publishes a PID-to-conversation record even before a hook binds it.
       // Unlike a directory scan this also identifies an old process in a busy project.
+      // Every home, the moved ones too (lib/engineHomes.ts): the default alone left an agent in a moved
+      // CLAUDE_CONFIG_DIR whose start-up hook did not bind it without a conversation.
       const exact = opts?.pid ? await claudeProcessSession(opts.pid, cwd, startedAtMs) : null
-      return exact ?? fileEngineSession(env.CLAUDE_PROJECTS_DIR, cwd, startedAtMs, readTranscriptMeta, opts)
+      return exact ?? fileEngineSession(claudeProjectsRoots(env.CLAUDE_PROJECTS_DIR), cwd, startedAtMs, readClaudeTranscriptMeta, opts)
     }
-    case 'codex':
+    case 'codex': {
+      // The agent's own profile alone, else the daemon's home and every one the person moved, as
+      // findResumedTranscript looks: the default alone missed a rollout in a moved CODEX_HOME.
+      const sessions = (opts?.codexHome ? [opts.codexHome] : codexHomeRoots(env.CODEX_HOME)).map((home) => join(home, 'sessions'))
+      // October 6 parallel-create incident: the only rollout in a folder can belong to a sibling
+      // whose file opened first. A known Codex process must name its own open rollout; until then,
+      // leave it unbound for its next discovery pass or startup hook, never guess from the folder.
+      if (opts?.pid) return codexProcessSession(opts.pid, sessions, cwd)
       // Codex writes no `cwd` on line one; its rollout meta carries it — and says whether the rollout
       // belongs to a subagent, which must never become an agent of its own.
       // Its session id lives INSIDE the file: the name is `rollout-<timestamp>-<id>.jsonl`, so deriving
       // the id from the filename produced the literal string "rollout-…" (seen on a live pane).
-      return fileEngineSession(join(opts?.codexHome || env.CODEX_HOME, 'sessions'), cwd, startedAtMs, async (path) => {
+      return fileEngineSession(sessions, cwd, startedAtMs, async (path) => {
         const meta = readCodexRolloutMeta(path)
         return meta && !meta.isSubagent ? { cwd: meta.cwd, sessionId: meta.id || undefined } : null
       }, opts)
+    }
     case 'pi':
       return fileEngineSession(join(env.PI_HOME, 'agent', 'sessions'), cwd, startedAtMs, readTranscriptMeta, opts)
     case 'commandcode':
@@ -411,14 +472,19 @@ const CLAUDE_CONTINUATION_TAIL_BYTES = 4 * 1024
  *  lines of the top — the records before it are bookkeeping (mode, file history, title, agent name). */
 const CLAUDE_CONTINUATION_HEAD_BYTES = 256 * 1024
 
-async function headBytes(path: string, maxBytes: number): Promise<string> {
+async function headBytes(path: string, maxBytes: number): Promise<Buffer> {
   const handle = await open(path, 'r')
   try {
     const length = Math.min((await handle.stat()).size, maxBytes)
-    if (length <= 0) return ''
+    if (length <= 0) return Buffer.alloc(0)
     const buffer = Buffer.alloc(length)
-    await handle.read(buffer, 0, length, 0)
-    return buffer.toString('utf-8')
+    let read = 0
+    while (read < length) {
+      const { bytesRead } = await handle.read(buffer, read, length - read, read)
+      if (!bytesRead) break
+      read += bytesRead
+    }
+    return buffer.subarray(0, read)
   } finally {
     await handle.close()
   }
@@ -438,13 +504,13 @@ async function headBytes(path: string, maxBytes: number): Promise<string> {
  * these two lines and no turn.
  */
 async function hasConversationTurn(path: string): Promise<boolean> {
-  let head: string
+  let head: Buffer
   try {
     head = await headBytes(path, CLAUDE_CONTINUATION_HEAD_BYTES)
   } catch {
     return false
   }
-  for (const line of head.split('\n')) {
+  for (const line of head.toString('utf-8').split('\n')) {
     if (!line.trim() || (!line.includes('"user"') && !line.includes('"assistant"'))) continue
     try {
       const record = JSON.parse(line) as { type?: unknown }
@@ -454,6 +520,8 @@ async function hasConversationTurn(path: string): Promise<boolean> {
   // Nothing in the head, but more file than we read: a continuation can open on a `file-history-snapshot`
   // large enough to push the first turn past the bound, and the thing being ruled out is two short
   // lines. Anything this size is a conversation, so the bound must never be what refuses one.
+  // Count the bytes read, not decoded UTF-16 characters: Unicode bookkeeping must not make
+  // a read that hit the byte cap look smaller and strand the real turn beyond it.
   return head.length >= CLAUDE_CONTINUATION_HEAD_BYTES
 }
 
@@ -511,27 +579,130 @@ export async function claudeContinuation(transcriptPath: string): Promise<Repair
 export async function findResumedTranscript(
   engine: AgentEngine,
   sessionId: string,
-  opts?: { codexHome?: string },
+  opts?: { codexHome?: string; cwd?: string },
 ): Promise<string | null> {
+  if (engine === 'pi') {
+    // Pi allocates an ID before its first reply creates the file. Look up that
+    // exact ID again at Close, including after exit, without guessing by mtime.
+    if (!opts?.cwd || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$/.test(sessionId)
+      || sessionId.endsWith('.jsonl')) throw new Error('The Pi conversation location is unavailable.')
+    const directory = join(env.PI_HOME, 'agent', 'sessions', piSessionFolder(opts.cwd))
+    let files: string[]
+    try { files = await readdir(directory) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error // An unreadable store is not an unwritten conversation.
+    }
+    const matches: string[] = []
+    for (const file of files.filter(file => file.endsWith(`_${sessionId}.jsonl`))) {
+      const head = await readPiHead(join(directory, file))
+      if (!head || typeof head === 'symbol') throw new Error('The Pi conversation file could not be read.')
+      if (head.sessionId === sessionId && await sameDir(head.cwd, opts.cwd)) matches.push(file)
+    }
+    if (matches.length > 1) throw new Error('More than one file matches this Pi conversation.')
+    return matches.length ? join(directory, matches[0]) : null
+  }
   if (!/^[0-9a-f-]{16,}$/i.test(sessionId)) return null
-  if (engine === 'codex') return resolveCodexRollout(sessionId, join(opts?.codexHome || env.CODEX_HOME, 'sessions'))
+  // In every home the registry takes a transcript from (registry.validTranscriptPath): the daemon's own and
+  // each one the person moved in their shell profile (lib/engineHomes.ts), or an agent's own Codex profile
+  // alone. Only the default folders were looked in, so a resume typed into a pane for a conversation in a
+  // moved home found no file and never bound, though the registry would have taken it.
+  if (engine === 'codex') {
+    for (const home of opts?.codexHome ? [opts.codexHome] : codexHomeRoots(env.CODEX_HOME)) {
+      const found = resolveCodexRollout(sessionId, join(home, 'sessions'))
+      if (found) return found
+    }
+    return null
+  }
   if (engine !== 'claude') return null
-  let projects: string[]
-  try { projects = await readdir(env.CLAUDE_PROJECTS_DIR) } catch { return null }
-  for (const project of projects) {
-    const candidate = join(env.CLAUDE_PROJECTS_DIR, project, `${sessionId}.jsonl`)
-    try {
-      if ((await stat(candidate)).isFile()) return candidate
-    } catch { /* not this project */ }
+  for (const root of claudeProjectsRoots(env.CLAUDE_PROJECTS_DIR)) {
+    let projects: string[]
+    try { projects = await readdir(root) } catch { continue }
+    for (const project of projects) {
+      const candidate = join(root, project, `${sessionId}.jsonl`)
+      try {
+        if ((await stat(candidate)).isFile()) return candidate
+      } catch { /* not this project */ }
+    }
   }
   return null
 }
 
 /** Claude's native process record is removed at exit; capture it before Stop signals the engine. */
+/** The files a process holds open: `/proc` on Linux, `lsof` elsewhere. Empty when neither can say. */
+export async function openFiles(pid: number): Promise<string[]> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return []
+  if (process.platform === 'linux') {
+    const fds = await readdir(`/proc/${pid}/fd`).catch(() => [] as string[])
+    const paths = await Promise.all(fds.map((fd) => readlink(`/proc/${pid}/fd/${fd}`).catch(() => null)))
+    return paths.filter((path): path is string => !!path && path.startsWith('/'))
+  }
+  const stdout = await new Promise<string>((resolve) => {
+    // `-Fn`: one `n<path>` line per open file. A process that is gone answers nothing.
+    execFile('lsof', ['-n', '-P', '-p', String(pid), '-Fn'], { timeout: 3_000 }, (_error, out) => resolve(out ?? ''))
+  })
+  return stdout.split('\n').filter((line) => line.startsWith('n/')).map((line) => line.slice(1))
+}
+
+/** The rollout may be held by the native child of npm's Node launcher, not the launcher itself.
+ *  October 6 ownership E2E: removing the folder guess exposed that distinction for a manually started
+ *  Codex with no hook. Read only one direct Codex child of a Node launcher, never a nested tool. */
+export async function codexProcessFiles(
+  pid: number,
+  files: typeof openFiles = openFiles,
+  processes: () => Promise<readonly Pick<ProcessRow, 'pid' | 'parentPid' | 'executable' | 'args'>[] | null> = processRows,
+): Promise<string[]> {
+  const own = await files(pid)
+  if (own.some(path => /rollout-[^/]*\.jsonl$/.test(path))) return own
+  const rows = await processes()
+  const wrapper = rows?.find(row => row.pid === pid)
+  if (!wrapper || ![wrapper.executable, argvTokens(wrapper.args)[0] ?? '']
+    .some(path => /^node(?:js)?$/.test(basename(path)))) return own
+  const children = rows!.filter(row => row.parentPid === pid && engineProcessMatchScore(row, 'codex') > 0)
+  return children.length === 1 ? [...own, ...await files(children[0].pid)] : own
+}
+
+/**
+ * The conversation a Codex process is writing: the rollout it holds open.
+ *
+ * The one way to name a fork's conversation when its start-up hook was lost (a daemon restart in its
+ * first second). `codex fork <id>` names only its source in argv, and a fork shares its source's
+ * folder with every sibling started near it, so a scan of that folder finds them all and must refuse
+ * to guess — the fork stayed without a conversation for good (e2e/chaos.e2e.ts).
+ */
+export async function codexProcessSession(
+  pid: number,
+  sessionsRoot: string | string[],
+  cwd: string,
+  files: (pid: number) => Promise<string[]> = codexProcessFiles,
+): Promise<RepairedSession | null> {
+  const roots = await Promise.all((typeof sessionsRoot === 'string' ? [sessionsRoot] : sessionsRoot)
+    .map((one) => realpath(one).catch(() => one)))
+  const found = new Map<string, RepairedSession>()
+  for (const path of await files(pid)) {
+    if (!/rollout-[^/]*\.jsonl$/.test(path)) continue
+    const real = await realpath(path).catch(() => path)
+    if (!roots.some((root) => real.startsWith(`${root}${sep}`))) continue
+    const meta = readCodexRolloutMeta(real)
+    if (!meta || meta.isSubagent || !meta.id || !meta.cwd || !await sameDir(meta.cwd, cwd)) continue
+    found.set(real, { sessionId: meta.id, transcriptPath: real })
+  }
+  return found.size === 1 ? [...found.values()][0] : null
+}
+
 export async function claudeProcessSession(pid: number, cwd: string, startedAtMs: number): Promise<RepairedSession | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(startedAtMs)) return null
+  // `<home>/sessions/<pid>.json` in a moved CLAUDE_CONFIG_DIR too (lib/engineHomes.ts): the default alone
+  // was read, so a process in a moved home was never named by its own record.
+  for (const projects of claudeProjectsRoots(env.CLAUDE_PROJECTS_DIR)) {
+    const found = await claudeProcessRecord(join(dirname(projects), 'sessions', `${pid}.json`), pid, cwd, startedAtMs)
+    if (found) return found
+  }
+  return null
+}
+
+async function claudeProcessRecord(file: string, pid: number, cwd: string, startedAtMs: number): Promise<RepairedSession | null> {
   try {
-    const record = JSON.parse(await readFile(join(dirname(env.CLAUDE_PROJECTS_DIR), 'sessions', `${pid}.json`), 'utf8'))
+    const record = JSON.parse(await readFile(file, 'utf8'))
     // procStart is UTC in current Claude, while older builds used the host's local ps format.
     // Both represent the exact second, not the metadata file's modification time or a recycled PID.
     if (record.pid !== pid || typeof record.procStart !== 'string'

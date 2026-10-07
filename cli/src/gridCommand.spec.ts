@@ -17,10 +17,10 @@ import { tmpdir } from 'os'
 import { delimiter, join } from 'path'
 import { fileURLToPath } from 'url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { useBundledCli } from './__fixtures__/bundledCli.js'
 
 const CLI_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const CLI_SOURCE = join(CLI_ROOT, 'src', 'cli.ts')
-const TSX = join(CLI_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+const cli = useBundledCli()
 const dirs: string[] = []
 const servers: Server[] = []
 
@@ -166,7 +166,7 @@ type Run = { status: number | null; stdout: string; stderr: string }
  *  would produce the same shorter stdout, so the flake would make the real failure look like noise. */
 function run(root: string, args: string[], backendUrl?: string, extra: NodeJS.ProcessEnv = {}, grid: GridOnPath = 'runnable'): Promise<Run> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [TSX, CLI_SOURCE, ...args], {
+    const child = spawn(process.execPath, [cli(), ...args], {
       cwd: CLI_ROOT,
       env: envFor(root, backendUrl, extra, grid),
     })
@@ -353,7 +353,7 @@ describe('harness grid login — a signed-out computer', () => {
       resolveComputer: () => ({ machine: { machineId: 'm_new' } }),
     })
 
-    const child = spawn(process.execPath, [TSX, CLI_SOURCE, 'grid', 'login', '--json'], {
+    const child = spawn(process.execPath, [cli(), 'grid', 'login', '--json'], {
       cwd: CLI_ROOT,
       env: envFor(root, base),
     })
@@ -581,7 +581,7 @@ describe('harness grid login — the sign-in half it inherits', () => {
       resolveComputer: () => ({ machine: { machineId: 'm_seeded' } }),
     })
 
-    const child = spawn(process.execPath, [TSX, CLI_SOURCE, 'grid', 'login', '--force', '--json'], {
+    const child = spawn(process.execPath, [cli(), 'grid', 'login', '--force', '--json'], {
       cwd: CLI_ROOT,
       env: envFor(root, base),
     })
@@ -761,6 +761,43 @@ describe('harness grid logout', () => {
     // present-but-unrunnable file answers EACCES, which it does not.
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('PATH')
+  }, 20_000)
+})
+
+describe('harness grid env', () => {
+  it('prints the grid\'s exports from the harness\'s own grid, for a shell to eval', async () => {
+    const root = tempRoot()
+    seedSession(root)
+    const exports = "export OPENAI_BASE_URL='https://relay.example/g/1/relay/v1'\nexport OPENAI_API_KEY='k'\n"
+
+    const result = await run(root, ['grid', 'env', 'team grid'], 'http://127.0.0.1:1', { FAKE_GRID_STDOUT: exports })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(exports)
+    expect(readRecord(root).args).toEqual(['--remote', 'info', 'team grid', '--env'])
+  }, 20_000)
+
+  it('carries the grid\'s refusal out in its own words and exit code', async () => {
+    const root = tempRoot()
+    seedSession(root)
+
+    const result = await run(root, ['grid', 'env', 'home'], 'http://127.0.0.1:1',
+      { FAKE_GRID_EXIT: '1', FAKE_GRID_STDERR: 'Unknown grid home.\n' })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Unknown grid home.')
+    expect(result.stdout).toBe('')
+  }, 20_000)
+
+  it('asks for a grid, and never passes a flag to grid as one', async () => {
+    const root = tempRoot()
+    seedSession(root)
+
+    for (const args of [['grid', 'env'], ['grid', 'env', '--help']]) {
+      const result = await run(root, args, 'http://127.0.0.1:1')
+      expect(result.status).toBe(2)
+      expect(result.stderr).toContain('Usage: harness grid env <grid>')
+    }
   }, 20_000)
 })
 

@@ -93,6 +93,7 @@ describe('the rest of a Codex home', () => {
     const quoted = { type: 'event_msg', payload: { type: 'agent_message', phase: 'task_started' } }
     expect(await codexTurnOpen(file('quoted', [event('task_complete'), quoted]))).toBe(false)
     expect(await codexTurnOpen(join(dir, 'gone.jsonl'))).toBe(true)
+    expect(await codexTurnOpen(join(dir, 'gone.jsonl'), null)).toBeNull()
     // Too far back to be read: busy, the safe answer.
     expect(await codexTurnOpen(file('long', [event('task_complete'), { type: 'response_item', payload: { big: 'x'.repeat(5 * 1024 * 1024) } }]))).toBe(true)
   })
@@ -116,6 +117,9 @@ describe('codexProvider', () => {
       [D, 'codex-app', ''],
     ].sort())
     expect(found.find((s) => s.sessionId === C)).toMatchObject({ engine: 'codex', transcriptPath: live, mtime: Date.parse('2026-09-25T00:00:00Z') })
+    // An archived one is found, to read, and says so: Codex resumes it only once `codex unarchive` puts it back.
+    expect(found.find((s) => s.sessionId === C)).not.toHaveProperty('archived')
+    expect(found.find((s) => s.sessionId === D)).toMatchObject({ archived: true })
   })
 
   it('knows its owners from the rollouts Codex processes hold open, and asks their rollout about the turn', async () => {

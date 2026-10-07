@@ -7,6 +7,7 @@
 //   - nothing lands outside the glass and the face fits the run budget with the ring on it.
 #include "../main/ui/habitat/terminal.h"
 #include "../main/ui/habitat/nixfred_art.h"
+#include "../main/ui/habitat/focus_faces.h"
 #include "../main/ui/habitat/character.h"
 #include <assert.h>
 #include <stdio.h>
@@ -130,7 +131,7 @@ int main(void)
     // rule, tested in test_touch_ui); this shows Fred the same feedback on the red ring.
     ht_scene_clear(&a, BLACK);
     nixfred_attention(&a, true, "", P.yellow, P.red, INK);
-    centre(&a, 200, &ht_lv_geist_reg_20.base, INK, "Run the migration?");
+    centre(&a, 200, &ht_lv_inter_20.base, INK, "Run the migration?");
     nixfred_hold_rim(&a, 600, P.accent);
     assert(a.count <= HT_RUNS);
     render(&a);

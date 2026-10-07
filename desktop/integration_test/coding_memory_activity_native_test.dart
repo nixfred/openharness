@@ -147,6 +147,40 @@ void main() {
             shot.dispose();
           }
         }
+        connection.runtime = {
+          'state': 'ready',
+          'learning': {
+            'state': 'waiting_for_model',
+            'reason': 'inference_provider_restricted',
+          },
+        };
+        await library.refresh();
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('provider declined background learning'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Choose another model'), findsOneWidget);
+        expect(connection.learn, isTrue);
+        expect(connection.recall, isTrue);
+        expect(
+          connection.calls.where((p) => p['action'] == 'apply'),
+          hasLength(1),
+        );
+        if (directory != null) {
+          final shot =
+              await (boundary.currentContext!.findRenderObject()
+                      as RenderRepaintBoundary)
+                  .toImage(pixelRatio: 1);
+          try {
+            final bytes = await shot.toByteData(format: ui.ImageByteFormat.png);
+            await File(
+              '$directory/provider-refusal-native-${brightness.name}.png',
+            ).writeAsBytes(bytes!.buffer.asUint8List());
+          } finally {
+            shot.dispose();
+          }
+        }
         expect(tester.takeException(), isNull);
       },
     );

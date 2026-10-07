@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /usr/lib/harness-os/screen-action wifi

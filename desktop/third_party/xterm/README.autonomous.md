@@ -13,6 +13,20 @@ fix and the regression in `test/terminal_session_test.dart` passes against it.
 
 ## Local patches
 
+- **Single-byte output avoids a code-point list copy**
+  (`lib/src/utils/byte_consumer.dart`). On native runtimes, Latin-1 strings use
+  their immutable code-unit view, whose entries already equal their Unicode
+  code points.
+  Wider text and browser runtimes retain the original rune decoder: mixed
+  queue-list types slowed Unicode parsing in the JavaScript benchmark.
+  Queue positions, rollback,
+  split escape sequences and supplementary characters keep their existing
+  semantics. Regressions: `test/terminal_byte_consumer_test.dart`, also run in
+  Chrome. Compare an earlier revision with the working tree using
+  `python3 tool/benchmark_terminal_parser.py --flutter /path/to/flutter
+  --baseline REVISION --output /tmp/parser-result.json` from `desktop/`.
+  That benchmark measures parsing, not rendering or whole-app energy.
+
 - **OSC 8 hyperlinks are kept per cell** (`lib/src/core/escape/parser.dart`,
   `lib/src/core/cursor.dart`, `lib/src/core/buffer/line.dart`,
   `lib/src/core/buffer/buffer.dart`, `lib/src/terminal.dart`). Upstream drops
@@ -97,6 +111,26 @@ fix and the regression in `test/terminal_session_test.dart` passes against it.
   times and then stopped for good, with no error anywhere. The setter now moves
   `_onScroll`. Regression: the reparent test in
   `test/terminal_alt_buffer_scroll_test.dart`.
+
+- **A committed IME word stays painted until the terminal echoes it**
+  (`lib/src/ui/ime_echo_hold.dart`, `lib/src/terminal_view.dart`). Upstream
+  clears the pre-edit preview the moment a composition commits, but a remote
+  terminal echoes it a round trip later — about half a second from a browser
+  through the relay — so a word typed with Telex vanished, and an agent's
+  placeholder reappeared, before the echo brought it back. The commit is now
+  held where the echo will land, the next composition is drawn after it, and
+  each part lets go as the terminal shows it, on Return or another terminal key,
+  or after two seconds. Plain typing never starts a hold, so a prompt that does
+  not echo shows nothing new; a view whose echo never matches stops holding
+  after two expiries. While a preview shows, a prompt's dim placeholder after
+  the cursor ("Ask Codex to do anything", drawn with SGR 2) is painted over
+  with its own background (`lib/src/ui/prompt_placeholder.dart`,
+  `TerminalPainter.paintCellCover`), as the program does once the text echoes;
+  a row with any non-dim text after the cursor is left alone. The cursor is
+  drawn after the preview, not on its first cell, where the block hid a lone
+  composing letter (Telex `a` waits for the next key). Regressions:
+  `test/ime_echo_hold_test.dart`, `test/terminal_view_ime_echo_test.dart`,
+  `test/prompt_placeholder_test.dart`.
 
 Each of these has to survive an upstream bump — the tests named are what catch
 it if one is dropped.

@@ -6,6 +6,7 @@ mod activity;
 mod app;
 mod capture;
 mod tree;
+mod files;
 mod borders;
 mod cli;
 mod clipboard;
@@ -39,6 +40,7 @@ mod modal;
 mod new_harness;
 mod mouse;
 mod options;
+mod os_welcome;
 mod paste;
 mod pane;
 mod pane_frame;
@@ -515,7 +517,7 @@ async fn run(config: config::Config) -> io::Result<()> {
         if let Some(event) = first { apply(&mut app, event, &mut refill, &mut startup_input); need_draw = true }
         // Everything else already waiting goes into the same frame.
         while let Ok(event) = rx.try_recv() { apply(&mut app, event, &mut refill, &mut startup_input); need_draw = true }
-        if !input_ready && (app.focused().is_some() || app.shell_asked && app.starting_shell.is_none()) {
+        if !input_ready && (app.focused().is_some() || app.tab().home || app.shell_asked && app.starting_shell.is_none()) {
             input_ready = true;
             while let Some(event) = startup_input.pop_front() { input::handle(&mut app, event); refill = true; }
         }
@@ -558,7 +560,9 @@ async fn run(config: config::Config) -> io::Result<()> {
         let all = app.mouse && app.wants_motion();
         if all != mouse_all { execute!(term.backend_mut(), term_out::Mouse(if all { 2 } else { 1 }))?; mouse_all = all }
         app.flush_acks();
-        if refill && matches!(app.modal, Some(modal::Modal::Picker { .. } | modal::Modal::NewHarness(_))) { input::refill(&mut app) }
+        // Welcome forms also need connection and catalog updates, including drafts in
+        // background windows. Refill leaves unrelated overlays alone.
+        if refill { input::refill(&mut app) }
         // A scroll that has rested: every row of the screen written again, once — row by row over
         // what is there, not after erasing it, so it never flashes.
         let settle = app::scroll_settle_in(app.scrolled_at, Instant::now()) == Some(Duration::ZERO);
@@ -645,7 +649,7 @@ async fn run(config: config::Config) -> io::Result<()> {
         }
     }
     // (A server with the desk lives on past its last terminal, until kill-server.)
-    ids::leave(Some(app.desk_mode != app::DeskMode::Off && !app.forget_sessions));
+    ids::leave(Some(app.desk_on() && !app.forget_sessions));
     drop(term);
     drop(restore);
     // `hn attach -t nosuch`: tmux's error, and no client.

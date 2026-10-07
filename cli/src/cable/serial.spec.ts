@@ -2,12 +2,12 @@ import { EventEmitter } from 'node:events'
 import { constants } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const io = vi.hoisted(() => ({ open: vi.fn(), close: vi.fn(), configure: vi.fn(), stream: vi.fn() }))
-vi.mock('node:fs', async (original) => ({ ...await original<typeof import('node:fs')>(), openSync: io.open, closeSync: io.close }))
-vi.mock('node:tty', () => ({ ReadStream: io.stream }))
+const io = vi.hoisted(() => ({ open: vi.fn(), close: vi.fn(), configure: vi.fn(), stream: vi.fn(), readdir: vi.fn(), lstat: vi.fn(), read: vi.fn() }))
+vi.mock('node:fs', async (original) => ({ ...await original<typeof import('node:fs')>(), openSync: io.open, closeSync: io.close, readdirSync: io.readdir, lstatSync: io.lstat, readSync: io.read }))
+vi.mock('./portStream.js', () => ({ portStream: io.stream }))
 vi.mock('node:child_process', () => ({ execFile: io.configure }))
 
-import { SerialLink } from './serial.js'
+import { SerialLink, findDialPorts } from './serial.js'
 
 function port(nativeFd = 43) {
   const stream = Object.assign(new EventEmitter(), {
@@ -15,26 +15,51 @@ function port(nativeFd = 43) {
     destroyed: false,
     write: vi.fn((_bytes: Uint8Array, done: (error?: Error) => void) => { queueMicrotask(() => done()); return true }),
     destroy: vi.fn(() => { queueMicrotask(() => stream.emit('close')); return stream }),
+    unshift: vi.fn(),
   })
   io.stream.mockImplementation(function () { return stream })
   return stream
 }
 const tick = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
+const claimsPort = process.platform === 'darwin'
 
 describe('event-driven serial link', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     io.open.mockReturnValue(42)
+    if (claimsPort) io.open.mockReturnValueOnce(41)
     io.configure.mockImplementation((_cmd, _args, callback) => callback(null, '', ''))
+    // The far end is there and has said nothing yet.
+    io.read.mockImplementation(() => { throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }) })
   })
   afterEach(() => { vi.useRealTimers(); vi.resetAllMocks() })
+
+  it('refuses a port whose far end is gone before the stream reopens it, which would wait for it forever', async () => {
+    port()
+    io.read.mockReturnValueOnce(0)
+    await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toMatchObject({ code: 'EOF' })
+    expect(io.stream).not.toHaveBeenCalled()
+    expect(io.close).toHaveBeenCalledWith(42)
+    io.open.mockReturnValue(42)
+    if (claimsPort) io.open.mockReturnValueOnce(41)
+    io.read.mockImplementationOnce(() => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) })
+    await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toMatchObject({ code: 'EIO' })
+    expect(io.stream).not.toHaveBeenCalled()
+  })
+
+  it('hands the stream what the dial said before the port opened, ahead of the rest', async () => {
+    const stream = port()
+    io.read.mockImplementationOnce((_fd: number, buffer: Buffer) => buffer.write('hello', 0))
+    await SerialLink.open('/dev/fake', vi.fn(), vi.fn())
+    expect(stream.unshift).toHaveBeenCalledWith(Buffer.from('hello'))
+  })
 
   it('stays idle without a timer, preserves raw bytes, and closes the duplicate descriptor', async () => {
     const stream = port(), received = vi.fn(), closed = vi.fn()
     const link = await SerialLink.open('/dev/fake', received, closed)
     expect(io.open).toHaveBeenCalledWith('/dev/fake', constants.O_RDWR | constants.O_NOCTTY | constants.O_NONBLOCK)
     expect(io.close).toHaveBeenCalledExactlyOnceWith(42)
-    expect(io.stream).toHaveBeenCalledWith(42, { readable: true, writable: true })
+    expect(io.stream).toHaveBeenCalledWith(42)
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(received).not.toHaveBeenCalled()
@@ -52,28 +77,62 @@ describe('event-driven serial link', () => {
     const link = await SerialLink.open('/dev/fake', vi.fn(), vi.fn())
     expect(io.close).not.toHaveBeenCalled()
     await link.close()
-    expect(io.close).not.toHaveBeenCalled()
+    if (claimsPort) expect(io.close).toHaveBeenCalledExactlyOnceWith(41)
+    else expect(io.close).not.toHaveBeenCalled()
     expect(stream.destroy).toHaveBeenCalledTimes(1)
   })
 
   it('closes the descriptor if native stream construction fails', async () => {
     io.stream.mockImplementation(function () { throw new Error('TTY unavailable') })
     await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toThrow('TTY unavailable')
-    expect(io.close).toHaveBeenCalledExactlyOnceWith(42)
+    expect(io.close.mock.calls).toEqual(claimsPort ? [[42], [41]] : [[42]])
   })
 
   it('releases the native stream if closing the original descriptor fails', async () => {
     const stream = port()
     io.close.mockImplementation(() => { throw new Error('close failed') })
     await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toThrow('close failed')
-    expect(io.close).toHaveBeenCalledTimes(1)
+    expect(io.close).toHaveBeenCalledTimes(claimsPort ? 2 : 1)
     expect(stream.destroy).toHaveBeenCalledTimes(1)
   })
 
   it('does not open a port that could not be configured raw', async () => {
     io.configure.mockImplementation((_cmd, _args, callback) => callback(new Error('stty failed')))
     await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toThrow('stty failed')
-    expect(io.open).not.toHaveBeenCalled()
+    if (claimsPort) {
+      expect(io.open).toHaveBeenCalledTimes(1)
+      expect(io.close).toHaveBeenCalledExactlyOnceWith(41)
+    } else expect(io.open).not.toHaveBeenCalled()
+    expect(io.stream).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(!claimsPort)('refuses a competing claim before stty can touch the port', async () => {
+    io.open.mockReset().mockImplementation(() => { throw Object.assign(new Error('busy'), { code: 'EAGAIN' }) })
+    await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toMatchObject({ code: 'EAGAIN' })
+    expect(io.configure).not.toHaveBeenCalled()
+    expect(io.stream).not.toHaveBeenCalled()
+    expect(io.close).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(!claimsPort)('holds the kernel claim until the native stream has actually closed', async () => {
+    const stream = port()
+    stream.destroy.mockImplementation(() => stream)
+    const link = await SerialLink.open('/dev/fake', vi.fn(), vi.fn())
+    expect(io.open.mock.calls[0]).toEqual(['/dev/fake', constants.O_RDWR | constants.O_NOCTTY | constants.O_NONBLOCK | 0x20])
+    const closing = link.close()
+    await tick()
+    expect(io.close.mock.calls).toEqual([[42]])
+    stream.emit('close')
+    await closing
+    expect(io.close.mock.calls).toEqual([[42], [41]])
+    await link.close()
+    expect(io.close.mock.calls).toEqual([[42], [41]])
+  })
+
+  it.skipIf(!claimsPort)('releases the claim if opening the stream descriptor fails', async () => {
+    io.open.mockReset().mockReturnValueOnce(41).mockImplementationOnce(() => { throw new Error('port disappeared') })
+    await expect(SerialLink.open('/dev/fake', vi.fn(), vi.fn())).rejects.toThrow('port disappeared')
+    expect(io.close).toHaveBeenCalledExactlyOnceWith(41)
     expect(io.stream).not.toHaveBeenCalled()
   })
 
@@ -166,5 +225,33 @@ describe('event-driven serial link', () => {
     expect(writes[0]).toMatchObject({ status: 'rejected', reason: new Error('write failed') })
     expect(writes[1].status).toBe('fulfilled')
     await link.close()
+  })
+})
+
+describe('macOS dial discovery wiring', () => {
+  const dump = `+-o Tim <class IOUSBHostDevice>
+  "idVendor" = 12346
+  "idProduct" = 4097
+  +-o serial
+    "IOCalloutDevice" = "/dev/cu.usbmodem1101"`
+  afterEach(() => vi.resetAllMocks())
+
+  it.skipIf(process.platform !== 'darwin')('stats only cu.* entries, gates ioreg on them and keeps the error text', async () => {
+    io.readdir.mockReturnValue(['cu.usbmodem1101', 'tty.usbmodem1101', 'null'])
+    io.lstat.mockReturnValue({ ino: 900, rdev: 7 })
+    io.configure.mockImplementation((_c, _a, _o, cb) => cb(null, { stdout: dump, stderr: '' }))
+    await findDialPorts()
+    await findDialPorts()
+    expect(io.configure).toHaveBeenCalledTimes(1)
+    expect(io.configure.mock.calls[0].slice(0, 2)).toEqual(['ioreg', ['-r', '-c', 'IOUSBHostDevice', '-w0', '-l']])
+    expect(io.lstat.mock.calls.every(([path]) => path === '/dev/cu.usbmodem1101')).toBe(true)
+    expect(io.lstat).toHaveBeenCalled()
+
+    io.lstat.mockReturnValue({ ino: 901, rdev: 7 })
+    io.configure.mockImplementation((_c, _a, _o, cb) => cb(new Error('boom')))
+    await expect(findDialPorts()).rejects.toThrow('Could not enumerate USB dials')
+    io.configure.mockImplementation((_c, _a, _o, cb) => cb(null, { stdout: dump, stderr: '' }))
+    await expect(findDialPorts()).resolves.toHaveLength(1)
+    expect(io.configure).toHaveBeenCalledTimes(3)
   })
 })

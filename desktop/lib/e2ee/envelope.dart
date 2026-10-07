@@ -56,12 +56,17 @@ const Set<String> encryptedDownTypes = {
   'agent_resume',
   'agent_fork',
   'agent_recent',
+  // Writes the conversation record a switched agent reads (cli/src/lib/agentHandoff.ts).
+  'agent_handoff_prepare',
   'agent_update',
   'agent_files',
   'agent_read_file',
   'fs_list_dir',
   'project_preview',
   'git_project_info',
+  // The harness's branch and pull-request history is a machine RPC too (applicationFrames.ts
+  // `MACHINE_REQUESTS`): unsealed, the machine answers E2EE_REQUIRED.
+  'git_pull_request',
   // The trust-group roster swap (`viewer/group_sync.dart`): the keys every member trusts.
   'group_sync',
   'codex_profiles_list',

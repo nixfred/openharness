@@ -1,4 +1,4 @@
-import { readCompanionIdentity, sameCompanion, type CompanionIdentity, type CompanionMilestone } from './companionIdentity.js'
+import { readCompanionIdentity, type CompanionIdentity } from './companionProtocol.js'
 // The message layer: what the daemon and the dial SAY to each other, on top of the bytes serial.ts moves.
 //
 // Written twice — here and in devices/harness-device/firmware/main/cable_client.c — with no shared code, because one half
@@ -29,7 +29,7 @@ import { SerialLink, findDialPort } from './serial.js'
 import { PassageCarry, withCarriedPassage, type CarryRead } from './passageCarry.js'
 import { VoiceDraft, type DraftPin } from './voiceDraft.js'
 import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSpeech } from './questionInbox.js'
-import { notificationReadToken, type UnreadNotification } from './notificationRead.js'
+import { notificationReadToken, type UnreadNotification } from '../lib/notificationRead.js'
 
 /** Bumped when the VOCABULARY changes. Separate from the frame version, which is the envelope. */
 export const CABLE_PROTO_VERSION = 3   // 3: + question.close (a question answered on another client)
@@ -233,10 +233,6 @@ export interface RouteDecision {
  * and a network to prove that `hello` gets a `welcome`.
  */
 export interface CableHost {
-  /** Account/guest paired species while the creature experiment is on; otherwise null. */
-  companion?(): string | null
-  companionIdentity?(): CompanionIdentity | null
-  companionMilestone?(): CompanionMilestone | null
   /** The computer at the other end of the cable — its identity, not "the" machine's. */
   localMachine(): { id: string; name: string }
   /** Every machine the owner has, local row included. Never rejects: `source` explains a short list. */
@@ -348,6 +344,13 @@ export interface CableHost {
    * Never called for a device that has been a dial.
    */
   onForeignPort?(path: string, why: string): void
+  /**
+   * Something this session does threw, or the far end is flooding the port with what no dial sends. Told
+   * every time, so whoever owns the session can drop this dial alone, and look at its port again later,
+   * rather than let one device's fault reach every other one in the process. A dial is hardware speaking
+   * whatever its firmware says: a fault here is expected to happen, and to be this dial's alone.
+   */
+  onFault?(error: unknown, hostile?: boolean): void
   /**
    * The dial as a window would draw it: there or not, on which firmware, and whether an update is
    * going over the cable right now. Fired on every change and never on a keepalive — the window
@@ -497,8 +500,6 @@ export class CableSession {
   private greetedHw: string | undefined
   /** What the device last SAID its settings are. Never what this computer last asked for. */
   private greetedSettings: DeviceSettings | undefined
-  private companionEventSeen: string | null | undefined
-  private companionAttempt: { id: string | null; at: number } | undefined
   private greetedFw: string | null = null
   private lastRx = 0
   private stopped = false
@@ -617,8 +618,8 @@ export class CableSession {
 
   start(): void {
     this.stopped = false
-    this.timer = setInterval(() => void this.tick(), 1_000)
-    void this.tick()
+    this.timer = setInterval(() => this.ticked(), 1_000)
+    this.ticked()
   }
 
   async stop(): Promise<void> {
@@ -627,6 +628,17 @@ export class CableSession {
     this.timer = null
     await this.link?.close('daemon stopping')
     this.link = null
+  }
+
+  /** One tick, its failure this dial's: a rejection left unhandled would end the whole devices process. */
+  private ticked(): void {
+    void this.tick().catch((error: unknown) => this.fault(error))
+  }
+
+  /** This dial's fault, told to whoever owns the session (CableHost.onFault). */
+  private fault(error: unknown, hostile = false): void {
+    this.log(`cable: ${hostile ? 'flooded' : 'fault'} · ${error instanceof Error ? error.message : String(error)}`)
+    this.host.onFault?.(error, hostile)
   }
 
   // ── port lifecycle ────────────────────────────────────────────────────────────────────────────────
@@ -689,7 +701,6 @@ export class CableSession {
     // restarted greets the dial before its registry has finished loading, so the one thing it ever said
     // was "no agents". The dial removed both tiles and sat empty while the daemon knew about two.
     if (this.greetedMac !== null) {
-      await this.syncCompanion()
       // Machines FIRST. The dial paints its Overview eyebrow from the machine list, so an agent list that
       // lands first shows a nameless "Machine" for a frame.
       if (Date.now() - this.machinesAt >= MACHINES_POLL_MS) {
@@ -789,8 +800,6 @@ export class CableSession {
     this.decoder.reset()
     this.greetedMac = null
     this.greetedFw = null
-    this.companionAttempt = undefined
-    this.companionEventSeen = undefined
     this.appFocusGeneration += 1
     this.drivingAppFocus = false
     this.expectedAppFocusEcho = ''
@@ -849,10 +858,46 @@ export class CableSession {
 
   // ── inbound ───────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * What a dial may send in a second before it reads as hostile: a byte stream that is mostly not frames, a
+   * flood of frames, or bytes that take the decoder longer than it may spend. A dial sends a few dozen
+   * frames a second at most (voice is 16-bit PCM at 16 kHz, about 32 KB/s in frames of up to 8 KB), and its
+   * boot noise is a few hundred bytes; the decoder's worst case is a CRC over 8 KB for every eight bytes of
+   * a crafted stream, which at USB speed would hold the event loop for seconds at a time.
+   */
+  static readonly BUDGET = { garbageBytes: 64 * 1024, frames: 2_000, decodeMs: 500 }
+  private budget = { since: 0, garbage: 0, frames: 0, ms: 0 }
+
   private onBytes(chunk: Buffer): void {
+    const started = performance.now()
+    const discarded = this.decoder.discardedBytes
+    let frames = 0
+    try {
+      this.decode(chunk, () => { frames++ })
+    } catch (error) {
+      // A throw inside the decoder's callback (the console log's write, the voice buffer) is this dial's
+      // fault: thrown out of the port's `data` event it would end the whole devices process.
+      this.fault(error)
+    }
+    const now = Date.now()
+    if (now - this.budget.since >= 1_000) this.budget = { since: now, garbage: 0, frames: 0, ms: 0 }
+    this.budget.garbage += this.decoder.discardedBytes - discarded
+    this.budget.frames += frames
+    this.budget.ms += performance.now() - started
+    const over = this.budget.garbage > CableSession.BUDGET.garbageBytes ? `${this.budget.garbage} B that are no frames`
+      : this.budget.frames > CableSession.BUDGET.frames ? `${this.budget.frames} frames`
+      : this.budget.ms > CableSession.BUDGET.decodeMs ? `${Math.round(this.budget.ms)} ms of decoding` : ''
+    if (over) {
+      this.budget = { since: now, garbage: 0, frames: 0, ms: 0 }
+      this.fault(new Error(`${over} in a second, more than a dial sends`), true)
+    }
+  }
+
+  private decode(chunk: Buffer, counted: () => void): void {
     this.lastRx = Date.now()
     this.bytesSinceOpen += chunk.length
     this.decoder.feed(chunk, (frame) => {
+      counted()
       this.framesSinceOpen += 1
       if (frame.type === CableType.Json) {
         let msg: Message
@@ -861,7 +906,8 @@ export class CableSession {
         } catch {
           return // unreadable payloads are counted by the decoder, never fatal
         }
-        void this.onMessage(msg)
+        // Its failure is this dial's: a rejection left unhandled would end the whole devices process.
+        void this.onMessage(msg).catch((error: unknown) => this.fault(error))
         return
       }
       if (frame.type === CableType.Log) {
@@ -966,7 +1012,6 @@ export class CableSession {
         // a flash slot before it answers, so a cadence of retries would spend erase cycles on the user's
         // hardware every fifteen seconds, and nothing about the next greeting changes what went wrong.
         await this.maybeOfferFirmware(str('fw') ?? '')
-        await this.syncCompanion()
         return
       }
       case 'pong':
@@ -1692,32 +1737,6 @@ export class CableSession {
     const sent = await this.send({ t: 'settings.set', ...Object.fromEntries(fields) })
     if (!sent) this.log('cable: settings change not written — the device is not on the wire')
     return sent
-  }
-
-  /** A transient identity, independent of the device's saved skin and preferences. */
-  private async syncCompanion(): Promise<void> {
-    const settings = this.greetedSettings
-    if (!this.greetedMac || typeof settings?.followCompanion !== 'boolean') return
-    const requested = settings.followCompanion ? this.host.companion?.() : null
-    const id = requested && ['tim', 'gnu', 'lynx', 'mutt', 'yak', 'gopher', 'bug', 'tux', 'auk', 'beastie'].includes(requested)
-      ? requested : null
-    const identity = id ? this.host.companionIdentity?.() ?? null : null
-    const detailed = settings.companionProtocol === 2 && !!identity
-    const key = detailed ? JSON.stringify(identity) : id
-    const now = Date.now()
-    const same = settings.companion === id && (!detailed || sameCompanion(settings.companionDetails, identity))
-    if (same) this.companionAttempt = undefined
-    else if (this.companionAttempt?.id !== key || now - this.companionAttempt.at >= 5_000) {
-      this.companionAttempt = {id:key,at:now}
-      if (await this.send({t:'companion.set',id,...(detailed?{identity}: {})})) this.log(`cable: companion → ${id ?? 'saved skin'}${detailed?` (${identity!.name}, ${identity!.version})`:''}`)
-    }
-    const event = this.host.companionMilestone?.() ?? null
-    if (this.companionEventSeen === undefined) { this.companionEventSeen=event?.token ?? null; return }
-    if (event && event.token !== this.companionEventSeen) {
-      this.companionEventSeen=event.token
-      if (settings.companionProtocol===2 && settings.followCompanion && !settings.quiet && now>=event.at && now-event.at<=8_000)
-        await this.send({t:'companion.celebrate',kind:event.kind,token:event.token,identity:event.companion})
-    }
   }
 
   private async send(msg: Message): Promise<boolean> {

@@ -191,6 +191,110 @@ void main() {
     expect(swarmDestinations(app).any((row) => row.agentId == 'a0'), isTrue);
   });
 
+  test(
+    'Reopen restores and resumes saved panes without following a tab switch',
+    () async {
+      await app.addAgentToSwarm('m', 'saved');
+      final closedId = app.activeSwarmId;
+      await app.closeSwarm(closedId);
+      expect(connection.requests, isEmpty);
+      expect(app.reopenClosed(), isTrue);
+      expect(app.activeSwarmId, closedId);
+      final pane = app.panes.single;
+      expect(connection.types, ['agent_resume']);
+      final repeat = app.openSavedPane(pane.id);
+      expect(connection.requests, hasLength(1));
+      app.newSwarm();
+      final otherId = app.activeSwarmId;
+      connection.restartReplies.single.complete(
+        restartReceipt(
+          connection.requests.single['creationId'] as String,
+          agentId: 'saved',
+          sessionId: 'original-conversation',
+        ),
+      );
+      await repeat;
+      expect(app.activeSwarmId, otherId);
+      expect(app.swarms.firstWhere((s) => s.id == closedId).panes, [pane]);
+      expect(app.panes, isEmpty);
+      expect(
+        app
+            .stateOf('m')!
+            .agents
+            .firstWhere((a) => a.id == 'saved')
+            .terminalAvailable,
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'a restored stopped pane offers Open and retains a failed resume',
+    (tester) async {
+      await app.addAgentToSwarm('m', 'saved');
+      await mount(tester, app);
+      expect(
+        find.text(
+          'This harness is stopped. Open it to continue your saved conversation.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('terminal unavailable (no verified terminal pane)'),
+        findsNothing,
+      );
+      await tester.tap(find.widgetWithText(TextButton, 'Open'));
+      await tester.pump();
+      expect(connection.types, ['agent_resume']);
+      expect(find.text('Opening saved conversation…'), findsOneWidget);
+      connection.restartReplies.single.complete({
+        'creationId': connection.requests.single['creationId'],
+        'state': 'failed',
+        'failure': {
+          'code': 'RESUME_UNAVAILABLE',
+          'detail': 'Conversation missing',
+        },
+      });
+      await tester.pumpAndSettle();
+      expect(app.panes.single.agentId, 'saved');
+      expect(find.widgetWithText(TextButton, 'Open'), findsOneWidget);
+      expect(find.text('Conversation missing'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  test('closing a pane while resume is pending cannot recreate it', () async {
+    await app.addAgentToSwarm('m', 'saved');
+    final pane = app.panes.single;
+    final opening = app.openSavedPane(pane.id);
+    await app.closePane(pane.id);
+    connection.restartReplies.single.complete(
+      restartReceipt(
+        connection.requests.single['creationId'] as String,
+        agentId: 'saved',
+        sessionId: 'original-conversation',
+      ),
+    );
+    await opening;
+    expect(app.allPanes, isEmpty);
+    expect(connection.requests, hasLength(1));
+  });
+
+  testWidgets('a stopped pane with retained output also offers Open', (
+    tester,
+  ) async {
+    app.adoptSessionForTest(terminal('saved', []));
+    await mount(tester, app);
+    expect(
+      find.text(
+        'Open to continue your saved conversation. Retained output is read only.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Open'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   for (final placement in HarnessPlacement.values) {
     test('Enter resumes directly before opening ${placement.name}', () async {
       final target = app.activeSwarmId;
@@ -445,39 +549,53 @@ void main() {
     );
   }
 
-  testWidgets('Enter submits resume immediately with no confirmation dialog', (
-    tester,
-  ) async {
-    await mount(tester, app);
-    await chord(tester, LogicalKeyboardKey.keyT);
-    await openHarnessPicker(tester);
-    await tester.pump();
-    await tester.enterText(
-      find.byKey(const ValueKey('swarm-search-input')),
-      'Saved work',
-    );
-    await tester.pump();
-    // The preview offers the same action for pointer users; Return submits
-    // directly from search without first opening a confirmation dialog.
-    expect(find.widgetWithText(TextButton, 'Open'), findsOneWidget);
-    expect(find.byType(AlertDialog), findsNothing);
-    expect(connection.types, isEmpty);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(connection.types, ['agent_resume']);
-    expect(find.byType(AlertDialog), findsNothing);
-    connection.restartReplies.single.complete({
-      'creationId': connection.requests.single['creationId'],
-      'state': 'failed',
-      'failure': {
-        'code': 'RESUME_UNAVAILABLE',
-        'detail': 'Conversation missing',
-      },
-    });
-    await tester.pump();
-    expect(find.text('Conversation missing'), findsOneWidget);
-    expect(find.text('Start New Conversation'), findsOneWidget);
-    expect(app.allPanes, isEmpty);
-    await tester.pumpWidget(const SizedBox());
-  });
+  testWidgets(
+    'Enter submits resume immediately and its failure notice expires',
+    (tester) async {
+      await mount(tester, app);
+      await chord(tester, LogicalKeyboardKey.keyT);
+      await openHarnessPicker(tester);
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('swarm-search-input')),
+        'Saved work',
+      );
+      await tester.pump();
+      // The preview offers the same action for pointer users; Return submits
+      // directly from search without first opening a confirmation dialog.
+      expect(find.widgetWithText(TextButton, 'Open'), findsOneWidget);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(connection.types, isEmpty);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(connection.types, ['agent_resume']);
+      expect(find.byType(AlertDialog), findsNothing);
+      connection.restartReplies.single.complete({
+        'creationId': connection.requests.single['creationId'],
+        'state': 'failed',
+        'failure': {
+          'code': 'RESUME_UNAVAILABLE',
+          'detail': 'Conversation missing',
+        },
+      });
+      await tester.pump();
+      expect(find.text('Conversation missing'), findsOneWidget);
+      expect(find.text('Start New Conversation'), findsOneWidget);
+      expect(find.byTooltip('Dismiss notice'), findsOneWidget);
+      expect(app.allPanes, isEmpty);
+      // Let the notice finish appearing, then check both sides of its timeout.
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 9));
+      expect(find.text('Conversation missing'), findsOneWidget);
+      expect(find.text('Start New Conversation'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Conversation missing'), findsNothing);
+      expect(find.text('Start New Conversation'), findsNothing);
+      expect(find.byTooltip('Dismiss notice'), findsNothing);
+      expect(connection.types, ['agent_resume']);
+      expect(app.allPanes, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

@@ -14,7 +14,7 @@
  *   turn_ended (empty text) → {kind:'done'}                          (clear busy)
  *
  * Every frame carries top-level `agentId` + `dbSessionId` (= the tmux session id). The recap
- * (`summarizeTurnText`) is injected so it's unit-testable with a stub. Mirrors the hosted runtime's
+ * writer (`summarize`) is injected so it's unit-testable with a stub; the daemon's is an excerpt. Mirrors the hosted runtime's
  * device-gated recap (recap.ts / manager.ts triggerTurnRecap / websocket.ts handleBrainSummaryEvent).
  */
 
@@ -23,6 +23,7 @@ import { join } from 'path'
 import type { LastTurnText, LiveEvent } from './normalize.js'
 import { AgentNotifications } from './agentNotifications.js'
 import { deriveTurnSummary } from './deviceRecap.js'
+import { RECENT_TURNS, lastFullText, recentAsks, recentRecaps, splitSummary, type RecentRecap, type SessionRecaps } from './recapReads.js'
 import { atomicWriteJson } from './registry.js'
 
 export type CommanderFrame = {
@@ -84,10 +85,13 @@ export interface CommanderMirrorOpts {
   subagentActive?: (sessionId: string, agentId: string) => boolean
   dataDir: string
   recapForce?: boolean
-  /** A function when it can change while the daemon runs — the pair brain switches it on with pairing. */
+  /** A function when the setting can change while the daemon runs. */
   alwaysGenerate?: boolean | (() => boolean)
-  /** Every recap that is stored, as it is stored — the pair sensor journals it (pair/sensor.ts). */
-  onSummary?: (sessionId: string, summary: { recap: string; body: string }) => void
+  /**
+   * What this session's recaps hold, or whether its card is busy, may have changed: the recaps' process
+   * tells the core what it now holds (services/recapsProcess.ts), which answers from it in line.
+   */
+  changed?: (sessionId: string) => void
 }
 
 interface SessionState {
@@ -119,7 +123,6 @@ interface TodoInput {
   todos?: Array<{ content?: string; subject?: string; status?: string }>
 }
 
-const MAX_PART = 2000
 
 // Stable per-tool colors (device renders the tool name in this color); hash fallback for others.
 const TOOL_COLORS: Record<string, string> = {
@@ -233,17 +236,6 @@ function holdsTurn(a: SessionState['agents'][number]): boolean {
   return a.doneMs === null && !a.carried
 }
 
-/** Split a persisted "recap\n\nbody" into its parts (mirror websocket.ts:540 / getRecentEvents). */
-function splitSummary(summary: string): { recap: string; body: string } {
-  const nl = summary.indexOf('\n\n')
-  const recap = (nl >= 0 ? summary.slice(0, nl) : summary).replace(/\s+/g, ' ').trim().slice(0, MAX_PART)
-  const body = (nl >= 0 ? summary.slice(nl + 2) : summary).replace(/\s+/g, ' ').trim().slice(0, MAX_PART)
-  return { recap, body }
-}
-
-/** How many turn summaries are kept per session. Three is what the voice router reads: enough to tell one
- *  agent's subject from another's, few enough that one chatty agent cannot crowd the others out. */
-const RECENT_TURNS = 3
 
 /**
  * The cap on ONE stored final answer, in bytes of UTF-8.
@@ -325,6 +317,7 @@ export class CommanderMirror {
    * of. The question carries the topic; the answer usually does not.
    */
   private asks = new Map<string, string[]>()
+  private revisions = new Map<string, number>()
   private file: string
   private historyFile: string
   private fullTextFile: string
@@ -376,35 +369,11 @@ export class CommanderMirror {
     ;(isError ? console.error : console.log)(`[recap] ${line}`)
   }
 
-  /**
-   * Tool calls started and not yet answered, per session, exactly as the transcript has them: the pair's
-   * floor (pair/classify.ts) reads a permission prompt from the call it is about, not from its wrapped paint.
-   */
-  private readonly toolCalls = new Map<string, Map<string, { name: string; input: unknown }>>()
-
-  /** The session's open tool calls (started, no result yet), oldest first. */
-  openTools(sessionId: string): Array<{ name: string; input: unknown }> {
-    return [...(this.toolCalls.get(sessionId)?.values() ?? [])]
-  }
-
-  private trackTool(sessionId: string, e: LiveEvent): void {
-    if (e.type === 'turn_started' || e.type === 'turn_ended') { this.toolCalls.delete(sessionId); return }
-    if (e.type === 'tool_start') {
-      let open = this.toolCalls.get(sessionId)
-      if (!open) { open = new Map(); this.toolCalls.set(sessionId, open) }
-      open.set(String(e.payload.id), { name: String(e.payload.tool || ''), input: e.payload.input })
-      if (open.size > 32) open.delete(open.keys().next().value as string)
-    } else if (e.type === 'tool_end') {
-      this.toolCalls.get(sessionId)?.delete(String(e.payload.id))
-    }
-  }
-
   /** Fold one session's LiveEvents into device commander_event frames (live cards + async recap). */
   ingest(events: LiveEvent[], sessionId: string, options?: { replay?: boolean }): void {
     const st = this.stateFor(sessionId)
     if (!options?.replay && st.turnOpen) this.notifications.continued(sessionId)
     for (const e of events) {
-      this.trackTool(sessionId, e)
       switch (e.type) {
         case 'turn_started':
           this.notifications.started(sessionId, options?.replay)
@@ -429,6 +398,7 @@ export class CommanderMirror {
           // The question is a fact about the TURN, not about the recap, so it is kept on its own list
           // and no longer has to wait for, or stay in step with, anything else.
           this.rememberAsk(sessionId, e.payload.userMessage || '')
+          this.stored(sessionId)
           st.turnOpen = true
           st.everOpened = true
           st.abandoned = false
@@ -535,6 +505,7 @@ export class CommanderMirror {
           break // thinking/user_message — web-only
       }
     }
+    this.opts.changed?.(sessionId)
   }
 
   private clearEndTimers(st: SessionState): void {
@@ -664,8 +635,7 @@ export class CommanderMirror {
     //     nothing rides the wire to an absent device. This is the fix for the back-fill gap — a device
     //     that pairs LATER restores real tiles from what was persisted here, instead of blank ones,
     //     because replayAll() only re-emits stored recaps and never regenerates a past turn.
-    // Cost: with SUMMARY_MODE=model this is one engine one-shot per turn, per agent, forever — the very
-    // cost the device gate used to avoid. SUMMARY_MODE=local makes it free (no model, same-tick excerpt).
+    // Free: the recap is an excerpt cut the moment the turn ends, with no model in the loop.
     const alwaysGenerate = typeof this.opts.alwaysGenerate === 'function' ? this.opts.alwaysGenerate() : this.opts.alwaysGenerate
     const localOnly = !device && !this.opts.recapForce && !alwaysGenerate
     if (localOnly && !this.opts.notifyWithoutDevice) {
@@ -678,6 +648,7 @@ export class CommanderMirror {
     const ac = new AbortController()
     st.abort = ac
     st.summarizing = true
+    this.opts.changed?.(sessionId)
     const t0 = Date.now()
 
     void this.resolveTurnText(sessionId, fallbackText, fallbackUserMessage)
@@ -731,6 +702,7 @@ export class CommanderMirror {
       // messages), or a tools/thinking-only turn ended with no final text. Graceful: clear busy, no recap.
       const ask = userMessage.replace(/\s+/g, ' ').trim().slice(0, 60)
       st.summarizing = false
+      this.opts.changed?.(sessionId)
       this.trace(sessionId, `${sid} turn-end · empty assistant text → done · source=${source}${ask ? ` · ask="${ask}"` : ' · (no user prompt captured this turn)'}`)
       this.emit(sessionId, { kind: 'done', text: 'done' })
       return
@@ -766,11 +738,11 @@ export class CommanderMirror {
           // Recorded in the SAME branch as the summary, so the two arrays cannot drift out of step —
           // a turn that produced no summary produces no row in either.
           this.rememberFullText(sessionId, text)
+          this.stored(sessionId)
           this.saveSoon()
           const { recap, body } = splitSummary(summary)
           const notification = this.notifications.completed(sessionId, body || recap,
             (this.opts.isSubagent?.(sessionId) ?? false) || st.abandoned)
-          try { this.opts.onSummary?.(sessionId, { recap, body }) } catch { /* an observer never costs the recap */ }
           this.trace(sessionId, `${sid} done in ${ms}ms · recap="${recap}" · bodyLen=${body.length}`)
           this.emit(sessionId, { kind: 'done', text: 'done' })
           // One decision feeds both clients. A silent recap still updates the
@@ -780,6 +752,7 @@ export class CommanderMirror {
           this.opts.sendWeb({ type: 'turn_summary', agentId: this.opts.agentIdFor?.(sessionId) ?? sessionId,
             dbSessionId: sessionId, payload: { summary, sessionId, notification } })
         } else {
+          this.opts.changed?.(sessionId)
           this.trace(sessionId, `${sid} summarizer returned NULL after ${ms}ms → done`)
           this.emit(sessionId, { kind: 'done', text: 'done' })
           if (!local) {
@@ -791,6 +764,7 @@ export class CommanderMirror {
         const ms = Date.now() - t0
         if (ac.signal.aborted) return
         st.summarizing = false
+        this.opts.changed?.(sessionId)
         this.trace(sessionId, `${sid} FAILED after ${ms}ms: ${err instanceof Error ? err.message : String(err)}`, true)
         this.emit(sessionId, { kind: 'done', text: 'done' })
         this.opts.sendWeb({ type: 'turn_summary_pending', dbSessionId: sessionId, payload: { sessionId, done: true } })
@@ -804,6 +778,28 @@ export class CommanderMirror {
    *  device that missed it is stuck "Working…" forever. A bare `done` clears that stale busy WITHOUT a beep or
    *  recap card, and is a harmless no-op on a tile that isn't busy; the device's recent-poll restores the
    *  stored summary text afterwards. */
+  /**
+   * What a dial attaching now must be shown of the turns in progress: the cards `heartbeat` would send for
+   * each busy session, returned rather than sent, and not gated on a device watching (the dial is). The
+   * devices restart in a process of their own and come back to a dial whose tiles were mid-turn; without
+   * these the tile reads idle until the next heartbeat, or the next turn.
+   */
+  liveCards(): Array<Record<string, unknown>> {
+    const cards: Array<Record<string, unknown>> = []
+    for (const [sessionId, st] of this.states) {
+      const card = (payload: Record<string, unknown>) =>
+        cards.push({ type: 'commander_event', agentId: this.opts.agentIdFor?.(sessionId) ?? sessionId, dbSessionId: sessionId, payload })
+      if (st.turnOpen) {
+        if (this.opts.verifiedWorking?.(sessionId) === false) continue
+        card(st.lastTodos ? { kind: 'processing', text: 'Processing', todos: st.lastTodos } : { kind: 'processing', text: 'Processing' })
+        if (st.lastTool) card(st.lastTool)
+      } else if (st.summarizing) {
+        card({ kind: 'processing', text: 'Summarizing…' })
+      }
+    }
+    return cards
+  }
+
   replayAll(): void {
     for (const sessionId of this.states.keys()) {
       // Busy session → re-assert its live processing/summarizing state (shared with heartbeat()).
@@ -847,30 +843,10 @@ export class CommanderMirror {
    *
    * `n` is honoured now. It used to be ignored and this always returned one, which made every caller
    * asking for more a promise nobody kept: the router in particular was told it had three turns of
-   * context and was given one.
-   *
-   * Falls back to the single latest summary when the history is empty, so the recaps already on disk from
-   * before this existed are usable on the first run rather than after three more turns.
+   * context and was given one. The rule is lib/recapReads.ts's, which the core reads with too.
    */
-  recent(sessionId: string, n = 2): Array<{ kind: string; text: string; recap?: string; fullText?: string }> {
-    const want = Math.max(1, n)
-    const stored = this.history.get(sessionId) ?? []
-    const latest = this.summaries.get(sessionId)
-    // The latest lives in both places once a turn has run under this build; dedupe so it is not read twice.
-    const usingHistory = stored.length > 0
-    const all = usingHistory ? stored : latest ? [latest] : []
-    const fulls = this.fullTexts.get(sessionId) ?? []
-    return all
-      .slice(0, want)
-      // PAIRED BEFORE FILTERING, not after. The filter below drops empty summaries, and dropping them
-      // from one array while reading the other by position is how a turn ends up carrying the previous
-      // turn's answer — wrong in the one way nobody would think to check.
-      .map((summary, at) => ({ summary, full: fulls[usingHistory ? at : 0] }))
-      .filter(({ summary }) => summary && summary.trim())
-      .map(({ summary, full }) => {
-        const { recap, body } = splitSummary(summary)
-        return { kind: 'summary', text: body || recap, recap, ...(full ? { fullText: full } : {}) }
-      })
+  recent(sessionId: string, n = 2): RecentRecap[] {
+    return recentRecaps(this.snapshot(sessionId), n)
   }
 
   /**
@@ -882,12 +858,45 @@ export class CommanderMirror {
    * one belongs — every time a turn ended without a summary.
    */
   recentAsks(sessionId: string, n = RECENT_TURNS): string[] {
-    return (this.asks.get(sessionId) ?? []).filter(Boolean).slice(0, Math.max(1, n))
+    return recentAsks(this.snapshot(sessionId), n)
   }
 
   /** The newest turn's complete final answer, for a consumer that reads rather than glances. */
   lastFullText(sessionId: string): string | undefined {
-    return this.fullTexts.get(sessionId)?.[0]
+    return lastFullText(this.snapshot(sessionId))
+  }
+
+  /** A turn is open on this session, or its recap is being cut: the devices' card for it is busy. */
+  busy(sessionId: string): boolean {
+    const st = this.states.get(sessionId)
+    return !!st && (st.turnOpen || st.summarizing)
+  }
+
+  /** Bumped whenever what is stored for a session changes, so a reader can tell cheaply that it did. */
+  revision(sessionId: string): number {
+    return this.revisions.get(sessionId) ?? 0
+  }
+
+  /** What is held for one session; null when nothing is, stored or live. */
+  snapshot(sessionId: string): SessionRecaps | null {
+    const busy = this.busy(sessionId)
+    const latest = this.summaries.get(sessionId) ?? null
+    const history = this.history.get(sessionId) ?? []
+    const fullTexts = this.fullTexts.get(sessionId) ?? []
+    const asks = this.asks.get(sessionId) ?? []
+    if (!busy && latest === null && !history.length && !fullTexts.length && !asks.length) return null
+    return { latest, history, fullTexts, asks, busy }
+  }
+
+  /** Every session anything is held for, stored or live. */
+  sessions(): string[] {
+    return [...new Set([...this.states.keys(), ...this.summaries.keys(), ...this.history.keys(), ...this.fullTexts.keys(), ...this.asks.keys()])]
+  }
+
+  /** What is stored for this session changed: counted, and said. */
+  private stored(sessionId: string): void {
+    this.revisions.set(sessionId, this.revision(sessionId) + 1)
+    this.opts.changed?.(sessionId)
   }
 
   /** The user's own words for a turn, clipped — the topic signal the recap cannot carry. */
@@ -926,6 +935,7 @@ export class CommanderMirror {
     // A cancel outranks a held turn-end: the user threw the turn away, sub-agents and all.
     this.clearEndTimers(st)
     st.endPending = false
+    this.opts.changed?.(sessionId)
     this.emit(sessionId, { kind: 'done', text: 'done' })
   }
 
@@ -948,6 +958,7 @@ export class CommanderMirror {
     const pastFull = this.fullTexts.get(fromSessionId)
     if (pastFull?.length && !this.fullTexts.get(toSessionId)?.length) this.fullTexts.set(toSessionId, pastFull)
     this.save()
+    this.stored(toSessionId)
   }
 
   /** Session metadata was unbound or its process agent was removed: abort any in-flight recap and drop
@@ -961,8 +972,8 @@ export class CommanderMirror {
     // The state object is about to be dropped; a held turn-end timer would fire against a dead session.
     if (st) this.clearEndTimers(st)
     this.states.delete(sessionId)
-    this.toolCalls.delete(sessionId)
     // NB: intentionally do NOT delete this.summaries[sessionId] — reuse it on the next resume.
+    this.opts.changed?.(sessionId)
     this.emit(sessionId, { kind: 'done', text: 'done' })
   }
 
@@ -976,6 +987,7 @@ export class CommanderMirror {
     this.fullTexts.delete(sessionId)
     this.asks.delete(sessionId)
     this.save(true)
+    this.stored(sessionId)
   }
 
   private load(): void {
@@ -1035,3 +1047,4 @@ export class CommanderMirror {
 
 // Used by other modules only for potential reuse — kept exported.
 export { splitSummary }
+export type { SessionRecaps }

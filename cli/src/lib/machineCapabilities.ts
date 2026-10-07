@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { cpus, loadavg } from 'node:os'
+import { cpus, hostname, loadavg } from 'node:os'
 
 /**
  * What this machine can take right now: GPU memory and load, CPU load, power source, thermal
@@ -49,7 +49,7 @@ export const systemReaders: CapabilityReaders = {
   readFile: (p) => fs.readFile(p, 'utf8'),
   listDir: (p) => fs.readdir(p),
   which: async (cmd) => { try { await run('sh', ['-c', `command -v ${cmd}`]); return true } catch { return false } },
-  hostname: () => process.env.HOSTNAME ?? require('node:os').hostname(),
+  hostname: () => process.env.HOSTNAME ?? hostname(),
   loadavg,
   cores: () => cpus().length,
   now: () => Date.now(),

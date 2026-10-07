@@ -135,6 +135,12 @@ const LOCAL_ONLY_COMMANDS = new Set([
   'upgrade', 'vim',
 ])
 
+/** A whole prompt that is one of LOCAL_ONLY_COMMANDS, typed plainly: `/compact`, `/model opus`. */
+function isLocalOnlyCommandLine(text: string): boolean {
+  const name = /^\/([A-Za-z][\w-]*)(?:\s|$)/.exec(text.trim())?.[1]
+  return name !== undefined && LOCAL_ONLY_COMMANDS.has(name.toLowerCase())
+}
+
 /**
  * `<command-name>/goal</command-name>…<command-args>x</command-args>` → `/goal x`.
  *
@@ -402,8 +408,11 @@ function userTextRaw(msg: NormalizedMessage): string | null {
  * then the text block is empty and there is nothing left to parse.
  */
 function taskNotificationEvent(raw: Record<string, unknown>): LiveEvent | null {
-  if (raw.type !== 'user') return null
-  const content = (raw.message as { content?: unknown } | undefined)?.content ?? raw.content
+  // One that finishes while its parent still works comes as a `queued_command` attachment, the more common
+  // delivery (real 2.1.270–2.1.287). Read from user records alone, it never finished on the dial.
+  const attachment = raw.type === 'attachment' ? raw.attachment as { type?: unknown; prompt?: unknown } | undefined : undefined
+  if (raw.type !== 'user' && attachment?.type !== 'queued_command') return null
+  const content = attachment ? attachment.prompt : (raw.message as { content?: unknown } | undefined)?.content ?? raw.content
   let text = ''
   if (typeof content === 'string') text = content
   else if (Array.isArray(content)) {
@@ -430,6 +439,11 @@ function isInterruptLine(msg: NormalizedMessage): boolean {
 function realUserText(msg: NormalizedMessage): string | null {
   const text = userTextRaw(msg)
   if (text === null || INTERRUPT_MARKER.test(text)) return null
+  // Claude Code 2.1.290 also writes a built-in command it runs itself as a plain user line ("/compact"),
+  // ahead of the tagged record `commandPromptText` already keeps out. Taken as a prompt, it opened a turn
+  // nothing ever closed: after a /compact the agent read working, then unknown, until the next message
+  // (found by daemon QA). The same list decides both forms.
+  if (isLocalOnlyCommandLine(text)) return null
   // A `!command` line is not a prompt — skip it so the turn (and its recap) stays anchored to the last
   // real ask. Only when nothing but bash blocks remain: a message that also carries prose still counts.
   if (!stripBashModeBlocks(text)) return null
@@ -491,36 +505,48 @@ export function lastTurnTextFromRawLines(rawLines: string[]): LastTurnText | nul
 /** Aggregates computed from a sub-agent's OWN transcript. Async/background agents never get totals
  *  in the launcher's toolUseResult (it only records `{isAsync, status:'async_launched', agentId}` at
  *  launch) — the real numbers live in `<session>/subagents/agent-<id>.jsonl`. totalTokens mirrors the
- *  CLI's definition: input + output + cache_read + cache_creation summed over assistant turns. */
-export function subagentStatsFromRawLines(rawLines: string[]): { totalToolUseCount: number; totalDurationMs?: number; totalTokens?: number } {
-  let toolCount = 0
-  let tokens = 0
-  let first: number | undefined
-  let last: number | undefined
-  for (const line of rawLines) {
-    if (!line.trim()) continue
+ *  CLI's definition: input + output + cache_read + cache_creation summed over assistant turns. Taken a
+ *  line at a time, so a long transcript is never held whole. */
+export class SubagentStats {
+  private toolCount = 0
+  private tokens = 0
+  private first: number | undefined
+  private last: number | undefined
+
+  push(line: string): void {
+    if (!line.trim()) return
     let raw: Record<string, unknown>
-    try { raw = JSON.parse(line) as Record<string, unknown> } catch { continue }
-    if (!raw || typeof raw !== 'object') continue
+    try { raw = JSON.parse(line) as Record<string, unknown> } catch { return }
+    if (!raw || typeof raw !== 'object') return
     const ts = typeof raw.timestamp === 'string' ? Date.parse(raw.timestamp) : NaN
-    if (!Number.isNaN(ts)) { if (first === undefined) first = ts; last = ts }
-    if (raw.type !== 'assistant') continue
+    if (!Number.isNaN(ts)) { if (this.first === undefined) this.first = ts; this.last = ts }
+    if (raw.type !== 'assistant') return
     const msg = raw.message as { content?: unknown; usage?: Record<string, unknown> } | undefined
-    if (!msg) continue
+    if (!msg) return
     if (Array.isArray(msg.content)) {
-      for (const b of msg.content) if ((b as { type?: string }).type === 'tool_use') toolCount++
+      for (const b of msg.content) if ((b as { type?: string }).type === 'tool_use') this.toolCount++
     }
     const u = msg.usage
     if (u) {
-      tokens += (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0)
+      this.tokens += (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0)
         + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0)
     }
   }
-  return {
-    totalToolUseCount: toolCount,
-    totalDurationMs: first !== undefined && last !== undefined && last > first ? last - first : undefined,
-    totalTokens: tokens || undefined,
+
+  result(): { totalToolUseCount: number; totalDurationMs?: number; totalTokens?: number } {
+    const { first, last } = this
+    return {
+      totalToolUseCount: this.toolCount,
+      totalDurationMs: first !== undefined && last !== undefined && last > first ? last - first : undefined,
+      totalTokens: this.tokens || undefined,
+    }
   }
+}
+
+export function subagentStatsFromRawLines(rawLines: string[]): { totalToolUseCount: number; totalDurationMs?: number; totalTokens?: number } {
+  const stats = new SubagentStats()
+  for (const line of rawLines) stats.push(line)
+  return stats.result()
 }
 
 /** Emit tool_end events for a user message's tool_result blocks. */
@@ -644,11 +670,30 @@ export function compactEventFromRaw(raw: Record<string, unknown>): SessionEvent[
 // ── Full replay (session_get) ─────────────────────────────────────────────────────────────────────
 
 /** Convert a whole session's raw JSONL lines to replay events (same render path as streaming). */
+/**
+ * A message the person typed while Claude Code was working. Claude Code delivers it into the running
+ * turn as a `queued_command` attachment, not a prompt record. The live view leaves it out on purpose
+ * (it opens no turn there), but the history must show it: without it a reopened conversation answered a
+ * question it never showed (found by daemon QA with Claude Code 2.1.290). Sub-agent hand-backs and
+ * Claude's own continuations arrive the same way, and they are not the person's words.
+ */
+function queuedHumanPrompt(raw: Record<string, unknown>): string | null {
+  if (raw.type !== 'attachment') return null
+  const attachment = raw.attachment as { type?: unknown; commandMode?: unknown; prompt?: unknown; origin?: { kind?: unknown } } | undefined
+  if (attachment?.type !== 'queued_command' || attachment.commandMode !== 'prompt' || attachment.origin?.kind !== 'human') return null
+  const prompt = attachment.prompt
+  const text = typeof prompt === 'string' ? prompt
+    : Array.isArray(prompt) ? prompt.map((block) => (block as { type?: unknown; text?: unknown })?.type === 'text' ? String((block as { text?: unknown }).text ?? '') : '').join('\n')
+    : ''
+  return text.trim() ? text : null
+}
+
 export function messagesToEvents(rawLines: string[]): SessionEvent[] {
   const events: SessionEvent[] = []
   const toolIdToName = new Map<string, string>()
   let thinkingCounter = 0
   let inAutoFixSequence = false
+  let continuedAt = -1
 
   for (const line of rawLines) {
     if (!line.trim()) continue
@@ -656,6 +701,15 @@ export function messagesToEvents(rawLines: string[]): SessionEvent[] {
     try { raw = JSON.parse(line) as Record<string, unknown> } catch { continue }
     const compact = compactEventFromRaw(raw)
     if (compact) { events.push(...compact); continue } // compact boundary → indicator; summary/meta → suppressed
+    const queued = queuedHumanPrompt(raw)
+    if (queued) { events.push({ type: 'user_message', payload: { content: queued } }); continue }
+    // A pass a blocking Stop hook continued, as the live view starts it (lineToEvents), once per pass.
+    const continued = stopHookContinuation(raw)
+    if (continued !== null) {
+      if (continuedAt !== events.length - 1) events.push({ type: 'user_message', payload: { content: continued } })
+      continuedAt = events.length - 1
+      continue
+    }
     const msg = transformLine(raw)
     if (!msg?.message) continue
 
@@ -713,19 +767,28 @@ export function messagesToEvents(rawLines: string[]): SessionEvent[] {
  * would drop tool names. A user-prompt line never sits between a tool_use and its tool_result, so
  * snapping there keeps every turn whole.
  */
+/**
+ * What a Claude history page knows of one line: the cursor that names it, and whether a page may start
+ * there — a real user prompt, so a turn is never split. Shared by `windowRawLines` and the bounded pager
+ * (lib/transcriptPages.ts), so the two cannot drift apart.
+ */
+export function claudePageLine(line: string): { cursor: string | null; startsPage: boolean } {
+  if (!line.trim()) return { cursor: null, startsPage: false }
+  let raw: Record<string, unknown>
+  try { raw = JSON.parse(line) as Record<string, unknown> } catch { return { cursor: null, startsPage: false } }
+  const cursor = (raw.uuid ?? raw.id ?? raw.message_id ?? null) as string | null
+  const msg = transformLine(raw)
+  return { cursor, startsPage: msg ? realUserText(msg) !== null : false }
+}
+
 export function windowRawLines(
   rawLines: string[],
   opts: { limit: number; before?: string },
 ): { window: string[]; hasMore: boolean; oldestCursor: string | null; staleCursor?: boolean } {
   // Per-line uuid + whether the line is a real user-prompt turn start (parse each line once).
   const meta = rawLines.map((line) => {
-    if (!line.trim()) return { uuid: null as string | null, turnStart: false }
-    let raw: Record<string, unknown>
-    try { raw = JSON.parse(line) as Record<string, unknown> } catch { return { uuid: null as string | null, turnStart: false } }
-    const uuid = (raw.uuid ?? raw.id ?? raw.message_id ?? null) as string | null
-    const msg = transformLine(raw)
-    const turnStart = msg ? realUserText(msg) !== null : false
-    return { uuid, turnStart }
+    const { cursor, startsPage } = claudePageLine(line)
+    return { uuid: cursor, turnStart: startsPage }
   })
 
   let endIndex = rawLines.length
@@ -755,6 +818,36 @@ export interface TurnState {
   /** tool_use ids started but not yet resolved by a tool_result. */
   pendingTools: Set<string>
   thinkingCounter: number
+  /** Before the counter in a live thinking id. A fold that starts mid-transcript names its window here
+   *  (lib/attachTranscript.ts), so its ids cannot repeat ones another fold of the same session sent. */
+  thinkingPrefix?: string
+  /** The open turn is one a blocking Stop hook continued (`stopHookContinuation`), not a prompt's. */
+  continued?: boolean
+}
+
+/**
+ * The turn a Stop hook that blocked keeps going, or null. `/goal` is built on such a hook, and people write
+ * their own. Claude Code writes the hook's feedback as a hidden `isMeta` user line, then one of these, then
+ * works on in the SAME turn with no prompt line between (real 2.1.282/2.1.283):
+ *   {"type":"attachment","attachment":{"type":"goal_status","met":false,"condition":"…","reason":"…"}}
+ *   {"type":"attachment","attachment":{"type":"hook_blocking_error","hookEvent":"Stop","blockingError":{"blockingError":"…"}}}
+ * The pass's end_turn had closed the turn, so the rest ran with none open: no turn_ended, no recap, and
+ * idle whenever a tool outlasted the work lease. A `sentinel` goal_status restates an active goal at start.
+ * The label matches the Codex normalizer's goal continuations.
+ */
+export function stopHookContinuation(raw: Record<string, unknown>): string | null {
+  if (raw.type !== 'attachment') return null
+  const attachment = raw.attachment as Record<string, unknown> | undefined
+  if (attachment?.type === 'goal_status' && attachment.met === false && attachment.sentinel !== true) {
+    const condition = typeof attachment.condition === 'string' ? attachment.condition.trim() : ''
+    return condition ? `Continuing goal: ${condition}` : 'Continuing goal'
+  }
+  if (attachment?.type === 'hook_blocking_error' && attachment.hookEvent === 'Stop') {
+    const blocking = attachment.blockingError as { blockingError?: unknown } | undefined
+    const reason = typeof blocking?.blockingError === 'string' ? blocking.blockingError.trim().split('\n')[0].trim() : ''
+    return reason ? `Continuing: ${reason.length > 200 ? `${reason.slice(0, 197)}...` : reason}` : 'Continuing'
+  }
+  return null
 }
 
 export function newTurnState(): TurnState {
@@ -791,6 +884,37 @@ export function foldTranscript(
   }
 }
 
+/**
+ * `foldTranscript` one record at a time, for a transcript streamed in rather than loaded
+ * (lib/attachTranscript.ts). History keeps only its last `turn_started` — the one event an attach ever
+ * replays from it — so folding a long turn holds nothing but that.
+ */
+export class TranscriptFold {
+  private lastStarted: LiveEvent | null = null
+  private readonly folded: LiveEvent[] = []
+
+  constructor(
+    private readonly ingest: (line: string) => LiveEvent[],
+    private readonly turnOpenAfter: () => boolean,
+    private readonly live: boolean,
+  ) {}
+
+  push(line: string): void {
+    for (const event of this.ingest(line)) {
+      if (this.live) this.folded.push(event)
+      else if (event.type === 'turn_started') this.lastStarted = event
+    }
+  }
+
+  finish(): { history: LiveEvent[]; live: LiveEvent[]; turnOpen: boolean } {
+    return {
+      history: this.lastStarted ? [this.lastStarted] : [],
+      live: this.folded,
+      turnOpen: !this.live && this.turnOpenAfter(),
+    }
+  }
+}
+
 // Terminal assistant stop reasons that close a turn. `tool_use` is deliberately absent (the turn
 // continues into the tool). `pause_turn` is absent too — it may legitimately resume; the Stop hook
 // (which only fires when the agent is truly done) is the authoritative catch-all for that case.
@@ -821,6 +945,24 @@ export function lineToEvents(rawLine: string, state: TurnState): LiveEvent[] {
   // launch ack, and this record is not a prompt.
   const finished = taskNotificationEvent(raw)
   if (finished) return [finished]
+  // A Stop hook that blocked: the pass's end_turn closed the turn Claude Code works on in. Open it again.
+  const continued = stopHookContinuation(raw)
+  if (continued !== null) {
+    if (state.turnOpen) return []
+    state.turnOpen = true
+    state.pendingTools.clear()
+    state.continued = true
+    return [{ type: 'turn_started', payload: { userMessage: continued } }]
+  }
+  // Claude Code's own record that its turn is over. A continued pass can end with no output: when the hook
+  // refuses again, Claude Code pauses the goal and writes only notices and this (real 2.1.283), with no
+  // end_turn or Stop to close what was opened above. Every other turn is closed as before.
+  if (raw.type === 'system' && raw.subtype === 'turn_duration') {
+    if (!state.turnOpen || !state.continued) return []
+    state.turnOpen = false
+    state.pendingTools.clear()
+    return [{ type: 'turn_ended', payload: {} }]
+  }
   const msg = transformLine(raw)
   if (!msg?.message) return []
 
@@ -841,6 +983,7 @@ export function lineToEvents(rawLine: string, state: TurnState): LiveEvent[] {
       if (state.turnOpen) events.push({ type: 'turn_ended', payload: {} })
       state.turnOpen = true
       state.pendingTools.clear()
+      state.continued = false
       events.push({ type: 'turn_started', payload: { userMessage: userText } })
       return events
     }
@@ -855,7 +998,7 @@ export function lineToEvents(rawLine: string, state: TurnState): LiveEvent[] {
 
   // assistant
   const before = events.length
-  events.push(...assistantEvents(msg, state.toolIdToName, 'thinking-live-', state.thinkingCounter))
+  events.push(...assistantEvents(msg, state.toolIdToName, state.thinkingPrefix ?? 'thinking-live-', state.thinkingCounter))
   state.thinkingCounter += events.slice(before).filter((e) => e.type === 'thinking_delta').length
   for (const e of events) {
     if (e.type === 'tool_start') state.pendingTools.add(e.payload.id)
@@ -867,4 +1010,56 @@ export function lineToEvents(rawLine: string, state: TurnState): LiveEvent[] {
     events.push({ type: 'turn_ended', payload: {} })
   }
   return events
+}
+
+function parseRecord(rawLine: string): Record<string, unknown> | null {
+  if (!rawLine.trim()) return null
+  try {
+    const raw = JSON.parse(rawLine) as unknown
+    return raw && typeof raw === 'object' ? raw as Record<string, unknown> : null
+  } catch { return null }
+}
+
+/**
+ * The record `lineToEvents` opens a turn on — a real user prompt — decided from the record alone, as
+ * `lineToEvents` decides it whatever came before. Attaching reads a transcript backward to the last
+ * one of these and folds only from there (lib/attachTranscript.ts): every turn-scoped piece of
+ * `TurnState` is reset by it, so the fold from here ends exactly where the whole-history fold does.
+ */
+export function startsClaudeTurn(rawLine: string): boolean {
+  const raw = parseRecord(rawLine)
+  if (!raw || compactEventFromRaw(raw) || taskNotificationEvent(raw)) return false
+  const msg = transformLine(raw)
+  if (!msg?.message || msg.type !== 'user' || isInterruptLine(msg)) return false
+  return realUserText(msg) !== null
+}
+
+/**
+ * The tool calls a Claude record makes (`defines`) and the earlier calls whose results it carries
+ * (`references`), decided along `lineToEvents`' own branches. A result names its tool from the call
+ * `lineToEvents` saw earlier, so an attach that starts mid-transcript reaches back for the calls its
+ * turn's results answer (lib/attachTranscript.ts).
+ */
+export function claudeToolLinks(rawLine: string): { defines: string[]; references: string[] } {
+  const raw = parseRecord(rawLine)
+  if (!raw || compactEventFromRaw(raw) || taskNotificationEvent(raw)) return { defines: [], references: [] }
+  const msg = transformLine(raw)
+  if (!msg?.message) return { defines: [], references: [] }
+  if (msg.type === 'assistant') {
+    return { defines: msg.message.content.filter((block) => block.type === 'tool_use').map((block) => block.id || ''), references: [] }
+  }
+  if (isInterruptLine(msg) || realUserText(msg) !== null) return { defines: [], references: [] }
+  return { defines: [], references: msg.message.content.filter((block) => block.type === 'tool_result').map((block) => block.tool_use_id || '') }
+}
+
+/** `tailFileUntil` selector for `lastTurnTextFromRawLines`: stop on the prompt it resets on, keep the
+ *  assistant records it reads after that, and drop everything else it ignores — so a recap reads the
+ *  last turn's text instead of the whole conversation. */
+export function selectClaudeRecapLine(line: string): 'keep' | 'skip' | 'stop' {
+  const raw = parseRecord(line)
+  if (!raw || compactEventFromRaw(raw) !== undefined) return 'skip'
+  const msg = transformLine(raw)
+  if (!msg?.message) return 'skip'
+  if (realUserText(msg) !== null) return 'stop'
+  return msg.type === 'assistant' ? 'keep' : 'skip'
 }

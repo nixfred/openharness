@@ -528,6 +528,10 @@ class WsConn {
   /// three — only a link can — so this stops and says so the way the CLI's own relay does, with
   /// 4404.
   void _refusePeer(String reason) {
+    appLog.info(
+      'ws',
+      'refused ${machineId.length > 8 ? machineId.substring(0, 8) : machineId}: $reason',
+    );
     _closing = true;
     _ready = false;
     _observerHandshakeTimer?.cancel();
@@ -588,6 +592,9 @@ class WsConn {
     // File paths and media contents are user data, not frame diagnostics.
     'agent_read_file',
     'agent_read_file_result',
+    // Conversation-derived: file names and the project folder.
+    'agent_handoff_prepare',
+    'agent_handoff_prepare_result',
     'project_preview',
     'project_preview_result',
     'git_project_info',

@@ -16,6 +16,10 @@ enum { NIXFRED_RIM_IN = 223, NIXFRED_RIM_OUT = 231, NIXFRED_SCAN_STEPS = 8 };
 // the rim clockwise (a transfer); `pct` < 0 draws a scanner segment at `scan_step` (one lap a second),
 // so a stuck boot reads as a stopped line.
 void nixfred_boot_face(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, int scan_step);
+// The same face with its two lines in the given faces (the wordmark, the percent): Focus draws in one font, so
+// it passes Inter Bold 48 and Inter 20 (upstream, 2026-10-06); the fixed-cell faces are mono 28 and mono 20.
+void nixfred_boot_face_in(ht_scene_t *f, uint16_t accent, uint16_t ink, int pct, int scan_step,
+                          const ht_font_t *word, const ht_font_t *small);
 
 // Question / permission chrome: the state ring on the rim with a soft glow inside it, and a badge at
 // 12 o'clock: the person the agent is waiting on (initials when the host supplies them, else a neutral
