@@ -9,6 +9,59 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## Upstream sync: 41 commits from autonomous-ai/openharness main (47878898), and go-live, 2026-10-08
+
+Merges upstream/main 478788986 into nixfred/main 35254b1c (branch nixfred/sync-upstream-2026-10-08) as 937a13bf,
+then fast-forwards nixfred/main to it. Firmware `0.0.86-nixfred.11`, ESP-IDF v5.5.0, 3,063,104 B against an 8 MB
+slot (63% free), flashed over USB.
+
+- Upstream brought: Claude Code and Codex behind engine facets, one piece at a time: hooks (#1013), transcript
+  readers (#1015), live transcript facets and parsing (#1017, #1019), runtime profiles (#1022), screen
+  interpretation (#1027), model controls (#1038) and question navigation (#1040). An answer's keys are now
+  chosen by a per-engine control that can run in a supervised engine worker behind revocable grants; a killed
+  worker fails the answer instead of typing half of it. On the dial: custom pets (#1035, #1036), a pet pack
+  store in the firmware (pet_store.c, .hpet packs) and pet settings in the desktop Devices tab. Also hn 0.1.17
+  to 0.1.19 (dialogs, pane drag, Sign out asks first, agent and model in the pane title), Harness Hub and the
+  web connect page (#1026, #1037), OS Connectors with a local bridge (#1024, #1039), a headless box signed in
+  with a ticket from the phone (#1021), agent ids kept across a Linux clock step (#1018).
+- Conflicts (9), each kept both sides: .gitignore; cable/cableFleet.ts (`nixfred()` beside `petsChanged()` and
+  `petDial()`); core/input.ts and core/main.ts (upstream's `promptTyped` with the screen reading, plus
+  `externalPrompt` and `brake`); core/questions.ts (upstream's `questionControlFor` and `readQuestion` plus the
+  Orca `route` and attention); core/transcripts/attach.ts (`liveFor`, `remoteLive` beside `current`);
+  lib/hooks.ts (upstream moved the Claude and Codex installers to engines/*/installHooks.ts, so the watch mode
+  Notification event and the opt-in PreToolUse gate hook moved into engines/claude/installHooks.ts and are
+  re-exported from lib/hooks.ts); services/devices.spec.ts; firmware test_touch_ui.py (nixfred sources plus
+  pet_store.c).
+- Orca answers on the new contract: upstream's question controls write each approved key or text through
+  `submitTerminal`/`keyTerminal`, which has no pane for an Orca row. core/main.ts now asks
+  `nf.controlWrite(target)` first (ExternalTerminalRouter.controlWrite): for an Orca row the engine's own
+  navigation picks the keys and they are typed into its Orca terminal, audited, and refused with answers off;
+  every pane row keeps the stock write. New orcaWatch.spec case, red before and green after. The Hermes
+  `onVanished` cleanup now drops `liveParsers` (upstream removed `turnStates`). The five nixfred firmware slice
+  tests link pet_store.c (focus.c now looks pets up in the store).
+- Verified on the branch: tsc clean. vitest (TMPDIR=/dev/shm): 11,534 passed, 8 failed, 108 skipped (last sync
+  11,101/5). The 8: the known 5, plus cableFleet "port held" and processRows, which fail the same way on clean
+  upstream/main 47878898, and tmuxPaneInfo, a load flake that passes alone on both trees. test:core 1,523
+  passed with its coverage gates (last 1,309); architecture.spec 9/9; test:harnessd 261 passed, 2 failed (the
+  known processName and master link pair). Desktop: flutter analyze 0 errors, 0 warnings (24 infos, all
+  upstream's); nixfred, settings and attention_glow tests 117 passed, pet tests 68, boot_flow 36; linux release
+  build. Firmware: idf.py build; full test/run.sh with the cc wrapper. Scratch daemon (HOME, XDG_RUNTIME_DIR,
+  TMUX_TMPDIR under /tmp/claude-1000/ohs3, CABLE_DISABLE, DISABLE_HOOK_INSTALL=true, updates off): status, orca,
+  subs, attention, spend (enabled false), gate, capabilities, hermes; a simulated Orca row through
+  dist/notify.mjs went idle, working, permission, done and offline, keeping its Orca terminal id, and
+  attention matched each step.
+- Go-live: `install-cli.sh --no-updates --no-restart`, then `systemctl --user restart harness.service`.
+  `harness status` says v0.3.67-dev.937a13bf6, backend connected, 12 agents. The journal shows the core
+  ready, every service connected (devices and wifi too), `[orca] watch mode ON · answers ON (file) · orca CLI
+  found`, Claude and Codex hooks "already installed" (~/.codex/hooks.json byte-identical; ~/.claude/settings.json
+  changed only in Larry's own stats counters, not its hooks). Flash: service stopped, `idf.py -p /dev/ttyACM0
+  flash` (bootloader, partition table, ota_data, app; no NVS, no efuse), service started:
+  `dial 80:45:6B:35:06:CC on fw 0.0.86-nixfred.11 proto 3`, then `nixfred.subs sent · 3 plans` and
+  `nixfred.fleet sent`. The desktop release bundle was rebuilt in this checkout (not launched).
+- Not verified: anything on the glass (custom pets, rings, shade, hub); an answer typed into a real Orca
+  terminal through the new question controls; a custom pet pack sent to the dial; the gate verdict through a
+  real PreToolUse hook; dispatch and clip_push between two machines.
+
 ## Upstream sync: 70 commits from autonomous-ai/openharness main (7305140e), and go-live, 2026-10-07
 
 Merges upstream/main 7305140e0 into the harnessd sync branch (51c6ba67, the 404-commit port below) as 1ed0916d,

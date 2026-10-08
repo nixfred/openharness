@@ -29,7 +29,7 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
 [PLAN.md](PLAN.md), [nixfred/README.md](nixfred/README.md) (every command),
 [nixfred/DESIGN.md](nixfred/DESIGN.md) (the visual system).
 
-**The Harness dial (firmware `0.0.86-nixfred.10`, flashed over USB; see NIXFRED-CHANGELOG.md)**
+**The Harness dial (firmware `0.0.86-nixfred.11`, flashed over USB; see NIXFRED-CHANGELOG.md)**
 
 - **Open the menu (the hub):** pull down from the top edge (the small notch at 12 o'clock), or hold a
   still finger 650 ms anywhere (a ring fills). Neither ever starts voice or answers a question; a press
