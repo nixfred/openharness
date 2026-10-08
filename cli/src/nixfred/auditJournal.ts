@@ -45,8 +45,20 @@ export class AuditJournal {
     return this.ready
   }
 
-  /** Redacts detail and name before anything touches disk. */
-  async append(entry: AuditEntry): Promise<void> {
+  private chain: Promise<void> = Promise.resolve()
+
+  /**
+   * Redacts detail and name before anything touches disk. Appends are serialized: each one awaits the
+   * directory, rotation and stat, so two concurrent appends could otherwise land out of order (seen on a
+   * loaded full-suite run, 2026-10-08).
+   */
+  append(entry: AuditEntry): Promise<void> {
+    const next = this.chain.then(() => this.write(entry))
+    this.chain = next.catch(() => {})
+    return next
+  }
+
+  private async write(entry: AuditEntry): Promise<void> {
     await this.ensureDir()
     await this.rotateIfNeeded()
     const safe: AuditEntry = {

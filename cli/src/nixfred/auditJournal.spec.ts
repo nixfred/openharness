@@ -31,6 +31,17 @@ describe('AuditJournal', () => {
     expect((await j.tail(1))[0]!.name).toBe('cmd 2')
   })
 
+  it('keeps concurrent appends in call order even when the first one is slow to reach the disk', async () => {
+    const fs = memFs()
+    let first = true
+    const stat = fs.stat
+    fs.stat = async (p) => { if (first) { first = false; await new Promise((r) => setTimeout(r, 20)) } return stat(p) }
+    fs.files.set('/data/audit.jsonl', '')
+    const j = new AuditJournal(fs, '/data')
+    await Promise.all([j.append(entry(1)), j.append(entry(2)), j.append(entry(3))])
+    expect(fs.files.get('/data/audit.jsonl')!.trim().split('\n').map((l) => (JSON.parse(l) as { at: number }).at)).toEqual([1, 2, 3])
+  })
+
   it('searches newest first with a limit', async () => {
     const fs = memFs()
     const j = new AuditJournal(fs, '/data')
