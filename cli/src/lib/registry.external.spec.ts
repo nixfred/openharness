@@ -40,13 +40,26 @@ describe('registerExternal', () => {
     expect(out).toMatchObject({ isNew: true })
     const row = registry.bySession(SID)!
     expect(row).toMatchObject({ hosted: 'external', engine: 'claude', active: true, cwd: '/home/u/proj', transcriptPath: path, runtimes: [], processIdentity: null })
-    expect(row.external).toEqual({ orca: { terminal: TERM, worktree: 'r::/home/u/proj' }, proc: { pid: 4242, start: 's1' } })
+    expect(row.external).toEqual({ orca: { terminal: TERM, worktree: 'r::/home/u/proj' }, herdr: null, inner: null, proc: { pid: 4242, start: 's1' } })
     expect(registry.advertised().map((r) => r.sessionId)).toContain(SID)
     expect(registry.hostedList('external').map((r) => r.sessionId)).toEqual([SID])
     expect(registry.hostedList('hermes-store')).toEqual([])
     registry.flush()
     const saved = existsSync(join(dataDir, 'registry.json')) ? readFileSync(join(dataDir, 'registry.json'), 'utf8') : '[]'
     expect(saved).not.toContain(SID)
+  })
+
+  it('carries a herdr pane and the innermost host, keeps them when a later hook has none, and never persists them', async () => {
+    const { registry } = await load()
+    registry.load()
+    const herdr = { pane: 'w4F:p1', workspace: 'w4F', tab: 'w4F:t1', socket: '/home/u/.config/herdr/herdr.sock', bin: '/usr/bin/herdr' }
+    registry.registerExternal({ engine: 'claude', sessionId: SID, cwd: '/home/u/proj', title: null, transcriptPath: null, orca: null, herdr, inner: 'herdr', proc: { pid: 9, start: 's9' } })
+    expect(registry.bySession(SID)!.external).toEqual({ orca: null, herdr, inner: 'herdr', proc: { pid: 9, start: 's9' } })
+    registry.registerExternal({ engine: 'claude', sessionId: SID, cwd: null, title: null, transcriptPath: null, orca: null, proc: null })
+    expect(registry.bySession(SID)!.external).toEqual({ orca: null, herdr, inner: 'herdr', proc: { pid: 9, start: 's9' } })
+    registry.flush()
+    const saved = existsSync(join(dataDir, 'registry.json')) ? readFileSync(join(dataDir, 'registry.json'), 'utf8') : '[]'
+    expect(saved).not.toContain('w4F')
   })
 
   it('is idempotent, refreshes the Orca ref and fills gaps, and reactivates a row that ended', async () => {

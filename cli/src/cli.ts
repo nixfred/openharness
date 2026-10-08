@@ -1659,14 +1659,15 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
       break
     }
     case 'hermes': action = args[0] === 'doctor-done' ? 'hermes-doctor-done' : 'hermes-health'; break
-    case 'orca': {
+    case 'orca': case 'external': {
       // harness orca [status] | on | off | answers <on|off> | answer <agent> <number|label>
+      // `harness external` is the same command under a host-neutral name (herdr, Orca, plain terminals).
       const sub = args[0] ?? 'status'
       if (sub === 'status') action = 'orca-status'
       else if (sub === 'on' || sub === 'off') { action = 'orca-set'; body = { change: sub } }
       else if (sub === 'answers' && (args[1] === 'on' || args[1] === 'off')) { action = 'orca-set'; body = { change: `answers-${args[1]}` } }
       else if (sub === 'answer' && args[1] && args[2]) { action = 'orca-answer'; body = { agentId: args[1], answer: args.slice(2).join(' ') } }
-      else { console.error('Usage: harness orca [status] | on | off | answers <on|off> | answer <agent-id> <number|label>'); process.exit(1) }
+      else { console.error(`Usage: harness ${cmd} [status] | on | off | answers <on|off> | answer <agent-id> <number|label>`); process.exit(1) }
       break
     }
     case 'placement': body = { needsGpu: flags.includes('--gpu'), interactive: flags.includes('--interactive'), minFreeVramMb: num('min-vram') ?? undefined }; break
@@ -1678,11 +1679,19 @@ async function nixfredCommand(cmd: string, args: string[], flags: string[]): Pro
   if (!res.ok || reply.ok === false) { console.error(`✗ ${String(reply.error ?? res.statusText)}`); process.exit(1) }
   const result = reply.result as unknown
   if ((action === 'orca-status' || action === 'orca-set') && result && typeof result === 'object') {
-    const r = result as { enabled: boolean; answers: boolean; source: string; idleCaptureMs: number; orcaCli: boolean; rows: Array<{ agentId: string; engine: string; active: boolean; name: string; state: string; orcaTerminal: string | null }> }
-    console.log(`watch mode: ${r.enabled ? 'on' : 'off'} · answers into Orca: ${r.answers ? 'on' : 'off'} · set by ${r.source} · orca CLI: ${r.orcaCli ? 'found' : 'NOT found'}`)
-    if (!r.enabled) console.log('  turn it on with: harness orca on   (off again: harness orca off, or HARNESS_ORCA_WATCH=0)')
-    for (const a of r.rows) console.log(`  ${a.active ? '●' : '○'} ${a.agentId.slice(0, 8)} ${a.name.padEnd(28)} ${a.engine.padEnd(7)} ${a.state.padEnd(10)} ${a.orcaTerminal ?? 'no Orca terminal (watch only)'}`)
-    if (r.enabled && !r.rows.length) console.log('  no external sessions yet: start or prompt a claude/codex session in an Orca terminal')
+    const r = result as { enabled: boolean; answers: boolean; source: string; idleCaptureMs: number; orcaCli: boolean; herdrCli?: boolean; rows: Array<{ agentId: string; engine: string; active: boolean; name: string; state: string; orcaTerminal: string | null; herdrPane?: string | null; host?: 'herdr' | 'orca' | null; inner?: string | null }> }
+    console.log(`watch mode: ${r.enabled ? 'on' : 'off'} · answers into herdr/Orca: ${r.answers ? 'on' : 'off'} · set by ${r.source} · herdr CLI: ${r.herdrCli ? 'found' : 'NOT found'} · orca CLI: ${r.orcaCli ? 'found' : 'NOT found'}`)
+    if (!r.enabled) console.log(`  turn it on with: harness ${cmd} on   (off again: harness ${cmd} off, or HARNESS_ORCA_WATCH=0)`)
+    // The host column is where an answer or a prompt would be typed right now (orcaWatch.ts selectExternalHost).
+    const hostOf = (a: (typeof r.rows)[number]): string => {
+      if (a.host === 'herdr' && a.herdrPane) return `herdr ${a.herdrPane}`
+      if (a.host === 'orca' && a.orcaTerminal) return `orca ${a.orcaTerminal}`
+      if (a.host === undefined && a.orcaTerminal) return `orca ${a.orcaTerminal}`
+      if (a.inner === 'tmux') return 'inside tmux (watch only)'
+      return 'no herdr pane or Orca terminal (watch only)'
+    }
+    for (const a of r.rows) console.log(`  ${a.active ? '●' : '○'} ${a.agentId.slice(0, 8)} ${a.name.padEnd(28)} ${a.engine.padEnd(7)} ${a.state.padEnd(10)} ${hostOf(a)}`)
+    if (r.enabled && !r.rows.length) console.log('  no external sessions yet: start or prompt a claude/codex session in a herdr pane or an Orca terminal')
     return
   }
   if (action === 'orca-answer' && result && typeof result === 'object') {
@@ -2844,7 +2853,7 @@ switch (cmd) {
   case 'gate': case 'spend': case 'checkpoint': case 'checkpoints': case 'restore': case 'bundle':
   case 'record': case 'pin': case 'pins': case 'asciicast': case 'audit': case 'placement': case 'nixfred':
   case 'collisions': case 'lock': case 'unlock': case 'locks': case 'branches': case 'hermes': case 'ci': case 'loops':
-  case 'dispatch': case 'dispatches': case 'clip': case 'subs': case 'orca':
+  case 'dispatch': case 'dispatches': case 'clip': case 'subs': case 'orca': case 'external':
     nixfredCommand(cmd, args, flags).catch(onError)
     break
   case 'logs':

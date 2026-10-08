@@ -2,14 +2,14 @@
  * nixfred: a tap on the Harness dial takes the desktop to that agent, wherever it runs.
  *
  * The host is read live from the agent process at tap time (no registry plumbing): its environment
- * says which terminal multiplexer or IDE holds it, innermost first:
- *   1. Orca      ORCA_TERMINAL_HANDLE        -> `orca terminal switch --terminal <handle>`
- *   2. tmux      TMUX_PANE (+ TMUX socket)   -> `tmux switch-client -t <pane>` and `select-window`
- *   3. herdr     HERDR_WORKSPACE_ID/TAB_ID   -> `herdr workspace focus`, `herdr tab focus`
- * When an agent carries BOTH an Orca handle and herdr ids (herdr running inside an Orca terminal, or a
- * herdr server started from one), Orca is the default winner: Orca switches to its terminal, then herdr
- * focuses the agent's workspace inside it. If Orca cannot switch (closed, stale handle) herdr takes over.
- * HARNESS_REVEAL_PREFER=herdr flips the winner.
+ * says which terminal multiplexer or IDE holds it, and the parent chain says which one is innermost:
+ *   1. herdr     HERDR_WORKSPACE_ID/TAB_ID   -> `herdr workspace focus`, `herdr tab focus`
+ *   2. Orca      ORCA_TERMINAL_HANDLE        -> `orca terminal switch --terminal <handle>`
+ *   3. tmux      TMUX_PANE (+ TMUX socket)   -> `tmux switch-client -t <pane>` and `select-window`
+ * The innermost host always wins. When an agent carries BOTH an Orca handle and herdr ids and the parent
+ * chain cannot tell, herdr is the default winner (Fred's host since 2026-10-08) and Orca is left alone.
+ * HARNESS_REVEAL_PREFER=orca flips that: Orca switches to its terminal, then herdr focuses the agent's
+ * workspace inside it, and if Orca cannot switch (closed, stale handle) herdr takes over.
  * Then, for ANY terminal or IDE (kitty, Ghostty, Alacritty, WezTerm, foot, VS Code, Cursor, Zed, Orca,
  * herdr's own window...), the process tree is walked up to the first ancestor that owns a Hyprland
  * window, and that window is focused (Omarchy 4 takes a Lua dispatch: hl.dsp.focus({window=...})).
@@ -17,12 +17,11 @@
  */
 import { execFile, spawn } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
-import { findOrcaBin } from './orcaWatch.js'
+import { HERDR_ID_RE, findOrcaBin } from './orcaWatch.js'
 
 const ORCA_HANDLE_RE = /^term_[0-9a-f-]{8,64}$/i
 const HYPR_ADDR_RE = /^0x[0-9a-f]+$/i
 const TMUX_PANE_RE = /^%\d{1,6}$/
-const HERDR_ID_RE = /^[A-Za-z0-9]{1,16}(:[A-Za-z0-9]{1,16})?$/
 
 export type Run = (bin: string, args: string[], env?: NodeJS.ProcessEnv) => Promise<string>
 const defaultRun: Run = (bin, args, env) => new Promise((resolve, reject) => {
@@ -110,7 +109,7 @@ export async function revealSession(pid: number | null, orcaHandle: string | nul
   const herdrWs = vars.get('HERDR_WORKSPACE_ID') ?? ''
   const hasHerdr = HERDR_ID_RE.test(herdrWs)
   const hasOrca = !!handle && ORCA_HANDLE_RE.test(handle)
-  const prefer = (deps.prefer ?? process.env.HARNESS_REVEAL_PREFER ?? 'orca') === 'herdr' ? 'herdr' : 'orca'
+  const prefer = (deps.prefer ?? process.env.HARNESS_REVEAL_PREFER ?? 'herdr') === 'orca' ? 'orca' : 'herdr'
   const focusHerdr = async (): Promise<boolean> => {
     const tab = vars.get('HERDR_TAB_ID') ?? ''
     const env = { ...process.env, ...(vars.get('HERDR_SOCKET_PATH')?.startsWith('/') ? { HERDR_SOCKET_PATH: vars.get('HERDR_SOCKET_PATH')! } : {}) }

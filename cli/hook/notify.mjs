@@ -1521,6 +1521,7 @@ async function fallbackRegister(input, engine, tmuxPane) {
 // A Claude or Codex session outside tmux (an Orca terminal, any plain terminal) used to be dropped
 // right here. With watch mode on it is reported to the daemon as an external row instead. Off by
 // default: nothing is posted unless the daemon's orca-watch.json says enabled, or HARNESS_ORCA_WATCH=1.
+// A herdr pane's ids travel too (herdrIds below), so answers and prompts can be typed into it.
 // From Orca only the terminal handle and the worktree/tab/pane ids are forwarded; Orca's own hook token
 // (ORCA_AGENT_HOOK_TOKEN) and everything else in the environment stay here.
 const EXTERNAL_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd', 'Notification'])
@@ -1540,6 +1541,25 @@ function orcaIds() {
   if (!handle || !/^term_[0-9a-f-]{8,64}$/i.test(handle)) return undefined
   const id = (v) => (typeof v === 'string' && v && v.length <= 512 ? v : undefined)
   return { terminal: handle, worktree: id(process.env.ORCA_WORKTREE_ID), tab: id(process.env.ORCA_TAB_ID), pane: id(process.env.ORCA_PANE_KEY) }
+}
+
+// From herdr (herdr.dev) only the pane, tab and workspace ids and the agent's own herdr socket and binary
+// paths are forwarded, each validated here and again by the daemon (orcaWatch.ts parseHerdrRef).
+function herdrIds() {
+  const pane = process.env.HERDR_PANE_ID
+  if (!pane || !/^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$/.test(pane)) return undefined
+  const ctl = /[\u0000-\u001f\u007f]/
+  const abs = (v) => (typeof v === 'string' && v.startsWith('/') && v.length <= 1024 && !ctl.test(v) && !v.split('/').includes('..') ? v : undefined)
+  const ws = process.env.HERDR_WORKSPACE_ID
+  const tab = process.env.HERDR_TAB_ID
+  const bin = abs(process.env.HERDR_BIN_PATH)
+  return {
+    pane,
+    workspace: ws && /^[A-Za-z0-9]{1,16}$/.test(ws) ? ws : undefined,
+    tab: tab && /^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$/.test(tab) ? tab : undefined,
+    socket: abs(process.env.HERDR_SOCKET_PATH),
+    bin: bin && bin.split('/').pop() === 'herdr' ? bin : undefined,
+  }
 }
 
 async function postExternal(port, engine, event, input) {
@@ -1562,6 +1582,7 @@ async function postExternal(port, engine, event, input) {
     codexHome: engine === 'codex' && process.env.CODEX_HOME ? process.env.CODEX_HOME : undefined,
     callerPid: process.ppid,
     orca: orcaIds(),
+    herdr: herdrIds(),
   })
 }
 

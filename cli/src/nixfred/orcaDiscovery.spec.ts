@@ -23,6 +23,15 @@ describe('discoverOrcaClaudes', () => {
     expect(found[0]).toMatchObject({ pid: 100, sessionId: SID, cwd: '/w/a.b', orca: { terminal: 'term_c07405a6-d443-408b', tab: 't1' } })
     expect(found[0]!.transcriptPath).toBe(`/h/.claude/projects/-w-a-b/${SID}.jsonl`)
   })
+  it('picks up a herdr pane from the process environment, validated, and nothing else', () => {
+    const env = 'HOME=/h\u0000HERDR_ENV=1\u0000HERDR_PANE_ID=w4F:p1\u0000HERDR_TAB_ID=w4F:t1\u0000HERDR_WORKSPACE_ID=w4F\u0000HERDR_SOCKET_PATH=/h/.config/herdr/herdr.sock\u0000HERDR_BIN_PATH=/usr/bin/herdr\u0000SECRET_TOKEN=x\u0000'
+    const found = discoverOrcaClaudes('/h/.claude', fakeFs({ environ: (pid) => (pid === 200 ? env : 'HOME=/h\u0000') }))
+    expect(found[1]).toMatchObject({ pid: 200, orca: null, herdr: { pane: 'w4F:p1', tab: 'w4F:t1', workspace: 'w4F', socket: '/h/.config/herdr/herdr.sock', bin: '/usr/bin/herdr' } })
+    expect(JSON.stringify(found)).not.toContain('SECRET')
+    expect(found[0]!.herdr).toBeNull()
+    const hostile = discoverOrcaClaudes('/h/.claude', fakeFs({ environ: () => 'HERDR_PANE_ID=w4F:p1 x\u0000HERDR_BIN_PATH=/bin/sh\u0000' }))
+    expect(hostile.every((d) => d.herdr === null)).toBe(true)
+  })
   it('ignores a reused pid whose start time does not match', () => {
     expect(discoverOrcaClaudes('/h/.claude', fakeFs({ procStart: () => '99' }))).toHaveLength(0)
   })

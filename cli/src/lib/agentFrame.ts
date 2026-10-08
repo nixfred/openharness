@@ -129,7 +129,7 @@ export type AgentFrame = {
    * nixfred watch mode: set on a live session this daemon did not start (nixfred/orcaWatch.ts). A client
    * shows it as external and offers no move, restart or kill for it. Null on every other agent.
    */
-  external: { source: 'orca' | 'terminal'; orcaTerminal: string | null; orcaWorktree: string | null } | null
+  external: { source: 'herdr' | 'orca' | 'terminal'; orcaTerminal: string | null; orcaWorktree: string | null; herdrPane: string | null } | null
 }
 
 /** What the daemon knows about an agent's DSH — looked up by the caller, never here. */
@@ -265,7 +265,14 @@ export async function agentFrame(
     bypassPermission: s.bypassPermission ?? null,
     namedAgent: s.agent ?? null,
     external: s.hosted === 'external'
-      ? { source: s.external?.orca ? 'orca' : 'terminal', orcaTerminal: s.external?.orca?.terminal ?? null, orcaWorktree: s.external?.orca?.worktree ?? null }
+      ? {
+        // Where an answer goes (orcaWatch.ts selectExternalHost): the innermost host wins, herdr when unknown.
+        source: s.external?.inner === 'tmux' ? 'terminal'
+          : s.external?.herdr && s.external.inner !== 'orca' ? 'herdr'
+            : s.external?.orca && s.external.inner !== 'herdr' ? 'orca' : 'terminal',
+        orcaTerminal: s.external?.orca?.terminal ?? null, orcaWorktree: s.external?.orca?.worktree ?? null,
+        herdrPane: s.external?.herdr?.pane ?? null,
+      }
       : null,
   }
 }

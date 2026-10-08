@@ -1,17 +1,19 @@
 /**
- * nixfred watch mode, part two: find Claude sessions already running in Orca terminals without waiting
- * for a hook.
+ * nixfred watch mode, part two: find Claude sessions already running in herdr panes and Orca terminals
+ * without waiting for a hook.
  *
  * Claude Code reads its hooks once, when a session starts or resumes. A session started before
  * `harness start` wrote the notify hook never reports, and after any daemon restart the in-memory
  * external rows are gone until each session speaks again. Both left Fred's Orca agents invisible.
  *
  * Every live Claude process writes `~/.claude/sessions/<pid>.json` (pid, sessionId, cwd, procStart),
- * and an Orca terminal puts ORCA_TERMINAL_HANDLE in the process environment. Together they are enough
- * to register the row. Sessions with no hook get their working/idle state from transcript activity.
+ * and an Orca terminal puts ORCA_TERMINAL_HANDLE in the process environment, a herdr pane HERDR_PANE_ID,
+ * HERDR_WORKSPACE_ID, HERDR_TAB_ID, HERDR_SOCKET_PATH and HERDR_BIN_PATH. Together they are enough to
+ * register the row. Only those variables are read; nothing else in the environment leaves here. Sessions with no hook get their working/idle state from transcript activity.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { herdrRefFromEnv, type HerdrRef } from './orcaWatch.js'
 
 export interface DiscoveredSession {
   pid: number
@@ -20,6 +22,8 @@ export interface DiscoveredSession {
   transcriptPath: string | null
   /** Null when the session is not in an Orca terminal (herdr, tmux, a plain terminal, an IDE). */
   orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
+  /** Null when the session is not in a herdr pane. */
+  herdr: HerdrRef | null
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -74,7 +78,7 @@ export function discoverOrcaClaudes(claudeHome: string, fs: DiscoveryFs = nodeDi
     const vars = new Map<string, string>()
     for (const kv of env.split('\u0000')) {
       const i = kv.indexOf('=')
-      if (i > 0 && kv.startsWith('ORCA_')) vars.set(kv.slice(0, i), kv.slice(i + 1))
+      if (i > 0 && (kv.startsWith('ORCA_') || kv.startsWith('HERDR_'))) vars.set(kv.slice(0, i), kv.slice(i + 1))
     }
     const terminal = vars.get('ORCA_TERMINAL_HANDLE')
     const cwd = typeof meta.cwd === 'string' && meta.cwd.startsWith('/') ? meta.cwd : null
@@ -87,7 +91,7 @@ export function discoverOrcaClaudes(claudeHome: string, fs: DiscoveryFs = nodeDi
       const tab = vars.get('ORCA_TAB_ID'); if (tab) orca.tab = tab
       const pane = vars.get('ORCA_PANE_KEY'); if (pane) orca.pane = pane
     }
-    out.push({ pid, sessionId, cwd, transcriptPath: guess && fs.exists(guess) ? guess : null, orca })
+    out.push({ pid, sessionId, cwd, transcriptPath: guess && fs.exists(guess) ? guess : null, orca, herdr: herdrRefFromEnv(vars) })
   }
   return out
 }

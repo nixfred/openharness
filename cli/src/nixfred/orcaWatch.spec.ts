@@ -5,12 +5,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ExternalCaptureGate,
   ExternalTerminalRouter,
+  HerdrCli,
   OrcaCli,
   applyOrcaWatchSwitch,
   attentionForExternalEvent,
+  herdrKeyName,
+  herdrRefFromEnv,
+  herdrRowName,
   orcaKeyBytes,
   parseExternalHook,
+  parseHerdrRef,
   readOrcaWatchConfig,
+  selectExternalHost,
+  type HerdrExec,
+  type HerdrPaneInfo,
   type OrcaExec,
 } from './orcaWatch.js'
 
@@ -285,5 +293,294 @@ describe('engine process liveness', () => {
     expect(engineStillRunning({ pid: 400, start: 's400' }, read)).toBe(true)
     expect(engineStillRunning({ pid: 400, start: 'other' }, read)).toBe(false)
     expect(engineStillRunning({ pid: 999, start: 'x' }, read)).toBe(false)
+  })
+})
+
+// ── herdr (2026-10-08: Fred's host again) ────────────────────────────────────────────────────────────
+
+describe('herdr ids', () => {
+  const base = { engine: 'claude', event: 'SessionStart', sessionId: SID, cwd: '/home/u/proj' }
+  const good = { pane: 'w4F:p1', tab: 'w4F:t1', workspace: 'w4F', socket: '/home/u/.config/herdr/herdr.sock', bin: '/usr/bin/herdr' }
+
+  it('keeps a well-formed herdr block from the hook, and nothing else in it', () => {
+    const r = parseExternalHook({ ...base, herdr: { ...good, token: 'SECRET' } })
+    expect(r.ok && r.event.herdr).toEqual(good)
+    expect(JSON.stringify(r)).not.toContain('SECRET')
+  })
+
+  it('drops the block for a hostile pane id and the field for each hostile value', () => {
+    for (const pane of ['w4F:p1; rm -rf /', 'w4F', '../x', 'w4F:p1\n', 'a'.repeat(17) + ':p1', '']) {
+      const r = parseExternalHook({ ...base, herdr: { ...good, pane } })
+      expect(r.ok && r.event.herdr).toBeNull()
+    }
+    const r = parseExternalHook({ ...base, herdr: { pane: 'w4F:p1', tab: '$(id)', workspace: 'w4F:t1', socket: 'rel.sock', bin: '/tmp/x/sh' } })
+    expect(r.ok && r.event.herdr).toEqual({ pane: 'w4F:p1' })
+    expect(parseHerdrRef({ pane: 'w4F:p1', socket: '/a/../../etc/s.sock', bin: '/opt/../usr/bin/herdr' })).toEqual({ pane: 'w4F:p1' })
+    expect(parseHerdrRef({ pane: 'w4F:p1', socket: '/run/a\u0007b.sock', bin: '/home/u/.local/bin/herdr' })).toEqual({ pane: 'w4F:p1', bin: '/home/u/.local/bin/herdr' })
+    expect(parseHerdrRef('w4F:p1')).toBeNull()
+    expect(parseHerdrRef([good])).toBeNull()
+  })
+
+  it('reads the same ids from a process environment', () => {
+    const vars = new Map(Object.entries({ HERDR_PANE_ID: 'w4F:p1', HERDR_TAB_ID: 'w4F:t1', HERDR_WORKSPACE_ID: 'w4F', HERDR_SOCKET_PATH: good.socket, HERDR_BIN_PATH: good.bin, HERDR_ENV: '1' }))
+    expect(herdrRefFromEnv(vars)).toEqual(good)
+    expect(herdrRefFromEnv({ HERDR_ENV: '1' })).toBeNull()
+  })
+})
+
+describe('herdrKeyName', () => {
+  it('maps the driver key vocabulary to herdr send-keys names', () => {
+    expect(herdrKeyName('Enter')).toBe('enter')
+    expect(herdrKeyName('Escape')).toBe('esc')
+    expect(herdrKeyName('Tab')).toBe('tab')
+    expect(herdrKeyName('BTab')).toBe('shift+tab')
+    expect(herdrKeyName('Up')).toBe('up')
+    expect(herdrKeyName('Down')).toBe('down')
+    expect(herdrKeyName('Left')).toBe('left')
+    expect(herdrKeyName('Right')).toBe('right')
+    expect(herdrKeyName('BSpace')).toBe('backspace')
+    expect(herdrKeyName('Space')).toBe('space')
+    expect(herdrKeyName('C-u')).toBe('ctrl+u')
+    expect(herdrKeyName('7')).toBe('7')
+  })
+  it('refuses kill keys, keys herdr 0.9 cannot send, and anything unknown', () => {
+    for (const k of ['C-c', 'C-d', 'Home', 'End', 'DC', 'PPage', 'NPage', 'rm -rf', 'enter', '']) expect(herdrKeyName(k)).toBeNull()
+  })
+})
+
+describe('selectExternalHost', () => {
+  const orca = { terminal: TERM }
+  const herdr = { pane: 'w4F:p1' }
+  it('herdr only, Orca only', () => {
+    expect(selectExternalHost({ orca: null, herdr })).toBe('herdr')
+    expect(selectExternalHost({ orca, herdr: null })).toBe('orca')
+    expect(selectExternalHost({ orca: null, herdr: null })).toBeNull()
+    expect(selectExternalHost(null)).toBeNull()
+  })
+  it('both: the innermost host wins; herdr when the parent chain is unknown', () => {
+    expect(selectExternalHost({ orca, herdr, inner: 'herdr' })).toBe('herdr')
+    expect(selectExternalHost({ orca, herdr, inner: 'orca' })).toBe('orca')
+    expect(selectExternalHost({ orca, herdr, inner: null })).toBe('herdr')
+  })
+  it('never types into an outer host: tmux innermost, or the innermost host without its ref', () => {
+    expect(selectExternalHost({ orca, herdr, inner: 'tmux' })).toBeNull()
+    expect(selectExternalHost({ orca, herdr: null, inner: 'herdr' })).toBeNull()
+    expect(selectExternalHost({ orca: null, herdr, inner: 'orca' })).toBeNull()
+  })
+})
+
+const HSOCK = '/tmp/hh/herdr.sock'
+const HBIN = '/opt/herdr/bin/herdr'
+function herdrPane(over: Record<string, unknown> = {}) {
+  return { pane_id: 'w4F:p1', tab_id: 'w4F:t1', workspace_id: 'w4F', agent: 'claude', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: SID }, ...over }
+}
+function fakeHerdr(state: { panes: Array<Record<string, unknown>>; screen?: string; failSend?: boolean } = { panes: [herdrPane()] }) {
+  const calls: Array<{ bin: string; args: string[]; env: NodeJS.ProcessEnv }> = []
+  const exec: HerdrExec = async (bin, args, env) => {
+    calls.push({ bin, args, env })
+    const [noun, verb, id] = args
+    if (noun === 'pane' && verb === 'get') {
+      const p = state.panes.find((x) => x.pane_id === id)
+      if (!p) throw new Error('{"error":{"code":"pane_not_found"}}')
+      return JSON.stringify({ id: 'cli:pane:get', result: { pane: p, type: 'pane_info' } })
+    }
+    if (noun === 'pane' && verb === 'list') return JSON.stringify({ id: 'cli:pane:list', result: { panes: state.panes, type: 'pane_list' } })
+    if (noun === 'pane' && verb === 'read') return `${state.screen ?? '❯ 1. Yes\n  2. No'}\n\n`
+    if (noun === 'pane' && (verb === 'send-text' || verb === 'send-keys')) {
+      if (state.failSend || !state.panes.some((x) => x.pane_id === id)) throw new Error('pane_not_found')
+      return ''
+    }
+    if (noun === 'workspace' && verb === 'list') return JSON.stringify({ result: { workspaces: [{ workspace_id: 'w4F', label: 'Blip:gus:herdr' }, { workspace_id: 'w9', label: 'flea' }] } })
+    if (noun === 'tab' && verb === 'list') return JSON.stringify({ result: { tabs: [{ tab_id: 'w4F:t1', label: '1' }, { tab_id: 'w4F:t2', label: 'review' }] } })
+    throw new Error(`unexpected ${args.join(' ')}`)
+  }
+  return { exec, calls, state }
+}
+
+describe('HerdrCli', () => {
+  it('runs herdr as argv against the row\'s own socket and binary, never the daemon\'s HERDR_* env', async () => {
+    const h = fakeHerdr()
+    const cli = new HerdrCli({ exec: h.exec, env: { PATH: '/usr/bin', HERDR_SOCKET_PATH: '/home/fred/.config/herdr/herdr.sock', HERDR_PANE_ID: 'w1:p1' } })
+    const ref = { pane: 'w4F:p1', socket: HSOCK, bin: HBIN }
+    expect(await cli.sendText(ref, 'hello; rm -rf /')).toBe(true)
+    expect(await cli.sendKey(ref, 'enter')).toBe(true)
+    expect(await cli.read(ref)).toBe('❯ 1. Yes\n  2. No')
+    expect(await cli.read(ref, 40)).toBe('❯ 1. Yes\n  2. No')
+    expect(h.calls.map((c) => [c.bin, ...c.args])).toEqual([
+      [HBIN, 'pane', 'send-text', 'w4F:p1', 'hello; rm -rf /'],
+      [HBIN, 'pane', 'send-keys', 'w4F:p1', 'enter'],
+      [HBIN, 'pane', 'read', 'w4F:p1', '--source', 'visible', '--format', 'text'],
+      [HBIN, 'pane', 'read', 'w4F:p1', '--source', 'recent', '--lines', '40', '--format', 'text'],
+    ])
+    for (const c of h.calls) {
+      expect(c.env.HERDR_SOCKET_PATH).toBe(HSOCK)
+      expect(c.env.HERDR_PANE_ID).toBeUndefined()
+      expect(c.env.PATH).toBe('/usr/bin')
+    }
+  })
+  it('without a socket on the row, no HERDR_SOCKET_PATH is passed at all (herdr uses its default)', async () => {
+    const h = fakeHerdr()
+    const cli = new HerdrCli({ exec: h.exec, env: { HERDR_SOCKET_PATH: '/elsewhere.sock' } })
+    await cli.paneGet({ pane: 'w4F:p1', bin: HBIN })
+    expect(h.calls[0]!.env.HERDR_SOCKET_PATH).toBeUndefined()
+  })
+  it('reads pane identity, and reports failure as null/false', async () => {
+    const h = fakeHerdr()
+    const cli = new HerdrCli({ exec: h.exec, bin: HBIN })
+    expect(await cli.paneGet({ pane: 'w4F:p1' })).toEqual({ pane: 'w4F:p1', workspace: 'w4F', tab: 'w4F:t1', agent: 'claude', agentSession: SID })
+    expect(await cli.paneGet({ pane: 'w9:p9' })).toBeNull()
+    expect(await cli.sendText({ pane: 'w9:p9' }, 'x')).toBe(false)
+    expect(await new HerdrCli({ bin: null }).sendText({ pane: 'w4F:p1' }, 'x')).toBe(false)
+  })
+})
+
+describe('herdrRowName', () => {
+  const labels = (panes: HerdrPaneInfo[]) => ({ workspaces: new Map([['w4F', 'Blip:gus:herdr']]), tabs: new Map([['w4F:t1', '1'], ['w4F:t2', 'review']]), panes })
+  const p = (pane: string, tab: string, session: string | null): HerdrPaneInfo => ({ pane, workspace: 'w4F', tab, agent: 'claude', agentSession: session })
+  it('is the workspace label for the only agent in its workspace', () => {
+    expect(herdrRowName(SID, { pane: 'w4F:p1' }, labels([p('w4F:p1', 'w4F:t1', SID)]))).toBe('Blip:gus:herdr')
+  })
+  it('adds the tab label, or the pane id when the tab is only numbered, when agents share the workspace', () => {
+    const two = labels([p('w4F:p1', 'w4F:t1', SID), p('w4F:p2', 'w4F:t2', 'other')])
+    expect(herdrRowName(SID, { pane: 'w4F:p1' }, two)).toBe('Blip:gus:herdr · p1')
+    expect(herdrRowName('other', { pane: 'w4F:p2' }, two)).toBe('Blip:gus:herdr · review')
+  })
+  it('follows a moved pane by its session, and is null with no label', () => {
+    expect(herdrRowName(SID, { pane: 'w1:p1', workspace: 'w1' }, labels([p('w4F:p3', 'w4F:t1', SID)]))).toBe('Blip:gus:herdr')
+    expect(herdrRowName(SID, { pane: 'w1:p1', workspace: 'w1' }, labels([]))).toBeNull()
+  })
+})
+
+describe('ExternalTerminalRouter: herdr rows', () => {
+  const herdrRef = { pane: 'w4F:p1', workspace: 'w4F', tab: 'w4F:t1', socket: HSOCK, bin: HBIN }
+  function setup(opts: { answers?: boolean; panes?: Array<Record<string, unknown>>; row?: Record<string, unknown> } = {}) {
+    const h = fakeHerdr({ panes: opts.panes ?? [herdrPane()] })
+    const orcaExec = fakeExec(['orca screen'])
+    const audit = vi.fn()
+    const fallback = { capture: vi.fn(async () => 'tmux screen'), sendText: vi.fn(async () => true), sendKey: vi.fn(async () => true), acquireControl: vi.fn(() => () => {}) }
+    const row = { agentId: 'h1', sessionId: SID, engine: 'claude', hosted: 'external' as const, external: { orca: null, herdr: { ...herdrRef }, inner: 'herdr' as const }, ...opts.row }
+    const rows: Record<string, unknown> = { h1: row, [SID]: row }
+    const router = new ExternalTerminalRouter({
+      resolve: (id) => rows[id] as never,
+      orca: new OrcaCli({ bin: 'orca', exec: orcaExec }),
+      herdr: new HerdrCli({ exec: h.exec, env: {} }),
+      answersEnabled: () => opts.answers ?? true,
+      gate: new ExternalCaptureGate({ idleCaptureMs: 0, now: () => 0 }),
+      fallback,
+      audit,
+    })
+    const verbs = () => h.calls.map((c) => `${c.args[0]} ${c.args[1]}`)
+    return { router, h, orcaExec, audit, fallback, row, verbs }
+  }
+
+  it('reads, answers with keys and text, each checked against the pane first and audited', async () => {
+    const { router, h, audit, fallback, orcaExec, verbs } = setup()
+    expect(await router.answerDeps.capture('h1')).toBe('❯ 1. Yes\n  2. No')
+    expect(await router.answerDeps.sendKey('h1', 'Down')).toBe(true)
+    expect(await router.answerDeps.sendKey('h1', 'Escape')).toBe(true)
+    expect(await router.answerDeps.sendText('h1', 'blue\u0007')).toBe(true)
+    expect(verbs()).toEqual(['pane get', 'pane read', 'pane get', 'pane send-keys', 'pane get', 'pane send-keys', 'pane get', 'pane send-text'])
+    expect(h.calls[3]!.args).toEqual(['pane', 'send-keys', 'w4F:p1', 'down'])
+    expect(h.calls[5]!.args).toEqual(['pane', 'send-keys', 'w4F:p1', 'esc'])
+    expect(h.calls[7]!.args).toEqual(['pane', 'send-text', 'w4F:p1', 'blue'])
+    expect(h.calls.every((c) => c.bin === HBIN && c.env.HERDR_SOCKET_PATH === HSOCK)).toBe(true)
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'h1', route: 'herdr', what: 'key', value: 'Down', ok: true, terminal: 'w4F:p1' }))
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ route: 'herdr', what: 'text', ok: true }))
+    expect(fallback.sendKey).not.toHaveBeenCalled()
+    expect(orcaExec.calls).toHaveLength(0)
+    expect(router.hostOf('h1')).toBe('herdr')
+    expect(router.answerDeps.acquireControl?.(SID)).toBeTypeOf('function')
+  })
+
+  it('sends nothing at all while answers are off (no herdr call), but still reads', async () => {
+    const { router, audit, verbs } = setup({ answers: false })
+    expect(await router.answerDeps.sendKey('h1', '1')).toBe(false)
+    expect(await router.prompt('h1', 'hi')).toBe(false)
+    expect(verbs()).toEqual([])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ route: 'herdr', ok: false, reason: 'answers_off' }))
+    expect(await router.answerDeps.capture('h1')).toContain('Yes')
+  })
+
+  it('refuses kill keys and keys herdr cannot send, without touching the pane', async () => {
+    const { router, audit, verbs } = setup()
+    expect(await router.answerDeps.sendKey('h1', 'C-c')).toBe(false)
+    expect(await router.answerDeps.sendKey('h1', 'PPage')).toBe(false)
+    expect(verbs()).toEqual([])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ ok: false, reason: 'key_refused' }))
+  })
+
+  it('refuses cleanly when the pane is gone', async () => {
+    const { router, audit, verbs } = setup({ panes: [] })
+    expect(await router.answerDeps.sendKey('h1', '1')).toBe(false)
+    expect(await router.answerDeps.capture('h1')).toBeNull()
+    expect(verbs()).toEqual(['pane get', 'pane list', 'pane get', 'pane list'])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ route: 'herdr', ok: false, reason: 'pane_gone', terminal: 'w4F:p1' }))
+  })
+
+  it('refuses a pane that now runs another session (or no agent at all)', async () => {
+    const other = herdrPane({ agent_session: { value: '11111111-2222-4333-8444-555555555555' } })
+    const { router, audit, verbs } = setup({ panes: [other] })
+    expect(await router.answerDeps.sendText('h1', 'yes')).toBe(false)
+    expect(verbs()).toEqual(['pane get', 'pane list'])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ ok: false, reason: 'pane_mismatch' }))
+    const shell = setup({ panes: [herdrPane({ agent: undefined, agent_session: undefined })] })
+    expect(await shell.router.prompt('h1', 'rm -rf ~')).toBe(false)
+    expect(shell.verbs()).toEqual(['pane get', 'pane list'])
+  })
+
+  it('accepts a pane with no reported session when herdr sees the same engine in it', async () => {
+    const { router } = setup({ panes: [herdrPane({ agent_session: undefined })] })
+    expect(await router.answerDeps.sendKey('h1', '2')).toBe(true)
+    const codex = setup({ panes: [herdrPane({ agent: 'codex', agent_session: undefined })] })
+    expect(await codex.router.answerDeps.sendKey('h1', '2')).toBe(false)
+  })
+
+  it('follows a pane herdr moved, by its session, and remembers the new id', async () => {
+    const { router, h, row } = setup({ panes: [herdrPane({ pane_id: 'w9:p2', workspace_id: 'w9', tab_id: 'w9:t1' })] })
+    expect(await router.answerDeps.sendKey('h1', '1')).toBe(true)
+    expect(h.calls.at(-1)!.args).toEqual(['pane', 'send-keys', 'w9:p2', '1'])
+    expect(row.external.herdr).toMatchObject({ pane: 'w9:p2', workspace: 'w9', tab: 'w9:t1', socket: HSOCK, bin: HBIN })
+  })
+
+  it('types a prompt as text then Enter, keeping its line breaks', async () => {
+    const { router, h, audit } = setup()
+    expect(await router.prompt('h1', 'line one\nline two\u0007')).toBe(true)
+    expect(h.calls.filter((c) => c.args[1] !== 'get').map((c) => c.args)).toEqual([
+      ['pane', 'send-text', 'w4F:p1', 'line one\nline two'],
+      ['pane', 'send-keys', 'w4F:p1', 'enter'],
+    ])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ route: 'herdr', what: 'prompt', ok: true, terminal: 'w4F:p1' }))
+  })
+
+  it('hands the question controls a herdr write', async () => {
+    const { router, h } = setup()
+    const w = router.controlWrite('h1')
+    expect(w).toBeDefined()
+    expect(await w!.key('3')).toBe(true)
+    expect(await w!.key('Enter')).toBe(true)
+    expect(h.calls.filter((c) => c.args[1] === 'send-keys').map((c) => c.args[3])).toEqual(['3', 'enter'])
+  })
+
+  it('a row with both refs goes where its innermost host is; tmux innermost is watch only', async () => {
+    const both = { orca: { terminal: TERM }, herdr: { ...herdrRef } }
+    const viaOrca = setup({ row: { external: { ...both, inner: 'orca' } } })
+    expect(await viaOrca.router.answerDeps.sendKey('h1', '1')).toBe(true)
+    expect(viaOrca.orcaExec.calls.map((c) => c[1])).toEqual(['send'])
+    expect(viaOrca.verbs()).toEqual([])
+    const viaHerdr = setup({ row: { external: { ...both, inner: 'herdr' } } })
+    expect(await viaHerdr.router.answerDeps.sendKey('h1', '1')).toBe(true)
+    expect(viaHerdr.orcaExec.calls).toHaveLength(0)
+    const viaTmux = setup({ row: { external: { ...both, inner: 'tmux' } } })
+    expect(await viaTmux.router.answerDeps.sendKey('h1', '1')).toBe(false)
+    expect(await viaTmux.router.answerDeps.capture('h1')).toBeNull()
+    expect(viaTmux.audit).toHaveBeenCalledWith(expect.objectContaining({ route: 'none', ok: false, reason: 'no_host' }))
+    expect(viaTmux.orcaExec.calls).toHaveLength(0)
+    expect(viaTmux.verbs()).toEqual([])
+  })
+
+  it('an Orca prompt is the text then a carriage return, as before', async () => {
+    const r = setup({ row: { external: { orca: { terminal: TERM }, herdr: null, inner: 'orca' } } })
+    expect(await r.router.prompt('h1', 'ship it')).toBe(true)
+    expect(r.orcaExec.calls.map((c) => c[5])).toEqual(['ship it', '\r'])
   })
 })

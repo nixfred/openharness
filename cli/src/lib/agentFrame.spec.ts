@@ -26,8 +26,19 @@ describe('agentFrame', () => {
     row.hosted = 'external'
     row.external = { orca: { terminal: 'term_15fd9a21-2ea5', worktree: 'r::/w' }, proc: { pid: 1, start: 'x' } }
     expect((await agentFrame(row, { selectedModel: null, terminalAvailable: false })).external)
-      .toEqual({ source: 'orca', orcaTerminal: 'term_15fd9a21-2ea5', orcaWorktree: 'r::/w' })
+      .toEqual({ source: 'orca', orcaTerminal: 'term_15fd9a21-2ea5', orcaWorktree: 'r::/w', herdrPane: null })
     expect((await agentFrame(session(null), { selectedModel: null, terminalAvailable: true })).external).toBeNull()
+  })
+  it('marks a herdr row with its pane, and follows the innermost host when it has both', async () => {
+    const row = session(null)
+    row.hosted = 'external'
+    row.external = { orca: null, herdr: { pane: 'w4F:p1', workspace: 'w4F' }, inner: 'herdr', proc: { pid: 1, start: 'x' } }
+    expect((await agentFrame(row, { selectedModel: null, terminalAvailable: false })).external)
+      .toEqual({ source: 'herdr', orcaTerminal: null, orcaWorktree: null, herdrPane: 'w4F:p1' })
+    row.external = { orca: { terminal: 'term_15fd9a21-2ea5' }, herdr: { pane: 'w4F:p1' }, inner: 'orca', proc: null }
+    expect((await agentFrame(row, { selectedModel: null, terminalAvailable: false })).external?.source).toBe('orca')
+    row.external = { orca: { terminal: 'term_15fd9a21-2ea5' }, herdr: { pane: 'w4F:p1' }, inner: 'tmux', proc: null }
+    expect((await agentFrame(row, { selectedModel: null, terminalAvailable: false })).external?.source).toBe('terminal')
   })
   it('carries only the owning machine’s cached token snapshot, including a measured zero', async () => {
     const context = { selectedModel: null, terminalAvailable: true }

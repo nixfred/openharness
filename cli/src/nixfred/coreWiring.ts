@@ -37,9 +37,10 @@ import { statBirthMs } from '../core/agents/bind.js'
 import { Nixfred, type NixfredSessionLike } from '../nixfredWiring.js'
 import { CLIP_REQUESTS, clipPushRequest } from './clipPush.js'
 import { discoverOrcaClaudes, transcriptAgeSec } from './orcaDiscovery.js'
+import { innermostHost, nodeProcFs } from './orcaReveal.js'
 import {
-  ExternalCaptureGate, ExternalTerminalRouter, OrcaCli, applyOrcaWatchSwitch, attentionForExternalEvent, engineStillRunning,
-  findEngineAncestor, findOrcaBin, notificationOpensDialog, parseExternalHook, readOrcaWatchConfig, type OrcaSwitch,
+  ExternalCaptureGate, ExternalTerminalRouter, HerdrCli, OrcaCli, applyOrcaWatchSwitch, attentionForExternalEvent, engineStillRunning,
+  findEngineAncestor, findOrcaBin, herdrRowName, notificationOpensDialog, parseExternalHook, readOrcaWatchConfig, type OrcaSwitch,
 } from './orcaWatch.js'
 
 export { CLIP_REQUESTS }
@@ -103,32 +104,30 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
   })
 
   // ── watch mode: sessions this daemon did not start become external rows (orcaWatch.ts) ─────────────
-  // An answer to one of them is typed into its Orca terminal. Every pane-backed row goes straight through to
-  // the stock functions, unchanged. The router is handed ONLY to the answer controller and the question
-  // watcher (core/questions.ts `route`), so nothing else can type into an Orca terminal.
+  // An answer to one of them is typed into its herdr pane or its Orca terminal, whichever is the innermost
+  // host of the engine (orcaWatch.ts selectExternalHost). Every pane-backed row goes straight through to the
+  // stock functions, unchanged. The router is handed ONLY to the answer controller, the question watcher
+  // (core/questions.ts `route`), the question controls (`controlWrite`) and the session input's external
+  // branch (`externalPrompt`), so nothing else can type into an external terminal.
   let orcaWatch = readOrcaWatchConfig(deps.dataDir)
   const orcaCli = new OrcaCli({ bin: findOrcaBin() })
+  const herdrCli = new HerdrCli()
   const externalTerminals = new ExternalTerminalRouter({
     resolve: (id) => registry.resolve(id),
     orca: orcaCli,
+    herdr: herdrCli,
     answersEnabled: () => orcaWatch.enabled && orcaWatch.answers,
     gate: new ExternalCaptureGate({ idleCaptureMs: orcaWatch.idleCaptureMs }),
     fallback: deps.terminal,
     audit: (entry) => {
-      console.log(`[orca] ${sid(entry.agentId)} answer ${entry.what} via ${entry.route} · ${entry.ok ? 'delivered' : 'NOT delivered'}`)
+      console.log(`[orca] ${sid(entry.agentId)} ${entry.what === 'prompt' ? 'prompt' : `answer ${entry.what}`} via ${entry.route}${entry.terminal ? ` ${entry.terminal}` : ''} · ${entry.ok ? 'delivered' : `NOT delivered${entry.reason ? ` (${entry.reason})` : ''}`}`)
       nixfred.auditAnswer(entry)
     },
   })
 
-  // A typed or spoken prompt (dial voice, app) for an Orca row goes into its Orca terminal, then Enter.
-  // Same switch as answers: watch mode on and answers on. Every send is audited.
-  const externalPrompt = async (session: RegisteredSession, text: string): Promise<boolean> => {
-    const terminal = session.external?.orca?.terminal
-    if (!terminal || !(orcaWatch.enabled && orcaWatch.answers)) return false
-    const ok = (await orcaCli.send(terminal, text)) && (await orcaCli.send(terminal, '\r'))
-    nixfred.auditAnswer({ agentId: session.agentId, sessionId: session.sessionId ?? '', route: 'orca', what: 'prompt', value: text.slice(0, 200), ok, terminal })
-    return ok
-  }
+  // A typed or spoken prompt (dial voice, app) for an external row goes into its herdr pane or Orca terminal,
+  // then Enter. Same switch as answers: watch mode on and answers on. Every send is audited.
+  const externalPrompt = (session: RegisteredSession, text: string): Promise<boolean> => externalTerminals.prompt(session.agentId, text)
 
   // The brakes, in order: spend cap (pauses the pane and tells the web why), then the loop policy (battery,
   // lid, busy GPU, quiet hours, fleet lease).
@@ -175,14 +174,18 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
       return { ok: true, ended: !!existing }
     }
     const hadTranscript = existing?.transcriptPath ?? null
+    const proc = e.callerPid ? findEngineAncestor(e.callerPid, e.engine) : null
     const out = registry.registerExternal({
       engine: e.engine, sessionId: e.sessionId, cwd: e.cwd, title: e.title, transcriptPath: e.transcriptPath,
-      codexHome: e.codexHome, model: e.model, orca: e.orca,
-      proc: e.callerPid ? findEngineAncestor(e.callerPid, e.engine) : null,
+      codexHome: e.codexHome, model: e.model, orca: e.orca, herdr: e.herdr,
+      // The nearest multiplexer/IDE above the engine decides where answers go (selectExternalHost).
+      inner: proc ? innermostHost(proc.pid, nodeProcFs) : null,
+      proc,
     })
     if (!out) return { ignored: true, reason: 'not_registered' }
     const row = registry.byAgent(out.agentId)
     if (!row) return { ignored: true, reason: 'not_registered' }
+    if (out.isNew && row.external?.herdr) void refreshHerdrNames().catch(() => {})
     if (out.isNew || out.reactivated || (!hadTranscript && row.transcriptPath)) await attachExternal(row, true, e.event)
     else if (e.event === 'SessionStart') await attachExternal(row, true, e.event)
     // A dialog is open: read the Orca screen fresh until it is answered or the turn moves on.
@@ -203,6 +206,11 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
     for (const d of discoverOrcaClaudes(claudeHome)) {
       const existing = registry.bySession(d.sessionId)
       if (existing && existing.active) {
+        // A row a hook made before its herdr ids travelled: the process environment says which pane it is.
+        if (existing.hosted === 'external' && existing.external && !existing.external.herdr && d.herdr) {
+          existing.external.herdr = d.herdr
+          if (!existing.external.inner) existing.external.inner = innermostHost(d.pid, nodeProcFs)
+        }
         if (hooklessExternal.has(existing.agentId)) {
           const age = transcriptAgeSec(existing.transcriptPath ?? d.transcriptPath)
           const cur = nixfred.attention.get(existing.agentId)?.state
@@ -211,10 +219,36 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
         }
         continue
       }
-      const res = await handleExternalHook({ engine: 'claude', event: 'SessionStart', sessionId: d.sessionId, cwd: d.cwd, transcriptPath: d.transcriptPath, callerPid: d.pid, orca: d.orca })
+      const res = await handleExternalHook({ engine: 'claude', event: 'SessionStart', sessionId: d.sessionId, cwd: d.cwd, transcriptPath: d.transcriptPath, callerPid: d.pid, orca: d.orca, herdr: d.herdr })
       if (res.ok && typeof res.agentId === 'string') {
         hooklessExternal.add(res.agentId)
-        console.log(`[orca] ${sid(res.agentId)} discovered claude (no hook yet) · orca=${d.orca?.terminal ?? '-'} · cwd=${d.cwd ?? '?'}`)
+        console.log(`[orca] ${sid(res.agentId)} discovered claude (no hook yet) · herdr=${d.herdr?.pane ?? '-'} · orca=${d.orca?.terminal ?? '-'} · cwd=${d.cwd ?? '?'}`)
+      }
+    }
+    await refreshHerdrNames()
+  }
+
+  // herdr names: a herdr row is called what its herdr workspace is called ("Blip:gus:herdr"), not
+  // "blip · ec70". One `workspace list`, `tab list` and `pane list` per herdr server per discovery pass.
+  // Set as the row's default name, so a rename in the app still wins (registry.ts projectDisplayName).
+  const refreshHerdrNames = async (): Promise<void> => {
+    const rows = registry.hostedList('external').filter((r) => r.active && r.external?.herdr)
+    const servers = new Map<string, typeof rows>()
+    for (const r of rows) {
+      const h = r.external!.herdr!
+      const key = `${h.bin ?? ''}\u0000${h.socket ?? ''}`
+      servers.set(key, [...(servers.get(key) ?? []), r])
+    }
+    for (const group of servers.values()) {
+      const h = group[0]!.external!.herdr!
+      const labels = await herdrCli.labels({ ...(h.socket ? { socket: h.socket } : {}), ...(h.bin ? { bin: h.bin } : {}) })
+      if (!labels) continue
+      for (const r of group) {
+        const name = herdrRowName(r.sessionId, r.external!.herdr!, labels)
+        if (!name || name === r.defaultName) continue
+        r.defaultName = name
+        deps.announceSession(r)
+        console.log(`[orca] ${sid(r.agentId)} herdr name · ${name}`)
       }
     }
   }
@@ -222,9 +256,12 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
   const orcaStatus = (): Record<string, unknown> => ({
     ...orcaWatch,
     orcaCli: orcaCli.available,
+    herdrCli: !!herdrCli.binFor({ pane: 'x:x' }),
     rows: registry.hostedList('external').map((r) => ({
       agentId: r.agentId, sessionId: r.sessionId, engine: r.engine, active: r.active, name: projectDisplayName(r), cwd: r.cwd,
       orcaTerminal: r.external?.orca?.terminal ?? null, orcaWorktree: r.external?.orca?.worktree ?? null,
+      herdrPane: r.external?.herdr?.pane ?? null, herdrWorkspace: r.external?.herdr?.workspace ?? null,
+      inner: r.external?.inner ?? null, host: externalTerminals.hostOf(r.agentId),
       state: nixfred.attention.get(r.agentId)?.state ?? (r.active ? 'idle' : 'offline'),
     })),
   })

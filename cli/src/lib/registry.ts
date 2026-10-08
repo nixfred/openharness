@@ -152,11 +152,18 @@ export interface RegisteredSession {
   hosted?: 'hermes-store' | 'external'
   /**
    * nixfred watch mode (nixfred/orcaWatch.ts): a live Claude/Codex session this daemon did NOT start,
-   * registered from its hooks. Memory-only like every hosted row. `orca` is the Orca terminal the
-   * session runs in, when the hook saw one; it is the only place an answer may be typed. Never moved,
-   * never killed: the row has no runtime and no process identity to act on.
+   * registered from its hooks. Memory-only like every hosted row. `orca` is the Orca terminal and `herdr`
+   * the herdr pane the session runs in, when the hook or the process environment showed one; `inner` is the
+   * nearest of them in the engine's parent chain, which decides where an answer may be typed
+   * (nixfred/orcaWatch.ts selectExternalHost). Never moved, never killed: the row has no runtime and no
+   * process identity to act on.
    */
-  external?: { orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null; proc: { pid: number; start: string } | null } | null
+  external?: {
+    orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
+    herdr?: { pane: string; workspace?: string; tab?: string; socket?: string; bin?: string } | null
+    inner?: 'herdr' | 'orca' | 'tmux' | null
+    proc: { pid: number; start: string } | null
+  } | null
   /**
    * The engine's OWN model this agent was on immediately before it moved to a grid.
    *
@@ -2169,6 +2176,8 @@ class Registry {
     codexHome?: string | null
     model?: string | null
     orca: { terminal: string; worktree?: string; tab?: string; pane?: string } | null
+    herdr?: { pane: string; workspace?: string; tab?: string; socket?: string; bin?: string } | null
+    inner?: 'herdr' | 'orca' | 'tmux' | null
     proc: { pid: number; start: string } | null
   }): { agentId: string; isNew: boolean; reactivated?: boolean } | null {
     if (this.writeBlocked || !input.sessionId) return null
@@ -2181,7 +2190,12 @@ class Registry {
       if (input.cwd) { existing.cwd = input.cwd; existing.projectDir = basename(input.cwd) || existing.projectDir }
       if (transcript) existing.transcriptPath = transcript
       if (input.model) existing.model = input.model
-      existing.external = { orca: input.orca ?? existing.external?.orca ?? null, proc: input.proc ?? existing.external?.proc ?? null }
+      existing.external = {
+        orca: input.orca ?? existing.external?.orca ?? null,
+        herdr: input.herdr ?? existing.external?.herdr ?? null,
+        inner: input.inner !== undefined && input.inner !== null ? input.inner : (existing.external?.inner ?? null),
+        proc: input.proc ?? existing.external?.proc ?? null,
+      }
       existing.lastHookAt = Date.now()
       const reactivated = !existing.active
       if (reactivated) existing.active = true
@@ -2200,7 +2214,7 @@ class Registry {
       gridLaunch: null,
       gridWebSearch: null,
       hosted: 'external',
-      external: { orca: input.orca, proc: input.proc },
+      external: { orca: input.orca, herdr: input.herdr ?? null, inner: input.inner ?? null, proc: input.proc },
       defaultName: undefined,
       transcriptPath: transcript,
       projectDir: basename(input.cwd ?? '') || input.sessionId.slice(0, 8),

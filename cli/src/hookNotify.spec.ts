@@ -76,6 +76,8 @@ function runHook(opts: RunHookOpts): Promise<string> {
     // failure in five full-suite runs. Give the child room so these specs test behaviour, not the load
     // on the machine running them.
     env.HARNESS_HOOK_DEADLINE_MS = '30000'
+    // A developer running the suite inside herdr (or Orca) must not leak their own pane into the hook.
+    for (const k of Object.keys(env)) if (k.startsWith('HERDR_') || k.startsWith('ORCA_')) delete env[k]
     if (opts.env) Object.assign(env, opts.env)
     delete env.TMUX_PANE
     if (opts.tmuxPane) env.TMUX_PANE = opts.tmuxPane
@@ -1622,6 +1624,39 @@ describe('watch mode: sessions outside tmux (nixfred/orcaWatch.ts)', () => {
     expect(requests).toHaveLength(1)
     expect(requests[0]?.body).toMatchObject({ event: 'Stop', sessionId: SID })
     expect(requests[0]?.body.orca).toBeUndefined()
+  })
+
+  const HERDR_ENV = {
+    HERDR_ENV: '1',
+    HERDR_PANE_ID: 'w4F:p1',
+    HERDR_TAB_ID: 'w4F:t1',
+    HERDR_WORKSPACE_ID: 'w4F',
+    HERDR_SOCKET_PATH: '/home/u/.config/herdr/herdr.sock',
+    HERDR_BIN_PATH: '/usr/bin/herdr',
+    HERDR_CLIENT_SOCKET_PATH: '/home/u/.config/herdr/herdr-client.sock',
+  }
+
+  it('reports a herdr session with its pane, tab, workspace, socket and binary', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    await runHook({ port, dataDir, env: HERDR_ENV, input: { hook_event_name: 'SessionStart', session_id: SID, cwd: '/home/u/proj' } })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.body.herdr).toEqual({ pane: 'w4F:p1', tab: 'w4F:t1', workspace: 'w4F', socket: '/home/u/.config/herdr/herdr.sock', bin: '/usr/bin/herdr' })
+    expect(requests[0]?.body.orca).toBeUndefined()
+    expect(JSON.stringify(requests)).not.toContain('herdr-client.sock')
+  })
+
+  it('drops hostile herdr values: a bad pane drops the block, bad paths and ids drop the field', async () => {
+    const { port, requests } = await collect({ ok: true })
+    const dataDir = watchDir(true)
+    await runHook({ port, dataDir, env: { ...HERDR_ENV, HERDR_PANE_ID: 'w4F:p1; rm -rf /' }, input: { hook_event_name: 'Stop', session_id: SID } })
+    await runHook({ port, dataDir, env: { ...HERDR_ENV, HERDR_SOCKET_PATH: 'relative.sock', HERDR_BIN_PATH: '/tmp/evil/sh', HERDR_TAB_ID: '$(id)', HERDR_WORKSPACE_ID: 'w4F/../x' }, input: { hook_event_name: 'Stop', session_id: SID } })
+    await runHook({ port, dataDir, env: { ...HERDR_ENV, HERDR_SOCKET_PATH: '/home/u/../../etc/x.sock' }, input: { hook_event_name: 'Stop', session_id: SID } })
+    expect(requests).toHaveLength(3)
+    expect(requests[0]?.body.herdr).toBeUndefined()
+    expect(requests[1]?.body.herdr).toEqual({ pane: 'w4F:p1' })
+    expect(requests[2]?.body.herdr).toMatchObject({ pane: 'w4F:p1', bin: '/usr/bin/herdr' })
+    expect((requests[2]?.body.herdr as { socket?: string }).socket).toBeUndefined()
   })
 
   it('leaves a tmux session on the stock path, and a Notification there posts nothing', async () => {
