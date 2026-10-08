@@ -84,7 +84,7 @@ function callArguments(source: string, call: string): { text: string; at: number
 }
 
 /** Every call whose dependencies run DURING start-up, before `runForeground` has finished its body. */
-const STARTUP_CALLS = ['await repairClaudeCwd({', 'await restoreAgents({']
+const STARTUP_CALLS = ['await repairProjectCwds({', 'await restoreAgents({']
 
 /** What the prologue is allowed to do before the master's update is listened for: nothing that can throw. */
 const PROLOGUE_CALLS = new Set(['installTimestampedConsole'])
@@ -113,7 +113,7 @@ describe('the core\'s start-up order (core/main.ts)', () => {
     for (const risky of [
       'requireTmuxAvailable(',      // throws outright when tmux is missing
       'await startHookServer(',     // EADDRINUSE on a fixed port with no fallback
-      'installSessionHooks(',       // 13 vendor settings files, any of which can be unreadable
+      'installEngineHooks(',        // 13 vendor settings files, any of which can be unreadable
       'await restoreAgents({',      // tmux, the registry, and the closures a bad edit puts in a dead zone
       'await agentReconciler.start(',
       'loadCursorPendingTasks(',    // a file lock that can hang, not just throw

@@ -17,10 +17,20 @@ that stream.
 **The engine interface is being migrated in small batches.** Claude Code and Codex now own their
 launch contracts, history/last-turn readers and hook behavior behind `Engine` (`engine.ts`). `registry.ts`
 selects those engines; `launches.ts` and `hooks.ts` expose their respective facets without loading history
-readers. Hook transport, process binding and event delivery stay with core. Claude Code and Codex history/last-turn reads,
-live transcript parsing, runtime profiles/catalogs, screen interpretation, model-control drivers and question navigation run on demand in supervised workers;
+readers. Hook transport, process binding and event delivery stay with core. Their hooks are declared data
+(`claude/hookContract.ts`, `codex/hookContract.ts`) that core applies in line with `kit/` mechanics, never in a
+worker ([hooks](../../../docs/design/2026-10-08-engine-hooks.md)). So are their launch specifics (`claude/launch.ts`,
+`codex/launch.ts`): Codex's pane startup probe and retry, its own-login provider, the harness context and env
+flags, folder trust and the resume repair, applied by `kit/launchStartup.ts`, `kit/launchArgs.ts`,
+`kit/folderTrust.ts` and `kit/resumeRepair.ts`, and what discovery reads off their processes and transcripts
+(`claude/discoveryContract.ts`, `codex/discoveryContract.ts`, `kit/processFacts.ts`, `kit/projectFolder.ts`) ([launch](../../../docs/design/2026-10-08-engine-launch.md)). Claude Code and Codex history/last-turn reads,
+live transcript parsing, runtime profiles/catalogs, screen interpretation, submission readings, model-control drivers, question navigation and Codex's app-server connection run on demand in supervised workers;
 the other facets still run in core. Explicit inline mode and older masters retain inline implementations. See
+[hooks](../../../docs/design/2026-10-08-engine-hooks.md),
+[launch](../../../docs/design/2026-10-08-engine-launch.md),
 [question control](../../../docs/design/2026-10-08-engine-question-control.md),
+[submission](../../../docs/design/2026-10-08-engine-submission.md),
+[native control](../../../docs/design/2026-10-08-engine-native-control.md),
 [model control](../../../docs/design/2026-10-08-engine-model-control.md),
 [screen interpretation](../../../docs/design/2026-10-08-engine-screen.md),
 [runtime profiles](../../../docs/design/2026-10-08-engine-runtime.md) and the
@@ -415,7 +425,7 @@ Only needed for the capabilities your agent actually has. Skip what does not app
 
 | File | What to add |
 |---|---|
-| `lib/sessionInput.ts` | How text is submitted, and how long to wait before deciding the submit failed. Muse writes its `started` record as soon as it accepts a prompt, so 6 seconds is enough; a slower agent needs a longer window |
+| `lib/sessionInput.ts` | How text is submitted, and how long to wait before deciding the submit failed. Muse writes its `started` record as soon as it accepts a prompt, so 6 seconds is enough; a slower agent needs a longer window. Claude Code and Codex declare theirs in `<engine>/submissionPolicy.ts` and read their composer in `<engine>/submission.ts`, in their worker |
 | `lib/sessionRepair.ts` | Rebinding a pane to its session after a restart |
 | `lib/oneshot.ts` | Running a single prompt outside an interactive session |
 

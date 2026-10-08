@@ -10,6 +10,8 @@ import type { ServiceProcessOptions } from '../../serviceProcess.js'
 import type { EngineTranscript, HistoryAsk, TranscriptSession } from '../facets/transcript.js'
 import { engineLiveRequests } from './liveRequests.js'
 import { engineScreenRequests } from './screenRequests.js'
+import { engineSubmissionRequests } from './submissionRequests.js'
+import { engineNativeControlRequests } from './nativeControlRequests.js'
 import { engineRuntimeRequests } from './runtimeRequests.js'
 import {
   EngineReadError, record, READER_HISTORY, READER_IN_FLIGHT, READER_LAST_TURN, READER_REPLY_BYTES,
@@ -91,11 +93,13 @@ export function runEngineReader(engine: ReaderEngine, options: EngineProcessOpti
   let core: CoreConnection | null = null
   return (options.run ?? runServiceProcess)({
     name: READER_SERVICES[engine], socketPath: options.socketPath, machineId: options.machineId,
-    token: options.token, requests: options.requests ?? { ...engineReaderRequests(engine), ...engineLiveRequests(engine), ...engineRuntimeRequests(engine), ...engineScreenRequests(engine), ...engineModelControlRequests(engine, {
+    token: options.token, requests: options.requests ?? { ...engineReaderRequests(engine), ...engineLiveRequests(engine), ...engineRuntimeRequests(engine), ...engineScreenRequests(engine), ...engineSubmissionRequests(engine), ...engineModelControlRequests(engine, {
       query: (query, payload) => core ? core.query(query, payload) : Promise.reject(new Error('core disconnected')),
     }), ...engineQuestionControlRequests(engine, {
       query: (query, payload) => core ? core.query(query, payload) : Promise.reject(new Error('core disconnected')),
-    }) },
+    }), ...(engine === 'codex' ? engineNativeControlRequests(engine, {
+      query: (query, payload) => core ? core.query(query, payload) : Promise.reject(new Error('core disconnected')),
+    }) : {}) },
     onConnected: connected => { core = connected }, onDisconnected: () => { core = null },
   })
 }

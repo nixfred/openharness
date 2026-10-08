@@ -28,7 +28,7 @@ import { DEFAULT_LOOP_POLICY, LoopLeaseStore, shouldDeferLoop, type LoopPolicy }
 import { buildCheckpoint, listCheckpoints, restoreCheckpoint, describeCheckpoint } from './nixfred/taskCheckpoint.js'
 import { buildReviewBundle } from './nixfred/reviewBundle.js'
 import { listPins, pin, startRecording, stopRecording, toAsciicast } from './nixfred/sessionRecorder.js'
-import { installGateHook, uninstallGateHook, gateHookInstalled } from './lib/hooks.js'
+import { installGateHook, uninstallGateHook, gateHookInstalled } from './nixfred/gateHook.js'
 import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
 import { CiWatcher, parsePrChecks } from './nixfred/ciWatch.js'
 import { DISPATCH_RESULT_TYPE, createRemoteAgentBackend, jobPrompt, type DispatchResult, type JobSpec, type MachineLink, type WireFrame } from './nixfred/remoteOrchestratorBackend.js'

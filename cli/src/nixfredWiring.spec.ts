@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dialFleet, dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
 
 vi.mock('./lib/desktopNotify.js', () => ({ notifyAttention: vi.fn(async () => 'skipped') }))
-vi.mock('./lib/hooks.js', () => ({ installGateHook: () => 'installed', uninstallGateHook: () => 'removed', gateHookInstalled: () => false }))
+vi.mock('./nixfred/gateHook.js', () => ({ installGateHook: () => 'installed', uninstallGateHook: () => 'removed', gateHookInstalled: () => false }))
 
 const session = (agentId: string, extra: Partial<NixfredSessionLike> = {}): NixfredSessionLike => ({
   agentId, sessionId: `s-${agentId}`, engine: 'claude', active: true, tmuxPane: '%3', cwd: '/tmp/proj', name: agentId, model: 'claude-sonnet', ...extra,
