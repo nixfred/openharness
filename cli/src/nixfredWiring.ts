@@ -492,10 +492,10 @@ export class Nixfred {
    * Watch mode (nixfred/orcaWatch.ts): one journal line for every key or text an answer typed into a
    * terminal this daemon does not own, delivered or not. `harness audit` shows them.
    */
-  auditAnswer(e: { agentId: string; sessionId: string; route: string; what: string; value: string; ok: boolean; terminal?: string }): void {
+  auditAnswer(e: { agentId: string; sessionId: string; route: string; what: string; value: string; ok: boolean; terminal?: string; reason?: string }): void {
     this.log({
       kind: 'answer', agentId: e.agentId, sessionId: e.sessionId, name: `answer via ${e.route}: ${e.what}`,
-      detail: `${JSON.stringify(e.value)}${e.terminal ? ` -> ${e.terminal}` : ''}${e.ok ? '' : ' (not delivered)'}`,
+      detail: `${JSON.stringify(e.value)}${e.terminal ? ` -> ${e.terminal}` : ''}${e.ok ? '' : e.reason ? ` (not delivered: ${e.reason})` : ' (not delivered)'}`,
       decision: e.ok ? 'allow' : 'deny',
     })
   }

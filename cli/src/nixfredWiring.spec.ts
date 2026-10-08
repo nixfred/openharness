@@ -60,10 +60,12 @@ describe('Nixfred wiring', () => {
     sessions = [session('a'), session('x', { external: true, tmuxPane: undefined })]
     nix.auditAnswer({ agentId: 'x', sessionId: 's-x', route: 'orca', what: 'key', value: '1', ok: true, terminal: 'term_abc' })
     nix.auditAnswer({ agentId: 'x', sessionId: 's-x', route: 'none', what: 'text', value: 'blue', ok: false })
-    await vi.waitFor(() => expect(readFileSync(join(dir, 'audit.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2))
+    nix.auditAnswer({ agentId: 'x', sessionId: 's-x', route: 'herdr', what: 'prompt', value: 'hi', ok: false, terminal: 'w4F:p1', reason: 'pane_gone' })
+    await vi.waitFor(() => expect(readFileSync(join(dir, 'audit.jsonl'), 'utf8').trim().split('\n')).toHaveLength(3))
     const lines = readFileSync(join(dir, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
     expect(lines[0]).toMatchObject({ kind: 'answer', agentId: 'x', sessionId: 's-x', name: 'answer via orca: key', detail: '"1" -> term_abc', decision: 'allow' })
     expect(lines[1]).toMatchObject({ kind: 'answer', decision: 'deny', detail: '"blue" (not delivered)' })
+    expect(lines[2]).toMatchObject({ kind: 'answer', decision: 'deny', name: 'answer via herdr: prompt', detail: '"hi" -> w4F:p1 (not delivered: pane_gone)' })
     const rows = (nix.attentionPayload().agents as Array<{ agentId: string; external: boolean }>)
     expect(rows.find((r) => r.agentId === 'x')?.external).toBe(true)
     expect(rows.find((r) => r.agentId === 'a')?.external).toBe(false)
