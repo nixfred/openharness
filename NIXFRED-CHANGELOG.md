@@ -9,6 +9,79 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## herdr is the watch-mode host again, plus 8 upstream commits (d4df7d39), and go-live, 2026-10-08 (herdr)
+
+Fred moved back from Orca to herdr (0.9.3) on 2026-10-08. Every live Claude on gus runs in a herdr pane, and
+`harness orca` listed all of them as "no Orca terminal (watch only)": rows and states, but answers and voice
+from the dial were refused. Branch nixfred/herdr-host: 268a0374 (herdr), 172eb081 (upstream merge), 4a3edba7
+(audit order), 6b3c0fc1 (audit reasons); nixfred/main fast-forwarded to 6b3c0fc1. Firmware unchanged
+(`0.0.86-nixfred.11`), not flashed.
+
+- herdr rows: the hook's external branch (notify.mjs `herdrIds`) forwards HERDR_PANE_ID, HERDR_WORKSPACE_ID,
+  HERDR_TAB_ID, HERDR_SOCKET_PATH and HERDR_BIN_PATH (strict ids, absolute paths without `..` or control
+  characters, a binary named `herdr`, nothing else), and discovery reads the same five from
+  /proc/<pid>/environ. The daemon validates them again (orcaWatch.ts `parseHerdrRef`).
+- Where keys go: `selectExternalHost`. The innermost host in the engine's parent chain wins (`innermostHost`,
+  stored on the row as `inner`); a tmux in between, or an innermost host the row has no id for, is watch only;
+  with no parent chain, herdr then Orca. Answers (`harness orca answer`, the app, the dial), upstream's
+  question controls (`controlWrite`) and prompts (the app's composer and the dial's voice, through
+  `externalPrompt`) all go through the same router: `herdr pane send-text` / `send-keys` / `read`, run
+  against the agent's own socket and binary with the daemon's HERDR_* stripped. Before every read or write
+  herdr must report this session in that pane (`agent_session`), or with no session reported the same
+  engine; a moved pane is found again by its session; otherwise refused (pane_gone, pane_mismatch). Keys map
+  from the driver's names to herdr's (Escape to esc, BTab to shift+tab, C-u to ctrl+u); C-c, C-d and the keys
+  herdr 0.9.3 cannot send (home, end, delete, page up/down) are refused. A prompt is its text, then Enter.
+  Same switch as Orca (`harness orca answers off` types nothing), and every send is in the audit journal,
+  now with the reason it was refused. Orca keeps working the same way when it is the innermost host.
+- Names: a herdr row is called after its herdr workspace label (with the tab label or pane id when agents
+  share a workspace), as its default name, so a rename in the app still wins. "blip · ec70" is "blip" again.
+- `harness orca` shows each row's host (`herdr w4F:p1`, `orca term_...`, or watch only) and the herdr CLI;
+  `harness external` is the same command. A dial tap (`HARNESS_REVEAL_PREFER`) now prefers herdr when the
+  process tree cannot tell; an innermost Orca still wins. `agentFrame.external.source` can be `herdr`, with
+  `herdrPane`.
+- Audit journal appends are serialized: two appends started together could land out of order (found on the
+  full run below, as a flaky nixfredWiring case; red-then-green auditJournal.spec case).
+- Upstream (8 commits, merged as 172eb081): #1041 Claude Code and Codex submission readings isolated; #1043
+  Codex's shared app-server from the Codex worker; #1045 Claude Code's and Codex's hooks as declared
+  contracts the kit installs; #1046 launch specifics and #1049 launch preparation as declared contracts;
+  #1048 actionlint planned with a published Go toolchain; #1050 plan for the other twelve engines; #1051
+  discovery as declared contracts. Conflicts (2): cli/src/engines/claude/installHooks.ts (deleted upstream,
+  modified by us) was deleted; the watch-mode Notification event is now in upstream's contract
+  (engines/claude/hookContract.ts `events`) and the opt-in PreToolUse gate installer moved unchanged to
+  cli/src/nixfred/gateHook.ts (new spec). cli/src/lib/hooks.ts is upstream's. The hook golden was re-recorded:
+  only Claude cases change, and only by the Notification block.
+- Verified on the branch: tsc clean. vitest (TMPDIR=/dev/shm): 11,777 passed, 10 failed, 108 skipped. The 10:
+  the known 8 (dsh shell and engineLaunch node PATH, tmuxStream.decode, processName hard link, master link
+  name, cableFleet "port held", processRows, tmuxPaneInfo); upstream's new launchArgv.golden, which records
+  `exec '/bin/dash'` and gus has no /bin/dash (fails the same way on clean upstream/main d4df7d39); and the
+  audit ordering race fixed in 4a3edba7 (auditJournal and nixfredWiring specs green after, rerun alone).
+  test:core 1,588 passed with its coverage gates (last 1,523); architecture.spec 12/12; test:harnessd 263
+  passed, 2 failed (the known processName and master link pair). New and changed specs: orcaWatch 49,
+  orcaDiscovery 6, orcaReveal, registry.external 5, agentFrame 21, hookNotify 68 (the hook spec no longer
+  inherits the developer's own HERDR_* / ORCA_*), gateHook 1, auditJournal 5, nixfredWiring 18.
+- Live, against a disposable herdr server only (its own XDG_CONFIG_HOME and socket under
+  /tmp/claude-1000/ohs4/herdr, never Fred's), with a fake agent that reports itself to that herdr as a claude
+  session and prints every key it gets, through an isolated daemon (HOME, XDG_RUNTIME_DIR, TMUX_TMPDIR under
+  /tmp/claude-1000/ohs4, port 34765, CABLE_DISABLE, DISABLE_HOOK_INSTALL=true, updates off): the question
+  watcher read the pane through herdr and opened "Which drink would you like?"; `harness orca answer <agent> 2`
+  typed `2` (fake: ANSWERED:2, controller: submitted); a prompt sent as the app's `message` frame arrived as
+  text plus Enter; with answers off, into a pane running only a shell, and into a closed pane it was refused
+  (answers_off, pane_mismatch, pane_gone) and nothing arrived; the router typed Up, Down, Escape, BTab, Tab,
+  Enter, text and Enter (fake: KEY:UP, KEY:DOWN, KEY:ESC, KEY:BACKTAB, KEY:TAB, LINE:[], LINE:[typed text])
+  and refused C-c and Home. Smoke: status, orca, external, subs, attention, spend (enabled false), gate. An
+  Orca row and a herdr row through dist/notify.mjs went idle, working, permission, done and offline, keeping
+  `orca term_...` and `herdr w2:p1`. The disposable server and scratch daemon were stopped afterwards.
+- Go-live: `install-cli.sh --no-updates --no-restart`, then `systemctl --user restart harness.service`.
+  `harness status` says v0.3.67-dev.6b3c0fc10, backend connected. The journal shows every service connected,
+  the core ready, `[orca] watch mode ON · answers ON (file)`, `dial 80:45:6B:35:06:CC on fw
+  0.0.86-nixfred.11 proto 3`, and Claude and Codex hooks "already installed" (the hooks section of
+  ~/.claude/settings.json and ~/.codex/hooks.json byte-identical before and after). `harness external` lists
+  14 live sessions: 12 as `herdr <pane>` named after their workspaces (inner host herdr from the real process
+  tree), 2 in plain kitty windows as watch only.
+- Not verified: an answer or a voice prompt from the dial into one of Fred's real herdr panes (Fred's to try;
+  nothing was typed into his panes); a dial tap revealing a herdr row on the glass; a Codex session in herdr
+  (herdr's session report for Codex was not checked); herdr panes on another machine (`--machine`).
+
 ## Upstream sync: 41 commits from autonomous-ai/openharness main (47878898), and go-live, 2026-10-08
 
 Merges upstream/main 478788986 into nixfred/main 35254b1c (branch nixfred/sync-upstream-2026-10-08) as 937a13bf,

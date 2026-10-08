@@ -47,6 +47,17 @@ upstream. Full detail: [NIXFRED-CHANGELOG.md](NIXFRED-CHANGELOG.md),
   count ("9+" past nine); a new notice rings it for about 5 s. Tap the bubble to open the inbox. The old
   blue dot at 12 o'clock is gone, so the notch there is only the shade's grab handle now.
 
+**Watch mode: agents you started yourself, in herdr first**
+
+- `harness external on` (also `harness orca on`): every Claude Code and Codex session the daemon did
+  not start becomes a row on the app and the dial, with its live state. herdr panes come first: the
+  row is named after its herdr workspace, a dial tap focuses that workspace, and answers and voice
+  prompts from the dial are typed into the pane with `herdr pane send-text` / `send-keys`, only after
+  herdr confirms the pane still holds that session. Orca terminals work the same way through the
+  `orca` CLI; when an agent has both, the host nearest to it in the process tree wins.
+- `harness external` lists each row's host (`herdr w4F:p1`, `orca term_...`, or watch only). Every
+  send is in the audit journal; `harness external answers off` keeps the rows and types nothing.
+
 **Knowing what needs you**
 
 - Every agent has a typed state (working, waiting, permission, failed, done, idle, offline) with a
