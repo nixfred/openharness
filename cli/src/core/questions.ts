@@ -7,7 +7,7 @@
  * Moved verbatim out of `runForeground` (the core boundary, step 6: docs/design/2026-10-03-harnessd.md).
  * The socket's two handlers stay bound there: `answer` (question_response) and `monitorActivity`.
  */
-import { AskQuestionController, QuestionWatcher, type AskQuestionDeps, type QuestionAnswerPayload, type QuestionAnswerResult } from '../lib/askQuestion.js'
+import { AskQuestionController, QuestionWatcher, type AskQuestionDeps, type QuestionAnswerPayload, type QuestionAnswerResult } from '../lib/questionController.js'
 import type { AutonomousDeviceInput } from './deviceInput.js'
 import { preview, sid } from '../lib/log.js'
 import type { RegisteredSession } from '../lib/registry.js'
@@ -17,6 +17,8 @@ import { withPermissionFlag } from '../nixfred/permissionFlag.js'
 type Frame = { type: string; agentId?: string; dbSessionId?: string; payload: Record<string, unknown> }
 
 export interface QuestionDeps {
+  questionControlFor: import('../lib/questionControl.js').QuestionControlFor
+  readQuestion: import('../lib/questionController.js').QuestionWatcherDeps['readQuestion']
   resolve: (id: string) => RegisteredSession | undefined
   terminal: Pick<TerminalControl, 'captureTerminal' | 'submitTerminal' | 'keyTerminal'>
   /** Holds a pane, queue and terminal both, for the whole multi-step answer (Input.acquireTerminalControl). */
@@ -44,13 +46,17 @@ export interface QuestionDeps {
 }
 
 export function createQuestions({
-  resolve, terminal, acquireTerminalControl, clients, agentIdFor, sessionTurnOpen, someoneCanAnswer, deviceInput, route, attention,
+  questionControlFor, readQuestion, resolve, terminal, acquireTerminalControl, clients, agentIdFor, sessionTurnOpen, someoneCanAnswer, deviceInput, route, attention,
 }: QuestionDeps) {
   const { captureTerminal, submitTerminal, keyTerminal } = terminal
   // AskUserQuestion bridge: mirrors the question to the device's question screen, and keys the device's
   // answer back into the CLI's own terminal dialog.
   const questions = new AskQuestionController({
+    questionControlFor,
     getSession: (id) => resolve(id),
+    readQuestion,
+    // nixfred: an Orca row's dialog is read and keyed through the router (nixfred/orcaWatch.ts); every
+    // pane-backed row gets the stock functions. Native per-engine steps reach Orca through core/main.ts.
     ...(route?.answer ?? {
       capture: captureTerminal,
       sendText: submitTerminal,
@@ -91,6 +97,7 @@ export function createQuestions({
   const questionWatcher = new QuestionWatcher({
     getSession: (id) => resolve(id),
     capture: route ? (target, lines) => route.watcherCapture(target, lines) : captureTerminal,
+    readQuestion,
     hasDevice: () => someoneCanAnswer(),
     isDriving: (sessionId) => questions.isDriving(sessionId),
     onQuestion: (sessionId, requestId, shaped, detail) => {

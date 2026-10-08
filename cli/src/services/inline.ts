@@ -1,3 +1,4 @@
+export { questionControlFor } from '../engines/questionControls.js'
 /**
  * The services that run in a process of their own by default (harnessd/services.ts `SERVICE_HOSTS`), for
  * when they run in the core's instead: with `HARNESSD_SERVICES=none` (debugging, or a quick way back), a
@@ -12,6 +13,11 @@
  * target, and its test"). The core still routes these services' requests and holds their fallbacks: both are
  * declared in core/api.ts, which it loads either way.
  */
+export { engineTranscriptFor } from '../engines/transcripts.js'
+export { liveFor } from '../engines/live.js'
+export { screenFor } from '../engines/screens.js'
+export { modelControlFor } from '../engines/modelControls.js'
+export { runtimeFor } from '../engines/runtime.js'
 export { startGateway } from '../gateway/start.js'
 export { startCommandBar } from './commandBar.js'
 export { startDevices } from './devices.js'

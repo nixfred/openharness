@@ -25,12 +25,22 @@ questions. Everything else is a service ([../services/AGENTS.md](../services/AGE
 
 - `agents/`: create, fork, restart, retarget, stop, resume, close, discovery, adoption, binding, the list.
 - `transcripts/`: attach (bounded reads from the end), ingest, live tail, relaunch marks, normalizers.
+  Claude Code/Codex live interpretation is injected through `Engine.live`; core keeps parser handles
+  and immutable turn snapshots, never edits their engine state. Supervised Claude Code/Codex parsers
+  run in workers through [the live transport](../../../docs/design/2026-10-07-engine-streams.md).
 - `turns/`: working/idle, the event funnel, cancel, heartbeats, hooks, and `recaps.ts`, the core's whole
   side of the recaps: the turn lifecycle it tells them, and what it reads back.
 - `terminals/`: who controls a pane (the control lease), opening a terminal with a literal argv (`open.ts`),
   and the requests about a terminal itself (`requests.ts`: `terminal_info`, `theme_set`).
-- `engines/`: the engines' hooks.
-- `input.ts`, `questions.ts`: messages into a pane; an agent's question and its answer.
+- `engines/`: hook coordination, reader ports and live worker coordination. Claude Code/Codex
+  history, last-turn reads, live parsing, runtime profiles/catalogs and screen interpretation run in supervised workers; core passes snapshots,
+  validates bounded replies, retains acknowledged cursors and owns binding/turn state. The explicit
+  inline/older-master compatibility path is the only live parser or runtime profile implementation
+  composition in core. Screen reads are bounded and fenced to the worker connection and session binding
+  ([screen boundary](../../../docs/design/2026-10-08-engine-screen.md)). Core keeps accepted profiles and control authority; native model drivers run in workers through [revocable control grants](../../../docs/design/2026-10-08-engine-model-control.md), and so does question navigation ([question control](../../../docs/design/2026-10-08-engine-question-control.md)). See [runtime profiles](../../../docs/design/2026-10-08-engine-runtime.md).
+- `input.ts`, `questions.ts`: messages into a pane; an agent's question and its answer. Core matches an answer to the
+  question on screen and holds the lease; Claude Code's and Codex's keys for each approved step come from their engine
+  worker through a revocable grant (`engines/questionControls.ts`).
   `deviceInput.ts`: the pane writer lock every write takes, and a device's queued turns behind it.
   `cardText.ts`: an engine's error, rewritten for a device's card.
 - `deliveries.ts`: delivered turns, the Wi-Fi device's, a team's and the orchestrator's: text written into an

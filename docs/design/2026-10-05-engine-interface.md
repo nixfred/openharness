@@ -1,9 +1,21 @@
 # Engines behind one interface
 
+> Process pilot: Claude Code and Codex history/last-turn reads now run in supervised workers. Other
+> facets remain in core. See [the reader contract](2026-10-07-engine-readers.md) for scope, limits,
+> failure behavior and compatibility. This is not complete engine isolation.
+
+
 > **Status, 2026-10-07: resumed by the owner, a few engines per batch.** The first batch moves Claude
 > Code and Codex launch contracts, paged history and last-turn reads behind an `Engine` interface. It
-> preserves their existing argv and transcript behavior. Launch metadata loads separately from readers.
-> Hooks, discovery/resume, live ingestion, screen/input, models and one-shot handling remain to migrate.
+> preserves their existing argv and transcript behavior. The second batch moves their hook installation,
+> Claude Code's resume-path correction and Stop handling, and Codex's subagent admission behind a hooks
+> facet. Launch metadata and hooks load separately from history readers. Core retains authenticated
+> transport, process binding, prompt timestamps and event delivery. Discovery/resume, live ingestion,
+> screen/input, models and one-shot handling remain to migrate.
+> Since then, Claude Code's and Codex's transcript readers (#1015), live parsing (#1017, #1019), runtime
+> profiles (#1022), screen interpretation (#1027), model controls (#1038) and question navigation run in
+> their supervised engine workers. Still in core for them: submission verification, hook admission and
+> installers, engine-specific launch, discovery and resume, and native control connections.
 > The older all-engine branches (`engine-interface-1..5`, `engine-lane-*`, draft PR #842) are retained as
 > reference work; they are not the implementation currently landing. The phased plan below is the
 > target architecture, not a claim that all facets or engine isolation are already complete.
@@ -1199,4 +1211,3 @@ All counts are on `main` at `31b4a0c27`, run from `cli/`, without spec files.
   `src/lib/sessionSearch/externals` 55,983 bytes.
 - The inventory tables (section 3): read from the code by file, with each decision's lines; the lines
   are on `31b4a0c27` and will move.
-

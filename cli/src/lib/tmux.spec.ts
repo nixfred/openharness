@@ -20,6 +20,7 @@ import {
   sendLiteralToTmux,
   sendToTmux,
   tmuxCaptureArgs,
+  withStartTicks,
 } from './tmux.js'
 import { tmuxControlGate } from './tmuxControlGate.js'
 import { assumeTmuxVersion, resetTmuxVersionCache } from './tmuxVersion.js'
@@ -71,6 +72,17 @@ describe('tmux process primitives', () => {
     vi.restoreAllMocks()
   })
 
+
+  it('adds the start ticks a clock step cannot move on Linux, and nothing elsewhere', () => {
+    const live = parseProcessRow('3998  3992 node            Mon Sep 21 08:15:25 2026 node /home/node/.npm-global/bin/codex')!
+    const gone = parseProcessRow('3999  3992 node            Mon Sep 21 08:15:25 2026 node codex')!
+    const ticksOf = (pid: number) => pid === 3998 ? 26385008 : null
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    expect(withStartTicks([live, gone], ticksOf)).toEqual([{ ...live, startTicks: 26385008 }, gone])
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    expect(withStartTicks([live], ticksOf)).toEqual([live])
+    vi.restoreAllMocks()
+  })
 
   it('parses a process whose comm field contains spaces', () => {
     expect(parseProcessRow('4242 100 ⌘ Greeting Thu Jul 30 11:00:03 2026 cmd -r abcdef12-3456-7890-abcd-ef1234567890')).toEqual({
@@ -615,6 +627,34 @@ if [ "$1" = "paste-buffer" ] && [ "$TMUX_SUBMIT_FAIL" = "1" ]; then exit 2; fi
       writeFileSync(argsFile, '')
       expect(await sendToTmux('%7', 'clear to send', async () => null)).toBe(true)
       expect(commands().at(-1)).toBe('send-keys -t %7 Enter')
+
+      // A revoked engine operation must not paste after waiting for a tmux room or buffer load.
+      writeFileSync(argsFile, '')
+      expect(await sendToTmux('%7', '/model next', undefined, () => false)).toBe(false)
+      expect(readFileSync(argsFile, 'utf8')).toBe('')
+      writeFileSync(argsFile, '')
+      expect(await sendToTmux('%7', '/model next', undefined, () => readFileSync(argsFile, 'utf8') === '')).toBe(false)
+      expect(commands()).toEqual(['load-buffer -b buffer -', 'delete-buffer -b buffer'])
+
+      // Revocation while the caller awaits a final admission check must withhold Enter.
+      writeFileSync(argsFile, '')
+      let allowed = true
+      expect(await sendToTmux('%7', '/model next', async () => { allowed = false; return null }, () => allowed))
+        .toEqual({ withheld: 'terminal control revoked' })
+      expect(commands()).toEqual(['load-buffer -b buffer -', 'paste-buffer -t %7 -b buffer -p -d'])
+
+      // tmux 3.4 can queue a paste behind a terminal attach. Revocation follows it through that queue.
+      writeFileSync(argsFile, '')
+      assumeTmuxVersion({ major: 3, minor: 4 })
+      allowed = true
+      const leave = await tmuxControlGate.enter('attach')
+      const queued = sendToTmux('%7', '/model next', undefined, () => allowed)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      allowed = false
+      leave()
+      expect(await queued).toBe(false)
+      expect(readFileSync(argsFile, 'utf8')).toBe('')
+      assumeTmuxVersion(null)
 
       writeFileSync(argsFile, '')
       process.env.TMUX_SUBMIT_FAIL = '1'

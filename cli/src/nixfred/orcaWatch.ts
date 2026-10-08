@@ -361,6 +361,16 @@ export class ExternalTerminalRouter {
     return row && row.hosted === 'external' && row.external ? row as RoutableRow & { external: { orca: OrcaRef | null } } : undefined
   }
 
+  /**
+   * For upstream's native question steps (core/main.ts question controls, #1040): the engine's own navigation
+   * decides each key and text, and for an external row they are typed into its Orca terminal (audited, and
+   * refused with no terminal or answers off). Undefined for every pane-backed row: the stock write applies.
+   */
+  controlWrite(target: string): { text: (text: string) => Promise<boolean>; key: (key: string) => Promise<boolean> } | undefined {
+    if (!this.external(target)) return undefined
+    return { text: (text) => this.send(target, 'text', text), key: (key) => this.send(target, 'key', key) }
+  }
+
   /** For the question watcher: external rows go through the gate. */
   watcherCapture(target: string, lines?: number): Promise<string | null> { return this.capture(target, lines, true) }
 

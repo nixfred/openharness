@@ -42,7 +42,8 @@ describe('Nixfred wiring', () => {
     sessions = [session('a'), session('b')]
     nix = new Nixfred(deps())
   })
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+  // maxRetries: a journal write the command fired can land while the folder is being removed (ENOTEMPTY, seen once under a full run).
+  afterEach(() => { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }) })
 
   it('turns attention changes into a local frame with a summary and glyphs', () => {
     nix.attention.turnStarted('a', 'fix login')

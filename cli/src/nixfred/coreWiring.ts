@@ -73,7 +73,7 @@ export interface NixfredCoreDeps {
   answerQuestion: (payload: QuestionAnswerPayload) => Promise<QuestionAnswerResult>
   showAwaitingAnswer: (sessionId: string) => void
   /** The Hermes readers and turn states (core/transcripts/normalizers.ts), for a hosted row that retires. */
-  hermes: () => { readers: Map<string, { stop(): void }>; turnStates: Map<string, unknown> }
+  hermes: () => { readers: Map<string, { stop(): void }>; liveParsers: Map<string, unknown> }
   /** The gateway's sessions to the owner's other machines (`gateway.windowRelay`), for the dispatcher. */
   relay: () => Pick<WindowRelay, 'acquire'>
   autonomousEnv: () => string
@@ -267,6 +267,10 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
     brake,
     /** core/questions.ts `route`. */
     route: { answer: externalTerminals.answerDeps, watcherCapture: (target: string, lines?: number) => externalTerminals.watcherCapture(target, lines) },
+    /** core/main.ts question controls (upstream's per-engine navigation contract, #1040): the worker decides the
+     *  keys, and for an Orca row each approved key or text is typed into its Orca terminal instead of a pane.
+     *  Undefined for every pane-backed row, which keeps the stock terminal write. */
+    controlWrite: (target: string) => externalTerminals.controlWrite(target),
     /** core/questions.ts `attention`. */
     questionAttention: {
       asked: (sessionId: string, permission: boolean, question: string) => nixfred.attention.question(deps.agentIdFor(sessionId), permission, question),
@@ -368,10 +372,10 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
           console.log(`[hermes-store] ${sid(agentId)} dormant · idle past the window`)
         },
         onVanished: (agentId, sessionId) => {
-          const { readers, turnStates } = deps.hermes()
+          const { readers, liveParsers } = deps.hermes()
           readers.get(sessionId)?.stop()
           readers.delete(sessionId)
-          turnStates.delete(sessionId)
+          liveParsers.delete(sessionId)
           deps.syncRecapPool()
           console.log(`[hermes-store] ${sid(agentId)} forgotten · gone from every store`)
         },

@@ -11,7 +11,7 @@ audience, not its name.
 
 Product names and interface copy follow the [Naming System](../docs/naming-system.md).
 
-**Harness 0.1.1:** the USB opens the installer directly. Installation works offline.
+**Harness 0.1.2:** the USB opens the installer directly. Installation works offline.
 After shutdown, remove the USB and boot the installed disk. If disconnected,
 the Wi-Fi page opens first and advances automatically when connected; Ethernet
 skips that step. OpenCode starts on the left with two real terminals on the right.
@@ -76,6 +76,18 @@ VM-verified installation, firmware preservation and offline recovery; physical
 hardware and automatic T2 kernel upgrades remain unverified. Apple Silicon and Raspberry Pi do not have
 installable Harness images yet. See the [hardware targets](DEVELOPMENT.md#mac-support-targets)
 for requirements and remaining work.
+
+## Connected accounts
+
+Open **Connections** from the browser's New Tab page, or run `harness connections`.
+The local start page is removable in Chromium's extension settings and preserves
+existing New Tab customizations. Sign in to a service on the local Connectors page.
+21 services (Linear, Notion, Canva, Atlassian, GitLab,
+Figma…) sign in directly from this computer; GitHub, Slack, Google, Microsoft
+365 and a few others sign in through the Harness account. Claude Code, Codex
+and OpenCode then get each service as an MCP server on a local bridge, which
+adds the credential and renews it before it expires. Tokens stay outside
+projects and agent configuration. See [Connections](connectors/README.md).
 
 ## Design
 

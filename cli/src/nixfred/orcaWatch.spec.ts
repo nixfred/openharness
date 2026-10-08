@@ -233,6 +233,23 @@ describe('ExternalTerminalRouter', () => {
     expect(exec.calls.map((c) => c[1])).toEqual(['read'])
   })
 
+  it('hands upstream\'s native question steps an Orca write for an Orca row, and nothing for a pane row', async () => {
+    // core/main.ts question controls (#1040): the engine's own navigation decides the keys; for an Orca row
+    // each one is typed into its Orca terminal, audited, and a pane row keeps the stock terminal write.
+    const { router, exec, audit, fallback } = setup()
+    const orca = router.controlWrite('a1')
+    expect(orca).toBeDefined()
+    expect(await orca!.key('2')).toBe(true)
+    expect(await orca!.text('teal')).toBe(true)
+    expect(exec.calls.map((c) => c[1])).toEqual(['send', 'send'])
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'a1', route: 'orca', what: 'key', value: '2', ok: true }))
+    expect(router.controlWrite('a2')).toBeUndefined()
+    expect(router.controlWrite('unknown')).toBeUndefined()
+    expect(fallback.sendKey).not.toHaveBeenCalled()
+    // An external row without an Orca terminal still gets a write that refuses, never the pane path.
+    expect(await router.controlWrite('a3')!.key('1')).toBe(false)
+  })
+
   it('watcher capture goes through the gate; answer capture is always fresh', async () => {
     const { router, exec } = setup()
     expect(await router.watcherCapture('a1')).toBeNull()          // idle 0, no hint: no read at all

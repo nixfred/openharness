@@ -7,6 +7,14 @@ export interface ProcessIdentity {
   pid: number
   executable: string
   startMarker: string
+  /**
+   * Linux only: when the process started, in clock ticks since boot (`/proc/<pid>/stat` field 22).
+   * `startMarker` is `ps lstart`, which Linux derives from the boot time, and the boot time moves
+   * every time the wall clock is stepped: a Docker Desktop VM resynced after the Mac slept shifted
+   * every process's lstart by hours, and each agent got a new id for the same process (6 panes, 5
+   * times in 15 hours, machine-remote-1, 2026-10-07). The ticks never change for a process.
+   */
+  startTicks?: number
 }
 
 export interface TmuxRuntimeRef {
@@ -203,7 +211,11 @@ export function terminalActionRejected(reason: string): {
  * engine can open a dialog between a paste and its Enter (a long or multi-line one waits up to 1.5 s for
  * the engine to take it in, tmux.ts), and that Enter would answer the dialog.
  */
-export interface SubmitOptions { beforeEnter?: () => Promise<string | null> }
+export interface SubmitOptions {
+  beforeEnter?: () => Promise<string | null>
+  /** Synchronous authority fence, checked immediately before paste/Enter dispatch, including queues. */
+  allowed?: () => boolean
+}
 
 /** The text was typed and its Enter not pressed, for `reason`: it waits in the composer, unsent. */
 export function terminalEnterWithheld(reason: string): { state: 'unknown'; dispatch: 'possibly_executed'; reason: string } {

@@ -143,6 +143,12 @@ const SERVICE_MAY_IMPORT: Record<string, string> = {
 
 /** What is not the core's, by path: each goes to a service or its own process, in the plan's order. */
 const EDGE: RegExp[] = [
+  /^engines\/(claude|codex)\/(screen|composer|activity|stoppedGoal|modelControl|modelPicker|questionControl)\.ts$/,
+  /^lib\/(askQuestion|runtimeProfileController|composerScreen|teamWriteHold|messageHold|terminalActivity|codexTurnRecovery)\.ts$/,
+  /^engines\/(screens|modelControls|questionControls)\.ts$/,
+  // The pilot reader implementations and their host are never loaded by supervised core.
+  /^engines\/(worker\/process|transcripts|(claude|codex)\/(transcript|\w+ReaderProcess))\.ts$/,
+  /^engines\/(runtime|(claude|codex)\/runtimeProfile)\.ts$/, /^lib\/runtimeProfile\.ts$/,
   /^gateway\//, /^lib\/e2ee\//, /^cable\//, /^device\//, /^lib\/autonomous-device\//, /^sharing\//, /^teams\//, /^orchestrator\//, /^services\//,
   /^lib\/grid(Attach|Credentials|Derive|Ensure|Envelope|Exec|FleetRpc|Handoff|Install|McpUrl|Models|ModelsPayload|Picture|Presence|Reader|Target|Wake)\.ts$/,
   /^lib\/localModels\.ts$/,
@@ -193,6 +199,30 @@ describe('the daemon\'s shape', () => {
         : /(^|\/)services\//.test(from) || (/(^|\/)(cli|backendSocket|localWsServer)\.js$/.test(from) && !typeOnly)))
       .map(({ file, from }) => `${file} imports ${from}`)
     expect(wrong, 'The core calls services only through CorePorts, and is handed the socket\'s pieces as dependencies (src/core/AGENTS.md).').toEqual([])
+  })
+
+  it('live transcript coordination depends on engine contracts, with neutral folding mechanics', () => {
+    const owners = new Set(['core/transcripts/attach.ts', 'core/transcripts/ingest.ts', 'core/transcripts/normalizers.ts'])
+    const wrong = importsIn('core').filter(({ file, from, typeOnly }) => owners.has(file) && !typeOnly
+      && (/engines\/(claude|codex)\//.test(from) || /lib\/normalize\.js$/.test(from) || /engines\/live\.js$/.test(from)))
+    expect(wrong, 'Inject the live facet; do not construct or edit an engine parser in core.').toEqual([])
+    for (const entry of ['lib/attachTranscript.ts', 'engines/kit/events.ts', 'engines/kit/transcriptFold.ts']) {
+      expect([...closureOf(entry).keys()].filter(file => /^engines\/(claude|codex)\//.test(file)), entry).toEqual([])
+    }
+  })
+
+  it('runtime profile authority and wire values load contracts without vendor profile implementations', () => {
+    for (const entry of ['core/engines/runtimeSessions.ts', 'core/engines/runtimeProfiles.ts',
+      'core/engines/runtimeTransport.ts', 'lib/runtimeProfileWire.ts', 'lib/runtimeProfileManager.ts']) {
+      expect([...closureOf(entry).keys()].filter(file => /^engines\/(claude|codex)\//.test(file)), entry).toEqual([])
+      expect(closureOf(entry).has('lib/runtimeProfile.ts'), entry).toBe(false)
+    }
+  })
+
+  it('screen transport and input authority do not load native screen implementations', () => {
+    for (const entry of ['core/input.ts', 'core/questions.ts', 'core/engines/screens.ts', 'core/engines/screenTransport.ts']) {
+      expect([...closureOf(entry).keys()].filter(file => /^engines\/(claude|codex)\//.test(file)), entry).toEqual([])
+    }
   })
 
   it('the gateway reaches the core only through core/api.ts: never a core module, the registry, cli.ts or the socket', () => {

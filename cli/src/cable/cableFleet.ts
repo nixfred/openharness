@@ -329,4 +329,16 @@ export class CableFleet {
   summary(...args: Parameters<Surface['summary']>) { return this.send('summary', ...args) }
   turnError(...args: Parameters<Surface['turnError']>) { return this.send('turnError', ...args) }
   nixfred(...args: Parameters<Surface['nixfred']>) { return this.send('nixfred', ...args) }
+  /** The pet mapping changed: every live dial is brought in line, each on its own link. */
+  petsChanged() { return this.send('petsChanged') }
+  /**
+   * The Devices tab shows ONE pet state. With several dials attached it is the first attached one (discovery
+   * order), the same choice `publish` makes for the flat status; a pull-down per dial is a later concern.
+   */
+  petDial(): ReturnType<Surface['petDial']> {
+    for (const entry of this.entries.values()) {
+      if (entry.attached && entry.session.petDial) return entry.session.petDial()
+    }
+    return { supported: false, held: [], sending: null, errors: {} }
+  }
 }
