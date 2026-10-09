@@ -9,6 +9,24 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## Clicking an attention toast opens that agent's herdr pane, 2026-10-09
+
+Fred: clicking a "needs my attention" toast did not go to the session. Two faults in `lib/desktopNotify.ts`:
+the click focused the Harness window with the classic `hyprctl dispatch focuswindow class:...`, which
+Hyprland 0.56's Lua config rejects, and the action was named `show`, so a click on the toast body
+(`default`) invoked nothing. The toast also carried no target the desktop could keep.
+
+- `AttentionNotice.herdrPane`: watch-mode sessions carry their herdr pane (`NixfredSessionLike.herdrPane`,
+  mapped in `nixfredSession` from `external.herdr.pane`). `onAttentionChange` and `onCollision` (first
+  agent) pass it through.
+- With a pane of the strict id shape and a `herdr-goto` helper on PATH, the toast carries Omarchy's
+  `omarchy-exec-argv` hint `["herdr-goto", "<pane>"]`, so the click works after the daemon's notify-send
+  has gone and from the notification history. The `default` action runs the same helper on other desktops.
+- No helper or no pane: the click focuses the Harness window, Lua dispatch first, classic form as fallback.
+- Arguments end with `--`, so a title starting with `-` stays data.
+- Verified: new `desktopNotify.spec.ts` (5 tests: herdr target, no-helper fallback in Lua, classic fallback,
+  malformed pane refused, no click no action); `nixfredWiring.spec.ts` 18 green; `tsc --noEmit` clean.
+
 ## herdr is the watch-mode host again, plus 8 upstream commits (d4df7d39), and go-live, 2026-10-08 (herdr)
 
 Fred moved back from Orca to herdr (0.9.3) on 2026-10-08. Every live Claude on gus runs in a herdr pane, and

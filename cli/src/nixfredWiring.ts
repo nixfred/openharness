@@ -49,6 +49,8 @@ export interface NixfredSessionLike {
   name: string
   /** nixfred watch mode: a session this daemon did not start. */
   external?: boolean
+  /** The herdr pane an external session runs in, so its notification can take you there. */
+  herdrPane?: string | null
 }
 
 export interface NixfredDeps {
@@ -444,7 +446,8 @@ export class Nixfred {
     const payload = this.attentionPayload()
     this.deps.sendLocal({ type: 'attention', payload })
     this.pushFleet(payload)
-    void notifyAttention({ agentName: e.agents.map((a) => a.agentName).join(' and '), machine: this.deps.machineName(), state: 'waiting', detail: e.detail }).catch(() => {})
+    const herdrPane = this.deps.sessions().find((s) => s.agentId === e.agents[0]?.agentId)?.herdrPane ?? null
+    void notifyAttention({ agentName: e.agents.map((a) => a.agentName).join(' and '), machine: this.deps.machineName(), state: 'waiting', detail: e.detail, herdrPane }).catch(() => {})
   }
 
   /** Which repo and branch each active agent's folder is on, fed to the collision watcher. */
@@ -530,7 +533,8 @@ export class Nixfred {
     // waiting agent shows on the bar and the device but does not pop a notification.
     const onBattery = this.capsCache ? !this.capsCache.value.power.onAc : false
     if (state === 'permission' || state === 'failed' || (state === 'waiting' && !onBattery)) {
-      void notifyAttention({ agentName: name, machine: this.deps.machineName(), state, detail }).catch(() => {})
+      const herdrPane = this.deps.sessions().find((s) => s.agentId === agentId)?.herdrPane ?? null
+      void notifyAttention({ agentName: name, machine: this.deps.machineName(), state, detail, herdrPane }).catch(() => {})
     }
     if (state === 'done' && row) this.exportRecap(row)
     if (state === 'working') {

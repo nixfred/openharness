@@ -84,7 +84,7 @@ export function nixfredSession(s: RegisteredSession): NixfredSessionLike {
   return {
     agentId: s.agentId, sessionId: s.sessionId, engine: s.engine, active: s.active, tmuxPane: s.tmuxPane,
     cwd: s.cwd ?? undefined, transcriptPath: s.transcriptPath ?? undefined, model: (s as { model?: string | null }).model ?? null, name: projectDisplayName(s),
-    external: s.hosted === 'external',
+    external: s.hosted === 'external', herdrPane: s.external?.herdr?.pane ?? null,
   }
 }
 
