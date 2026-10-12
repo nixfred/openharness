@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -254,5 +255,23 @@ describe('Nixfred wiring', () => {
     await expect(nix.command('nope', {})).rejects.toThrow(/unknown nixfred action/)
     const att = await nix.command('attention', {}) as { agents: unknown[] }
     expect(att.agents).toHaveLength(2)
+  })
+
+  it('a session that finished long ago and is still listed makes no branch collision with the live one, but two that both worked in the hour do', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'nixfred-repo-'))
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main', repo])
+      sessions = [session('live', { cwd: repo, name: 'mobs' }), session('ghost', { cwd: repo, name: 'mobs' })]
+      nix.attention.turnStarted('ghost', 'old bug hunt')
+      nix.attention.turnEnded('ghost') // "done, unreviewed"
+      now += 50 * 3_600_000 // two days later, still listed
+      nix.attention.turnStarted('live', 'working now')
+      await nix.pollBranches()
+      expect(nix.collisions.recent()).toEqual([]) // one live session on the branch is not a collision
+
+      nix.attention.turnStarted('ghost', 'back at it') // now both are working the branch
+      await nix.pollBranches()
+      expect(nix.collisions.recent().map((e) => e.detail)).toEqual([expect.stringMatching(/^mobs and mobs on branch main in /)])
+    } finally { rmSync(repo, { recursive: true, force: true }) }
   })
 })

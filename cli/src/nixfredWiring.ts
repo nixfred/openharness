@@ -29,7 +29,7 @@ import { buildCheckpoint, listCheckpoints, restoreCheckpoint, describeCheckpoint
 import { buildReviewBundle } from './nixfred/reviewBundle.js'
 import { listPins, pin, startRecording, stopRecording, toAsciicast } from './nixfred/sessionRecorder.js'
 import { installGateHook, uninstallGateHook, gateHookInstalled } from './nixfred/gateHook.js'
-import { CollisionWatcher, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
+import { CollisionWatcher, countsTowardBranch, type BranchLock, type CollisionEvent } from './nixfred/collisionWatch.js'
 import { CiWatcher, parsePrChecks } from './nixfred/ciWatch.js'
 import { DISPATCH_RESULT_TYPE, createRemoteAgentBackend, jobPrompt, type DispatchResult, type JobSpec, type MachineLink, type WireFrame } from './nixfred/remoteOrchestratorBackend.js'
 import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
@@ -453,8 +453,13 @@ export class Nixfred {
   /** Which repo and branch each active agent's folder is on, fed to the collision watcher. */
   async pollBranches(): Promise<void> {
     const seen = new Map<string, { repo: string; branch: string } | null>()
+    const rows = new Map(this.snapshot().map((r) => [r.agentId, r]))
+    const now = this.now()
     for (const s of this.deps.sessions()) {
       if (!s.active || !s.cwd) continue
+      // A finished or forgotten row (a headless run still listed "done, unreviewed") is not working the branch: see countsTowardBranch.
+      const row = rows.get(s.agentId)
+      if (row && !countsTowardBranch(row, now)) continue
       let info = seen.get(s.cwd)
       if (info === undefined) {
         try {

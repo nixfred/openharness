@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CollisionWatcher, pathsFromToolInput } from './collisionWatch.js'
+import { CollisionWatcher, countsTowardBranch, pathsFromToolInput } from './collisionWatch.js'
 
 const A = { agentId: 'a', agentName: 'Aiona' }
 const J = { agentId: 'j', agentName: 'Jasmine' }
@@ -56,5 +56,38 @@ describe('CollisionWatcher', () => {
     w.onCollision((e) => seen.push(e.kind))
     w.noteTool(A, 'Edit', { file_path: '/p/x' }); w.noteTool(J, 'Edit', { file_path: '/p/x' })
     expect(seen).toEqual(['file'])
+  })
+})
+
+describe('countsTowardBranch', () => {
+  const H = 3_600_000
+  const now = 100 * H
+  it('counts an agent that is working, or that was active inside the window', () => {
+    expect(countsTowardBranch({ state: 'working', since: now - 5 * H }, now)).toBe(true)
+    expect(countsTowardBranch({ state: 'done', since: now - H / 2 }, now)).toBe(true)
+    expect(countsTowardBranch({ state: 'idle', since: now - H }, now)).toBe(true)
+    expect(countsTowardBranch({ state: 'waiting', since: now - 10 }, now)).toBe(true)
+  })
+  it('ignores offline rows and finished or forgotten ones older than the window', () => {
+    expect(countsTowardBranch({ state: 'offline', since: now }, now)).toBe(false)
+    expect(countsTowardBranch({ state: 'done', since: now - 2 * H }, now)).toBe(false) // a finished headless run still listed as "done, unreviewed"
+    expect(countsTowardBranch({ state: 'idle', since: 0 }, now)).toBe(false) // never seen doing anything
+  })
+  it('a forgotten "done" row beside the one live session raises no branch collision (the hourly "mobs and mobs on branch main")', () => {
+    const w = new CollisionWatcher({ now: () => now })
+    const live = { agentId: 'live', agentName: 'mobs' }
+    const ghost = { agentId: 'ghost', agentName: 'mobs' }
+    const rows = [{ ...live, state: 'working', since: now - 60_000 }, { ...ghost, state: 'done', since: now - 50 * H }]
+    for (const r of rows) if (countsTowardBranch(r, now)) w.noteBranch({ agentId: r.agentId, agentName: r.agentName }, '/p/mobs', 'main')
+    expect(w.recent()).toEqual([])
+    w.noteBranch(ghost, '/p/mobs', 'main') // feeding the ghost too, as the poll used to, is what raised it every hour
+    expect(w.recent()).toHaveLength(1)
+    expect(w.recent()[0]!.detail).toBe('mobs and mobs on branch main in /p/mobs')
+  })
+  it('two sessions that both worked inside the window still collide', () => {
+    const w = new CollisionWatcher({ now: () => now })
+    const rows = [{ agentId: 'a', agentName: 'Aiona', state: 'working', since: now - 1000 }, { agentId: 'j', agentName: 'Jasmine', state: 'done', since: now - H / 4 }]
+    for (const r of rows) if (countsTowardBranch(r, now)) w.noteBranch({ agentId: r.agentId, agentName: r.agentName }, '/p', 'main')
+    expect(w.recent().map((e) => e.kind)).toEqual(['branch'])
   })
 })
