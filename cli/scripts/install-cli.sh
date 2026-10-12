@@ -173,9 +173,17 @@ echo "    launcher: $LAUNCHER$([ "$KEEP_UPDATES" -eq 1 ] && echo '  (self-update
 if [ "$WAS_RUNNING" -eq 1 ] && [ "$DO_RESTART" -eq 1 ]; then
   echo ">> reconnecting on the new build…"
   sleep 1                       # grace for the backend to release the one-machine claim (as `harness update` does)
-  "$LAUNCHER" start
+  # A host that runs the daemon as a systemd user unit (nixfred fork: harness.service) must bring it back through
+  # that unit. `harness stop` above made the unit exit cleanly, so it sits "inactive (dead)" (Restart=on-failure does
+  # not fire on a clean exit); `"$LAUNCHER" start` would then daemonize a copy inside the caller's own terminal
+  # scope, with no supervision, no restart and no boot start. Found 2026-10-12.
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user cat harness.service >/dev/null 2>&1; then
+    systemctl --user start harness.service
+  else
+    "$LAUNCHER" start
+  fi
 elif [ "$WAS_RUNNING" -eq 1 ]; then
-  echo "  (daemon stopped and NOT restarted — run: harness start)"
+  echo "  (daemon stopped and NOT restarted — run: harness start, or systemctl --user start harness.service when it runs as a unit)"
 else
   echo "  (no daemon was running — run \`harness login\` if needed, then \`harness start\`)"
 fi

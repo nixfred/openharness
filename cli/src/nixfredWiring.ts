@@ -13,7 +13,7 @@
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
-import { hostname } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { env } from './config/env.js'
 import { AttentionTracker, summarizeAttention, type AttentionRow, type AttentionState } from './lib/attention.js'
@@ -103,6 +103,17 @@ export function dialPlans(compact: ReturnType<SubscriptionsService['compact']>):
   }
 }
 
+/**
+ * The collision card draws its detail in 3 wrapped lines. A home path ("in /home/pi/Projects/mobs") spent a whole
+ * line on "/home/pi/Projects/" and the repo name, the one part that says WHICH repo, fell off the end of line 3, so
+ * the card read as if the whole Projects folder was in conflict. `~/` keeps the repo name on the card.
+ */
+export function dialAlertDetail(detail: string, home: string = homedir()): string {
+  const h = home.replace(/\/+$/, '')
+  const short = h && h !== '/' ? detail.split(`${h}/`).join('~/') : detail
+  return short.slice(0, 118)
+}
+
 /** What the attention payload holds that `dialFleet` reads. */
 export interface DialFleetSource {
   machineId: string
@@ -141,7 +152,7 @@ export function dialFleet(src: DialFleetSource, caps: MachineCapabilities | null
   const alert = src.alerts.find((e) => e.agents.length >= 2)
   if (alert) {
     const [a, b] = alert.agents
-    frame.alert = { a: a!.agentId, b: b!.agentId, an: a!.agentName, bn: b!.agentName, detail: alert.detail.slice(0, 118), at: alert.at }
+    frame.alert = { a: a!.agentId, b: b!.agentId, an: a!.agentName, bn: b!.agentName, detail: dialAlertDetail(alert.detail), at: alert.at }
   }
   return frame
 }

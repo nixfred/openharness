@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { dialFleet, dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
+import { dialAlertDetail, dialFleet, dialPlans, Nixfred, type NixfredDeps, type NixfredSessionLike } from './nixfredWiring.js'
 
 vi.mock('./lib/desktopNotify.js', () => ({ notifyAttention: vi.fn(async () => 'skipped') }))
 vi.mock('./nixfred/gateHook.js', () => ({ installGateHook: () => 'installed', uninstallGateHook: () => 'removed', gateHookInstalled: () => false }))
@@ -146,6 +146,22 @@ describe('Nixfred wiring', () => {
     // No capabilities read yet and no alert: the frame still carries the clock and lanes, nothing else.
     const bare = dialFleet({ machineId: 'm1', agents: [], alerts: [] }, null, now)
     expect(bare).toEqual({ t: 'nixfred.fleet', clock: 14 * 3600 + 7 * 60 + 30, lanes: [] })
+  })
+
+  it('the collision card keeps the repo name: the home path becomes ~/ so it fits the dial\'s 3 lines', () => {
+    const home = '/home/pi'
+    expect(dialAlertDetail('mobs and mobs on branch main in /home/pi/Projects/mobs', home)).toBe('mobs and mobs on branch main in ~/Projects/mobs')
+    // Only a path under the home folder is shortened; another root, a bare home and an empty home are left alone.
+    expect(dialAlertDetail('a and b on branch x in /srv/repo', home)).toBe('a and b on branch x in /srv/repo')
+    expect(dialAlertDetail('a and b on branch x in /home/pi', home)).toBe('a and b on branch x in /home/pi')
+    expect(dialAlertDetail('a and b on branch x in /home/pi/r', '')).toBe('a and b on branch x in /home/pi/r')
+    expect(dialAlertDetail('a and b on branch x in /home/pi/r', '/')).toBe('a and b on branch x in /home/pi/r')
+    // A home given with a trailing slash behaves the same, and the dial's buffer limit still applies.
+    expect(dialAlertDetail('x in /home/pi/r', '/home/pi/')).toBe('x in ~/r')
+    expect(dialAlertDetail('y'.repeat(300), home)).toHaveLength(118)
+    const now = 1_790_000_000_000
+    const frame = dialFleet({ machineId: 'm1', agents: [], alerts: [{ kind: 'branch', key: 'k', at: now, agents: [{ agentId: 'a', agentName: 'mobs' }, { agentId: 'b', agentName: 'mobs' }], detail: `mobs and mobs on branch main in ${homedir()}/Projects/mobs` }] }, null, now)
+    expect((frame.alert as { detail: string }).detail).toBe('mobs and mobs on branch main in ~/Projects/mobs')
   })
 
   it('dialFleet names the agents whose open question is a permission (perm), and omits it when none', () => {
