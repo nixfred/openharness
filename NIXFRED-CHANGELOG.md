@@ -5,6 +5,17 @@ on top of upstream. Every entry names the upstream commit it sits on, what was v
 not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted upstream yet; see
 "Submitting" in PLAN.md for how each piece becomes its own PR when the time comes.
 
+## 2026-10-12 (sync): 251 upstream commits, firmware nixfred.12
+
+Branch nixfred/sync-upstream-2026-10-12, merge cfc6b107f on nixfred/main d64e56723. Daemon v0.3.89-dev.cfc6b107f, firmware 0.0.86-nixfred.12.
+
+- Upstream: Agent Messages (`harness send`, an account experiment, off by default), agents as clients (`harness ps/show/wait/new/close/send`, `harness mcp`), a hook and session reliability series, engines loaded through the loader, required sign-in on Desktop and TUI, Settings regrouped, Connectors, Memories, Harness Pro firmware with OTA over the cable, a relaxing resting face, and a tap anywhere finishes a voice recording.
+- Conflicts (16), both sides kept. The fleet overview moved from the removed command bar to the command palette (Ctrl+Shift+G unchanged). The voice screen keeps our rim; a tap anywhere finishes, and the hub hold is still never armed on VOICE. Token usage now comes from the usage service, Hermes homes come through the kit, the gate keeps its own atomic write, and the hook golden changes only in the Claude cases our Notification event touches.
+- Guards, now explicit: a systemd drop-in (`harness.service.d/nixfred-guards.conf`) sets DISABLE_HOOK_INSTALL=true so the daemon never rewrites ~/.claude/settings.json or ~/.codex (a hook-installing start would have added 27 allow rules, a PostToolUse hook and Codex entries), and CABLE_FW_DISABLE=true so stock firmware is never offered to the dial. The old protection was an accident of the version string.
+- Verified: tsc clean; vitest 15,045 passed and 9 failed (all identical on clean upstream); test:core 2,601; test:harnessd 271 passed, 2 known; Flutter 263 tests, analyze 0 errors, Linux release build; idf.py build and firmware host tests green. Smoke with Orca and herdr rows covered the full lifecycle; a disposable herdr covered an answer, an app prompt and three refusals. The merged daemon was run against copies of the real config: no changes with the flag on, 59 added lines with it off.
+- Live: daemon under harness.service, dial on nixfred.12, nixfred.subs and nixfred.fleet frames flowing, config files byte-identical, 15 herdr rows.
+- Not verified: the glass on nixfred.12, an answer or voice prompt into a real herdr pane, the Pro board.
+
 ## Flashing rule (2026-10-02)
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
