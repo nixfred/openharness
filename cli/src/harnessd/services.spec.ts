@@ -314,7 +314,7 @@ describe('ServiceSupervisor', () => {
   })
 
   it('starts an experiment\'s process only once the core asks for one of its services, and keeps it like any other', () => {
-    const experiment: ServiceSpec = { name: 'experiments', services: ['orchestrator', 'teams'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true }
+    const experiment: ServiceSpec = { name: 'experiments', services: ['orchestrator', 'messages'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true }
     const supervisor = make([search, experiment])
     supervisor.start()
     expect(children.map((child) => child.spec.name)).toEqual(['search'])
@@ -322,12 +322,12 @@ describe('ServiceSupervisor', () => {
     supervisor.want('search')
     supervisor.want('nobody')
     expect(children).toHaveLength(1)
-    supervisor.want('teams')
+    supervisor.want('messages')
     expect(latest('experiments').env.HARNESSD_SERVICE).toBe('experiments')
     // Asked again, while it runs or after it crashed: the master's to restart, once.
     supervisor.want('orchestrator')
     latest('experiments').exit(1)
-    supervisor.want('teams')
+    supervisor.want('messages')
     expect(children.filter((child) => child.spec.name === 'experiments')).toHaveLength(1)
     vi.advanceTimersByTime(1_000)
     expect(children.filter((child) => child.spec.name === 'experiments')).toHaveLength(2)
@@ -337,7 +337,7 @@ describe('ServiceSupervisor', () => {
   it('starts every process on demand a core too old to ask for it would never ask for, and stops one never started at once', () => {
     const experiment: ServiceSpec = { name: 'orchestrator', services: ['orchestrator'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true }
     const devices: ServiceSpec = { name: 'devices', services: ['devices', 'wifi'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true, askedSince: 4 }
-    const idle: ServiceSpec = { ...experiment, name: 'teams', services: ['teams'] }
+    const idle: ServiceSpec = { ...experiment, name: 'messages', services: ['messages'] }
     // A core of protocol 3 asks for the experiments, not for the devices: theirs starts as it binds.
     const three = make([search, experiment, devices])
     three.start()
@@ -361,10 +361,10 @@ describe('ServiceSupervisor', () => {
     never.start()
     expect(never.status()[0].state).toBe('off')
     never.unasked(2)
-    expect(children.map((child) => child.spec.name)).toEqual(['orchestrator', 'devices', 'teams'])
+    expect(children.map((child) => child.spec.name)).toEqual(['orchestrator', 'devices', 'messages'])
     // One running then is stopped and started with the others, and waits to be asked for again.
     never.stop(vi.fn())
-    latest('teams').exit(0)
+    latest('messages').exit(0)
     never.start()
     expect(never.status()[0].state).toBe('off')
   })
@@ -458,16 +458,87 @@ describe('ServiceSupervisor', () => {
     expect(named.onDemand).toBeUndefined()
   })
 
+  it('runs the viewers and the Store only once something needs them, asked for by a core of protocol 5, and from the start when named', () => {
+    const [viewers] = serviceSpecs({}, SERVICE_HOSTS).filter((spec) => spec.name === 'viewers')
+    expect(viewers).toMatchObject({ services: ['viewers', 'store'], onDemand: true, askedSince: 5 })
+    // Named, as tests and support name it: from the start, as every master before it ran them.
+    const [named] = serviceSpecs({ HARNESSD_SERVICES: 'viewers' }, SERVICE_HOSTS)
+    expect(named.services).toEqual(['viewers', 'store'])
+    expect(named.onDemand).toBeUndefined()
+    // Asked for by either of its services.
+    const supervisor = make([search, viewers])
+    supervisor.start()
+    expect(children.map((child) => child.spec.name)).toEqual(['search'])
+    supervisor.want('store')
+    supervisor.want('viewers')
+    expect(children.map((child) => child.spec.name)).toEqual(['search', 'viewers'])
+  })
+
+  it('starts the viewers as a core of protocol 4 binds, which never asks for them, and leaves the rest to it', () => {
+    const onDemand = serviceSpecs({}, SERVICE_HOSTS).filter((spec) => spec.onDemand)
+    const four = make(onDemand)
+    four.start()
+    expect(children).toHaveLength(0)
+    // Models, the devices and the gateway it asks for itself (protocol 4); the engines' workers are new to it.
+    four.unasked(4)
+    expect(children.map((child) => child.spec.name)).toEqual(['viewers'])
+    // A core of this protocol asks for each itself.
+    children.length = 0
+    const five = make(onDemand)
+    five.start()
+    five.unasked(5)
+    expect(children).toHaveLength(0)
+  })
+
   it('knows every service each process this build runs hosts, and each in one process only', () => {
     const hosted = Object.values(SERVICE_HOSTS).flatMap((host) => host.services)
     expect(KNOWN_SERVICES).toEqual(hosted)
     expect(new Set(hosted).size).toBe(hosted.length)
-    expect(SERVICE_HOSTS.edge.services).toEqual(['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell'])
+    expect(SERVICE_HOSTS.edge.services).toEqual(['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell', 'connectors', 'agentCleanup', 'messages'])
+    // Agent Messages has no process of its own: one cost every computer it was on 62 MiB at idle (2026-10-12).
+    expect(Object.keys(SERVICE_HOSTS)).not.toContain('messages')
+  })
+
+  // Agent Messages left a process of its own, started on demand, for the edge host (2026-10-12). Where it runs is the
+  // master's to say, by service (`serviceProcessesEnv`), and a core routes it there and runs none of it itself, whichever
+  // build each is: two at once would both type the same messages into the same panes.
+  it('Agent Messages under a master of this build: in the edge host from the start; a core of either build routes it there, and its ask starts nothing', () => {
+    const specs = serviceSpecs({}, SERVICE_HOSTS)
+    const hosts = specs.filter((spec) => spec.services.includes('messages'))
+    expect(hosts.map((spec) => [spec.name, spec.onDemand])).toEqual([['edge', undefined]])
+    const env = { HARNESSD_SUPERVISED: '1', HARNESSD_SERVICE_TOKEN: 'token', ...serviceProcessesEnv(specs, 42) }
+    // Both builds know the name: a core from before, which ran it as an experiment, routes it to the link the edge
+    // host opens as `messages` and starts none of it in its own process; so does a core of this build.
+    expect(servicesTheMasterRuns(env, KNOWN_SERVICES).has('messages')).toBe(true)
+    const supervisor = make(specs)
+    supervisor.start()
+    const started = children.length
+    expect(children.filter((child) => child.spec.services.includes('messages')).map((child) => child.spec.name)).toEqual(['edge'])
+    // Either core asks for it as it starts (core/messagesLink.ts, core/experiments.ts): no second process.
+    supervisor.want('messages')
+    supervisor.want('messages')
+    expect(children).toHaveLength(started)
+  })
+
+  it('Agent Messages under a master from before: its own process, started once when a core of this build asks, and routed there', () => {
+    // The master as 3cff043360 ran it: a process of its own on demand, and the edge host without it.
+    const before = { ...SERVICE_HOSTS, edge: { ...SERVICE_HOSTS.edge, services: SERVICE_HOSTS.edge.services.filter((name) => name !== 'messages') },
+      messages: { services: ['messages'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true } }
+    const specs = serviceSpecs({}, before)
+    const env = { HARNESSD_SUPERVISED: '1', HARNESSD_SERVICE_TOKEN: 'token', ...serviceProcessesEnv(specs, 42) }
+    expect(servicesTheMasterRuns(env, KNOWN_SERVICES).has('messages')).toBe(true)
+    const supervisor = make(specs)
+    supervisor.start()
+    expect(children.filter((child) => child.spec.services.includes('messages'))).toHaveLength(0)
+    // This build's core asks for it as it starts, whatever its setting says: once, one process.
+    supervisor.want('messages')
+    supervisor.want('messages')
+    expect(children.filter((child) => child.spec.services.includes('messages')).map((child) => [child.spec.name, child.spec.services])).toEqual([['messages', ['messages']]])
   })
 })
 
 describe('which services the core leaves to its master', () => {
-  const known = ['search', 'viewers', 'workspaces', 'teams']
+  const known = ['search', 'viewers', 'workspaces', 'messages']
   const supervised = { HARNESSD_SUPERVISED: '1', HARNESSD_SERVICE_TOKEN: 'token' }
 
   it('is what the master says it runs, told in a form a core from before the list reads too', () => {
@@ -478,13 +549,13 @@ describe('which services the core leaves to its master', () => {
     expect(serviceProcessesEnv(serviceSpecs({ HARNESSD_SERVICES: 'store' }, SERVICE_HOSTS), 42)).toMatchObject({ [SERVICE_PROCESSES_ENV]: 'store' })
     // By service, not by process: a core from before the edge host routes the services it knows of it.
     const hosted = serviceSpecs({ HARNESSD_SERVICES: 'edge' }, SERVICE_HOSTS)
-    expect(serviceProcessesEnv(hosted, 42)).toEqual({ [SERVICE_PROCESSES_ENV]: 'workspaces,usage,monitor,projects,handoff,recaps,windowNames,shell', HARNESSD_SERVICES: 'workspaces,usage,monitor,projects,handoff,recaps,windowNames,shell', [ENGINE_LIVE_ENV]: '42:1', [ENGINE_RUNTIME_ENV]: '42:1', [ENGINE_SCREEN_ENV]: '42:1', [ENGINE_MODEL_CONTROL_ENV]: '42:1', [ENGINE_QUESTION_CONTROL_ENV]: '42:1', [ENGINE_SUBMISSION_ENV]: '42:1', [ENGINE_NATIVE_CONTROL_ENV]: '42:1' })
-    expect([...servicesTheMasterRuns({ ...supervised, ...serviceProcessesEnv(hosted, 42) }, known)]).toEqual(['workspaces'])
+    expect(serviceProcessesEnv(hosted, 42)).toEqual({ [SERVICE_PROCESSES_ENV]: 'workspaces,usage,monitor,projects,handoff,recaps,windowNames,shell,connectors,agentCleanup,messages', HARNESSD_SERVICES: 'workspaces,usage,monitor,projects,handoff,recaps,windowNames,shell,connectors,agentCleanup,messages', [ENGINE_LIVE_ENV]: '42:1', [ENGINE_RUNTIME_ENV]: '42:1', [ENGINE_SCREEN_ENV]: '42:1', [ENGINE_MODEL_CONTROL_ENV]: '42:1', [ENGINE_QUESTION_CONTROL_ENV]: '42:1', [ENGINE_SUBMISSION_ENV]: '42:1', [ENGINE_NATIVE_CONTROL_ENV]: '42:1' })
+    expect([...servicesTheMasterRuns({ ...supervised, ...serviceProcessesEnv(hosted, 42) }, known)]).toEqual(['workspaces', 'messages'])
     expect(serviceProcessesEnv([], 42)).toEqual({ [SERVICE_PROCESSES_ENV]: '', HARNESSD_SERVICES: 'none', [ENGINE_LIVE_ENV]: '42:1', [ENGINE_RUNTIME_ENV]: '42:1', [ENGINE_SCREEN_ENV]: '42:1', [ENGINE_MODEL_CONTROL_ENV]: '42:1', [ENGINE_QUESTION_CONTROL_ENV]: '42:1', [ENGINE_SUBMISSION_ENV]: '42:1', [ENGINE_NATIVE_CONTROL_ENV]: '42:1' })
     expect([...servicesTheMasterRuns({ ...supervised, ...serviceProcessesEnv(specs, 42) }, known)]).toEqual(['search', 'workspaces'])
     expect([...servicesTheMasterRuns({ ...supervised, ...serviceProcessesEnv([], 42) }, known)]).toEqual([])
     // What the master says wins over whatever HARNESSD_SERVICES the core inherited; names it does not know are its own.
-    expect([...servicesTheMasterRuns({ ...supervised, [SERVICE_PROCESSES_ENV]: ' teams, nothing ', HARNESSD_SERVICES: 'search' }, known)]).toEqual(['teams'])
+    expect([...servicesTheMasterRuns({ ...supervised, [SERVICE_PROCESSES_ENV]: ' messages, nothing ', HARNESSD_SERVICES: 'search' }, known)]).toEqual(['messages'])
   })
 
   it('under a master too old to say, is what HARNESSD_SERVICES names, and nothing when it names none: never every service', () => {

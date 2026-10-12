@@ -1,0 +1,78 @@
+import { describe, expect, it } from 'vitest'
+import { settingsCommand, SETTINGS_SIGNED_OUT, SETTINGS_USAGE } from './settings.js'
+
+/** This computer's daemon as `harness settings` meets it: its answers to `/api/agent-settings`, and what was asked. */
+function daemon(answer: (method: string, body: unknown) => { status: number; body: unknown } | Error) {
+  const asked: Array<{ url: string; method: string; headers: Record<string, string>; body: unknown }> = []
+  const fetch = (async (url: string, init: RequestInit) => {
+    const body = init.body ? JSON.parse(String(init.body)) : undefined
+    asked.push({ url, method: String(init.method), headers: init.headers as Record<string, string>, body })
+    const reply = answer(String(init.method), body)
+    if (reply instanceof Error) throw reply
+    return new Response(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body), { status: reply.status })
+  }) as unknown as typeof globalThis.fetch
+  const out: string[] = [], err: string[] = []
+  const run = (...argv: string[]) => settingsCommand(argv, { port: 4321, fetch, out: (l) => out.push(l), err: (l) => err.push(l) })
+  return { run, asked, out, err }
+}
+
+const OFF = { agentsStartAgents: false, pullRequestLine: false, agentMessages: false }
+
+describe('harness settings', () => {
+  it('lists the account\'s settings as this computer keeps them, every one off until turned on', async () => {
+    const d = daemon(() => ({ status: 200, body: { ...OFF, signedIn: true } }))
+    expect(await d.run()).toBe(0)
+    expect(d.out).toEqual([[
+      'agents-start-agents   off  agents may start, wait for and close harnesses of their own',
+      'pull-request-line     off  a harness another agent starts says so in the pull requests it opens',
+      'agent-messages        off  agents in the same tab may message each other',
+    ].join('\n')])
+    expect(d.asked).toEqual([{ url: 'http://127.0.0.1:4321/api/agent-settings', method: 'GET', headers: { 'x-adapter-local': '1' }, body: undefined }])
+    expect(SETTINGS_USAGE).toContain('experiments of your account, the same on each of its\ncomputers, and each off until you turn it on')
+  })
+
+  it('says a computer signed out has none to turn on', async () => {
+    const d = daemon(() => ({ status: 200, body: { ...OFF, agentMessages: true, signedIn: false } }))
+    expect(await d.run()).toBe(0)
+    expect(d.out[0]).toMatch(/^agent-messages +on /m)
+    expect(d.out[1]).toBe(SETTINGS_SIGNED_OUT)
+  })
+
+  it('turns one on or off for the account, through the daemon', async () => {
+    const d = daemon((method, body) => ({ status: 200, body: { ...OFF, ...(body as object), signedIn: true } }))
+    expect(await d.run('agent-messages', 'on')).toBe(0)
+    expect(d.out.pop()).toBe('agent-messages is on for your account.')
+    expect(d.asked.pop()).toEqual({ url: 'http://127.0.0.1:4321/api/agent-settings', method: 'PATCH',
+      headers: { 'x-adapter-local': '1', 'content-type': 'application/json' }, body: { agentMessages: true } })
+    expect(await d.run('agents-start-agents', 'off')).toBe(0)
+    expect(d.out.pop()).toBe('agents-start-agents is off for your account.')
+    expect(d.asked.pop()!.body).toEqual({ agentsStartAgents: false })
+    expect(await d.run('pull-request-line', 'on')).toBe(0)
+    expect(d.out.pop()).toBe('pull-request-line is on for your account.')
+  })
+
+  it('says why it could not: signed out, the account out of reach, an odd answer, or no daemon', async () => {
+    const signedOut = daemon(() => ({ status: 409, body: { error: { code: 'SIGNED_OUT', message: 'Sign in to Harness to change this.' } } }))
+    expect(await signedOut.run('agent-messages', 'on')).toBe(1)
+    expect(signedOut.err).toEqual(['Sign in to Harness to change this.'])
+    const odd = daemon(() => ({ status: 503, body: 'not json' }))
+    expect(await odd.run('agent-messages', 'off')).toBe(1)
+    expect(await odd.run()).toBe(1)
+    expect(odd.err).toEqual(['Harness could not change the settings (503).', 'Harness could not read the settings (503).'])
+    const down = daemon(() => Object.assign(new Error('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) }))
+    expect(await down.run()).toBe(1)
+    expect(down.err).toHaveLength(1)
+    expect(down.out).toEqual([])
+  })
+
+  it('refuses what it does not know with the usage, and prints it for --help', async () => {
+    const d = daemon(() => ({ status: 200, body: OFF }))
+    expect(await d.run('nope', 'on')).toBe(2)
+    expect(await d.run('agents-start-agents', 'maybe')).toBe(2)
+    expect(await d.run('agents-start-agents', 'on', 'extra')).toBe(2)
+    expect(d.err).toEqual([SETTINGS_USAGE, SETTINGS_USAGE, SETTINGS_USAGE])
+    expect(await d.run('--help')).toBe(0)
+    expect(d.out).toEqual([SETTINGS_USAGE])
+    expect(d.asked).toEqual([])
+  })
+})

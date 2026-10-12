@@ -12,8 +12,8 @@ import { statSync } from 'node:fs'
 import type { BackendSocket } from '../../backendSocket.js'
 import { installedDsh } from '../../dsh/installed.js'
 import { harnessEnvToClear } from '../../dsh/launch.js'
-import { forkRuntimeKey, harnessLaunchOrRefusal, prepareHarnessLaunch } from '../../dsh/runtime.js'
-import { opencodeMajorVersion } from '../../engines/opencode/version.js'
+import type { DshThrough } from './dshThrough.js'
+import * as opencodeLaunch from '../../engines/launchControl.js'
 import type { TurnRecaps } from '../turns/recaps.js'
 import { createAndRegisterPane } from '../../lib/createAgentPane.js'
 import { enginePathOverride } from '../../lib/engineBin.js'
@@ -27,10 +27,18 @@ import { prepareInstructionWrites, scmLaunchEnv } from '../../scm/scmProjects.js
 import type { createLaunchHelpers } from './launch.js'
 import { mergedLaunchEnv } from './launchEnv.js'
 import type { createPaneWatcher } from './newPane.js'
+import type { NativeLaunchResult, NativeLaunchSource } from '../../engines/nativeLaunch.js'
+import type { LaunchAuthority, LaunchPreparation } from '../../lib/launchPreparation.js'
+import type { LaunchOverridesDeps } from '../../lib/launchOverrides.js'
+import type { AgentEngine } from '../../engines/types.js'
+import { nativeHookLocations } from '../../engines/kit/nativeLocations.js'
 
 type ForkAgent = NonNullable<BackendSocket['onForkAgent']>
 
 export interface ForkAgentDeps {
+  native?: (engine: AgentEngine, source: NativeLaunchSource, authority: LaunchAuthority) => Promise<NativeLaunchResult>
+  prepareNative?: LaunchOverridesDeps['prepareNative']
+  authority?: (agentId: string) => () => boolean
   tmuxBackend: TmuxBackend | null
   registry: typeof registry
   mirror: Pick<TurnRecaps, 'isBusy' | 'recentAsks' | 'recent' | 'lastFullText'>
@@ -44,15 +52,22 @@ export interface ForkAgentDeps {
   relaunchOverrides: ReturnType<typeof createLaunchHelpers>['relaunchOverrides']
   /** This account's private grid, as the socket knows it (BackendSocket.gridName). */
   gridName: () => string | null
+  dshLaunch: Pick<DshThrough, 'launch'>
 }
 
 export function createAgentForker({
-  tmuxBackend, registry, mirror, pendingForkInherit, watchNewPane, announceSession, attachDsh, prepareApiTools, relaunchOverrides, gridName,
+  native: inspectNative, prepareNative, authority: captureAuthority,
+  tmuxBackend, registry, mirror, pendingForkInherit, watchNewPane, announceSession, attachDsh, prepareApiTools, relaunchOverrides, gridName, dshLaunch,
 }: ForkAgentDeps) {
-  const forkAgent: ForkAgent = async ({ agentId, name, prompt }) => {
+  const prepare = async ({ agentId, name, prompt }: Parameters<ForkAgent>[0], authority: LaunchAuthority): Promise<LaunchPreparation<Awaited<ReturnType<ForkAgent>>>> => {
+    const ownsSource = captureAuthority?.(agentId) ?? (() => true)
+    const owner = () => authority.current() && ownsSource()
+    const changed = { ok: false, error: 'AGENT_CHANGED', detail: 'The original fork source changed or stopped during preparation.' } as const
+    if (!owner()) return changed
     if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
-    const source = registry.byAgent(agentId)
-    if (!source) return { ok: false, error: 'AGENT_NOT_FOUND' }
+    const observed = registry.byAgent(agentId)
+    if (!observed) return { ok: false, error: 'AGENT_NOT_FOUND' }
+    const source = structuredClone(observed)
     const sourceName = projectDisplayName(source)
     if (!source.cwd) return { ok: false, error: 'CWD_NOT_FOUND', detail: `${sourceName} has no working folder on record.` }
     try {
@@ -74,9 +89,14 @@ export function createAgentForker({
     }
     const plan = planFork({ engine, sessionId: source.sessionId, name: sourceName, cwd: source.cwd }, memory, prompt)
     if (!plan.ok) return { ok: false, error: plan.error, detail: plan.detail }
+    const opencode = engine === 'opencode' ? opencodeLaunch : null
 
-    const label = buildHarnessSessionLabel(engine)
-    await prepareInstructionWrites(source.cwd)
+    const label = authority.label
+    const inspected = await inspectNative?.(engine, source, { ...authority, current: owner })
+    if (!owner()) return changed
+    if (inspected && !inspected.ok) return inspected
+    const native = inspected?.ok ? inspected.launch : undefined
+    const current = () => owner() && native?.current() !== false
     // Fork the source's saved harness context. Workspace templates and init are not run again.
     let dshEnv: Record<string, string> | undefined
     let dshArgs: string[] = []
@@ -86,10 +106,11 @@ export function createAgentForker({
       if (!installed) return { ok: false, error: 'INVALID_DSH', detail: `${source.dsh} is no longer installed on this machine` }
       // Narrowed above; a closure would lose that, so the checked values are named here.
       const cwd = source.cwd
-      const sourceKey = forkRuntimeKey({ cwd, agentId: source.agentId, dshRuntime: source.dshRuntime })
-      const prepared = harnessLaunchOrRefusal(() => prepareHarnessLaunch(installed, cwd, engine, label,
-        { privateGrid: gridName() }, sourceKey))
-      if (!prepared.ok) return prepared
+      const prepared = await dshLaunch.launch({ dsh: source.dsh, workspace: cwd, engine, key: label,
+        account: { privateGrid: gridName() }, forkOf: { agentId: source.agentId, dshRuntime: source.dshRuntime ?? null } })
+      if (!current()) return changed
+      if (!prepared.ok) return { ok: false, error: prepared.error, detail: prepared.detail,
+        ...(prepared.unavailable ? { unavailable: prepared.unavailable } : {}) }
       dshEnv = prepared.launch.env
       dshArgs = prepared.launch.args
       dshLabel = installed.manifest.name
@@ -99,16 +120,25 @@ export function createAgentForker({
     // engines/codex/launch.ts) and the model it had before the grid (`-m`), and a profile gets
     // its hooks. A fork was launched without any of them, and came back on Codex's default model where a
     // restart of its source came back on the source's own (e2e/forks.e2e.ts). The harness and the named
-    // agent are the fork's own (a new runtime, above and below), so they are not rebuilt here.
-    const built = await relaunchOverrides(source, { ...source, dsh: null, agent: null })
-    if (!built.ok) return { ok: false, error: built.error, detail: built.detail }
+    // agent are the fork's own (a new runtime, above and below), so they are not rebuilt here. A fork is started by
+    // whoever forks it, not by the agent that started its source: its pull requests carry no line for that.
+    const built = await relaunchOverrides(source, { ...source, dsh: null, agent: null, startedBy: null }, owner, native, label)
+    if (!current()) return changed
+    if (!built.ok) return built
+    if (built.overrides.native && prepareNative && !await prepareNative(built.overrides.native, owner,
+      { ...built.overrides.env, ...dshEnv }, [...built.overrides.clearEnv, ...harnessEnvToClear(dshEnv)])) {
+      return { ok: false, error: 'NATIVE_LAUNCH_HELD', unavailable: 'native', detail: 'Waiting to confirm the fork’s final native configuration.' }
+    }
+    if (!current()) return changed
+    const dispatchCurrent = () => current() && built.overrides.native?.current() !== false
     const installIfMissing = enginePathOverride(engine) ? undefined : engineInstallRecipe(engine)
     // Same guard as a relaunch (`buildLaunchOverrides`): an opencode agent recorded on v1 forks on v2
     // as a general session rather than handing the v2 TUI an `--agent` it exits on.
-    const forkMajor = opencodeMajorVersion()
+    const forkMajor = built.overrides.native ? built.overrides.native.opencodeMajor : opencode ? await opencode.opencodeMajorVersion() : null
     const extraArgs = [...built.overrides.extraArgs, ...dshArgs, ...(source.agent && supportsNamedAgent(engine, forkMajor) ? namedAgentArgs(engine, source.agent, forkMajor) : [])]
     const firstPrompt = plan.level === 'native' ? (prompt ?? undefined) : plan.firstPrompt
     const launchOptions = {
+      ...(built.overrides.native ? { native: built.overrides.native } : {}),
       clearEnv: harnessEnvToClear(dshEnv),
       bypassPermission: source.bypassPermission ?? false,
       ...(source.permissionMode ? { permissionMode: source.permissionMode } : {}),
@@ -121,15 +151,21 @@ export function createAgentForker({
     }
     // Same refusal as create: the clone inherits the source's permission mode, and an engine that
     // has since been downgraded would hand back a pane of help text instead of a harness.
-    const forkRefusal = await refusePermissionFlagIfUnsupported(engine, launchOptions)
+    const forkRefusal = await refusePermissionFlagIfUnsupported(engine, launchOptions, undefined, built.overrides.native)
+    if (!dispatchCurrent()) return changed
     if (forkRefusal) {
       console.warn(`[agent] fork refused · ${engine} · ${forkRefusal.detail}`)
       return { ok: false, ...forkRefusal }
     }
+    await prepareInstructionWrites(source.cwd)
+    if (!dispatchCurrent()) return changed
     prepareApiTools(source.cwd, engine)
     const command = buildEngineCommandArgv(engine, launchOptions)
     const argv = buildEngineLaunchArgv(engine, launchOptions)
+    return { ok: true, dispatch: async () => {
+    if (!dispatchCurrent()) return changed
     const result = await createAndRegisterPane({
+      current: dispatchCurrent, ...(built.overrides.native ? { nativeToken: built.overrides.native.token } : {}),
       tmuxBackend,
       registry,
       engine,
@@ -137,12 +173,14 @@ export function createAgentForker({
       sessionLabel: label,
       argv,
       // The SCM's environment last, after the harness context's, as at create and relaunch.
-      env: mergedLaunchEnv(mergedLaunchEnv(Object.keys(built.overrides.env).length ? built.overrides.env : undefined, dshEnv), scmLaunchEnv(source.scmLaunch)),
+      env: mergedLaunchEnv(mergedLaunchEnv(Object.keys(built.overrides.env).length ? built.overrides.env : undefined, dshEnv),
+        mergedLaunchEnv(scmLaunchEnv(source.scmLaunch), built.overrides.native?.environment)),
       grid: null,
       gridLaunchRecord: null,
       // Same folder as the source, so the same workspace binding.
       scmLaunchRecord: source.scmLaunch ?? null,
-      codexHome: source.codexHome ?? null,
+      codexHome: engine === 'codex' && built.overrides.native
+        ? nativeHookLocations(built.overrides.native.environment).CODEX_HOME : source.codexHome ?? null,
       dshRuntime: source.dsh ? label : null,
       dsh: source.dsh ?? null,
       agent: source.agent ?? null,
@@ -166,6 +204,12 @@ export function createAgentForker({
     void watchNewPane(engine, pending, spawned, command, installIfMissing)
     console.log(`[agent] fork pane open · ${engine} · ${plan.level} · ${source.agentId} → ${pending.agentId}`)
     return { ok: true, session: pending, level: plan.level }
+    } }
   }
-  return forkAgent
+  const forkAgent: ForkAgent = async input => {
+    const label = buildHarnessSessionLabel(registry.byAgent(input.agentId)?.engine ?? 'terminal')
+    const prepared = await prepare(input, { id: label, label, current: () => true, hold: () => {} })
+    return prepared.ok ? prepared.dispatch() : prepared
+  }
+  return Object.assign(forkAgent, { prepare })
 }

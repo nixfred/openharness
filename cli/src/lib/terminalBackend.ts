@@ -23,7 +23,8 @@ export interface TerminalBackend<Ref extends TerminalRuntimeRef = TerminalRuntim
   readonly instanceId: string
 
   create(request: TerminalCreateRequest): Promise<TerminalCreateResult<Ref>>
-  kill(runtime: Ref): Promise<TerminalActionResult>
+  /** Recheck the original Stop permission after backend waits, at command dispatch. */
+  kill(runtime: Ref, current?: () => boolean): Promise<TerminalActionResult>
   inventory(): Promise<TerminalInventoryResult>
   /** Current user-visible titles keyed by backend-scoped terminal route key. */
   titles(): Promise<TerminalReadResult<Map<string, string>>>

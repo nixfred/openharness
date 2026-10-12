@@ -51,7 +51,7 @@ class _DaemonApi extends ApiClient {
   /// Whether marking DEVICES seen succeeds; "Got it" on the baseline panel is a write of its own.
   bool dismissWorks = true;
   bool baselineWorks = true;
-  final dismissed = <({String? pub, List<String>? pubs, bool baseline})>[];
+  final dismissed = <({String? pub, List<String>? pubs, bool baseline, bool confirm})>[];
   final rebaselines = <({bool confirm, Map<String, Object?>? head})>[];
   Map<String, dynamic>? rebaselineAnswer;
 
@@ -73,8 +73,9 @@ class _DaemonApi extends ApiClient {
     String? pub,
     List<String>? pubs,
     bool baseline = false,
+    bool confirm = false,
   }) async {
-    dismissed.add((pub: pub, pubs: pubs, baseline: baseline));
+    dismissed.add((pub: pub, pubs: pubs, baseline: baseline, confirm: confirm));
     if (dismissWorks && !baseline && listing?['pending'] is List) {
       listing!['pending'] = [
         for (final p in listing!['pending'] as List)
@@ -488,6 +489,63 @@ void main() {
     expect(app.newDevices, isEmpty);
   });
 
+  test('"It\'s mine" asks the daemon to tell the other devices; opening the list and "Got it" do not', () async {
+    api.listing = {
+      'members': [
+        _member('me', 1, self: true),
+        _member('a', 3),
+        _member('b', 4),
+        _member('c', 5),
+      ],
+      'pending': ['a', 'b', 'c'],
+    };
+    await frame('device_keys_changed');
+    await Future<void>.delayed(Duration.zero);
+    app.dismissNewDevice('a');
+    app.dismissNewDevice('b', liftSuspension: true);
+    await Future<void>.delayed(Duration.zero);
+    // The banner's through `pubs` (a fork's suspension kept), the device's own page through `pub`: both
+    // are "It's mine" for that one device.
+    expect(api.dismissed.map((d) => d.confirm), [true, true]);
+    expect(api.dismissed.first.pubs, ['a']);
+    expect(api.dismissed.last.pub, 'b');
+    app.seenNewDevices();
+    app.dismissDepartedAll(['gone']);
+    await app.seeDeviceBaseline();
+    await Future<void>.delayed(Duration.zero);
+    expect(api.dismissed.skip(2).map((d) => d.confirm), [false, false, false]);
+  });
+
+  test('a device another of the person\'s devices confirmed leaves the banner, and says where', () async {
+    api.listing = {
+      'members': [
+        _member('me', 1, self: true),
+        _member('a', 3),
+      ],
+      'pending': ['a'],
+    };
+    await frame('device_keys_changed');
+    await Future<void>.delayed(Duration.zero);
+    expect(app.newDevices.map((d) => d.pub), ['a']);
+    // The daemon read an acknowledgement it checked against its own log: the key is not new there.
+    api.listing = {
+      'members': [
+        _member('me', 1, self: true),
+        {
+          ..._member('a', 3),
+          'confirmed': {'by': 'k', 'label': 'box2', 'at': 9},
+        },
+      ],
+      'pending': <String>[],
+    };
+    await frame('device_keys_changed');
+    await Future<void>.delayed(Duration.zero);
+    expect(app.newDevices, isEmpty);
+    final devices = (await app.loadDevices())!;
+    expect(devices.devices.firstWhere((d) => d.pub == 'a').confirmedOn, 'box2');
+    expect(devices.devices.firstWhere((d) => d.pub == 'me').confirmedOn, isNull);
+  });
+
   test('a fork-suspended entry is marked so on the banner, and follows the listing', () async {
     api.listing = {
       'members': [
@@ -623,7 +681,7 @@ void main() {
 
   test('"Got it" on the baseline panel is written to the daemon', () async {
     await app.seeDeviceBaseline();
-    expect(api.dismissed.single, (pub: null, pubs: null, baseline: true));
+    expect(api.dismissed.single, (pub: null, pubs: null, baseline: true, confirm: false));
     expect(app.baselineSeenLocally, isTrue);
   });
 

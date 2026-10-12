@@ -21,6 +21,17 @@ pub struct State {
 
 pub fn live(app: &App) -> bool { app.os_session && app.os_live && !app.headless }
 
+/// Only the locally created OS Wi-Fi form may cover required sign-in. Never
+/// expose the other panes or route workspace shortcuts while it is visible.
+pub fn entry_wifi(app: &App) -> Option<u64> {
+    if !crate::account::entry_required(app) || !app.os_session { return None }
+    let id = app.os_welcome.wifi_pane?;
+    let pane = app.panes.get(&id)?;
+    (app.os_welcome.wifi_tab.as_ref() == Some(&app.tab().id) && app.tab().panes().contains(&id)
+        && this_computer(app, &pane.machine_id) && pane.dead.is_none()
+        && !matches!(pane.phase, crate::pane::Phase::Card { .. })).then_some(id)
+}
+
 pub fn tick(app: &mut App) {
     if !app.os_session || app.tick % 8 != 0 { return }
     app.os_welcome.welcome_panes.retain(|id| app.panes.contains_key(id));
@@ -56,7 +67,10 @@ pub fn shell_created(app: &mut App, id: u64) {
             split_starter(app, id, Dir::Vertical, "/usr/bin/hn-os starter lower");
         }
         Some("sudo /usr/bin/harness install") if live(app) => app.os_welcome.install_pane = Some(id),
-        Some("/usr/bin/hn-os wifi") => app.os_welcome.wifi_pane = Some(id),
+        Some("/usr/bin/hn-os wifi") => {
+            app.os_welcome.wifi_pane = Some(id);
+            if entry_wifi(app).is_some() { app.modal = None; }
+        }
         _ => {}
     }
 }
@@ -84,6 +98,13 @@ fn local_dialog(app: &mut App, name: &str, command: &str, install: bool) {
 pub fn act(app: &mut App, action: Action) {
     if !app.os_session || app.headless { return app.error("This action belongs to the Harness operating system.") }
     if app.read_only() { return app.error("This client is read-only.") }
+    if crate::account::entry_required(app) {
+        // Compositor shortcuts arrive over IPC, outside the account page's key
+        // handling. Only the existing network form remains available here.
+        if action == Action::Wifi { local_dialog(app, "Wi-Fi", "/usr/bin/hn-os wifi", false); }
+        crate::account::enforce_entry(app);
+        return;
+    }
     app.os_welcome.dock_focus = None;
     match action {
         Action::Install if live(app) => local_dialog(app, "Install", "sudo /usr/bin/harness install", true),
@@ -100,6 +121,11 @@ pub fn act(app: &mut App, action: Action) {
 pub fn command(app: &mut App, args: &[String]) {
     if !app.os_session || app.headless { return app.error("This action belongs to the Harness operating system.") }
     if app.read_only() { return app.error("This client is read-only.") }
+    if crate::account::entry_required(app) {
+        if args.first().map(String::as_str) == Some("wifi") { act(app, Action::Wifi); }
+        else { crate::account::enforce_entry(app); }
+        return;
+    }
     if args.first().map(String::as_str) == Some("ready") {
         let Some(hint) = args.get(1).filter(|id| id.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))) else {
             return app.error("The welcome must identify its pane.");
@@ -238,6 +264,50 @@ mod tests {
             assert!(app.starting_shell.is_none());
             assert_eq!(app.tabs.len(), tabs);
         }
+    }
+
+    #[tokio::test]
+    async fn required_sign_in_only_exposes_the_owned_local_wifi_form() {
+        use crossterm::event::Event;
+        let mut app = fixture(100, 30);
+        app.os_live = false;
+        app.fleet.local_id = "local-daemon".into();
+        app.open_agent("local-daemon", "wifi", Placement::Auto(None));
+        let wifi = app.focused().unwrap();
+        app.os_welcome.wifi_tab = Some(app.tab().id.clone());
+        let pane = app.panes.get_mut(&wifi).unwrap();
+        pane.start_command = Some("/usr/bin/hn-os wifi".into());
+        pane.phase = crate::pane::Phase::Live;
+        pane.feed(b"Connect to Wi-Fi");
+        app.open_agent("remote", "private-work", Placement::Auto(None));
+        let private = app.focused().unwrap();
+        let pane = app.panes.get_mut(&private).unwrap();
+        pane.phase = crate::pane::Phase::Live;
+        pane.feed(b"PRIVATE_WORKSPACE_CONTENT");
+        assert!(contents(&render(&mut app)).contains("PRIVATE_WORKSPACE_CONTENT"));
+        crate::account::begin_entry(&mut app);
+        shell_created(&mut app, wifi);
+        assert_eq!(entry_wifi(&app), Some(wifi));
+        app.keymap.bind(crate::keys::Table::Root,
+            crate::keys::of(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), "new-window".into(), false);
+        for (width, height) in [(100, 30), (40, 12)] {
+            app.size = (width, height);
+            let text = contents(&render(&mut app));
+            assert!(text.contains("Connect to Wi-Fi"), "{text}");
+            assert!(!text.contains("PRIVATE_WORKSPACE_CONTENT") && !text.contains("Install Harness"), "{text}");
+        }
+        let tabs = app.tabs.len();
+        crate::input::handle(&mut app, Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        crate::input::handle(&mut app, Event::Paste("fixture password".into()));
+        assert_eq!(app.tabs.len(), tabs, "the form cannot invoke a workspace shortcut");
+        assert_eq!(app.panes[&wifi].queued, [b"x".to_vec(), b"fixture password".to_vec()]);
+        assert!(app.panes[&private].queued.is_empty());
+        for action in [Action::New, Action::Terminal, Action::Connect] { act(&mut app, action); }
+        assert_eq!(app.tabs.len(), tabs);
+        app.panes.remove(&wifi);
+        let text = contents(&render(&mut app));
+        assert!(text.contains("Sign in to Harness"), "closing networking returns to required sign-in: {text}");
+        assert!(!text.contains("PRIVATE_WORKSPACE_CONTENT"));
     }
 
     #[tokio::test]

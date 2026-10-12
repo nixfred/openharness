@@ -58,6 +58,20 @@ def screen():
     return outer('capture-pane', '-p', '-t', 'view')
 
 
+def outer_stopped():
+    """The outer tmux's server stopped and gone. kill-server returns before the server exits, and a
+    new-session on the same socket meanwhile reaches the dying server: "server exited unexpectedly"
+    (Harness OS image run 38234358932, 2026-10-12, Linux)."""
+    run(OUTER + ['kill-server'], ok=False)
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        p = subprocess.run(OUTER + ['list-sessions'], env=ENV, cwd=BASE, text=True, capture_output=True, timeout=12)
+        if p.returncode != 0 and re.search(r'no server running|error connecting|No such file', p.stderr):
+            return
+        time.sleep(.025)
+    raise AssertionError('the outer tmux server did not stop')
+
+
 def wait(fn, label, seconds=5):
     end = time.monotonic() + seconds
     while time.monotonic() < end:
@@ -215,7 +229,7 @@ def check_replay():
 def start_session(*extra):
     """A fresh hn in the outer terminal (with [extra] env), its output copied to raw.bin."""
     run(COMMAND + ['kill-server'], ok=False)
-    run(OUTER + ['kill-server'], ok=False)
+    outer_stopped()
     RAW.unlink(missing_ok=True)
     VERIFY.unlink(missing_ok=True)
     launch = ['env', '-u', 'TMUX', '-u', 'TMUX_PANE', '-u', 'HN_SOCKET',

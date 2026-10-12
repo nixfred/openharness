@@ -131,7 +131,10 @@ describe('Supervisor', () => {
     core().bind(2)
     crash()
     core().bind(3)
-    expect(unasked).toEqual([2, 3])
+    // A core of protocol 4 asks for models, the devices and the gateway, never for the viewers.
+    crash()
+    core().bind(4)
+    expect(unasked).toEqual([2, 3, 4])
     // A master with no services to start ignores both.
     make().start()
     core().bind(2)

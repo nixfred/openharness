@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { projectDisplayName, type RegisteredSession } from '../lib/registry.js'
-import { CONVERSATIONS_OFF, ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, RECAPS_FALLBACKS, resolveAgent, SHARING_FALLBACKS, TEAMS_FALLBACKS, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
+import { CONNECTOR_VAULT_OFF, CONVERSATIONS_OFF, ACCOUNT_BACKEND_OFF, AGENT_ACTIONS_OFF, AGENT_CLEANUP_FALLBACKS, createCoreApi, DAEMON_UNKNOWN, DELIVERIES_OFF, DEVICES_FALLBACKS, emptyPorts, LANE_OFF, LONG_ANSWERS, MODELS_OFF, STORE_OFF, MODELS_REQUESTS, MONITOR_OFF, OBSERVER_KEY_OFF, ORCHESTRATOR_FALLBACKS, RECAPS_FALLBACKS, resolveAgent, SHARING_FALLBACKS, MESSAGES_FALLBACKS, TERMINALS_OFF, WIFI_FALLBACKS, WIFI_OFF, type CoreApiDeps } from './api.js'
 import { FAIL, readFallback } from './serviceHost.js'
 
 const row = (agentId: string) => ({ agentId, sessionId: `s-${agentId}`, engine: 'claude', cwd: '/work/app' }) as RegisteredSession
@@ -41,8 +41,6 @@ describe('the core API services stand on', () => {
       } as unknown as CoreApiDeps['registry'],
       stoppedAgents: { list: vi.fn(() => [row('stopped')]) } as unknown as CoreApiDeps['stoppedAgents'],
       databaseHistory: vi.fn(),
-      externalSessions: { list: vi.fn(), scan: vi.fn() } as unknown as CoreApiDeps['externalSessions'],
-      openSessions: { known: vi.fn(), fresh: vi.fn() } as unknown as CoreApiDeps['openSessions'],
       syncSession: vi.fn(),
       runtimeModels: vi.fn(async () => []),
       viewerChanged: vi.fn(),
@@ -65,6 +63,7 @@ describe('the core API services stand on', () => {
       windows: vi.fn(),
       daemon: { command: 'harness', port: 18473, machineId: () => 'machine-1', autonomousEnv: 'prod' },
       observerKey: OBSERVER_KEY_OFF,
+      connectorVault: CONNECTOR_VAULT_OFF,
       observer: vi.fn(() => true),
       turns: { send: vi.fn(), stop: vi.fn(), recent: vi.fn(async () => []), asks: vi.fn(async () => []), deliver: vi.fn(), cancelDelivery: vi.fn(() => true), onDelivery: vi.fn(() => () => {}) },
       questions: { answer: vi.fn(), answerReviewed: vi.fn(async () => true) },
@@ -99,8 +98,6 @@ describe('the core API services stand on', () => {
     expect(core.agents.live().map((s) => s.agentId)).toEqual(['live'])
     expect(core.agents.displayName).toBe(projectDisplayName)
     expect(core.transcripts.databaseHistory).toBe(deps.databaseHistory)
-    expect(core.external.sessions).toBe(deps.externalSessions)
-    expect(core.external.open).toBe(deps.openSessions)
     expect(core.agents.byAgent('live')?.agentId).toBe('live')
     expect(core.agents.byAgent('gone')).toBeUndefined()
     expect(core.agents.resolve('s-live')?.agentId).toBe('live')
@@ -148,6 +145,34 @@ describe('the core API services stand on', () => {
     expect(core.clients.devicesChanged).toBe(deps.devicesChanged)
     expect(core.clients.dialWatching).toBe(deps.dialWatching)
     expect(core.transcripts.lastTurn).toBe(deps.lastTurn)
+  })
+
+  it('closes for the agent cleanup only a harness another agent started, the conversation it is now, and keeps it', async () => {
+    // Whatever the cleanup asks, from its own process or this one, the core decides what it may close
+    // (services/agentCleanup.ts): a harness the person started is never one.
+    const started = { ...row('kid'), startedBy: 'agent' as const, registeredAt: Date.parse('2026-10-12T08:00:00Z') }
+    const mine = { ...row('mine'), registeredAt: 0 }
+    const deps = coreDeps()
+    const byAgent = vi.fn((agentId: string) => (agentId === 'kid' ? started : agentId === 'mine' ? mine : undefined))
+    const closeAgent = vi.fn(async () => ({ closed: true as const }))
+    const activityAt = vi.fn(async () => 1_234)
+    const core = createCoreApi({ ...deps, registry: { ...deps.registry, byAgent } as unknown as CoreApiDeps['registry'], closeAgent, activityAt })
+    expect(await core.agents.closeStarted!('kid', 'idle')).toEqual({ closed: true })
+    expect(closeAgent).toHaveBeenCalledWith({ agentId: 'kid', sessionId: 's-kid', createdAt: '2026-10-12T08:00:00.000Z', mode: 'idle' })
+    expect(await core.agents.closeStarted!('mine', 'now')).toEqual({ error: 'NOT_AGENT_STARTED' })
+    expect(await core.agents.closeStarted!('gone', 'now')).toEqual({ error: 'AGENT_CHANGED' })
+    expect(closeAgent).toHaveBeenCalledTimes(1)
+    expect(await core.agents.lastActivity!('kid')).toBe(1_234)
+    expect(activityAt).toHaveBeenCalledWith(started)
+    expect(await core.agents.lastActivity!('gone')).toBeNull()
+    // A core built without a close or a clock closes nothing and knows no time.
+    const bare = createCoreApi({ ...deps, registry: { ...deps.registry, byAgent } as unknown as CoreApiDeps['registry'] })
+    expect(await bare.agents.closeStarted!('kid', 'now')).toEqual({ error: 'UNSUPPORTED' })
+    expect(await bare.agents.lastActivity!('kid')).toBeNull()
+  })
+
+  it('tells the agent cleanup nothing while it is off: every harness is left open, as before it', () => {
+    expect(AGENT_CLEANUP_FALLBACKS).toEqual({ closed: undefined, typed: undefined, stop: undefined })
   })
 
   it('lets the recaps send a turn\'s cards and recaps, and nothing else, down those doors', () => {
@@ -245,24 +270,29 @@ describe('the core API services stand on', () => {
       () => WIFI_OFF.streams([])]) expect(call()).toBeUndefined()
   })
 
-  it('falls back, when the teams fail, to an undo that has nothing to undo, and holds no pane for a team', () => {
-    const undo = TEAMS_FALLBACKS.prepare as () => void
-    expect(undo()).toBeUndefined()
-    expect(TEAMS_FALLBACKS.canWrite).toBe(false)
+  it('falls back, when Agent Messages fails, to writing none of its deliveries', () => {
+    expect(MESSAGES_FALLBACKS.canWrite).toBe(false)
   })
 
   it('starts with every port empty: a service fills its own when it starts', () => {
-    expect(emptyPorts()).toEqual({ search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null })
+    expect(emptyPorts()).toEqual({ usage: null, store: null, search: null, viewers: null, models: null, workspaces: null, messages: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null, agentCleanup: null })
     expect(emptyPorts()).not.toBe(emptyPorts())
   })
 
   it('answers models\' fallbacks while it is off: no set-up and no target, no note and no prewarm, no name of its own', async () => {
     const grid = { baseUrl: 'https://fixture.invalid/g/n1/relay/v1', model: 'm' }
     const launch = { networkId: 'n1', networkName: 'mine', baseUrl: grid.baseUrl, apiKey: 'k' }
+    const dsh = { dsh: 'test/draw', workspace: '/workspace', engine: 'claude' as const, account: {}, key: 'agent' }
+    await expect(STORE_OFF.dshMaterialize(dsh)).rejects.toThrow('the store service is unavailable')
+    await expect(STORE_OFF.dshLaunch(dsh)).rejects.toThrow('the store service is unavailable')
     await expect(MODELS_OFF.ensure()).rejects.toThrow('the models service is unavailable')
     await expect(MODELS_OFF.launchTarget({ model: 'm', grid: 'mine' })).rejects.toThrow('the models service is unavailable')
     await expect(MODELS_OFF.moveTarget({ gridName: null, model: 'm' })).rejects.toThrow('the models service is unavailable')
     await expect(MODELS_OFF.lists()).rejects.toThrow('the models service is unavailable')
+    await expect(MODELS_OFF.gridAssignments([])).rejects.toThrow('the models service is unavailable')
+    // A launch on a grid or a saved API is refused while models is off (core/agents/launch.ts `gridLaunchThrough`).
+    await expect(MODELS_OFF.gridLaunch({ engine: 'claude', override: launch, machine: { hermesSystemManaged: false } })).rejects.toThrow('the models service is unavailable')
+    await expect(MODELS_OFF.apiTarget({ connectionId: 'openrouter', model: 'm' })).rejects.toThrow('the models service is unavailable')
     expect(await MODELS_OFF.privateGridName()).toBeNull()
     expect(MODELS_OFF.annotation(grid)).toBeNull()
     expect([MODELS_OFF.prewarm(grid), MODELS_OFF.moved(launch), MODELS_OFF.machines(null, 'here'), MODELS_OFF.signedOut()]).toEqual([undefined, undefined, undefined, undefined])
@@ -284,7 +314,7 @@ describe('the core API services stand on', () => {
   })
 
   it('gives a service that reads no backend an unavailable answer, and no notice to hear', async () => {
-    expect(await ACCOUNT_BACKEND_OFF.backend('GET', '/api/tab-channels')).toEqual({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } })
+    expect(await ACCOUNT_BACKEND_OFF.backend('GET', '/api/agent-messages')).toEqual({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } })
     expect(ACCOUNT_BACKEND_OFF.onNotice(() => {})()).toBeUndefined()
   })
 
@@ -296,6 +326,8 @@ describe('the core API services stand on', () => {
     expect(TERMINALS_OFF.watch.onOutput(() => {})()).toBeUndefined()
     await expect(OBSERVER_KEY_OFF.publicKey()).rejects.toThrow('no E2EE identity')
     await expect(OBSERVER_KEY_OFF.signWelcome('m', 's', 'p', 'e')).rejects.toThrow('no E2EE identity')
+    await expect(CONNECTOR_VAULT_OFF.seal('{}')).rejects.toThrow('no E2EE identity')
+    expect(await CONNECTOR_VAULT_OFF.open({})).toBeNull()
     expect(SHARING_FALLBACKS).toEqual({ observer: undefined, linkDown: undefined, stop: undefined })
   })
 

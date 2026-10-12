@@ -28,7 +28,6 @@ The real Flutter `EngineMark` widget, rendered at 96, 16, 24 and 32 px:
 | Score | Original paired musical notes | MIT |
 | Sheet & Docs Studio | Original document and cell grid | MIT |
 | Roundtable | Original table with six seats and a decision at its center | MIT |
-| Jev Browser | Original browser window and evidence-search lens | MIT |
 | Godogen | Original Harness package icon: game controller and creation spark | MIT |
 
 The catalog audit on 2026-09-21 added eight original wrapper marks:
@@ -43,6 +42,8 @@ The catalog audit on 2026-09-21 added eight original wrapper marks:
 | SimSkill | Traffic intersection and a vehicle | MIT |
 | Harness Monitor | Status rows and an activity trace | MIT |
 | Harness Builder | Building block and creation spark | MIT |
+
+Memories (2026-10-10): stacked memory cards and the About You spark, MIT.
 
 Harness Monitor and Harness Builder are locally linked tools, not public catalog
 entries. Their marks are recognized when a daemon reports them; bundling an icon
@@ -103,7 +104,7 @@ On macOS, AppKit can render local vector sources without a browser. The original
 marks can be rendered this way; `--only` preserves every other recorded PNG:
 
 ```sh
-node desktop/tool/harness_marks.mjs --appkit --only=roundtable,jev-browser,godogen
+node desktop/tool/harness_marks.mjs --appkit --only=roundtable,godogen
 node desktop/tool/harness_marks.mjs --check
 ```
 

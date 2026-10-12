@@ -31,7 +31,7 @@ The defaults, in the workspace:
 | ⌘I | Models — subscriptions, local models, shared models, and APIs |
 | ⇧⌘L | Layout palette |
 | ⌘F · ⌘G · ⇧⌘G | Find in terminal · next · previous match |
-| ⇧⌘F / Ctrl+Alt+F (Linux) / Alt+Shift+F (browser) | Toggle inactive pane shading. Off by default; also available in Customize Harness → Appearance |
+| ⇧⌘F / Ctrl+Alt+F (Linux) / Alt+Shift+F (browser) | Toggle inactive pane shading. Off by default; also available in Appearance → Workspace |
 | ⇧⌘I | Harnesses needing input |
 | ⌘, · ⌘/ | Settings · keyboard shortcuts |
 
@@ -64,7 +64,7 @@ JSONC: `{ "version": 1, "bindings": [{ "keys": "cmd+k cmd+l", "command": "pane.f
 whole prefix; `when` is `workspace`, `terminal` or `picker`. The file is watched and reloaded on save;
 a bad edit keeps the last good keymap and says what was wrong. **Keyboard shortcuts (⌘/)** lists the
 effective bindings in searchable groups. Select a row and press Return to practice it without
-executing the action. The popup follows Customize Harness ▸ Terminal for its font and size.
+executing the action. The popup follows Appearance ▸ Terminal for its font and size.
 **Edit keyboard shortcuts** opens a commented config template with every command id.
 
 In both modes of the box the line is a readline: ⌃A ⌃E ⌃F ⌃B and ⌥←/→ move, ⌃W kills a word (stopping at `/`), ⌃U kills to the start, ⌃H and ⌃D delete a character each way, ⌃Y puts the last kill back. ⌃N/⌃J and ⌃P/⌃K move the highlight — ⌃K is "previous", as in fzf, not kill-line — ⌃M is Return and ⌃[ or ⌃G is Escape. Every entry of the box's bottom line is also a button.

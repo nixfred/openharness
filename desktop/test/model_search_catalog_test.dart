@@ -130,6 +130,47 @@ void main() {
     },
   );
 
+  test('an NVIDIA machine is told its VRAM, not its RAM', () async {
+    final grouped = ModelSearchCatalog(
+      app.modelManager,
+      _WithSubscriptions(),
+      pollHosts: false,
+    );
+    try {
+      Map<String, Object?> answer({bool vram = true, bool total = true}) => {
+        'memoryBytes': 64 * 1024 * 1024 * 1024,
+        if (vram) ...{
+          'fitMemory': 'vram',
+          'fitBytes': 22 * 1024 * 1024 * 1024,
+          if (total) 'gpuMemoryBytes': 24 * 1024 * 1024 * 1024,
+        },
+        'models': [
+          {'id': 'catalog-A', 'name': 'AAA catalog'},
+        ],
+      };
+      app.localInventory = answer(vram: false);
+      await app.modelManager.refresh();
+      expect(app.modelManager.fitsInVram, isFalse);
+      expect(grouped.catalogHeading, 'Get for ${thisComputerName()} · 64 GB');
+      app.localInventory = answer();
+      await app.modelManager.refresh();
+      expect(app.modelManager.fitsInVram, isTrue);
+      expect(app.modelManager.fitBytes, 22 * 1024 * 1024 * 1024);
+      expect(
+        grouped.catalogHeading,
+        'Get for ${thisComputerName()} · 24 GB VRAM',
+      );
+      app.localInventory = answer(total: false);
+      await app.modelManager.refresh();
+      expect(
+        grouped.catalogHeading,
+        'Get for ${thisComputerName()} · 22 GB VRAM for models',
+      );
+    } finally {
+      grouped.dispose();
+    }
+  });
+
   test('sections separate your models from downloads, and fold the catalog past five', () async {
     final usage = _WithSubscriptions();
     final grouped = ModelSearchCatalog(
@@ -380,6 +421,42 @@ void main() {
       expect(search.rows.map((row) => row.title), ['qwen3.8-27b']);
       expect(app.actions, isEmpty);
       expect(app.downloads, isEmpty);
+    },
+  );
+
+  test(
+    'a catalog model running here is one row, matched to the name grid serves it under',
+    () async {
+      Map<String, Object?> running() => {
+        'models': [
+          {
+            'id': 'unsloth/Qwen3.8-27B-GGUF',
+            'name': 'Qwen3.8-27B',
+            'state': 'running',
+            'canStop': true,
+            'app': 'Grid',
+            'servedAs': ['Qwen3.8-27B-UD-Q4_K_M'],
+          },
+        ],
+      };
+      app.localInventory = running();
+      app.inventory = const GridModels(
+        gridName: 'home',
+        models: [],
+        grids: [
+          GridSection(
+            name: 'home',
+            own: true,
+            models: [GridModel(id: 'Qwen3.8-27B-UD-Q4_K_M', node: 'This Mac')],
+          ),
+        ],
+      );
+      await app.modelManager.refresh();
+      final served = catalog.entries.values.where(
+        (entry) => entry.local?.id == 'unsloth/Qwen3.8-27B-GGUF',
+      );
+      expect(catalog.entries, hasLength(1));
+      expect(served.single.gridModel?.id, 'Qwen3.8-27B-UD-Q4_K_M');
     },
   );
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +12,7 @@ import 'package:harness/state/app_state.dart';
 import 'package:harness/state/swarm.dart';
 import 'package:harness/state/swarm_catalog.dart';
 
+import 'support/agent_messages_api.dart';
 import 'swarm_screen_test.dart' show mount;
 
 class _App extends AppNotifier {
@@ -215,4 +218,84 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('tabs carry Show Agent Messages and nothing to turn on', (
+    tester,
+  ) async {
+    final app = _App();
+    addTearDown(app.dispose);
+    final api = await joinAgentMessagesDesk(app);
+    await mount(tester, app, nativeTabs: true);
+    await tester.pumpAndSettle();
+    final tab = app.activeSwarmId;
+    Map row() => (updates().last['tabs'] as List).single as Map;
+
+    // The row says only that the tab has a log: no flag, no color, no
+    // traffic. The tab's 💬 was easy to hit by mistake and turned the tab
+    // off, failing a waiting message (owner, 2026-10-12).
+    app.agentMessages.handleEvent({'tabId': tab, 'messageId': 'm0000001'});
+    await tester.idle();
+    expect(row()['canShowAgentMessages'], isTrue);
+    expect(row().containsKey('agentMessages'), isFalse);
+    expect(row().containsKey('agentMessagesFlowing'), isFalse);
+    expect(updates().last['canShowAgentMessages'], isTrue);
+    expect(updates().last.containsKey('activeAgentMessages'), isFalse);
+    expect(updates().last.containsKey('agentMessagesInk'), isFalse);
+
+    Future<void> native(String method) =>
+        tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'harness/swarm_tabs',
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall(method, {'id': tab}),
+          ),
+          (_) {},
+        );
+    // An old on/off action does nothing: nothing asks the backend, and no
+    // notice or dialog opens.
+    final reads = api.reads;
+    unawaited(native('toggleAgentMessages'));
+    await tester.pumpAndSettle();
+    expect(api.reads, reads);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.textContaining('Agent Messages'), findsNothing);
+
+    // Show Agent Messages opens the tab's log.
+    unawaited(native('showAgentMessages'));
+    await tester.pumpAndSettle();
+    expect(find.text('Before · Agent Messages'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('Before · Agent Messages'), findsNothing);
+
+    // An older CLI or backend: no log to show.
+    api.unsupported = true;
+    await app.agentMessages.refresh();
+    await tester.idle();
+    expect(row().containsKey('canShowAgentMessages'), isFalse);
+    expect(updates().last['canShowAgentMessages'], isFalse);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a tab off the desk has no Agent Messages', (tester) async {
+    final app = _App();
+    addTearDown(app.dispose);
+    await mount(tester, app, nativeTabs: true);
+    await tester.pumpAndSettle();
+    expect(app.agentMessagesOffered(app.activeSwarmId), isFalse);
+    final row = (updates().last['tabs'] as List).single as Map;
+    expect(row.containsKey('canShowAgentMessages'), isFalse);
+    expect(updates().last['canShowAgentMessages'], isFalse);
+    unawaited(
+      tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'harness/swarm_tabs',
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('showAgentMessages'),
+        ),
+        (_) {},
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Agent Messages'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
 }

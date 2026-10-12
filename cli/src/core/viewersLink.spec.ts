@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../lib/registry.js'
 import { fakeCore } from '../testing/fakeCore.js'
 import { VIEWERS_UNAVAILABLE } from './api.js'
+import { ON_DEMAND_START_MS } from './serviceLinks.js'
 import { createViewersLink, SURFACE_WAIT_MS, VIEWERS_BUFFER_LIMIT } from './viewersLink.js'
 
 const agent = (over: Partial<RegisteredSession> = {}) =>
@@ -200,5 +201,123 @@ describe('a viewer served to a client over its connection, through the viewers\'
     link.notice({ kind: 'viewer', connId: 7, type: 'viewer_data' })
     link.notice({ kind: 'viewer', connId: 'c1' })
     expect(core.clients.viewerFrame).not.toHaveBeenCalled()
+  })
+})
+
+describe('the viewers\' process on demand (core/viewersWake.ts)', () => {
+  const onDemand = (connected = true) => {
+    const core = fakeCore()
+    vi.mocked(core.clients.viewerFrame).mockReturnValue(true)
+    const notify = vi.fn(() => connected)
+    const wake = vi.fn()
+    const timers: Array<{ run: () => void; ms: number; cleared: boolean }> = []
+    const link = createViewersLink(core, notify, { call: vi.fn(async () => ({})), buffered: () => 0 }, {
+      wake,
+      startWaitMs: 5_000,
+      setTimer: (run, ms) => { const timer = { run, ms, cleared: false }; timers.push(timer); return timer },
+      clearTimer: (timer) => { (timer as { cleared: boolean }).cleared = true },
+    })
+    return { core, notify, wake, timers, link, port: link.port }
+  }
+  const stream = (connId: string, type: string, streamId = 's1') =>
+    ({ type: 'service_event', payload: { kind: 'stream', connId, type, frame: { streamId } } })
+
+  it('asks for the process for an agent with a harness, and not for one without', () => {
+    const { wake, port } = onDemand()
+    port.attach(agent({ agentId: 'plain', dsh: undefined }))
+    expect(wake).not.toHaveBeenCalled()
+    port.attach(agent())
+    expect(wake).toHaveBeenCalledWith('a harness here')
+  })
+
+  it('holds a stream that comes before the process ever connected, asks for it once, and tells it every frame in order once it connects', () => {
+    const { core, notify, wake, timers, link, port } = onDemand()
+    expect(port.stream('c1', 'viewer_request', { streamId: 's1' })).toBe(true)
+    expect(port.stream('c2', 'viewer_request', { streamId: 's2' })).toBe(true)
+    expect(port.stream('c1', 'viewer_data', { streamId: 's1' })).toBe(true)
+    expect(wake.mock.calls).toEqual([['a viewer stream']])
+    expect(timers).toHaveLength(1)
+    expect(timers[0].ms).toBe(5_000)
+    expect(notify).not.toHaveBeenCalled()
+    link.connected()
+    expect(timers[0].cleared).toBe(true)
+    expect(notify.mock.calls).toEqual([[stream('c1', 'viewer_request')], [stream('c2', 'viewer_request', 's2')], [stream('c1', 'viewer_data')]])
+    expect(core.clients.viewerFrame).not.toHaveBeenCalled()
+    // Connected once, a frame is told as it comes, and refused at once while the process is down again.
+    notify.mockReturnValue(false)
+    expect(port.stream('c1', 'viewer_data', { streamId: 's1' })).toBe(false)
+    expect(timers).toHaveLength(1)
+  })
+
+  it('refuses what it held, and every stream after it at once, when the process does not connect within a start\'s wait', () => {
+    const { core, notify, wake, timers, link, port } = onDemand(false)
+    port.stream('c1', 'viewer_request', { streamId: 's1' })
+    port.stream('c1', 'viewer_close', { streamId: 's1' })
+    port.stream('c1', 'viewer_data', {})
+    timers[0].run()
+    // Only the stream's own frames that need an answer are answered: a close and a frame of no stream need none.
+    expect(core.clients.viewerFrame).toHaveBeenCalledTimes(1)
+    expect(core.clients.viewerFrame).toHaveBeenCalledWith('c1', 'viewer_close', { streamId: 's1', error: 'Viewer is no longer available' })
+    expect(port.stream('c1', 'viewer_request', { streamId: 's2' })).toBe(false)
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(wake).toHaveBeenCalledTimes(1)
+    // It came at last: streams go to it again.
+    notify.mockReturnValue(true)
+    link.connected()
+    expect(port.stream('c1', 'viewer_request', { streamId: 's3' })).toBe(true)
+    expect(notify).toHaveBeenLastCalledWith(stream('c1', 'viewer_request', 's3'))
+  })
+
+  it('refuses a held frame the process does not take as it connects', () => {
+    const { core, notify, link, port } = onDemand(false)
+    port.stream('c1', 'viewer_request', { streamId: 's1' })
+    link.connected()
+    expect(notify).toHaveBeenCalledWith(stream('c1', 'viewer_request'))
+    expect(core.clients.viewerFrame).toHaveBeenCalledWith('c1', 'viewer_close', { streamId: 's1', error: 'Viewer is no longer available' })
+  })
+
+  it('holds no more than a hung process\'s socket may keep: past it, a frame is refused', () => {
+    const { port } = onDemand()
+    const chunk = 'A'.repeat(VIEWERS_BUFFER_LIMIT / 2)
+    expect(port.stream('c1', 'viewer_data', { streamId: 's1', data: chunk })).toBe(true)
+    expect(port.stream('c1', 'viewer_data', { streamId: 's1', data: chunk })).toBe(false)
+    expect(port.stream('c1', 'viewer_close', { streamId: 's1' })).toBe(true)
+  })
+
+  it('drops what it held for a connection that closed, or for every one', () => {
+    const { notify, link, port } = onDemand()
+    port.stream('c1', 'viewer_request', { streamId: 's1' })
+    port.stream('c2', 'viewer_request', { streamId: 's2' })
+    port.closed('c1')
+    link.connected()
+    expect(notify.mock.calls).toEqual([
+      [{ type: 'service_event', payload: { kind: 'closed', connId: 'c1' } }],
+      [stream('c2', 'viewer_request', 's2')],
+    ])
+    const again = onDemand()
+    again.port.stream('c1', 'viewer_request', { streamId: 's1' })
+    again.port.closed()
+    again.link.connected()
+    expect(again.notify.mock.calls).toEqual([[{ type: 'service_event', payload: { kind: 'closed' } }]])
+  })
+
+  it('waits a start\'s wait by default, on the real clock', () => {
+    vi.useFakeTimers()
+    try {
+      const core = fakeCore()
+      const link = createViewersLink(core, vi.fn(() => false), undefined, { wake: vi.fn() })
+      link.port.stream('c1', 'viewer_request', { streamId: 's1' })
+      vi.advanceTimersByTime(ON_DEMAND_START_MS - 1)
+      expect(core.clients.viewerFrame).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(core.clients.viewerFrame).toHaveBeenCalledWith('c1', 'viewer_close', { streamId: 's1', error: 'Viewer is no longer available' })
+      // Connected, the default clock's timer is cleared too.
+      link.port.stream('c1', 'viewer_request', { streamId: 's2' })
+      const other = createViewersLink(core, vi.fn(() => true), undefined, { wake: vi.fn() })
+      other.port.stream('c1', 'viewer_request', { streamId: 's3' })
+      other.connected()
+      vi.advanceTimersByTime(ON_DEMAND_START_MS)
+      expect(core.clients.viewerFrame).toHaveBeenCalledTimes(1)
+    } finally { vi.useRealTimers() }
   })
 })

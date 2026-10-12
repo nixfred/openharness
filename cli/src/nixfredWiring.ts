@@ -35,7 +35,9 @@ import { DISPATCH_RESULT_TYPE, createRemoteAgentBackend, jobPrompt, type Dispatc
 import { describeHermesHealth, hermesHealth, stampHermesDoctor } from './nixfred/hermesHealth.js'
 import { describeSubscriptions, SubscriptionsService, type ProviderId } from './nixfred/subscriptions/index.js'
 import { nodeSubscriptionsDeps } from './nixfred/subscriptions/nodeDeps.js'
-import { listHermesHomes } from './engines/hermes/home.js'
+// The declared Hermes store and the kit's listing (engines/hermes/home.ts `listHermesHomes`, without loading Hermes's code).
+import { HERMES_HOMES } from './engines/hermes/contract.js'
+import { listStoreHomes } from './engines/kit/storeHomes.js'
 
 export interface NixfredSessionLike {
   agentId: string
@@ -488,7 +490,7 @@ export class Nixfred {
 
   private hermesDeps() {
     return {
-      listHomes: () => listHermesHomes(),
+      listHomes: () => listStoreHomes(HERMES_HOMES, env.HERMES_HOME),
       stat: async (p: string) => { try { const st = await fsp.stat(p); return { size: st.size, mtimeMs: st.mtimeMs } } catch { return null } },
       dirBytes: async (p: string) => { try { return Number((await exec('du', ['-sb', p], {}, 10_000)).split(/\s/)[0]) || 0 } catch { return 0 } },
       writers: async (p: string) => { try { return (await exec('lsof', ['-t', p], {}, 5000)).split(/\s+/).filter(Boolean).map(Number) } catch { return [] } },

@@ -14,6 +14,19 @@ fn dim(text: impl Into<String>) -> Span<'static> { Span::styled(text.into(), Sty
 fn bold(text: impl Into<String>) -> Span<'static> { Span::styled(text.into(), Style::default().add_modifier(Modifier::BOLD)) }
 fn kv(k: &str, v: impl Into<String>) -> Line<'static> { Line::from(vec![dim(format!("{k:<9}")), Span::raw(v.into())]) }
 
+/// A harness's model as people read it. The daemon sends a runtime profile
+/// (`runtime-v1:<session>:<engine>:<model, URL-encoded>@<effort>`): its last `:` part was shown
+/// as it came — `opencode%2Fmimo-v2.6-flash-free@auto` for `opencode/mimo-v2.6-flash-free`.
+fn model_name(a: &crate::fleet::Agent) -> String {
+    if let Some(d) = crate::runtime_model::details(&a.model, &a.id, &a.engine) { return d.name }
+    match a.model.strip_prefix("runtime-v1:") {
+        // A profile that is not this agent's own (another session id): still its model, decoded.
+        Some(rest) => rest.splitn(3, ':').nth(2).and_then(|m| m.rsplit_once('@').map(|(m, _)| m))
+            .and_then(crate::runtime_model::decode).unwrap_or_default(),
+        None => a.model.clone(),
+    }
+}
+
 pub fn lines(app: &App, kind: &PickerKind, id: &str) -> Vec<Line<'static>> {
     lines_with_actions(app, kind, id, true)
 }
@@ -72,7 +85,7 @@ fn harness(app: &App, machine_id: &str, agent_id: &str, actions: bool) -> Vec<Li
     // at the bottom (where the preview starts), what it asks you below them.
     if let Some(tail) = app.tails.get(&a.session_id) {
         // Its facts on one line: where, which model, its PR, what it has used.
-        let model = a.model.rsplit(':').next().unwrap_or("").to_string();
+        let model = model_name(a);
         let pr = a.pr.as_ref().map(|p| format!("#{} {}", p.number, p.state)).unwrap_or_default();
         let tokens = if a.tokens > 0 { format!("{} tokens", crate::fleet::compact(a.tokens)) } else { String::new() };
         let facts = [app.fleet.machine_name(machine_id), cwd.clone(), a.branch.clone(), model, pr, tokens].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -129,7 +142,7 @@ fn harness(app: &App, machine_id: &str, agent_id: &str, actions: bool) -> Vec<Li
     out.push(kv("machine", app.fleet.machine_name(machine_id)));
     if !cwd.is_empty() { out.push(kv("folder", cwd)) }
     if !a.branch.is_empty() { out.push(kv("branch", a.branch.clone())) }
-    let model = a.model.rsplit(':').next().unwrap_or("").to_string();
+    let model = model_name(a);
     if !model.is_empty() { out.push(kv("model", model)) }
     if !a.dsh.is_empty() { out.push(kv("harness", a.dsh.clone())) }
     if let Some(pr) = &a.pr { out.push(Line::from(vec![dim(format!("{:<9}", "pr")), Span::raw(format!("#{} {}", pr.number, pr.state)), dim(format!("  {}", pr.url))])) }
@@ -474,4 +487,18 @@ fn message(text: &str) -> Vec<Line<'static>> {
     out.push(Line::from(vec![dim(format!("  … {} lines …", lines.len() - 220))]));
     out.extend(tail.iter().map(|l| line(l)));
     out
+}
+
+#[cfg(test)]
+mod model_name_tests {
+    /// The runtime profile reads as its model: `opencode/mimo-v2.6-flash-free`, not
+    /// `opencode%2Fmimo-v2.6-flash-free@auto` (seen on a real machine).
+    #[test]
+    fn a_runtime_profile_reads_as_its_model() {
+        let agent = |model: &str| crate::fleet::agent_from("local", &serde_json::json!({ "id": "a1", "engine": "opencode", "selectedModel": model }), None);
+        assert_eq!(super::model_name(&agent("runtime-v1:a1:opencode:opencode%2Fmimo-v2.6-flash-free@auto")), "opencode/mimo-v2.6-flash-free");
+        assert_eq!(super::model_name(&agent("runtime-v1:other-session:opencode:opencode%2Fmimo@auto")), "opencode/mimo", "another session's profile, still decoded");
+        assert_eq!(super::model_name(&agent("opus")), "opus", "a plain model name as it is");
+        assert_eq!(super::model_name(&agent("")), "");
+    }
 }

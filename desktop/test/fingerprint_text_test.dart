@@ -82,11 +82,11 @@ void main() {
     );
     expect(
       fingerprintHowToCompare(computer: false),
-      'This device’s own key code. Open Your devices on that device — the code under “This device” must match.',
+      'This device’s own key code. Open Your devices on a phone, or Machines in a browser — the code shown for “This device” must match.',
     );
     expect(
       fingerprintHowToCompare(computer: true),
-      'This device’s own key code. Open Your devices on that computer — the code under “This device” must match — or run harness status on it.',
+      'This device’s own key code. Open Machines on that computer — the code shown for that computer must match — or run harness status on it.',
     );
   });
 }

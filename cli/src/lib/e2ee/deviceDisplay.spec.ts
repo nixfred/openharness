@@ -172,6 +172,12 @@ describe('formatDeviceDetail', () => {
     expect(text).toContain(`Not yours? harness devices remove ${FP_OLD}`)
     expect(text).not.toContain('This is this machine.')
   })
+  it('says on which device a key was confirmed, and nothing for one that was not', () => {
+    const app = listing().members[2]
+    expect(formatDeviceDetail({ ...app, confirmed: { by: 'B', label: 'studio-mac', at: NOW } }, undefined, NOW).join('\n')).toContain('confirmed    on studio-mac')
+    expect(formatDeviceDetail({ ...app, confirmed: { by: 'B', label: '', at: NOW } }, undefined, NOW).join('\n')).toContain('confirmed    on another device')
+    expect(formatDeviceDetail(app, undefined, NOW).join('\n')).not.toContain('confirmed')
+  })
   it('shows an app without a machine row, and unknown activity', () => {
     const app = listing().members[2]
     const text = formatDeviceDetail(app, undefined, NOW).join('\n')

@@ -8,6 +8,7 @@ import {
   type DevLogEntry, type DevLogState,
 } from './deviceLog.js'
 import { DeviceLogStore } from './deviceLogStore.js'
+import { checkDevAck, signDevAck, type DevAck } from './deviceAck.js'
 import { DeviceLogSyncer, devLogDivergence, type DeviceKeysSeen, type DeviceLogAppendAnswer, type DeviceLogFetched, type DeviceLogRebaseline } from './deviceLogSyncer.js'
 import { ADOPTED_SIGN_IN } from '../authSession.js'
 import { b64d, fingerprint } from './core.js'
@@ -66,6 +67,25 @@ class FakeBackend {
     try { this.push(entry) } catch (err) { return { error: err instanceof DevLogError ? err.code : 'X' } }
     return { head: this.state.head }
   })
+
+  /** The acknowledgements it keeps — served as they are, checked or not: a backend that lies keeps
+   *  anything. `acksRoute` false: a backend from before them (null, as a 404 reads). */
+  acks: unknown[] = []
+  acksRoute = true
+  fetchAcks = vi.fn(async (since: number): Promise<unknown[] | null> => {
+    if (this.offline || !this.acksRoute) return null
+    return this.acks.filter((a) => typeof (a as { addSeq?: unknown }).addSeq !== 'number' || (a as { addSeq: number }).addSeq > since)
+  })
+  postAck = vi.fn(async (ack: DevAck): Promise<boolean> => {
+    if (this.offline || !this.acksRoute) return false
+    this.acks.push(ack)
+    return true
+  })
+
+  /** A signed acknowledgement of `of` (added at `addSeq`, or where the log added it) by `by`. */
+  ack(by: { priv: Uint8Array; pub: string }, of: string, addSeq = this.state.active[of]?.seq ?? 1, acct = this.acct): DevAck {
+    return signDevAck({ v: 1, acct, pub: of, addSeq, signer: by.pub, at: 7_000 }, by.priv)
+  }
 }
 
 /** `signIn`: the sign-in's epoch (one starting ADOPTED_SIGN_IN is adopted), made at `signInAt` (the
@@ -74,6 +94,8 @@ function setup(opts: {
   known?: string[]; tombstoned?: string[]; blocked?: string[]; store?: DeviceLogStore; backend?: FakeBackend; signIn?: () => string | null; signInAt?: number | null
   isTrusted?: (pub: string) => boolean; signInAcct?: () => string | null; switchAccount?: (from: string, to: string) => void
   now?: () => number; seen?: () => Promise<DeviceKeysSeen | null>; log?: (line: string) => void
+  /** Wire the backend's acknowledgements ("It's mine" shared): read and posted. */
+  acks?: boolean
 } = {}) {
   const backend = opts.backend ?? new FakeBackend()
   const store = opts.store ?? new DeviceLogStore(join(mkdtempSync(join(tmpdir(), 'devlog-')), 'devlog.json'))
@@ -96,6 +118,7 @@ function setup(opts: {
     self: () => ({ machineId: MID_ME, label: 'my-mac' }),
     fetch: backend.fetch,
     append: backend.append,
+    ...(opts.acks ? { fetchAcks: backend.fetchAcks, postAck: backend.postAck } : {}),
     adopt: calls.adopt,
     drop: (pub) => { tombstoned.delete(pub); calls.drop(pub) },
     trustedNow: () => [...trusted],
@@ -2242,5 +2265,280 @@ describe('DeviceLogSyncer.sweepStale', () => {
     await t.syncer.sweepStale()
     expect(active(a.pub) && active(b.pub)).toBe(true)
     expect(t.backend.append).toHaveBeenCalledTimes(2) // register + the refused removal
+  })
+})
+
+describe('DeviceLogSyncer — "It\'s mine", once for the account', () => {
+  const later = key(5)
+  /** box2 was on the account before this machine joined (trusted, never new); phone joined after (new). */
+  async function joined(opts: Parameters<typeof setup>[0] = {}) {
+    const t = setup({ acks: true, ...opts })
+    t.backend.add(box2, 'machine', MID2, 'box2')
+    await t.syncer.register()
+    t.backend.add(phone, 'viewer', '', 'phone')
+    await t.syncer.refresh()
+    expect(t.store.read().pending).toEqual([phone.pub])
+    t.calls.announce.mockClear()
+    t.calls.changed.mockClear()
+    t.backend.fetchAcks.mockClear()
+    return t
+  }
+
+  it('a trusted older device\'s "It\'s mine" takes the new key off the list here, and says on which', async () => {
+    const lines: string[] = []
+    const t = await joined({ log: (l) => lines.push(l) })
+    t.backend.acks.push(t.backend.ack(box2, phone.pub))
+    await t.syncer.refresh()
+    expect(t.store.read().pending).toEqual([])
+    expect(t.syncer.list().members.find((m) => m.pub === phone.pub)).toMatchObject({ pending: false, confirmed: { by: box2.pub, label: 'box2', at: 5_000 } })
+    expect(t.syncer.list().members.find((m) => m.pub === box2.pub)?.confirmed).toBeUndefined()
+    expect(t.calls.changed).toHaveBeenCalled()
+    expect(lines.some((l) => l.includes('confirmed as yours on box2'))).toBe(true)
+    // It stays trusted as it was: an acknowledgement adds no trust and takes none away.
+    expect(t.calls.drop).not.toHaveBeenCalledWith(phone.pub)
+  })
+
+  it('asks from just below the oldest key new here, and not at all while nothing is new', async () => {
+    const t = await joined()
+    await t.syncer.refresh()
+    expect(t.backend.fetchAcks).toHaveBeenCalledWith(t.backend.state.active[phone.pub].seq - 1)
+    t.syncer.dismiss({ pub: phone.pub })
+    t.backend.fetchAcks.mockClear()
+    await t.syncer.refresh()
+    expect(t.backend.fetchAcks).not.toHaveBeenCalled()
+  })
+
+  it('a device confirmed while this machine was away is announced once, as every new key is, then taken off the list', async () => {
+    const t = setup({ acks: true })
+    t.backend.add(box2, 'machine', MID2, 'box2')
+    await t.syncer.register()
+    t.backend.add(phone, 'viewer', '', 'phone')
+    t.backend.add(later, 'viewer', '', 'later')
+    t.backend.acks.push(t.backend.ack(box2, phone.pub))
+    await t.syncer.refresh()
+    // The one-time "New device" never waits on, or is skipped for, anyone's word.
+    expect(t.calls.announce.mock.calls.map(([m]) => m.pub)).toEqual([phone.pub, later.pub])
+    expect(t.store.read().pending).toEqual([later.pub])
+    await t.syncer.refresh()
+    expect(t.calls.announce).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays as before when the acknowledgements cannot be read, or the read fails', async () => {
+    for (const fail of ['no route', 'throws'] as const) {
+      const lines: string[] = []
+      const t = setup({ acks: true, log: (l) => lines.push(l) })
+      t.backend.add(box2, 'machine', MID2, 'box2')
+      await t.syncer.register()
+      if (fail === 'no route') t.backend.acksRoute = false
+      else t.backend.fetchAcks.mockRejectedValueOnce(new Error('down'))
+      t.backend.add(phone, 'viewer', '', 'phone')
+      t.backend.acks.push(t.backend.ack(box2, phone.pub))
+      await t.syncer.refresh()
+      expect(t.calls.announce, fail).toHaveBeenCalledWith(expect.objectContaining({ pub: phone.pub }))
+      expect(t.store.read().pending, fail).toEqual([phone.pub])
+      if (fail === 'throws') expect(lines.some((l) => l.includes('could not read which devices were confirmed: down'))).toBe(true)
+    }
+  })
+
+  describe('what is ignored', () => {
+    it('a key vouching for itself, a bad signature, the wrong entry, another account, or this machine\'s own', async () => {
+      const t = await joined()
+      const good = t.backend.ack(box2, phone.pub)
+      t.backend.acks.push(
+        t.backend.ack(phone, phone.pub),
+        { ...good, at: good.at + 1 },
+        t.backend.ack(box2, phone.pub, t.backend.state.active[phone.pub].seq - 1),
+        t.backend.ack(box2, phone.pub, undefined, 'acct-2'),
+        t.backend.ack(me, phone.pub),
+        { junk: true },
+      )
+      await t.syncer.refresh()
+      expect(t.store.read().pending).toEqual([phone.pub])
+      expect(t.store.read().confirmed).toBeUndefined()
+      expect(t.calls.changed).not.toHaveBeenCalled()
+    })
+
+    it('a signer that is itself new here: two new devices must not vouch for each other', async () => {
+      const t = await joined()
+      t.backend.add(later, 'viewer', '', 'later')
+      await t.syncer.refresh()
+      t.backend.acks.push(t.backend.ack(later, phone.pub), t.backend.ack(phone, later.pub))
+      await t.syncer.refresh()
+      expect(t.store.read().pending).toEqual([phone.pub, later.pub])
+    })
+
+    it('a signer that is gone (removed, or joined and left before anyone looked)', async () => {
+      const t = await joined()
+      t.backend.add(later, 'viewer', '', 'later')
+      await t.syncer.refresh()
+      const fromLater = t.backend.ack(later, phone.pub)
+      const fromBox2 = t.backend.ack(box2, phone.pub)
+      t.backend.removeBy(later.pub, later)
+      t.backend.removeBy(box2.pub, me)
+      t.backend.acks.push(fromLater, fromBox2)
+      await t.syncer.refresh()
+      expect(t.store.read().departed?.map((d) => d.pub)).toEqual([later.pub])
+      expect(t.store.read().pending).toEqual([phone.pub])
+    })
+
+    it('a signer suspended here, unpaired here, or tombstoned here', async () => {
+      for (const how of ['suspended', 'blocked', 'tombstoned'] as const) {
+        const t = await joined(how === 'blocked' ? { blocked: [box2.pub] } : how === 'tombstoned' ? { tombstoned: [box2.pub] } : {})
+        if (how === 'suspended') t.store.write({ ...t.store.read(), suspended: [box2.pub] })
+        t.backend.acks.push(t.backend.ack(box2, phone.pub))
+        await t.syncer.refresh()
+        expect(t.store.read().pending, how).toEqual([phone.pub])
+      }
+    })
+
+    it('never lifts a suspension: a key a fork suspended here stays new and suspended', async () => {
+      const t = await joined()
+      t.store.write({ ...t.store.read(), suspended: [phone.pub] })
+      t.backend.acks.push(t.backend.ack(box2, phone.pub))
+      await t.syncer.refresh()
+      expect(t.backend.fetchAcks).not.toHaveBeenCalled()
+      expect(t.store.read()).toMatchObject({ pending: [phone.pub], suspended: [phone.pub] })
+      expect(t.calls.resume).not.toHaveBeenCalled()
+    })
+
+    it('nothing at all while the log is frozen here', async () => {
+      const t = await joined()
+      t.store.write({ ...t.store.read(), frozen: { reason: 'fork', at: 1, lastGoodHead: t.backend.state.head } })
+      t.backend.acks.push(t.backend.ack(box2, phone.pub))
+      await t.syncer.refresh()
+      expect(t.backend.fetchAcks).not.toHaveBeenCalled()
+      expect(t.store.read().pending).toEqual([phone.pub])
+    })
+
+    it('a key looked at here while the acknowledgements were on their way is left as the person left it', async () => {
+      const t = await joined()
+      t.backend.acks.push(t.backend.ack(box2, phone.pub))
+      t.backend.fetchAcks.mockImplementationOnce(async () => { t.syncer.dismiss({ pub: phone.pub }); return t.backend.acks })
+      await t.syncer.refresh()
+      expect(t.store.read().confirmed).toBeUndefined()
+      expect(t.calls.changed).toHaveBeenCalledOnce() // the dismissal's own
+    })
+  })
+
+  it('the mark goes with the key: a confirmed key removed later leaves none behind', async () => {
+    const t = await joined()
+    t.backend.acks.push(t.backend.ack(box2, phone.pub))
+    await t.syncer.refresh()
+    expect(t.store.read().confirmed?.[phone.pub]).toBeDefined()
+    t.backend.removeBy(phone.pub, me)
+    await t.syncer.refresh()
+    expect(t.store.read().confirmed).toBeUndefined()
+    // Confirmed, not new: its removal is not a "joined and left before you looked".
+    expect(t.store.read().departed ?? []).toEqual([])
+  })
+
+  describe('"It\'s mine" here is shared', () => {
+    it('for the one device the person pressed it for, signed by this machine for the entry that added it', async () => {
+      for (const opts of [{ pub: phone.pub }, { pubs: [phone.pub] }]) {
+        const t = await joined()
+        expect(await t.syncer.dismiss({ ...opts, confirm: true })).toBe(true)
+        expect(t.store.read().pending).toEqual([])
+        expect(t.backend.acks).toHaveLength(1)
+        expect(t.backend.acks[0]).toMatchObject({ signer: me.pub, pub: phone.pub, addSeq: t.backend.state.active[phone.pub].seq, acct: ACCT })
+        // What every other device checks it against: the same log.
+        expect(checkDevAck(t.backend.state, t.backend.acks[0]).ok).toBe(true)
+      }
+    })
+
+    it('never for a list looked at, every device at once, the baseline, or without "It\'s mine"', async () => {
+      const t = await joined()
+      t.backend.add(later, 'viewer', '', 'later')
+      await t.syncer.refresh()
+      expect(await t.syncer.dismiss({ pubs: [phone.pub, later.pub], confirm: true })).toBe(false)
+      const u = await joined()
+      expect(await u.syncer.dismiss({ pub: phone.pub })).toBe(false)
+      expect(await u.syncer.dismiss({ confirm: true })).toBe(false)
+      expect(await u.syncer.dismiss({ baseline: true, confirm: true })).toBe(false)
+      expect(t.backend.postAck).not.toHaveBeenCalled()
+      expect(u.backend.postAck).not.toHaveBeenCalled()
+    })
+
+    it('never for a key that was not new here, or this machine\'s own', async () => {
+      const t = await joined()
+      expect(await t.syncer.dismiss({ pub: box2.pub, confirm: true })).toBe(false)
+      expect(await t.syncer.dismiss({ pub: me.pub, confirm: true })).toBe(false)
+      t.syncer.dismiss({ pub: phone.pub })
+      expect(await t.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(t.backend.postAck).not.toHaveBeenCalled()
+    })
+
+    it('for a suspended key only when "It\'s mine" lifted the suspension here', async () => {
+      const t = await joined()
+      t.store.write({ ...t.store.read(), suspended: [phone.pub] })
+      expect(await t.syncer.dismiss({ pubs: [phone.pub], confirm: true })).toBe(false)
+      expect(t.store.read().suspended).toEqual([phone.pub])
+      expect(await t.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(true)
+      expect(t.store.read().suspended).toEqual([])
+    })
+
+    it('not from a frozen log, or one this machine is not on — the key is marked seen here all the same', async () => {
+      const t = await joined()
+      t.store.write({ ...t.store.read(), frozen: { reason: 'fork', at: 1, lastGoodHead: t.backend.state.head } })
+      expect(await t.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(t.store.read().pending).toEqual([])
+      const u = await joined()
+      const file = u.store.read()
+      const { [me.pub]: _gone, ...others } = file.state!.active
+      u.store.write({ ...file, state: { ...file.state!, active: others } })
+      expect(await u.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(t.backend.postAck).not.toHaveBeenCalled()
+      expect(u.backend.postAck).not.toHaveBeenCalled()
+    })
+
+    it('a backend that does not take it (or predates it) leaves the dismissal here, and says so', async () => {
+      const lines: string[] = []
+      const t = await joined({ log: (l) => lines.push(l) })
+      t.backend.acksRoute = false
+      expect(await t.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(t.store.read().pending).toEqual([])
+      expect(lines.some((l) => l.includes('could not tell your other devices'))).toBe(true)
+      const u = await joined({ log: (l) => lines.push(l) })
+      u.backend.postAck.mockRejectedValueOnce(new Error('boom'))
+      expect(await u.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(lines.some((l) => l.includes('boom'))).toBe(true)
+    })
+
+    it('a machine with nothing to share it with keeps "It\'s mine" here', async () => {
+      const t = setup()
+      t.backend.add(box2, 'machine', MID2, 'box2')
+      await t.syncer.register()
+      t.backend.add(phone, 'viewer', '', 'phone')
+      await t.syncer.refresh()
+      expect(await t.syncer.dismiss({ pub: phone.pub, confirm: true })).toBe(false)
+      expect(t.store.read().pending).toEqual([])
+    })
+
+    it('reaches the other machine: its banner goes, and says where it was confirmed', async () => {
+      // Two machines of one account, each with its own copy of the log, against one backend.
+      const backend = new FakeBackend()
+      backend.add(box2, 'machine', MID2, 'box2')
+      const here = setup({ acks: true, backend })
+      await here.syncer.register()
+      backend.add(phone, 'viewer', '', 'phone')
+      await here.syncer.refresh()
+      const there = new DeviceLogSyncer({
+        store: new DeviceLogStore(join(mkdtempSync(join(tmpdir(), 'devlog-')), 'devlog.json')),
+        identity: () => box2, signIn: () => null, self: () => ({ machineId: MID2, label: 'box2' }),
+        fetch: backend.fetch, append: backend.append, fetchAcks: backend.fetchAcks, postAck: backend.postAck,
+        adopt: () => {}, drop: () => {}, trustedNow: () => [], tombstoned: () => false, blocked: () => false,
+        announce: () => {}, signedOut: () => {}, now: () => 6_000, sleep: async () => {},
+      })
+      // box2 read the log before phone joined: phone is new there too.
+      const real = backend.fetch.getMockImplementation()!
+      backend.fetch.mockImplementationOnce(async () => ({ acct: ACCT, head: backend.state.hashes.length ? { seq: 2, hash: backend.state.hashes[1] } : backend.state.head, entries: backend.entries.slice(0, 2) }))
+      await there.refresh()
+      backend.fetch.mockImplementation(real)
+      await there.refresh()
+      expect(there.list().pending).toEqual([phone.pub])
+      expect(await here.syncer.dismiss({ pubs: [phone.pub], confirm: true })).toBe(true)
+      await there.refresh()
+      expect(there.list().pending).toEqual([])
+      expect(there.list().members.find((m) => m.pub === phone.pub)?.confirmed).toEqual({ by: me.pub, label: 'my-mac', at: 6_000 })
+    })
   })
 })

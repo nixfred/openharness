@@ -11,6 +11,7 @@ assert 19920 <= PORT <= 19929
 with socket.socket() as probe: probe.bind(('127.0.0.1',PORT))
 ENV={k:os.environ[k] for k in ('PATH','LANG','LC_ALL','TZ') if k in os.environ}
 ENV.update(HOME=str(BASE),HN_TMPDIR=str(BASE),HN_SOCKET_NAME=NAME,PORT=str(PORT),SHELL='/bin/sh',TERM='xterm-256color',COLORTERM='truecolor',HN_DESKTOP='off',HARNESS_TUI_DESK='sync',HARNESS_TUI_NOTIFY='off',HN_SESSION_FIXTURE='1')
+(BASE/'account.json').write_text(json.dumps({'loggedIn':True}))
 def run(args,check=True):
  r=subprocess.run(list(map(str,args)),env=ENV,cwd=BASE,text=True,capture_output=True,timeout=10)
  if check and r.returncode: raise AssertionError((args,r.stdout,r.stderr))

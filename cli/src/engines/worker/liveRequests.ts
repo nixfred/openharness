@@ -4,6 +4,7 @@ import type { ServiceRequests } from '../../core/api.js'
 import type { RuntimeField } from '../facets/runtime.js'
 import type { EngineLive } from '../facets/live.js'
 import { transcriptFields } from '../kit/runtime.js'
+import { transcriptCloses } from '../../lib/transcriptControls.js'
 import { record, READER_REPLY_BYTES, type ReaderEngine } from './protocol.js'
 import { LiveStreams } from './liveStreams.js'
 import {
@@ -40,10 +41,14 @@ function pullOf(payload: Record<string, unknown>, engine: ReaderEngine): LivePul
   if (!session || !label(payload.token) || (payload.cursor !== null && !liveCursor(payload.cursor))
     || typeof payload.fromStart !== 'boolean' || typeof payload.replay !== 'boolean'
     || (payload.end !== undefined && !position(payload.end)) || (payload.liveStart !== undefined && typeof payload.liveStart !== 'boolean')
-    || (payload.rewritten !== undefined && typeof payload.rewritten !== 'boolean')) return null
+    || (payload.rewritten !== undefined && typeof payload.rewritten !== 'boolean')
+    || (payload.closes !== undefined && !transcriptCloses(payload.closes))
+    || (payload.rewrittenFrom !== undefined && !label(payload.rewrittenFrom))) return null
   return { token: payload.token, session, cursor: payload.cursor, fromStart: payload.fromStart,
     replay: payload.replay, ...(payload.liveStart === undefined ? {} : { liveStart: payload.liveStart }),
     ...(payload.rewritten === undefined ? {} : { rewritten: payload.rewritten }),
+    ...(payload.rewrittenFrom === undefined ? {} : { rewrittenFrom: payload.rewrittenFrom }),
+    ...(payload.closes === undefined ? {} : { closes: payload.closes }),
     ...(payload.end === undefined ? {} : { end: payload.end }) }
 }
 
@@ -84,10 +89,12 @@ export function engineLiveRequests(engine: ReaderEngine, deps: LiveRequestDeps =
       return record(value) ? runtime.decode(value) : null
     } : undefined)
   })().catch((error) => { streams = null; throw error })
-  const forget = async (token: string): Promise<void> => {
+  // `release` only when core forgets the token: a failed read or an evicted reply drops the stream's
+  // state, which a cursor rebuilds, but not where that stream found its file rewritten.
+  const forget = async (token: string, release = false): Promise<void> => {
     const old = replies.get(token)
     if (old) { bytes -= old.bytes.length; replies.delete(token); parts.delete(old.id) }
-    if (streams) (await streams).forget(token)
+    if (streams) (await streams).forget(token, release)
   }
   const failure = (error: string) => ({ version: LIVE_VERSION, error,
     retryable: error !== 'ENGINE_INVALID_REQUEST' && error !== 'ENGINE_REPLY_TOO_LARGE' })
@@ -108,7 +115,7 @@ export function engineLiveRequests(engine: ReaderEngine, deps: LiveRequestDeps =
     }
     if (!label(payload.token)) return failure('ENGINE_INVALID_REQUEST')
     if (pending >= LIVE_IN_FLIGHT) return failure('ENGINE_BUSY')
-    if (type === LIVE_FORGET) { await forget(payload.token); return { version: LIVE_VERSION, forgotten: true } }
+    if (type === LIVE_FORGET) { await forget(payload.token, true); return { version: LIVE_VERSION, forgotten: true } }
     const ask = pullOf(payload, engine)
     if (!ask || (type === LIVE_PREPARE && ask.cursor !== null) || (type === LIVE_READ && ask.cursor === null)
       || (type === LIVE_CLOSE && (!ask.cursor || typeof payload.identity !== 'string'
@@ -144,7 +151,8 @@ export function engineLiveRequests(engine: ReaderEngine, deps: LiveRequestDeps =
       })()])
     } catch (error) {
       await forget(ask.token)
-      return failure(error instanceof Error && error.message === 'ENGINE_TRANSCRIPT_CHANGED' ? error.message : 'ENGINE_UNAVAILABLE')
+      return failure(error instanceof Error && ['ENGINE_TRANSCRIPT_CHANGED', 'ENGINE_CONTROL_BOUNDARY_CHANGED'].includes(error.message)
+        ? error.message : 'ENGINE_UNAVAILABLE')
     } finally { clearTimeout(timer); pending-- }
   }
   return Object.fromEntries([LIVE_CAPABILITIES, LIVE_PREPARE, LIVE_READ, LIVE_PART, LIVE_CLOSE, LIVE_FORGET].map(type => [type, handler(type)]))

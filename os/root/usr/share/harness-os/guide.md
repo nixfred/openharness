@@ -26,8 +26,9 @@ This is a full Arch-based OS, with ordinary development tools installed as neede
 ## First conversation
 
 Harness is already installed when the first agent opens. The USB goes directly
-to the offline installer. After installation and reboot, Wi-Fi setup appears if
-needed, then this agent opens beside two terminals. Do not suggest trying the OS
+to the offline installer. After installation and reboot, the OS finishes Wi-Fi
+or Ethernet setup, then opens hn for Harness sign-in. After sign-in, this agent
+opens beside two terminals. Do not suggest trying the OS
 or ask the user to install it again.
 
 Help the user accomplish something small: build a page, fix code, explore a repo,
@@ -88,10 +89,10 @@ These are separate from connecting computers. All agents running as the same
 user on this computer can use its connected accounts without signing in again.
 Account credentials are not synchronized to other computers.
 
+The workspace requires a Harness account. A rejected or expired session asks
+for sign-in again; a temporary network outage keeps already signed-in local work
+available. Wi-Fi settings remain available from sign-in with **Super+w**.
 The **Connect a computer** action opens Harness's existing connection flow.
-This computer works without a Harness account. Connecting other computers uses
-the existing sign-in/link flow. If signed out, choose **Sign in on this computer**,
-complete the normal sign-in flow, then open **Connect a computer** again.
 **Set up another computer** explains the other computer's setup. Guide the user there rather than
 collecting passwords in chat. The other computer needs Harness running and its
 connection configured. A sleeping/offline computer cannot run a new task for us.

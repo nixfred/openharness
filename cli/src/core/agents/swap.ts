@@ -17,6 +17,7 @@ import { sameProcessIdentity } from '../../lib/terminalRuntime.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 
 export interface PaneSwapDeps {
+  restartJobs?: AgentRestartCoordinator
   byAgent: (agentId: string) => RegisteredSession | undefined
   /** The tmux backend; a swap only ever runs where there is one. */
   tmuxBackend: TmuxBackend | null
@@ -28,7 +29,7 @@ export interface PaneSwapDeps {
 /** How long a relaunched engine must stay running before a restart counts it as come up (`waitForProcess`). */
 export const SWAP_SETTLE_MS = 500
 
-export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation }: PaneSwapDeps) {
+export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, keepAbandonedConversation, restartJobs = new AgentRestartCoordinator() }: PaneSwapDeps) {
   /**
    * The dependencies a pane-process swap needs, for both callers that do one.
    *
@@ -38,7 +39,6 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
    * is the only thing this takes. Written once because two copies of a kill sequence drift, and the
    * half that drifts is the half nobody ran today.
    */
-  const restartJobs = new AgentRestartCoordinator()
   const sameRestartTarget = (session: RegisteredSession): boolean => {
     const current = byAgent(session.agentId)
     return !!current && current.registeredAt === session.registeredAt
@@ -48,17 +48,19 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
   const paneSwapDeps = (
     session: RegisteredSession,
     runtime: TmuxRuntimeRef,
-    launch: { env?: Record<string, string>; extraArgs?: readonly string[]; clearEnv?: readonly string[] } = {},
+    launch: { native?: import('../../engines/nativeLaunch.js').NativeLaunch; env?: Record<string, string>; extraArgs?: readonly string[]; clearEnv?: readonly string[] } = {},
     /** The mode this swap may actually ask for — the row's own, unless the engine on disk has since
      *  stopped taking its flag and the caller dropped it (`dropPermissionFlagIfUnsupported`). */
     permissionMode: string | null = session.permissionMode ?? null,
+    current?: () => boolean,
   ): RestartAgentDeps => ({
+    ...(current ? { isCurrent: current } : {}),
     prepareResume: () => prepareSessionResume(session),
     // The row as the swap found it: the conversation a fallback to a fresh start leaves behind.
     keepAbandoned: () => keepAbandonedConversation(session),
     respawnRefusal: () => tmuxBackend!.respawnRefusal(launch.env ? { env: launch.env } : {}),
     holdOpen: async () => {
-      const result = await tmuxBackend!.holdOpen(runtime)
+      const result = await tmuxBackend!.holdOpen(runtime, current)
       return result.state === 'succeeded'
         ? { ok: true }
         : { ok: false, reason: 'reason' in result ? result.reason : 'could not re-arm remain-on-exit' }
@@ -68,10 +70,12 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
       kill: (pid, signal) => process.kill(pid, signal),
       sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.() }),
       log: (message) => console.log(message),
+      ...(current ? { current } : {}),
     }, checkAfterMs),
     respawn: async (argv) => {
       const result = await tmuxBackend!.respawn(runtime, {
         command: argv,
+        ...(current ? { current } : {}),
         cwd: homedir(),
         ...(launch.env ? { env: launch.env } : {}),
       })
@@ -104,6 +108,7 @@ export function createPaneSwap({ byAgent, tmuxBackend, prepareSessionResume, kee
     },
     buildArgv: (opts) => buildEngineLaunchArgv(session.engine, {
       ...opts,
+      ...(launch.native ? { native: launch.native } : {}),
       // The mode picked at create outranks what the live argv said: `bypassPermission` is a yes/no, and
       // Plan or Accept edits would come back as Ask without it.
       ...(permissionMode ? { permissionMode } : {}),

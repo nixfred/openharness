@@ -111,6 +111,9 @@ void main() {
     expect(appActions.last, 'showAbout');
 
     await tap(tester, 'menu-bar-harness');
+    // The panel it opens is Appearance, as Settings' rail calls it; "…" like Settings… beside it.
+    expect(find.text('Appearance…'), findsOneWidget);
+    expect(find.text('Customize Harness'), findsNothing);
     await tap(tester, 'menu-bar-customize');
     expect(swarmCalls.last.method, 'customize');
 
@@ -155,6 +158,31 @@ void main() {
     await tap(tester, 'menu-bar-file');
     await tap(tester, 'menu-bar-close-tab');
     expect(swarmCalls.last.method, 'closeActive');
+  });
+
+  testWidgets('File shows the active tab\'s Agent Messages, with no on/off '
+      'row', (tester) async {
+    swarmMenuBus.send('update', {
+      'enabled': true,
+      'canShowAgentMessages': true,
+    });
+    await pumpBar(tester);
+
+    await tap(tester, 'menu-bar-file');
+    // Whether agents may message is the account's (Settings ▸ Experimental):
+    // the tab's on/off was easy to hit by mistake (owner, 2026-10-12).
+    expect(find.byKey(const Key('menu-bar-agent-messages')), findsNothing);
+    expect(find.text('Agent Messages'), findsNothing);
+    await tap(tester, 'menu-bar-show-agent-messages');
+    expect(swarmCalls.last.method, 'showAgentMessages');
+    expect(swarmCalls.last.arguments, isNull, reason: 'the active tab');
+
+    // The Store tab has no log: the row goes quiet.
+    swarmMenuBus.send('update', {'enabled': true});
+    await tester.pump();
+    await tap(tester, 'menu-bar-file');
+    expect(find.byKey(const Key('menu-bar-show-agent-messages')), findsNothing);
+    expect(find.text('Show Agent Messages'), findsOneWidget);
   });
 
   testWidgets('View reaches both channels', (tester) async {
@@ -294,6 +322,16 @@ void main() {
     await tap(tester, 'menu-bar-help');
     await tap(tester, 'menu-bar-keyboard-practice');
     expect(appActions.last, 'keyboardPractice');
+  });
+
+  // The Mac's Help ▸ Welcome Tour reports the same string over app_menu.
+  testWidgets('Help opens the Welcome Tour', (tester) async {
+    await pumpBar(tester);
+
+    await tap(tester, 'menu-bar-help');
+    expect(find.text('Welcome Tour'), findsOneWidget);
+    await tap(tester, 'menu-bar-welcome-tour');
+    expect(appActions.last, 'welcomeTour');
   });
 
   testWidgets('rows go quiet while the app cannot take them', (tester) async {

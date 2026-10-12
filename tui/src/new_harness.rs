@@ -123,6 +123,10 @@ pub struct Form {
     trail: Vec<Child>,
     area: Rect,
     child_area: Rect,
+    /// The dialog's `[ Cancel ]` button, where it was last drawn: a click on it closes the form.
+    cancel_area: Rect,
+    /// On the button row, Cancel is the one chosen (← from Start), not Start.
+    cancel_chosen: bool,
     task_area: Rect,
     task_editor: task::Editor,
     hits: Vec<(Rect, Field)>,
@@ -163,9 +167,8 @@ impl Form {
         let page = matches!(self.surface, Surface::Window(_));
         let git_controls = self.draft.what.engine != "terminal"
             && (data::git(&self.git) || self.git_loading || self.git["error"].is_string());
-        let mut fields = vec![Field::Task, Field::Agent];
-        if page { fields.push(Field::Machine); }
-        fields.push(Field::Project);
+        // The machine is its own row, here and on the page: not "project @ machine" in one.
+        let mut fields = vec![Field::Task, Field::Agent, Field::Machine, Field::Project];
         if !page && git_controls { fields.extend([Field::Branch, Field::Worktree]); }
         if self.draft.what.engine != "terminal" {
             fields.push(Field::Model);
@@ -189,6 +192,8 @@ impl Form {
         let fields = self.fields();
         let at = fields.iter().position(|f| *f == self.focus).unwrap_or(0) as isize;
         self.focus = fields[(at + delta).rem_euclid(fields.len() as isize) as usize];
+        // Coming back to the buttons, Start is the one chosen again.
+        self.cancel_chosen = false;
     }
     fn worktree(&self) -> bool {
         self.draft.what.engine != "terminal"
@@ -230,13 +235,10 @@ impl Form {
             Project::Clone(url) => format!("Clone: {url}"),
         }
     }
-    fn project_label(&self) -> String {
-        format!("{} @ {}", self.project_name(), self.machine_label)
-    }
     fn hint(&self) -> String {
         if self.focus == Field::Project {
             if let Project::Folder(path) = &self.draft.project {
-                return format!("{} @ {}", short_path(path, &self.home), self.machine_label);
+                return short_path(path, &self.home);
             }
         }
         String::new()
@@ -252,9 +254,7 @@ impl Form {
                 self.draft.what.label.clone(),
             ),
             Field::Machine => ("Machine", self.machine_label.clone()),
-            Field::Project => ("Project", if matches!(self.surface, Surface::Window(_)) {
-                self.project_name()
-            } else { self.project_label() }),
+            Field::Project => ("Project", self.project_name()),
             Field::Task => ("Task", if self.draft.task.trim().is_empty() {
                 "Add a task (optional)".into()
             } else {
@@ -344,9 +344,17 @@ fn short_path(path: &str, home: &str) -> String {
         path.into()
     }
 }
+/// A machine's home folder: as its daemon reported it, or this computer's own.
+fn machine_home(app: &App, machine: &str) -> Option<String> {
+    app.homes.get(machine).cloned().or_else(|| {
+        (machine == app.fleet.local_id || crate::local::is_local(machine)).then(|| std::env::var("HOME").ok()).flatten()
+    })
+}
+
+/// A machine by its name — this computer's too, not "local".
 fn machine_label(app: &App, machine: &str) -> String {
     if app.fleet.machines.iter().any(|m| m.id == machine && m.local) {
-        "local".into()
+        app.fleet.local_machine_name()
     } else {
         app.fleet.machine_name(machine)
     }
@@ -495,11 +503,20 @@ fn make_form(app: &mut App, machine: Option<String>, cwd: Option<String>, surfac
         .and_then(|p| app.fleet.agent(&p.machine_id, &p.agent_id));
     let what = saved_agent(&saved);
     let engine = what.engine.clone();
-    let project = cwd
-        .or_else(|| saved["projects"][&machine].as_str().map(str::to_string))
-        .or_else(|| current.map(|a| a.cwd.clone()).filter(|p| !p.is_empty()))
-        .map(Project::Folder)
-        .unwrap_or_else(|| Project::New(String::new()));
+    // The home folder is nobody's project: hn's first shell starts there, and a fresh Mac's first
+    // harness, from that shell, wrote its files straight into it (macOS VM, 2026-10-09). Where the form
+    // was opened from home, a new project, as the desktop app makes one. A project the person chose
+    // (remembered) stays theirs, and a terminal from it opens at home (set_engine, the welcome row).
+    let home = machine_home(app, &machine);
+    let at_home = |p: &String| home.as_deref().is_some_and(|h| p.trim_end_matches('/') == h.trim_end_matches('/'));
+    let project = if cwd.as_ref().is_some_and(at_home) {
+        Project::New(String::new())
+    } else {
+        cwd.or_else(|| saved["projects"][&machine].as_str().map(str::to_string))
+            .or_else(|| current.map(|a| a.cwd.clone()).filter(|p| !p.is_empty() && !at_home(p)))
+            .map(Project::Folder)
+            .unwrap_or_else(|| Project::New(String::new()))
+    };
     let permission = saved["permissions"][&engine]
         .as_str()
         .map(str::to_string)
@@ -541,6 +558,8 @@ fn make_form(app: &mut App, machine: Option<String>, cwd: Option<String>, surfac
         trail: vec![],
         area: Rect::default(),
         child_area: Rect::default(),
+        cancel_area: Rect::default(),
+        cancel_chosen: false,
         task_area: Rect::default(),
         task_editor: task::Editor::default(),
         hits: vec![],
@@ -571,11 +590,7 @@ fn refresh_form(app: &App, form: &mut Form) {
         form.child_active = false;
         form.trail.clear();
     }
-    form.home = app
-        .homes
-        .get(&form.draft.machine)
-        .cloned()
-        .unwrap_or_default();
+    form.home = machine_home(app, &form.draft.machine).unwrap_or_default();
     if form.draft.what.engine == "terminal"
         && matches!(&form.draft.project,Project::Folder(p) if p.is_empty())
         && !form.home.is_empty()
@@ -602,12 +617,11 @@ fn refresh_form(app: &App, form: &mut Form) {
         Choice::Compatible(dsh) => Some(compatible_rows(app, &form.draft.machine, dsh)),
         Choice::Project => {
             let mut rows = project_rows(app, &form.draft, !matches!(form.surface, Surface::Window(_)));
-            // The welcome header owns the destination; choosing a folder must
-            // not silently switch to a different computer with the same path.
-            if matches!(form.surface, Surface::Window(_)) {
-                rows.retain(|row| row.id.strip_prefix("at:").and_then(|s| s.split_once('\t'))
-                    .is_none_or(|(machine, _)| machine == form.draft.machine));
-            }
+            // The Machine field (and the welcome header) owns the destination: the projects are the
+            // chosen machine's, and choosing one never switches to another computer.
+            let chosen = app.fleet.launch_machine_id(&form.draft.machine);
+            rows.retain(|row| row.id.strip_prefix("at:").and_then(|s| s.split_once('\t'))
+                .is_none_or(|(machine, _)| machine == chosen || machine == form.draft.machine));
             Some(rows)
         }
         Choice::Machine(_) => Some(modal::new_machine_rows(app, &form.draft.machine)),
@@ -691,11 +705,19 @@ fn project_rows(app: &App, draft: &Draft, show_machine: bool) -> Vec<Row> {
     if draft.what.engine != "terminal" {
         rows.push(Row::new("new", "New Folder"));
     }
+    // The chosen machine's home first, as the composer offers "this folder": a machine whose recent
+    // agents all ran in scratch folders otherwise offered nothing else.
+    let chosen = app.fleet.launch_machine_id(&draft.machine);
+    if let Some(home) = app.homes.get(chosen).filter(|h| h.starts_with('/')) {
+        let label = if show_machine { format!("~ @ {}", machine_label(app, chosen)) } else { "~".into() };
+        // (Its own id, not a recent project's "at:": chosen the same way, never counted among them.)
+        rows.push(Row::new(format!("home:{chosen}\t{home}"), label).extra(format!("home {}", app.fleet.machine_name(chosen))).group("Home"));
+    }
     let mut agents: Vec<_> = app
         .fleet
         .agents
         .values()
-        .filter(|a| !a.cwd.is_empty())
+        .filter(|a| !a.cwd.is_empty() && !crate::shell_context::scratch_folder(&a.cwd))
         .collect();
     agents.sort_by_key(|a| {
         (
@@ -727,11 +749,13 @@ fn project_rows(app: &App, draft: &Draft, show_machine: bool) -> Vec<Row> {
                 .map(String::as_str)
                 .unwrap_or(""),
         );
+        // "folder @ machine", the machine by its name. "local" still finds this computer's.
+        let local = app.fleet.machines.iter().any(|m| m.id == machine && m.local);
         let mut row = Row::new(
             format!("at:{machine}\t{}", a.cwd),
             if show_machine { format!("{short} @ {}", machine_label(app, machine)) } else { short },
         )
-        .extra(app.fleet.machine_name(machine))
+        .extra(format!("{}{}", app.fleet.machine_name(machine), if local { " local" } else { "" }))
         .group("Recent projects");
         row.disabled = !app
             .fleet
@@ -1059,7 +1083,8 @@ fn load_folder(app: &mut App, form: &mut Form, path: String) {
                         c.kind = Choice::Folder(path.clone());
                         c.picker.placeholder =
                             format!("{} · Ctrl-L path", short_path(&path, &form.home));
-                        let mut rows = vec![Row::new("use", "Use this folder")];
+                        // "Use ~/work/app", the folder it means, not "Use this folder".
+                        let mut rows = vec![Row::new("use", format!("Use {}", short_path(&path, &form.home)))];
                         if path != "/" {
                             rows.push(Row::new("up", ".. /"));
                         }
@@ -1231,17 +1256,15 @@ fn choose(app: &mut App, form: &mut Form) {
                     "new" => ProjectAction::New,
                     _ => ProjectAction::Open,
                 };
-                if matches!(form.surface, Surface::Window(_)) {
-                    let next = project_action(form, action);
-                    step_into(app, form, c, next, "");
-                } else {
-                    step_into(app, form, c, Choice::Machine(Some(action)), "");
-                }
+                // The machine is chosen in its own field: Open, New and Clone act on it, never
+                // asking for a machine a second time.
+                let next = project_action(form, action);
+                step_into(app, form, c, next, "");
                 return;
             }
             _ => {
                 if let Some((machine, path)) =
-                    id.strip_prefix("at:").and_then(|s| s.split_once('\t'))
+                    id.strip_prefix("at:").or_else(|| id.strip_prefix("home:")).and_then(|s| s.split_once('\t'))
                 {
                     set_machine(app, form, machine);
                     set_project(form, Project::Folder(path.into()));
@@ -1421,6 +1444,16 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
         form.submit_after_git = false;
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // → enters a field's choices; ← comes back out, once the query's cursor is at its start: a step
+    // back (a folder's parent list), else to the field, its choices still beside the form.
+    if key.code == KeyCode::Left && !ctrl && form.child_active && form.child.as_ref().is_some_and(|c| c.picker.qcursor == 0) {
+        if let Some(previous) = form.trail.pop() { form.child = Some(previous) }
+        else if form.focus == Field::Task { form.child = None; form.child_active = false }
+        else { form.child_active = false }
+        form.error.clear();
+        store_form(app, form);
+        return;
+    }
     if key.code == KeyCode::Esc || (ctrl && matches!(key.code, KeyCode::Char('c' | 'g'))) {
         if back(app, &mut form) {
             store_form(app, form);
@@ -1487,6 +1520,9 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
             KeyCode::Enter if !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
                 form.focus = Field::Create;
                 form.child = None;
+                // With a task, Enter starts it: the second Enter, on Start, was the step a newcomer
+                // stopped at (macOS VM, 2026-10-09). Without one it still steps to Start.
+                launch = !form.draft.task.trim().is_empty();
             }
             _ if form.blocked(Field::Task).is_none() => {
                 form.task_editor.key(&mut form.draft.task, key, form.task_area.width.max(1) as usize);
@@ -1568,6 +1604,16 @@ pub fn key(app: &mut App, mut form: Box<Form>, key: KeyEvent) {
             KeyCode::Tab | KeyCode::BackTab => {
                 form.move_by(if key.code == KeyCode::BackTab { -1 } else { 1 });
                 reveal(app, &mut form);
+            }
+            // The dialog's button row: ← → choose between Cancel and Start, as every dialog's
+            // buttons do; Enter on Cancel closes the form, as Esc does.
+            KeyCode::Left | KeyCode::Right if form.focus == Field::Create && !matches!(form.surface, Surface::Window(_)) => {
+                form.cancel_chosen = key.code == KeyCode::Left;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if form.focus == Field::Create && form.cancel_chosen => {
+                form.cancel_chosen = false;
+                dismiss(app, form);
+                return;
             }
             KeyCode::Enter | KeyCode::Char(' ') => launch = activate(app, &mut form),
             KeyCode::Right if form.focus != Field::Create => {
@@ -1689,6 +1735,11 @@ pub fn mouse(app: &mut App, mouse: MouseEvent) {
                 c.picker.move_by(delta as i64);
             }
         } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if form.cancel_area.contains(pos) {
+                // `[ Cancel ]`: as Esc closes the dialog, the draft kept for next time.
+                dismiss(app, form);
+                return;
+            }
             if form.child.is_some() && form.child_area.contains(pos) {
                 form.child_active = true;
                 let c = form.child.as_mut().unwrap();
@@ -2098,6 +2149,29 @@ mod tests {
         } } }
     }
 
+    /// `@` in the task (or the Machine field) lists the machines; ↑ ↓ move through them and stay
+    /// where they were moved to through the refreshes that follow.
+    #[tokio::test]
+    async fn arrows_move_through_the_machines_at_lists() {
+        let mut app = app();
+        for (id, name) in [("lap", "laptop"), ("box", "gpu-box")] {
+            app.fleet.machines.push(crate::fleet::Machine { shared: false, id: id.into(), name: name.into(), local: false,
+                status: "online".into(), reach: crate::fleet::Reach::Ready });
+        }
+        open(&mut app, None, Some("/home/dev/project".into()));
+        press(&mut app, KeyCode::Char('@'));
+        fn current(app: &App) -> Option<String> { form_of(app).child.as_ref().and_then(|c| c.picker.current_id()) }
+        let first = current(&app);
+        press(&mut app, KeyCode::Down);
+        let second = current(&app);
+        assert_ne!(second, first, "↓ moves");
+        crate::new_harness::refresh(&mut app);
+        assert_eq!(current(&app), second, "a refresh keeps the row ↓ moved to");
+        press(&mut app, KeyCode::Up);
+        crate::new_harness::refresh(&mut app);
+        assert_eq!(current(&app), first, "↑ moves back");
+    }
+
     #[tokio::test]
     async fn at_colon_percent_in_the_task_open_their_choosers() {
         let mut app = app();
@@ -2164,7 +2238,7 @@ mod tests {
             open(&mut app, explicit, None);
             let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
             assert_eq!(form.draft.machine, "local");
-            assert_eq!(form.project_label(), "New Folder @ local");
+            assert_eq!((form.project_name().as_str(), form.machine_label.as_str()), ("New Folder", app.fleet.local_machine_name().as_str()));
             for rows in [modal::machine_rows(&app), modal::new_machine_rows(&app, shell)] {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].id, "local");
@@ -2181,7 +2255,7 @@ mod tests {
         let recent: Vec<_> = rows.iter().filter(|r| r.id.starts_with("at:")).collect();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, "at:local\t/home/dev/repo");
-        assert_eq!(recent[0].label, "~/repo @ local");
+        assert_eq!(recent[0].label, format!("~/repo @ {}", app.fleet.local_machine_name()), "its machine by name, not '@ local'");
     }
 
     #[tokio::test]
@@ -2205,21 +2279,25 @@ mod tests {
         }
         open(&mut app, None, None);
         let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        // The projects are the chosen machine's (the Machine field picks it): this computer's own,
+        // at most fifty, and none of another machine's.
         child(&mut app, &mut form, Choice::Project, "");
-        assert_eq!(form.child.as_ref().unwrap().picker.rows.iter().filter(|r| r.id.starts_with("at:")).count(), 52);
+        let recent = |form: &Form| form.child.as_ref().unwrap().picker.rows.iter().filter(|r| r.id.starts_with("at:")).map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert_eq!(recent(&form).len(), 50);
+        assert!(recent(&form).iter().all(|id| !id.starts_with("at:office") && !id.starts_with("at:m2")));
+        // A large local history does not crowd out a remote machine's: chosen, its project is there.
         for machine in ["office", "m2"] {
-            for query in [format!("{machine} harness"), format!("harness {machine}")] {
-                let picker = &mut form.child.as_mut().unwrap().picker;
-                picker.set_query(&query);
-                let selected = picker.current().expect("the remote project is searchable");
-                assert_eq!(selected.id, format!("at:{machine}\t/home/dev/harnesses/autonomous-harness-2026-000"), "{query}");
-                assert!(selected.label.ends_with(&format!(" @ {machine}")));
-                assert!(!selected.disabled);
-            }
+            set_machine(&mut app, &mut form, machine);
+            child(&mut app, &mut form, Choice::Project, "");
+            assert_eq!(recent(&form), [format!("at:{machine}\t/home/dev/harnesses/autonomous-harness-2026-000")]);
+            let picker = &mut form.child.as_mut().unwrap().picker;
+            picker.set_query("harness");
+            let selected = picker.current().expect("the machine's project is searchable");
+            assert!(selected.label.ends_with(&format!(" @ {machine}")), "{}", selected.label);
+            assert!(!selected.disabled);
             choose(&mut app, &mut form);
             assert_eq!(form.draft.machine, machine);
             assert!(matches!(&form.draft.project, Project::Folder(path) if path == "/home/dev/harnesses/autonomous-harness-2026-000"));
-            child(&mut app, &mut form, Choice::Project, "");
         }
     }
 
@@ -2267,6 +2345,95 @@ mod tests {
         assert!(!rows.iter().any(|r| r.id.starts_with(&format!("at:{shell}\t"))));
     }
 
+    /// → enters a field's choices and ← comes back out (at the query's start), the choices still
+    /// shown beside the form; a typed query keeps ← for its cursor.
+    #[tokio::test]
+    async fn left_leaves_a_chooser_that_right_entered() {
+        let mut app = app();
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        form.focus = Field::Agent;
+        reveal(&mut app, &mut form);
+        app.modal = Some(Modal::NewHarness(form));
+        press(&mut app, KeyCode::Right);
+        assert!(form_of(&app).child_active, "→ enters the choices");
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Left);
+        assert!(form_of(&app).child_active, "← moves the query's cursor first");
+        press(&mut app, KeyCode::Left);
+        assert!(!form_of(&app).child_active, "← at the query's start comes back to the field");
+        assert_eq!(form_of(&app).focus, Field::Agent);
+        assert!(form_of(&app).child.is_some(), "its choices stay in view");
+    }
+
+    /// The dialog's Start is a button on its own line, in view at 80×24 whatever the agent's settings;
+    /// a click on it is Start.
+    #[tokio::test]
+    async fn the_dialog_ends_with_a_start_button_always_in_view() {
+        let mut app = app();
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        for engine in ["claude", "codex", "terminal"] {
+            set_engine(&mut form, engine);
+            let area = Rect::new(0, 0, 80, 24);
+            let mut buf = Buffer::empty(area);
+            view::draw(&mut buf, area, &mut form);
+            let text: Vec<String> = (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+            let label = form.describe(Field::Create).0;
+            assert!(text.iter().any(|l| l.contains(&format!("[ {label} ]"))), "{engine}: no Start button\n{}", text.join("\n"));
+            assert!(form.hits.iter().any(|(r, f)| *f == Field::Create && r.height == 1 && text[r.y as usize].contains("[ ")), "the button is its click target");
+            assert!(text.iter().any(|l| l.contains("[ Cancel ]")), "{engine}: no Cancel button");
+            assert!(form.cancel_area.width > 0 && text[form.cancel_area.y as usize].contains("[ Cancel ]"));
+        }
+        // A click on Cancel closes the form.
+        app.modal = Some(Modal::NewHarness(form));
+        let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
+        let at = form.cancel_area;
+        mouse(&mut app, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: at.x + 2, row: at.y, modifiers: KeyModifiers::NONE });
+        assert!(!matches!(app.modal, Some(Modal::NewHarness(_))), "Cancel closes the form");
+
+        // And from the keyboard: on the buttons, ← chooses Cancel, → Start again, Enter presses it.
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(mut form)) = app.modal.take() else { panic!() };
+        form.focus = Field::Create;
+        app.modal = Some(Modal::NewHarness(form));
+        press(&mut app, KeyCode::Left);
+        assert!(form_of(&app).cancel_chosen, "← chooses Cancel");
+        press(&mut app, KeyCode::Right);
+        assert!(!form_of(&app).cancel_chosen, "→ chooses Start");
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Down);
+        assert!(!form_of(&app).cancel_chosen, "coming back to the buttons, Start is chosen");
+        press(&mut app, KeyCode::Left);
+        let created = app.models_view.sent.len();
+        press(&mut app, KeyCode::Enter);
+        assert!(!matches!(app.modal, Some(Modal::NewHarness(_))), "Enter on Cancel closes the form");
+        assert_eq!(app.models_view.sent.len(), created, "and starts nothing");
+    }
+
+    /// A machine whose agents ran in scratch folders (a test matrix in /tmp) offered only those, and
+    /// starting in one was refused (FORBIDDEN: projects open under the home). Its home comes first,
+    /// and only folders under it are offered.
+    #[tokio::test]
+    async fn projects_offer_the_machine_home_and_only_folders_under_it() {
+        let mut app = app();
+        let ids: Vec<String> = app.fleet.machines.iter().map(|m| m.id.clone()).chain(["local".to_string()]).collect();
+        for id in ids { app.homes.insert(id, "/home/dev".into()); }
+        for (id, cwd) in [("a1", "/home/dev/repo"), ("a2", "/tmp/grid-matrix-out/agents/codex-1"), ("a3", "/private/tmp/scratch")] {
+            let agent = crate::fleet::agent_from("local", &json!({ "id": id, "engine": "codex", "project": { "cwd": cwd } }), None);
+            app.fleet.agents.insert(agent.key(), agent);
+        }
+        open(&mut app, None, None);
+        let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
+        let rows = project_rows(&app, &form.draft, true);
+        let first_folder = rows.iter().find(|r| r.id.starts_with("at:") || r.id.starts_with("home:")).expect("a folder");
+        assert_eq!(first_folder.group.as_deref(), Some("Home"), "the home comes first");
+        assert!(first_folder.id.starts_with("home:") && first_folder.id.ends_with("\t/home/dev"));
+        assert!(rows.iter().any(|r| r.id.ends_with("\t/home/dev/repo")));
+        assert!(!rows.iter().any(|r| r.id.contains("tmp/")), "folders outside the home are not offered: {:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>());
+    }
+
     #[tokio::test]
     async fn project_search_keeps_the_short_local_machine_name_searchable() {
         let mut app = app();
@@ -2283,7 +2450,7 @@ mod tests {
             picker.set_query(query);
             let selected = picker.current().expect("the real machine name and local both work");
             assert_eq!(selected.id, "at:local\t/home/dev/harnesses/repo", "{query}");
-            assert_eq!(selected.label, "~/harnesses/repo @ local");
+            assert_eq!(selected.label, "~/harnesses/repo @ M2", "the real machine name, not '@ local'");
             assert!(picker.visible.iter().all(|(i, hits)| hits.iter().all(|at| (*at as usize) < picker.rows[*i].label.chars().count())));
         }
     }
@@ -2309,7 +2476,8 @@ mod tests {
             refresh(&mut app);
             let Some(Modal::NewHarness(form)) = &app.modal else { panic!() };
             assert_eq!(form.draft.machine, if pending { shell } else { "local" });
-            assert_eq!(form.project_label(), "repo @ local");
+            // The machine by its name, renamed with it — not "local".
+            assert_eq!((form.project_name().as_str(), form.machine_label.as_str()), ("repo", "office"));
             if pending { assert_eq!(form.attempt.as_ref().unwrap().machine, shell); }
         }
     }
@@ -2334,6 +2502,37 @@ mod tests {
         assert_eq!(form.focus, Field::Task);
     }
 
+    // The second Enter, on Start, was where a newcomer stopped (macOS VM, 2026-10-09).
+    #[tokio::test]
+    async fn enter_in_a_task_starts_it_and_an_empty_task_steps_to_start() {
+        let mut app = app();
+        let mut form = make_form(&mut app, Some(crate::local::MACHINE.into()), Some("/home/dev/project".into()), Surface::Dialog).unwrap();
+        key(&mut app, form, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        form = take_active(&mut app).unwrap();
+        assert_eq!(form.focus, Field::Create, "no task: Enter steps to Start");
+        assert!(form.attempt.is_none() && !form.starting);
+        form.focus = Field::Task;
+        form.draft.task = "make a small web page".into();
+        key(&mut app, form, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let form = take_active(&mut app).unwrap();
+        assert!(form.attempt.is_some() || form.starting || !form.error.is_empty(), "the task was submitted");
+    }
+
+    // The home folder is nobody's project: a fresh Mac's first harness wrote into it.
+    #[tokio::test]
+    async fn the_home_folder_is_a_new_project_unless_the_harness_is_a_terminal() {
+        let mut app = app();
+        let home = std::env::var("HOME").unwrap();
+        app.homes.insert(crate::local::MACHINE.into(), home.clone());
+        let form = make_form(&mut app, Some(crate::local::MACHINE.into()), Some(format!("{home}/")), Surface::Dialog).unwrap();
+        assert!(matches!(&form.draft.project, Project::New(name) if name.is_empty()), "{:?}", form.draft.project);
+        let form = make_form(&mut app, Some(crate::local::MACHINE.into()), Some(format!("{home}/work")), Surface::Dialog).unwrap();
+        assert!(matches!(&form.draft.project, Project::Folder(path) if path.ends_with("/work")));
+        let mut form = make_form(&mut app, Some(crate::local::MACHINE.into()), Some(home.clone()), Surface::Dialog).unwrap();
+        set_engine(&mut form, "terminal");
+        assert!(matches!(&form.draft.project, Project::Folder(path) if *path == home), "a shell still opens at home");
+    }
+
     #[tokio::test]
     async fn offline_submission_explains_recovery_and_preserves_the_task_on_both_surfaces() {
         for window in [false, true] {
@@ -2345,10 +2544,7 @@ mod tests {
             let mut form = make_form(&mut app, Some(crate::local::MACHINE.into()), Some("/home/dev/project".into()), surface).unwrap();
             assert!(form.local_only);
             form.draft.task = "Keep my offline task".into();
-            key(&mut app, form, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-            let form = take_active(&mut app).unwrap();
-            assert_eq!(form.focus, Field::Create);
-            assert!(form.error.is_empty());
+            // One Enter with a task submits it, and says why it could not start.
             key(&mut app, form, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             let form = take_active(&mut app).unwrap();
             assert!(form.error.contains("harness start"));
@@ -2540,12 +2736,21 @@ mod tests {
                                 assert_eq!(form.area.intersection(area), form.area);
                             }
                             if form.child_area.width > 0 {
-                                assert!(active, "a chooser drops down only when entered");
                                 assert_eq!(form.child_area.intersection(area), form.child_area);
-                                assert_eq!(form.child_area.intersection(form.area), form.child_area, "inside the form: no side panel");
-                                if form.child_area != form.area && focus != Field::Task {
-                                    assert!(form.task_area.intersection(form.child_area).is_empty(), "over the task in {area:?}");
+                                if form.child_area.x >= form.area.right() {
+                                    // Room beside the form (as before 0.1.17): the choices stand there,
+                                    // entered or not, and the form stays whole.
+                                    assert!(form.child_area.intersection(form.area).is_empty(), "beside, not over the form in {area:?}");
+                                } else {
+                                    assert!(active, "where there is no room beside, a chooser drops down only when entered");
+                                    assert_eq!(form.child_area.intersection(form.area), form.child_area, "inside the form when narrow");
+                                    if form.child_area != form.area && focus != Field::Task {
+                                        assert!(form.task_area.intersection(form.child_area).is_empty(), "over the task in {area:?}");
+                                    }
                                 }
+                            }
+                            if width >= 150 && height >= 24 && form.child.is_some() {
+                                assert!(form.child_area.x >= form.area.right(), "a wide terminal shows the choices beside the form ({area:?})");
                             }
                             if width >= 80 && height >= 24 && form.child_area != form.area {
                                 assert_eq!(form.hits.len(), form.fields().len(), "all settings stay visible");

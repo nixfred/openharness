@@ -323,8 +323,8 @@ class _ModelsPanelState extends State<ModelsPanel> with SectionWakes {
                             child: Text(
                               [
                                 'This computer',
-                                if (controller.memoryBytes case final memory?)
-                                  '${_size(memory)} memory',
+                                if (controller.headingMemory case final memory?)
+                                  '${_size(memory.bytes)} ${memory.unit.isEmpty ? 'memory' : memory.unit}',
                               ].join(' · '),
                               style: AppType.monoMeta(
                                 color: AppPalette.textSecondary,

@@ -13,6 +13,7 @@ import { buildEngineCommandArgv, namedAgentArgs, supportsNamedAgent } from '../.
 import { buildLaunchOverrides, type LaunchOverridesDeps, type LaunchSource } from '../../lib/launchOverrides.js'
 import { binaryOnPath } from '../../lib/binaryOnPath.js'
 import { opencodeMajorVersion } from './version.js'
+import { gridLaunchInProcess } from '../../testing/gridLaunchInProcess.js'
 
 const installed = binaryOnPath('opencode')
 
@@ -24,10 +25,10 @@ describe.skipIf(!installed)('the installed opencode TUI accepts every flag we pa
   const help = helpResult ? `${helpResult.stdout}\n${helpResult.stderr}` : ''
   const major = installed ? opencodeMajorVersion() : null
   const deps: LaunchOverridesDeps = {
-    machine: () => ({ hermesSystemManaged: false, opencodeMajor: major }),
+    machine: async () => ({ hermesSystemManaged: false, opencodeMajor: await major }), gridLaunch: gridLaunchInProcess(),
     writeGridConfigDir: async (key) => `/state/grid-engine-config/${key}`,
     tmuxSupportsSessionEnv: async () => true,
-    installCodexHooks: () => {},
+    installCodexHooks: () => true,
     readCodexConfig: () => null,
   }
   const GRID = {
@@ -56,10 +57,10 @@ describe.skipIf(!installed)('the installed opencode TUI accepts every flag we pa
     for (const flag of flags) expect(listed(flag), `${flag} is not in \`opencode --help\` (v${major})`).toBe(true)
   })
 
-  it('agrees with the named-agent contract', () => {
+  it('agrees with the named-agent contract', async () => {
     // Where the contract says yes, the flag it hands over must exist; where it says no, nothing is passed.
-    if (!supportsNamedAgent('opencode', major)) return
-    for (const flag of namedAgentArgs('opencode', 'x', major).filter((token) => token.startsWith('-'))) {
+    if (!supportsNamedAgent('opencode', await major)) return
+    for (const flag of namedAgentArgs('opencode', 'x', await major).filter((token) => token.startsWith('-'))) {
       expect(listed(flag), `${flag} is not in \`opencode --help\``).toBe(true)
     }
   })

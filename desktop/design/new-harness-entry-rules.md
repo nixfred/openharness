@@ -59,8 +59,7 @@ Opening, searching, and cancelling never send input to an existing harness.
 | First empty workspace / New Tab | Same successful setup and working project; a suggested local folder on first launch | That tab when the user submits New Harness |
 
 The Store and orchestration tabs cannot host a terminal pane. Generic creation
-from either uses a new tab. Command-bar requests keep the workspace context and
-apply any agent or machine explicitly named by the request.
+from either uses a new tab.
 
 The unified picker has search and results on the left, with details and inline
 management controls on the right. Enter opens a harness, uses or gets a model,
@@ -86,7 +85,9 @@ coding agent should run it, using the last successful agent when compatible. The
 then reads `Blender · Codex`. Choosing a direct agent removes the package choice
 and sends no `dsh`; it does not remove project instructions or skills.
 
-Fresh harnesses use OpenCode with Muse Spark 1.3, xhigh effort and Auto-approve when compatible. Explicit and
+With nothing remembered, a fresh harness opens on the agent the person already uses: Claude Code
+or Codex when the machine reports it installed and signed in (the one used most recently when both
+are). Otherwise fresh harnesses use OpenCode with Muse Spark 1.3, xhigh effort and Auto-approve when compatible. Explicit and
 remembered agent choices are retained; reopening a session keeps its saved agent
 and model. A package's declared agent is a compatibility fallback, not a global default.
 

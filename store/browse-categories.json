@@ -1,6 +1,16 @@
 {
   "categories": [
     {
+      "name": "Essentials",
+      "domains": [
+        "Essentials"
+      ],
+      "featured": [
+        "memories",
+        "harness-monitor"
+      ]
+    },
+    {
       "name": "Coding",
       "domains": [
         "Code",
@@ -35,7 +45,8 @@
         "Fabrication",
         "Firmware",
         "Automation",
-        "Home automation"
+        "Home automation",
+        "Devices"
       ],
       "featured": [
         "autonomous-circuit",
@@ -77,8 +88,7 @@
       ],
       "featured": [
         "marp",
-        "typst",
-        "jev-sheets"
+        "typst"
       ]
     },
     {
@@ -127,8 +137,7 @@
         "Decisions"
       ],
       "featured": [
-        "roundtable",
-        "jev-browser"
+        "roundtable"
       ]
     },
     {

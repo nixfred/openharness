@@ -14,7 +14,8 @@ describe('the Hub contract', () => {
   });
   it('lists the same starters the backend serves', async () => {
     const { communityStarters } = await import('../../../../backend/src/lib/communityAccess');
-    expect(new Set(starterHarnesses.map(item => item.id))).toEqual(communityStarters);
+    // In order: a popular feed keeps the backend's order among starters with as many likes.
+    expect(starterHarnesses.map(item => item.id)).toEqual([...communityStarters]);
   });
   it('names a missing harness source', () => {
     expect(missingMarker('autonomous/blender', ['index.html'])).toBe('scenes/hello.py');

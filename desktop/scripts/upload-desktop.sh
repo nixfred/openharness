@@ -241,6 +241,21 @@ packaging_time() {
   echo ">> packaging timing: $name start=$started end=$SECONDS status=$status" >&2
   return "$status"
 }
+# Stapling fetches the accepted ticket from Apple's CloudKit, and that lookup drops: v1.2.67 failed
+# twice, both variants, on `NSURLErrorDomain -1005 "The network connection was lost"` (Error 68)
+# with notarization already Accepted (2026-10-12). Retried a few times, spaced out; the Gatekeeper
+# assessment after it still fails closed on a bundle that did not take its ticket.
+staple() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    xcrun stapler staple "$1" && return 0
+    [ "$attempt" -lt 5 ] || break
+    echo ">> stapling $1 failed (attempt $attempt of 5) — retrying in $((attempt * 15))s" >&2
+    sleep $((attempt * 15))
+  done
+  echo "error: could not staple the notarization ticket to $1" >&2
+  return 1
+}
 if [ "$DO_NOTARIZE" -eq 1 ]; then
   # This upload is discarded after stapling. Spend less CPU compressing it;
   # the final downloadable ZIP below still uses ditto's normal compression.
@@ -269,7 +284,7 @@ if [ "$DO_NOTARIZE" -eq 1 ]; then
     exit 1
   fi
   echo ">> stapling notarization ticket to $APP_BUNDLE"
-  xcrun stapler staple "$APP_BUNDLE"
+  staple "$APP_BUNDLE"
 
   # Fails closed rather than silently shipping a build Gatekeeper would reject on someone else's Mac.
   spctl -a -vv --type execute "$APP_BUNDLE" || {
@@ -326,7 +341,7 @@ if [ "$DO_NOTARIZE" -eq 1 ]; then
     exit 1
   fi
   echo ">> stapling notarization ticket to $DMG"
-  xcrun stapler staple "$DMG"
+  staple "$DMG"
   # Fails closed: this asserts the image passes the check a freshly DOWNLOADED copy will face.
   spctl -a -vv -t open --context context:primary-signature "$DMG" || {
     echo "error: Gatekeeper assessment failed on the dmg" >&2

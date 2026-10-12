@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { typedByPerson } from './typedInput.js'
 import { unlink } from 'node:fs/promises'
 import { deflateSync } from 'node:zlib'
 import { ENGINES } from '../engines/types.js'
@@ -171,10 +172,11 @@ export interface TerminalStreamManagerDeps {
    * An agent's terminal just took input (a keystroke or a paste) from the stream that holds it — never
    * from a watcher, whose input is refused before it gets here. Called on every accepted frame, so it
    * must be cheap and must not throw; the daemon starts a sleeping grid from it (the keystroke prewarm,
-   * grid-reads-without-waking issue 03), which is why it lives here, below every client that types.
+   * grid-reads-without-waking issue 03), which is why it lives here, below every client that types. `typed`: the frame
+   * holds what the person typed or pasted, not only what the terminal sends by itself (lib/typedInput.ts), which the
+   * agent cleanup reads as the person joining a harness another agent started (services/agentCleanup.ts).
    */
-  onInput?: (agentId: string) => void
-  onScopedInput?: (agentId: string, bytes: Uint8Array, tabId: string | undefined, pasted: boolean) => void
+  onInput?: (agentId: string, typed: boolean) => void
 }
 
 function sizeFrom(payload: FramePayload): TerminalStreamSize | null {
@@ -333,10 +335,10 @@ export class TerminalStreamManager {
       return
     }
     if (frame.kind === TerminalBinaryKind.paste) {
-      await this.paste(state, frame.bytes, frame.tabId)
+      await this.paste(state, frame.bytes)
       return
     }
-    await this.input(state, frame.seq, frame.bytes, frame.tabId)
+    await this.input(state, frame.seq, frame.bytes)
   }
 
   private capabilities(connId: string, requestId: unknown): void {
@@ -347,7 +349,6 @@ export class TerminalStreamManager {
       available: this.deps.streamingAvailable,
       features: {
         rawInput: !this.deps.readOnly,
-        swarmInput: !this.deps.readOnly,
         resize: !this.deps.readOnly,
         mouse: !this.deps.readOnly,
         keyframe: true,
@@ -579,7 +580,6 @@ export class TerminalStreamManager {
         // True for a watcher too: the client draws output and withholds input, exactly as it does
         // for an observer's stream. See the `takeover: false` branch above.
         readOnly: this.deps.readOnly === true || watching,
-        swarmInput: !this.deps.readOnly,
         ...(heldBy ? { heldBy } : {}),
       })) {
         await this.closeStream(state, 'backend disconnected', false)
@@ -626,7 +626,7 @@ export class TerminalStreamManager {
     else if (state.outputPaused) this.armStallTimer(state)
   }
 
-  private async input(state: ActiveStream, inputSeq: number, bytes: Uint8Array, tabId?: string): Promise<void> {
+  private async input(state: ActiveStream, inputSeq: number, bytes: Uint8Array): Promise<void> {
     if (!Number.isSafeInteger(inputSeq) || inputSeq !== state.lastInputSeq + 1 || bytes.length === 0 || bytes.length > INPUT_MAX_BYTES) {
       // Nothing here reached the pty, and `lastInputSeq` is deliberately left where it was. Say what
       // WOULD have been accepted: a client whose counter has drifted (a frame it dropped on its own
@@ -647,8 +647,7 @@ export class TerminalStreamManager {
     }
     state.lastInputSeq = inputSeq
     state.expiresAt = this.now() + HEARTBEAT_TIMEOUT_MS
-    this.tookInput(state)
-    this.deps.onScopedInput?.(state.agentId, bytes, tabId, false)
+    this.tookInput(state, typedByPerson(bytes))
     // Not awaited. `writeRaw` hands its `send-keys` to the control client's FIFO synchronously, so
     // keystroke order is already fixed by the time it returns its promise — and the seq above is
     // spent, so the next frame cannot race this one. Awaiting the reply held the whole local
@@ -676,8 +675,8 @@ export class TerminalStreamManager {
   }
 
   /** See `TerminalStreamManagerDeps.onInput`. A listener's failure is its own: input is never held by it. */
-  private tookInput(state: ActiveStream): void {
-    try { this.deps.onInput?.(state.agentId) } catch (error) {
+  private tookInput(state: ActiveStream, typed: boolean): void {
+    try { this.deps.onInput?.(state.agentId, typed) } catch (error) {
       this.diagnostic(state, 'input_listener_failed', { reason: error instanceof Error ? error.message : String(error) })
     }
   }
@@ -712,7 +711,7 @@ export class TerminalStreamManager {
    * (TERMINAL_*_PASTE_MAX_*_BYTES in terminalBinary.ts) — anything over that never decodes into a
    * frame at all, so there is nothing left to check here.
    */
-  private async paste(state: ActiveStream, bytes: Uint8Array, tabId?: string): Promise<void> {
+  private async paste(state: ActiveStream, bytes: Uint8Array): Promise<void> {
     if (bytes.length === 0) return
     let text: string
     try {
@@ -722,8 +721,7 @@ export class TerminalStreamManager {
       return
     }
     state.expiresAt = this.now() + HEARTBEAT_TIMEOUT_MS
-    this.tookInput(state)
-    this.deps.onScopedInput?.(state.agentId, bytes, tabId, true)
+    this.tookInput(state, true)
     const result = await state.handle.pasteRaw(text)
     if (result.state !== 'succeeded') {
       this.sendError(state.connId, 'TERMINAL_PASTE_FAILED', { streamId: state.streamId, message: result.reason })

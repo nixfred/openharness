@@ -1,7 +1,7 @@
-// Settings ▸ Your devices ▸ History…: the log's adds and removes, newest first.
+// Machines ▸ History…: the log's adds and removes, newest first.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:harness/settings/sections/account_device_history.dart';
+import 'package:harness/widgets/account_device_history.dart';
 import 'package:harness/state/account_devices.dart';
 import 'package:harness/theme/app_theme.dart' show AppColors;
 import 'package:harness/viewer/device_history.dart';

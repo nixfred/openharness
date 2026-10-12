@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// The account's shell, as the passwd entry gives it: none unless a test names one, never that of whoever runs the tests.
+const account = vi.hoisted(() => ({ shell: null as string | null }))
+vi.mock('node:os', async (original) => ({ ...await original<typeof import('node:os')>(), userInfo: () => ({ shell: account.shell }) }))
+
 import {
   loginShellEnvironment,
   oneShotParentEnv,
@@ -12,6 +20,7 @@ afterEach(() => {
   if (realShell === undefined) delete process.env.SHELL
   else process.env.SHELL = realShell
   delete process.env.HARNESS_LOGIN_SHELL_PROBE
+  account.shell = null
   resetLoginShellEnvironmentCache()
 })
 
@@ -48,6 +57,23 @@ describe('loginShellEnvironment', () => {
     process.env.SHELL = 'zsh'                     // not absolute
     resetLoginShellEnvironmentCache()
     expect(await warmLoginShellEnvironment()).toEqual({})
+  })
+
+  it.skipIf(process.platform === 'win32')('asks the account\'s shell when the daemon was given no SHELL', async () => {
+    // As from `docker exec` or a bare service: bash keeps SHELL to itself and zsh never sets it, so the daemon has
+    // none. It then read nothing of the person's profile, and logged that it could not.
+    const dir = mkdtempSync(join(tmpdir(), 'account-shell-'))
+    try {
+      const shell = join(dir, 'fake-shell')
+      // Takes `-lic <script>` as a shell does, with one variable only a profile would have exported.
+      writeFileSync(shell, '#!/bin/sh\nexport HARNESS_LOGIN_SHELL_PROBE=from-the-profile\nexec /bin/sh -c "$2"\n')
+      chmodSync(shell, 0o755)
+      account.shell = shell
+      delete process.env.SHELL
+      resetLoginShellEnvironmentCache()
+      expect((await warmLoginShellEnvironment()).HARNESS_LOGIN_SHELL_PROBE).toBe('from-the-profile')
+      expect(oneShotParentEnv().HARNESS_LOGIN_SHELL_PROBE).toBe('from-the-profile')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
   it('caches, so a recap never pays for the probe twice', async () => {

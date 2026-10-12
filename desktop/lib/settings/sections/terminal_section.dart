@@ -14,10 +14,10 @@ import '../../terminal/terminal_font_store.dart';
 import '../../terminal/terminal_theme.dart';
 import '../../terminal/terminal_theme_store.dart';
 
-/// Customize Harness ▸ Terminal: the colours and the face the agent's output is drawn in.
+/// Appearance ▸ Terminal: the colours and the face the agent's output is drawn in.
 ///
 /// Laid out in the app's own [SettingRow]s rather than in bare Material, for
-/// the same reason Appearance is: a preference reads as a preference here or it
+/// the same reason Workspace is: a preference reads as a preference here or it
 /// reads as a different app one pane over. What this screen adds on top of that
 /// shape is the [_Preview] — the terminal is the one setting whose value can
 /// only really be judged by looking at it, so the sample is given the room a

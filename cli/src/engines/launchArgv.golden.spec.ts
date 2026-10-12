@@ -40,6 +40,7 @@ import {
 import { GRID_CONFLICTING_ENV_VARS, type GridLaunchOverride } from '../lib/gridLaunch.js'
 import { buildLaunchOverrides, type LaunchOverridesDeps, type LaunchSource } from '../lib/launchOverrides.js'
 import { ENGINES, type AgentEngine } from './types.js'
+import { gridLaunchInProcess } from '../testing/gridLaunchInProcess.js'
 
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/launch-argv.golden.json', import.meta.url))
 const RECORD = process.env.RECORD_LAUNCH_GOLDEN === '1'
@@ -403,17 +404,17 @@ async function overridesCases(): Promise<Record<string, unknown>> {
   const run = async (engine: AgentEngine, source: LaunchSource, config: string | null = null, deps: Partial<LaunchOverridesDeps> = {}) => {
     const calls: string[] = []
     const result = await buildLaunchOverrides({
-      machine: () => ({ hermesSystemManaged: false, opencodeMajor: null }),
+      machine: () => ({ hermesSystemManaged: false, opencodeMajor: null }), gridLaunch: gridLaunchInProcess(),
       writeGridConfigDir: async (key, files) => { calls.push(`writeGridConfigDir ${key} ${files.map((file) => file.name).join(',')}`); return `/state/grid-engine-config/${key}` },
       tmuxSupportsSessionEnv: async () => true,
-      installCodexHooks: (home) => { calls.push(`installCodexHooks ${home}`) },
+      installCodexHooks: (home) => { calls.push(`installCodexHooks ${home}`); return true },
       readCodexConfig: (path) => { calls.push(`readCodexConfig ${path}`); return config },
-      dshLaunch: (dsh, workspace, eng, key) => {
+      dshLaunch: async (dsh, workspace, eng, key) => {
         calls.push(`dshLaunch ${dsh} ${workspace} ${eng} ${key}`)
         // As dsh/runtime.ts prepareHarnessLaunch ends: the package's argv, then the engine's context and env flags.
         const launchEnv = { HARNESS_DSH: dsh, HARNESS_WORKSPACE: workspace, HARNESS_CONTEXT_FILE: `${workspace}/.harness/runtime/${key}/CONTEXT.md`, STUDIO_MODE: 'pro "x"' }
         const adapter = harnessAdapter(eng)
-        return { env: launchEnv, args: ['--studio', ...(adapter.contextArgs?.(launchEnv.HARNESS_CONTEXT_FILE) ?? []), ...(adapter.envArgs?.(launchEnv) ?? [])] }
+        return { ok: true, launch: { env: launchEnv, args: ['--studio', ...(adapter.contextArgs?.(launchEnv.HARNESS_CONTEXT_FILE) ?? []), ...(adapter.envArgs?.(launchEnv) ?? [])] } }
       },
       ...deps,
     }, engine, source, 'agent-0001')
@@ -451,6 +452,23 @@ async function overridesCases(): Promise<Record<string, unknown>> {
   cases['codex · profile · the profile\'s file'] = await run('codex', { codexHome: profile }, null, { readCodexConfig: undefined })
   cases['codex · profile without a file'] = await run('codex', { codexHome: join(root, 'no-such-profile') }, null, { readCodexConfig: undefined })
   rmSync(join(daemonHome, 'config.toml'))
+  // Started by another agent: the pull request line last, from the person's settings as each engine reads them
+  // (lib/agentAttribution.ts, kit/attribution.ts), and none for an engine with no way to say it.
+  const settings = (files: Record<string, string>) => ({ readAttribution: (path: string) => files[path.split(homedir()).join('<home>')] ?? null })
+  for (const engine of ['claude', 'codex', 'opencode'] as const) {
+    cases[`${engine} · started by an agent`] = await run(engine, { startedBy: 'agent', cwd: '/work/app' }, null, settings({}))
+    cases[`${engine} · started by an agent, a harness on a grid as a named agent`] = await run(engine,
+      { startedBy: 'agent', gridLaunch: GRID, dsh: 'acme/studio', cwd: '/work/studio', agent: 'harness-compute' }, null, settings({}))
+  }
+  cases['claude · started by an agent, the folder\'s own pull request text'] = await run('claude', { startedBy: 'agent', cwd: '/work/app' }, null,
+    settings({ '/work/app/.claude/settings.json': '{"attribution":{"pr":"Made in the app"}}' }))
+  cases['claude · started by an agent, attribution hidden'] = await run('claude', { startedBy: 'agent', cwd: '/work/app' }, null,
+    settings({ '<home>/.claude/settings.json': '{"attribution":false}' }))
+  cases['codex · started by an agent, the person\'s own instructions'] = await run('codex', { startedBy: 'agent', cwd: '/work/app' }, null,
+    settings({ '<home>/.codex/config.toml': 'developer_instructions = "Be terse."\n' }))
+  cases['codex · profile, started by an agent, instructions it cannot keep exactly'] = await run('codex', { startedBy: 'agent', codexHome: '/profiles/work', cwd: '/work/app' }, null,
+    settings({ '/profiles/work/config.toml': 'developer_instructions = """\nmine\n"""\n' }))
+  cases['claude · not started by an agent'] = await run('claude', { startedBy: null, cwd: '/work/app' }, null, settings({}))
   return cases
 }
 
@@ -501,7 +519,29 @@ describe('every launch hands tmux what it did before Claude Code and Codex decla
         expect({ ...mine, script: mine.script && actual.scripts[mine.script] }, `${platform} · ${name}`)
           .toEqual({ ...value, script: value.script && golden.scripts[value.script] })
       }
-      for (const [name, value] of Object.entries(want.overrides)) expect(got.overrides[name], `${platform} · ${name}`).toEqual(value)
+      for (const [name, value] of Object.entries(want.overrides)) {
+        // Launch preparation intentionally asks the Store before publishing grid files. Keep the
+        // former artifact intact and pin this one ordering change explicitly, including its old
+        // trace. Every result field, call argument and other case still compares byte-for-byte.
+        const changedOrder: Record<string, readonly [string, string]> = {
+          'opencode · harness on a grid, as git, as a named agent': [
+            'writeGridConfigDir agent-0001 opencode.json',
+            'dshLaunch acme/studio /work/studio opencode agent-0001',
+          ],
+          'pi · harness on a grid, as git, as a named agent': [
+            'writeGridConfigDir agent-0001 models.json,settings.json',
+            'dshLaunch acme/studio /work/studio pi agent-0001',
+          ],
+        }
+        const order = changedOrder[name]
+        let expected = value
+        if (order) {
+          const former = value as { calls: string[] }
+          expect(former.calls, `${platform} · ${name} · former order`).toEqual(order)
+          expected = { ...former, calls: [order[1], order[0]] }
+        }
+        expect(got.overrides[name], `${platform} · ${name}`).toEqual(expected)
+      }
       expect(Object.keys(got.overrides).sort(), platform).toEqual(Object.keys(want.overrides).sort())
       expect(got.adapters, platform).toEqual(want.adapters)
     }

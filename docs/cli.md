@@ -25,7 +25,7 @@ works the same on a headless Linux server; the app is not required on a machine,
 | `harness remote` | From a Harness terminal tile: choose another of your machines (linking it on the spot if needed), open a terminal there and move this tile to it. |
 | `harness devices [list] [--json]` · `show <#\|fp>` · `remove <fp>` · `history [--json]` · `dismiss [<#\|fp>]` · `rebaseline [--yes]` | The account's devices as this machine verified them (below): list · one in full · take one out on every device · every add and removal, newest first · mark new ones seen · review and trust a frozen list again. |
 | `harness grid login [--force] [--json]` · `harness grid logout` | Sign the `grid` CLI in with this computer's account, no second browser. |
-| `harness grid env <grid>` | `<grid>`'s relay address and key as shell exports, through the harness's own `grid`: `eval "$(harness grid env <grid>)"` before calling a Jev model at `$OPENAI_BASE_URL/systemone`. |
+| `harness grid env <grid>` | `<grid>`'s relay address and key as shell exports, through the harness's own `grid`: `eval "$(harness grid env <grid>)"` before pointing an OpenAI-compatible client at `$OPENAI_BASE_URL`. |
 | `harness flash [flags]` | Re-flash a plugged-in Harness device over USB. Flags pass straight to the flasher. |
 | `harness autonomous-device discover\|status\|list\|pair\|revoke` | Pair Autonomous OS devices found on the LAN, directly, with no relay. |
 
@@ -109,11 +109,18 @@ it), a path looks like a path, the first other word is the agent and a second na
 Signing in is what makes a device trusted: every computer and app signed in to the account adds its
 key to the account's device key log, and the others trust it with no password. Nothing asks you to
 confirm a device; instead every device shows you each one it did not know before.
-`harness devices` is this machine's view, the same one Settings ▸ Your devices shows in the app.
+`harness devices` is this machine's view, the same one Machines shows in the app (Computers, and
+Phones & apps).
 
 - **New.** A device added after this machine joined the account is flagged `new` (an OS notification
-  in the apps) and stays flagged across restarts until you look: `harness devices dismiss` marks every
-  one seen, `dismiss <#|fp>` just one; opening Your devices does the same in the apps.
+  in the apps) and stays flagged across restarts until you confirm it on one of your trusted devices,
+  or review it on each. Confirming is "It's mine" in the apps, or `harness devices dismiss <#|fp>`
+  here: it marks that device seen here and tells your other devices, which stop flagging it and show
+  where it was confirmed (`harness devices show`: `confirmed on <device>`). Each device checks that
+  confirmation itself: it counts only when signed by a device that device already trusts — not one
+  that is itself new, suspended or removed there — and it never lifts a suspension. Reviewing
+  (`harness devices dismiss` with no device, or opening Your devices in the apps) marks every one seen
+  on that device only.
 - **Already on your account.** The first time a device reads the log it announces nothing; the apps
   show the devices that were already there once, until you press Got it.
 - **Joined and left before you looked.** A new device that was removed before you saw it stays listed,

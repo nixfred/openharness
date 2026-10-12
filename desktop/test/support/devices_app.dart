@@ -106,6 +106,10 @@ class FakeDevicesApp extends AppNotifier {
     baselineSeenCalls++;
   }
 
+  /// A canned list is always there to read.
+  @override
+  bool get accountDevicesReadable => true;
+
   @override
   Future<AccountDevices?> loadDevices({
     void Function(List<String> banner)? onListed,

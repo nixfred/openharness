@@ -45,9 +45,10 @@ _harness_platform() {
   esac
 }
 
+# shasum is Perl, and Perl panics and prints nothing under a locale the machine lacks (LC_ALL=C.UTF-8 on macOS).
 _harness_sha256() {
-  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
-  else sha256sum "$1" | cut -d' ' -f1; fi
+  if command -v shasum >/dev/null 2>&1; then LC_ALL=C shasum -a 256 "$1" | cut -d' ' -f1
+  else LC_ALL=C sha256sum "$1" | cut -d' ' -f1; fi
 }
 
 # _harness_fetch URL DEST SHA256 — DEST exists only if what arrived matches the pinned checksum.
@@ -56,7 +57,11 @@ _harness_fetch() {
   if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 -o "$part" "$1"; then
     rm -f "$part"; echo "miss could not download $1 — check this machine's internet connection"; return 1
   fi
-  if [ "$(_harness_sha256 "$part")" != "$3" ]; then
+  local sum; sum="$(_harness_sha256 "$part" 2>/dev/null || true)"
+  if [ -z "$sum" ]; then
+    rm -f "$part"; echo "miss could not checksum $1 — shasum and sha256sum both failed on this machine; nothing was installed"; return 1
+  fi
+  if [ "$sum" != "$3" ]; then
     rm -f "$part"; echo "miss $1 did not match its pinned checksum; nothing was installed"; return 1
   fi
   mv -f "$part" "$2"

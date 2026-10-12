@@ -4,44 +4,72 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../logging/debug_surface.dart';
 
-/// A Settings navigation entry. Customize returns to the workspace and opens
-/// its side panel; the other entries select a Settings page.
+/// A Settings navigation entry. Appearance ([customize]) returns to the workspace and opens its
+/// side panel, also called Appearance; the other entries select a Settings page.
+///
+/// Settings holds settings only. What is a thing rather than a setting lives where the thing is:
+/// the Autonomous robots in the Devices tab, the account's computers, phones and apps — and which
+/// of them this window shows — in Machines.
 ///
 /// Declared once, like [ShortcutAction] in `shortcuts/app_shortcuts.dart`: the
 /// rail, the search filter and the pane all read this list, so a section cannot
 /// be listed without a screen behind it or reachable without a row.
 enum SettingsSection {
   account(AppIcons.user, 'Account'),
-  accountDevices(AppIcons.shieldCheck, 'Your devices'),
-  profiles(AppIcons.monitor, 'Profiles'),
+  // Named `customize` still: the command palette remembers `settings:customize`. Its panel's
+  // tabs and its old name find it too.
+  customize(
+    AppIcons.palette,
+    'Appearance',
+    keywords: [
+      'customize',
+      'status',
+      'workspace',
+      'wallpaper',
+      'terminal',
+      'theme',
+      'colors',
+      'palette',
+      'font',
+    ],
+  ),
+  notifications(AppIcons.bell, 'Notifications'),
+  shortcuts(AppIcons.keyboard, 'Keyboard shortcuts'),
+  connectors(AppIcons.plug, 'Connectors'),
   usage(AppIcons.chartNoAxesColumn, 'Usage'),
   // nixfred: every AI plan on one screen (weekly used, banked, next plan).
   subscriptions(AppIcons.gauge, 'Subscriptions'),
-  customize(AppIcons.palette, 'Customize'),
-  notifications(AppIcons.bell, 'Notifications'),
   experimental(AppIcons.flaskConical, 'Experimental'),
-  devices(AppIcons.zap, 'Autonomous robots'),
-  shortcuts(AppIcons.keyboard, 'Keyboard shortcuts'),
-  debug(AppIcons.bug, 'Debug'),
-  about(AppIcons.info, 'About');
+  about(AppIcons.info, 'About'),
+  debug(AppIcons.bug, 'Debug');
 
-  const SettingsSection(this.icon, this.label);
+  const SettingsSection(this.icon, this.label, {this.keywords = const []});
 
   /// The rail glyph — Lucide's 300 weight, the one the machine rail's rows use,
   /// so the app's two nav columns draw at the same line weight.
   final IconData icon;
   final String label;
+
+  /// Other words the rail's filter and ⌘P find this row by, lowercase: what is inside a row
+  /// whose label does not say it, and a name it had before.
+  final List<String> keywords;
+
+  /// Whether [query] (trimmed, lowercase) finds this row: in its label or one of its [keywords].
+  bool matches(String query) =>
+      label.toLowerCase().contains(query) ||
+      keywords.any((keyword) => keyword.contains(query));
 }
 
 /// One labelled run of rows in the settings rail.
 ///
 /// The grouping is presentation only — [settingsGroups] flattens back to every
-/// section — but it says something true: the first run is what you *change*,
-/// the second is what you *consult*.
+/// section — but it says something true: who is signed in, how the app behaves,
+/// what agents may do, what is still taking shape, and what to consult.
 class SettingsGroup {
   const SettingsGroup(this.title, this.sections);
 
-  /// The caption over the run. A caption, not a sentence.
+  /// The caption over the run. A caption, not a sentence; empty for a run that needs none
+  /// (Account, alone at the top).
   final String title;
   final List<SettingsSection> sections;
 }
@@ -66,7 +94,8 @@ List<SettingsGroup> get settingsGroups =>
 @visibleForTesting
 List<SettingsGroup> settingsGroupsFor({required bool debugSurface}) {
   bool visible(SettingsSection section) =>
-      (!kIsWeb || section != SettingsSection.devices) &&
+      // This computer's own: the services its agents use.
+      (!kIsWeb || section != SettingsSection.connectors) &&
       (debugSurface || !_kDeveloperSections.contains(section));
   return [
     for (final group in _kSettingsGroups)
@@ -83,34 +112,29 @@ List<SettingsGroup> settingsGroupsFor({required bool debugSurface}) {
 const _kDeveloperSections = {SettingsSection.debug};
 
 const _kSettingsGroups = [
-  // Usage sits with the preferences rather than with Debug, which it
-  // otherwise resembles: that is developer furniture a shipped build
-  // hides, and this is a screen anybody is meant to open. It earns its place in
-  // a run titled "what you change" by carrying the three switches that decide
-  // which logs are read at all — the pane is off until somebody sets it.
-  SettingsGroup('Preferences', [
-    SettingsSection.usage,
-    SettingsSection.subscriptions,
+  // Who is signed in, first and alone: Settings opens on it.
+  SettingsGroup('', [SettingsSection.account]),
+  SettingsGroup('General', [
     SettingsSection.customize,
-    // Beside Customize because it is the same kind of decision — how this Mac behaves while you
-    // work — and NOT inside it, which is where the alert switch started. Customize is about how
-    // the app looks; a sound is not a look, and somebody turning one off does not think to look
-    // under Appearance for it.
+    // Beside Appearance because it is the same kind of decision — how this Mac behaves while you
+    // work — and NOT inside it, which is where the alert switch started. A sound is not a look,
+    // and somebody turning one off does not think to look under Appearance for it.
     SettingsSection.notifications,
-    SettingsSection.experimental,
-    SettingsSection.devices,
-    SettingsSection.account,
-    // Beside Account: the devices signed in to it, each trusted by the others because of that.
-    SettingsSection.accountDevices,
-    SettingsSection.profiles,
-  ]),
-  // Debug sits between the two things it is most often reached from: the keys
-  // that open it, and the version a report has to name.
-  SettingsGroup('Help', [
     SettingsSection.shortcuts,
-    SettingsSection.debug,
-    SettingsSection.about,
   ]),
+  // What agents may do with Harness is the account's: Labs ▸ Experimental (owner, 2026-10-12).
+  SettingsGroup('Agents', [
+    // The services this computer's agents use (Linear, Notion, GitHub…), connected once for all of them.
+    SettingsSection.connectors,
+    // What the agents on this machine have spent. It carries the switches that decide which logs
+    // are read at all — the pane is off until somebody sets it.
+    SettingsSection.usage,
+    // nixfred: every AI plan's meter, beside what the agents spent.
+    SettingsSection.subscriptions,
+  ]),
+  SettingsGroup('Labs', [SettingsSection.experimental]),
+  // Debug, in builds that have it, beside the version a report has to name.
+  SettingsGroup('Help', [SettingsSection.about, SettingsSection.debug]),
 ];
 
 /// The section Settings opens on — the first row of the first group, so the

@@ -17,8 +17,10 @@ import type { SupervisorStatus } from './supervisor.js'
  *  master's updater: the master tells its core to hand over for a build its updater staged (`harnessd:update`).
  *  4: `want` for the devices' process too, which runs only once there is a device, for models', which runs
  *  only once grid is in use here or a request needs it, and for the gateway's, which runs once this machine is
- *  signed in, has anything paired or needs it; and `want` before `bound` (./services.ts `askedSince`). */
-export const HARNESSD_PROTOCOL = 4
+ *  signed in, has anything paired or needs it; and `want` before `bound` (./services.ts `askedSince`).
+ *  5: `want` for the viewers' process (the harness viewers and the Store), which runs once a harness is here, a
+ *  request needs it or the release's own harnesses are to be put in place (core/viewersWake.ts). */
+export const HARNESSD_PROTOCOL = 5
 
 /** The command a bundle's master answers its probe on, and what it answers. */
 export const PROBE_COMMAND = '__harnessd-probe'
@@ -65,8 +67,9 @@ export type CoreMessage =
    *  loop was held since the last one (protocol 2). */
   | { type: 'harnessd:heartbeat'; rssBytes: number; heapUsedBytes: number; loopDelayMs?: number }
   /** Start the process that runs this service (harnessd/services.ts `onDemand`): an experiment that is on now
-   *  (protocol 3), or the devices, models or the gateway, now that they are needed (protocol 4, and before
-   *  `bound` too). A master from before ignores it, having started every service at once. */
+   *  (protocol 3), the devices, models or the gateway, now that they are needed (protocol 4, and before
+   *  `bound` too), or the viewers (protocol 5). A master from before ignores it, or finds that process already
+   *  running, having started it at once. */
   | { type: 'harnessd:want'; service: string }
 
 export type MasterMessage =

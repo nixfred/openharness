@@ -7,12 +7,21 @@
  * upstream's contract now; the gate stays its own small installer here, because it is opt-in and must never
  * run at `harness start`. Unchanged from the 2026-10-08 sync: same file, same block, same matcher.
  */
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { command, isOurs, writeJsonAtomic, type Settings } from '../engines/kit/notifyHooks.js'
+import { command, isOurs, type Settings } from '../engines/kit/notifyHooks.js'
 
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
+
+/** The kit's old writeJsonAtomic (removed upstream in #1158, whose native hook files are bound to the
+ *  daemon's preparation): a temporary file beside the target, then a rename. Only `harness gate` writes here. */
+function writeJsonAtomic(file: string, value: unknown): void {
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
+  renameSync(tmp, file)
+}
 
 /**
  * The destructive-action gate for Claude Code (nixfred): a PreToolUse hook on the tools that can change the

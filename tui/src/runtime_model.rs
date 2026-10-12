@@ -6,7 +6,7 @@ use regex::Regex;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Details { pub name: String, pub effort: String }
 
-fn decode(value: &str) -> Option<String> {
+pub(crate) fn decode(value: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut input = value.bytes();
     while let Some(b) = input.next() {

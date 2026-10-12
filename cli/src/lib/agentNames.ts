@@ -34,6 +34,11 @@ export function engineLabel(engine: string): string {
   return ENGINE_LABELS[engine as AgentEngine] ?? engine
 }
 
+/** An engine's name in a sentence: Claude Code by its whole name, as its install says it. */
+export function engineName(engine: string): string {
+  return engine === 'claude' ? 'Claude Code' : engineLabel(engine)
+}
+
 const pad = (n: number): string => String(n).padStart(2, '0')
 
 /**

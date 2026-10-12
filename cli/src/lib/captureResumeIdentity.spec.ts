@@ -1,21 +1,31 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { captureResumeIdentity } from './captureResumeIdentity.js'
-import { engineKeepsTranscriptFile, validTranscriptPath, type RegisteredSession } from './registry.js'
-import { claudeProcessSession, findLiveSession, findResumedTranscript } from './sessionRepair.js'
+import { engineKeepsTranscriptFile, type RegisteredSession } from './registry.js'
+import { controlTranscriptEvidence, savedTranscriptEvidence } from '../engines/transcriptBindings.js'
+import { findLiveSession, findResumedTranscript, processSessionEvidence } from './sessionRepair.js'
 import { processRows, resumeSessionId } from './tmux.js'
-vi.mock('./registry.js', () => ({ validTranscriptPath: vi.fn(() => true), engineKeepsTranscriptFile: vi.fn(() => true) }))
-vi.mock('./sessionRepair.js', () => ({ claudeProcessSession: vi.fn(), findLiveSession: vi.fn(), findResumedTranscript: vi.fn() }))
+import { IdentityReadUnavailable, ObservedConversationUnavailable } from '../engines/kit/identityScan.js'
+vi.mock('./registry.js', () => ({ engineKeepsTranscriptFile: vi.fn(() => true) }))
+vi.mock('../engines/transcriptBindings.js', () => ({ savedTranscriptEvidence: vi.fn(), controlTranscriptEvidence: vi.fn() }))
+vi.mock('./sessionRepair.js', () => ({ processSessionEvidence: vi.fn(), findLiveSession: vi.fn(), findResumedTranscript: vi.fn() }))
 vi.mock('./tmux.js', () => ({ processRows: vi.fn(), resumeSessionId: vi.fn() }))
+vi.mock('./processEvidence.js', async () => {
+  const { nativeConversationFixture } = await import('../testing/nativeConversationEvidence.js')
+  const { processRows } = await import('./tmux.js')
+  return { readProcessEvidence: (...args: Parameters<typeof import('./processEvidence.js')['readProcessEvidence']>) =>
+    nativeConversationFixture(async () => [], processRows).processes(...args) }
+})
 let row: RegisteredSession
 beforeEach(() => {
   vi.resetAllMocks()
   row = { engine: 'claude', sessionId: '', cwd: '/work', codexHome: null,
     processIdentity: { pid: 77, executable: '/bin/claude', startMarker: 'Mon Sep 21 01:00:00 2026' } } as RegisteredSession
   vi.mocked(processRows).mockResolvedValue([{ ...row.processIdentity!, args: 'claude', parentPid: 1 }])
-  vi.mocked(validTranscriptPath).mockReturnValue(true)
+  vi.mocked(savedTranscriptEvidence).mockImplementation((_engine, _id, path) => ({ path, fileKey: 'fixture', verify: vi.fn() }))
+  vi.mocked(controlTranscriptEvidence).mockImplementation((_engine, _id, path) => ({ path, verify: vi.fn() }))
   vi.mocked(engineKeepsTranscriptFile).mockReturnValue(true)
   vi.mocked(resumeSessionId).mockReturnValue(null)
-  vi.mocked(claudeProcessSession).mockResolvedValue(null)
+  vi.mocked(processSessionEvidence).mockResolvedValue({ session: null, verify: vi.fn() })
   vi.mocked(findLiveSession).mockResolvedValue(null)
   vi.mocked(findResumedTranscript).mockResolvedValue(null)
 })
@@ -23,6 +33,14 @@ it('leaves a shell and a complete binding unchanged', async () => {
   row.engine = 'terminal'; expect(await captureResumeIdentity(row)).toBe(row)
   row.engine = 'codex'; row.sessionId = 'known'; row.transcriptPath = '/history'
   expect(await captureResumeIdentity(row)).toBe(row); expect(processRows).not.toHaveBeenCalled()
+})
+
+it('uses a completely proven parent transcript without changing the saved conversation', async () => {
+  Object.assign(row, { sessionId: 'parent', transcriptPath: '/child' })
+  vi.mocked(savedTranscriptEvidence).mockReturnValue({ path: '/parent', fileKey: 'parent-file', verify: vi.fn() })
+  expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'parent', transcriptPath: '/parent' })
+  expect(row.transcriptPath).toBe('/child')
+  expect(findResumedTranscript).not.toHaveBeenCalled()
 })
 
 it('takes a database-backed engine on its recorded id, with no transcript to check', async () => {
@@ -40,16 +58,25 @@ it('captures a database-backed engine id read off the live process', async () =>
   vi.mocked(findLiveSession).mockResolvedValue({ sessionId: 'live' })
   expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'live', source: 'stop-repair' })
 })
+it('captures and preserves the exact Hermes home before stopping its process', async () => {
+  vi.mocked(engineKeepsTranscriptFile).mockReturnValue(false)
+  Object.assign(row, { engine: 'hermes', hermesHome: '/known-home' })
+  vi.mocked(findLiveSession).mockResolvedValue({ sessionId: 'live', hermesHome: '/known-home' })
+  expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'live', hermesHome: '/known-home', source: 'stop-repair' })
+  expect(findLiveSession).toHaveBeenCalledWith('hermes', '/work', expect.any(Number), expect.objectContaining({ hermesHome: '/known-home' }))
+})
 it.each([null, '/stale'])('repairs a known id with missing or invalid path %s', async transcriptPath => {
   Object.assign(row, { sessionId: 'known', transcriptPath, codexHome: '/profile' })
-  vi.mocked(validTranscriptPath).mockImplementation((_, path) => path === '/found')
+  vi.mocked(savedTranscriptEvidence).mockImplementation((_engine, _id, path) => ({ path: path === '/found' ? path : null, fileKey: 'fixture', verify: vi.fn() }))
   vi.mocked(findResumedTranscript).mockResolvedValue('/found')
   expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'known', transcriptPath: '/found' })
   expect(findResumedTranscript).toHaveBeenCalledWith('claude', 'known', { codexHome: '/profile' })
 })
-it.each([null, '/unsafe'])('retains the known id when its file is unavailable: %s', async path => {
+it.each([null, '/unsafe'])('holds the known id when its file is unavailable: %s', async path => {
   row.sessionId = 'known'; vi.mocked(findResumedTranscript).mockResolvedValue(path)
-  vi.mocked(validTranscriptPath).mockReturnValue(false); expect(await captureResumeIdentity(row)).toBe(row)
+  vi.mocked(savedTranscriptEvidence).mockReturnValue({ path: null, fileKey: null, verify: vi.fn() })
+  await expect(captureResumeIdentity(row)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+  expect(row.sessionId).toBe('known')
 })
 it('looks up a preallocated Pi session ID in its own project before stopping', async () => {
   Object.assign(row, { engine: 'pi', sessionId: 'preallocated', transcriptPath: null })
@@ -76,7 +103,9 @@ it.each(['identity', 'cwd', 'unknown', 'gone', 'pid', 'executable', 'start'])('r
   if (mode === 'pid') row.processIdentity!.pid++
   if (mode === 'executable') row.processIdentity!.executable = 'other'
   if (mode === 'start') row.processIdentity!.startMarker = 'later'
-  expect(await captureResumeIdentity(row)).toBe(row); expect(findLiveSession).not.toHaveBeenCalled()
+  if (['unknown', 'executable', 'start'].includes(mode)) await expect(captureResumeIdentity(row)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+  else expect(await captureResumeIdentity(row)).toBe(row)
+  expect(findLiveSession).not.toHaveBeenCalled()
 })
 it.each(['claude', 'codex'] as const)('captures an explicit %s resume without guessing by directory', async engine => {
   row.engine = engine; vi.mocked(resumeSessionId).mockReturnValue('exact')
@@ -84,18 +113,78 @@ it.each(['claude', 'codex'] as const)('captures an explicit %s resume without gu
   expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'exact', transcriptPath: '/exact', source: 'stop-repair' })
   expect(findLiveSession).not.toHaveBeenCalled()
 })
+it('holds an explicit file-backed resume whose announced conversation is unavailable', async () => {
+  vi.mocked(resumeSessionId).mockReturnValue('exact')
+  vi.mocked(findResumedTranscript).mockResolvedValue(null)
+  await expect(captureResumeIdentity(row)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+  expect(findLiveSession).not.toHaveBeenCalled()
+})
 it('prefers current Claude native metadata to old resume argv', async () => {
   vi.mocked(resumeSessionId).mockReturnValue('old')
-  vi.mocked(claudeProcessSession).mockResolvedValue({ sessionId: 'current', transcriptPath: '/current' })
+  vi.mocked(processSessionEvidence).mockResolvedValue({ session: { sessionId: 'current', transcriptPath: '/current' }, verify: vi.fn() })
   expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'current' }); expect(findResumedTranscript).not.toHaveBeenCalled()
+  expect(processSessionEvidence).toHaveBeenCalledWith('claude', 77, '/work', Date.parse(row.processIdentity!.startMarker), expect.anything())
 })
 it('captures a unique fresh session before its first hook arrives', async () => {
   vi.mocked(findLiveSession).mockResolvedValue({ sessionId: 'new', transcriptPath: '/new' })
   expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: 'new', transcriptPath: '/new' })
   expect(row.sessionId).toBe('')
-  expect(findLiveSession).toHaveBeenCalledWith('claude', '/work', Date.parse(row.processIdentity!.startMarker), { pid: 77, bornOnly: true, codexHome: undefined })
+  expect(findLiveSession).toHaveBeenCalledWith('claude', '/work', Date.parse(row.processIdentity!.startMarker), expect.objectContaining({ pid: 77, bornOnly: true, codexHome: undefined, expectedProcess: row.processIdentity }))
+})
+it.each(['claude', 'codex'] as const)('does not give an unbound %s fork its parent from the recent-file pool', async engine => {
+  Object.assign(row, { engine, forkedFrom: { agentId: 'parent-agent', name: 'Parent', sessionId: 'parent', transcriptPath: '/parent' } })
+  // A parent created in the same process-clock interval is a unique "born" candidate,
+  // even though its newer turns and conversation still belong to the parent.
+  vi.mocked(findLiveSession).mockImplementation(async (_engine, _cwd, _start, options) =>
+    options?.excludedSessionId === 'parent' ? null : { sessionId: 'parent', transcriptPath: '/parent' })
+  expect(await captureResumeIdentity(row)).toBe(row)
+  expect(savedTranscriptEvidence).not.toHaveBeenCalled()
+  expect(findLiveSession).toHaveBeenCalledWith(engine, '/work', expect.any(Number), expect.objectContaining({ excludedSessionId: 'parent' }))
+})
+it.each(['native record', 'explicit resume', 'new conversation'] as const)('preserves an unbound fork\'s %s evidence', async mode => {
+  row.forkedFrom = { agentId: 'parent-agent', name: 'Parent', sessionId: 'parent', transcriptPath: '/parent' }
+  if (mode === 'native record') vi.mocked(processSessionEvidence).mockResolvedValue({ session: { sessionId: 'parent', transcriptPath: '/parent' }, verify: vi.fn() })
+  if (mode === 'explicit resume') {
+    vi.mocked(resumeSessionId).mockReturnValue('parent')
+    vi.mocked(findResumedTranscript).mockResolvedValue('/parent')
+  }
+  if (mode === 'new conversation') vi.mocked(findLiveSession).mockResolvedValue({ sessionId: 'child', transcriptPath: '/child' })
+  expect(await captureResumeIdentity(row)).toMatchObject({ sessionId: mode === 'new conversation' ? 'child' : 'parent', source: 'stop-repair' })
 })
 it.each([null, { sessionId: 'missing' }, { sessionId: 'unsafe', transcriptPath: '/unsafe' }])('does not bind ambiguous or unsafe history: %s', async found => {
-  vi.mocked(findLiveSession).mockResolvedValue(found); vi.mocked(validTranscriptPath).mockReturnValue(false)
-  expect(await captureResumeIdentity(row)).toBe(row)
+  vi.mocked(findLiveSession).mockResolvedValue(found)
+  vi.mocked(savedTranscriptEvidence).mockReturnValue({ path: null, fileKey: null, verify: vi.fn() })
+  if (found) await expect(captureResumeIdentity(row)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+  else expect(await captureResumeIdentity(row)).toBe(row)
+})
+// A close of a harness still starting may stop one whose conversation was never seen (stopAgentService
+// `withoutConversation`); a conversation seen and then unreadable is held as seen.
+it.each([
+  ['a resume on its command line', () => { vi.mocked(resumeSessionId).mockReturnValue('exact'); vi.mocked(findResumedTranscript).mockResolvedValue(null) }],
+  ['its native record', () => {
+    vi.mocked(processSessionEvidence).mockResolvedValue({ session: { sessionId: 'current', transcriptPath: '/current' }, verify: vi.fn() })
+    vi.mocked(savedTranscriptEvidence).mockReturnValue({ path: null, fileKey: null, verify: vi.fn() })
+  }],
+  ['one found live', () => {
+    vi.mocked(findLiveSession).mockResolvedValue({ sessionId: 'new', transcriptPath: '/new' })
+    vi.mocked(savedTranscriptEvidence).mockImplementation(() => { throw new IdentityReadUnavailable('the transcript header is incomplete') })
+  }],
+] as const)('holds a conversation seen through %s and then unreadable as seen', async (_, arrange) => {
+  arrange()
+  await expect(captureResumeIdentity(row)).rejects.toBeInstanceOf(ObservedConversationUnavailable)
+})
+it('a conversation never seen, because its process could not be read, is not held as seen', async () => {
+  vi.mocked(findLiveSession).mockRejectedValue(new IdentityReadUnavailable('the native control descriptor type is unavailable'))
+  const error = await captureResumeIdentity(row).catch(e => e)
+  expect(error).toBeInstanceOf(IdentityReadUnavailable)
+  expect(error).not.toBeInstanceOf(ObservedConversationUnavailable)
+  const plain = new Error('disk gone')
+  vi.mocked(findLiveSession).mockRejectedValue(plain)
+  await expect(captureResumeIdentity(row)).rejects.toBe(plain)
+  vi.mocked(resumeSessionId).mockReturnValue('exact')
+  vi.mocked(findResumedTranscript).mockRejectedValue(plain)
+  await expect(captureResumeIdentity(row)).rejects.toBe(plain)
+  const seen = new ObservedConversationUnavailable('Conversation identity is held: seen.')
+  vi.mocked(findResumedTranscript).mockRejectedValue(seen)
+  await expect(captureResumeIdentity(row)).rejects.toBe(seen)
 })

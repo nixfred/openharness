@@ -136,6 +136,14 @@ class _DeviceDetailPageState extends State<DeviceDetailPage> {
                       member.machineId.length < 8 ? member.machineId.length : 8,
                     ),
                   ),
+                // Another of the person's devices said "It's mine" for it while it was new here: where
+                // the banner would have been, the page says where it was settled.
+                if (_row.confirmed case final confirmed?)
+                  SettingsRow(
+                    key: const Key('device-detail-confirmed'),
+                    title: 'Confirmed',
+                    value: 'on ${confirmed.label.trim().isEmpty ? 'another device' : confirmed.label.trim()}',
+                  ),
               ],
             ),
             if (fp.isNotEmpty) ...[

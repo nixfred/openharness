@@ -4,8 +4,10 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../settings/experimental_features.dart';
 import '../shared/theme/app_icons.dart';
 import '../shared/theme/app_theme.dart' as grid;
+import '../shared/widgets/app_menu.dart';
 import '../shared/widgets/skeleton.dart';
 import '../shared/widgets/app_icon_button.dart';
 import '../core/test_run.dart';
@@ -17,6 +19,7 @@ import 'device_setup_dialog.dart';
 import 'devices_controller.dart';
 import 'pet_settings.dart';
 import 'pet_source.dart';
+import 'wifi_robots.dart';
 
 final harnessDeviceShopUrl = Uri.parse(
   'https://www.autonomous.ai/harness-device',
@@ -37,6 +40,11 @@ class _DevicesTabState extends State<DevicesTab> {
     sendHostSettings: widget.notifier.setHostDeviceSettings,
     petRequest: widget.notifier.petRequest,
   );
+
+  /// The robots paired over the network, through this computer's CLI.
+  late final wifi = WifiRobotsController(
+    onLocalNetworkBlocked: widget.notifier.localNetworkBlocked,
+  );
   Timer? _refresh;
   @override
   void initState() {
@@ -54,13 +62,23 @@ class _DevicesTabState extends State<DevicesTab> {
   void dispose() {
     _refresh?.cancel();
     controller.dispose();
+    wifi.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => DevicesScreen(
-    controller: controller,
-    onRefresh: widget.notifier.refreshDevices,
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: widget.notifier.experimentalFeatures,
+    builder: (context, _) => DevicesScreen(
+      controller: controller,
+      wifi: wifi,
+      showCompanion: widget.notifier.experimentalFeatures.enabled(
+        ExperimentalFeature.focusBarCreature,
+      ),
+      onRefresh: () async {
+        await Future.wait([widget.notifier.refreshDevices(), wifi.refresh()]);
+      },
+    ),
   );
 }
 
@@ -68,6 +86,8 @@ class DevicesScreen extends StatefulWidget {
   const DevicesScreen({
     super.key,
     required this.controller,
+    this.wifi,
+    this.showCompanion = false,
     this.openShop,
     this.onRefresh,
     this.pickPetFile,
@@ -75,6 +95,12 @@ class DevicesScreen extends StatefulWidget {
     this.loadPetSheet,
   });
   final DevicesController controller;
+
+  /// The robots paired over the network. Null leaves Add device to the USB cable alone.
+  final WifiRobotsController? wifi;
+
+  /// Whether the desktop companion is on (Experimental), for the rows that follow it.
+  final bool showCompanion;
   final Future<bool> Function(Uri)? openShop;
   final Future<void> Function()? onRefresh;
 
@@ -126,6 +152,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
     super.initState();
     _page.addListener(_place);
     unawaited(widget.controller.load());
+    widget.wifi?.start();
   }
 
   @override
@@ -294,6 +321,62 @@ class _DevicesScreenState extends State<DevicesScreen> {
     });
   }
 
+  final _addMenu = MenuController();
+
+  Future<void> _pairWifi() async {
+    final wifi = widget.wifi;
+    if (wifi == null) return;
+    await showWifiPairDialog(context, wifi);
+  }
+
+  /// Add device: on a cable, or — with the network's robots on offer — by the code a robot shows.
+  Widget _addButton() {
+    final button = FilledButton(
+      key: const Key('devices-add'),
+      onPressed: widget.wifi == null
+          ? () => _setup()
+          : () => _addMenu.isOpen ? _addMenu.close() : _addMenu.open(),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(AppIcons.plus, size: 16),
+          const SizedBox(width: 7),
+          const Text('Add device'),
+          if (widget.wifi != null) ...[
+            const SizedBox(width: 5),
+            const Icon(AppIcons.chevronDown, size: 14),
+          ],
+        ],
+      ),
+    );
+    if (widget.wifi == null) return button;
+    return MenuAnchor(
+      controller: _addMenu,
+      consumeOutsideTap: true,
+      alignmentOffset: const Offset(0, grid.AppControl.menuGap),
+      style: grid.AppMenu.style(),
+      menuChildren: [
+        AppMenuItem(
+          key: const Key('devices-add-usb'),
+          label: 'USB cable',
+          onPressed: () {
+            _addMenu.close();
+            unawaited(_setup());
+          },
+        ),
+        AppMenuItem(
+          key: const Key('devices-add-wifi'),
+          label: 'Wi-Fi code',
+          onPressed: () {
+            _addMenu.close();
+            unawaited(_pairWifi());
+          },
+        ),
+      ],
+      child: button,
+    );
+  }
+
   Future<void> _setup({HarnessDevice? editing}) async {
     final key = await showDeviceSetup(
       context,
@@ -375,12 +458,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                   ],
                                 ),
                               ),
-                              FilledButton.icon(
-                                key: const Key('devices-add'),
-                                onPressed: () => _setup(),
-                                icon: const Icon(AppIcons.plus, size: 16),
-                                label: const Text('Add device'),
-                              ),
+                              _addButton(),
                             ],
                           ),
                         ],
@@ -411,6 +489,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
                           ],
                         ),
                       ],
+                      if (widget.wifi case final wifi?)
+                        WifiRobotsList(controller: wifi, topGap: 32),
                       const SizedBox(height: 32),
                       if (!widget.controller.loaded)
                         const SkeletonBlock(
@@ -520,6 +600,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                               petKey: _petKey,
                               petGap: beside ? _petGap : 0,
                               pickPetFile: widget.pickPetFile,
+                              showCompanion: widget.showCompanion,
                             );
                             if (!wide) {
                               _settle(false);
@@ -713,40 +794,45 @@ class _DeviceShowcase extends StatelessWidget {
         ),
       ),
       const SizedBox(height: 16),
-      Material(
-        color: DesktopChrome.surface,
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          key: const Key('devices-faces'),
+      if (!device.status.isPro) ...[
+        Material(
+          color: DesktopChrome.surface,
           borderRadius: BorderRadius.circular(14),
-          onTap: () => showDeviceFaces(context),
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                const FocusFacePreview(size: 52),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Faces', style: DesktopChrome.control(medium: true)),
-                      const SizedBox(height: 3),
-                      Text('Focus', style: DesktopChrome.metadata()),
-                    ],
+          child: InkWell(
+            key: const Key('devices-faces'),
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => showDeviceFaces(context),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const FocusFacePreview(size: 52),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Faces',
+                          style: DesktopChrome.control(medium: true),
+                        ),
+                        const SizedBox(height: 3),
+                        Text('Focus', style: DesktopChrome.metadata()),
+                      ],
+                    ),
                   ),
-                ),
-                Icon(
-                  AppIcons.chevronRight,
-                  size: 16,
-                  color: DesktopChrome.muted,
-                ),
-              ],
+                  Icon(
+                    AppIcons.chevronRight,
+                    size: 16,
+                    color: DesktopChrome.muted,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-      ),
-      const SizedBox(height: 16),
+        const SizedBox(height: 16),
+      ],
       _DeviceFacts(device: device),
     ],
   );

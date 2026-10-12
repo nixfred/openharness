@@ -1,9 +1,8 @@
 // The band a new device raises across the window: one device goes straight to its key code, several
-// go to Settings ▸ Your devices, where each is a row.
+// go to Machines, where each is a row.
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:harness/settings/sections/account_devices_section.dart';
 import 'package:harness/state/account_devices.dart' hide NewDeviceNotice;
 import 'package:harness/viewer/device_history.dart'
     show DevLogHistoryRow, DeviceLogHistory;
@@ -128,7 +127,7 @@ void main() {
     await tester.pump();
     expect(find.text('AAAA·BBBB·CCCC·DDDD'), findsOneWidget);
     expect(find.byKey(const Key('device-detail-mine')), findsOneWidget);
-    expect(find.byType(AccountDevicesSection), findsNothing);
+    expect(app.machinesRequest, isNull);
     // It’s mine there is the banner's It’s mine.
     await tester.tap(find.byKey(const Key('device-detail-mine')));
     await tester.pump();
@@ -137,7 +136,7 @@ void main() {
   });
 
   testWidgets(
-    'two new devices: Review devices opens the list, the new ones on top',
+    'two new devices: Review devices opens Machines on the first of them',
     (tester) async {
       final now = DateTime.now();
       app.newDevices
@@ -184,16 +183,10 @@ void main() {
         findsOneWidget,
       );
       await tester.tap(review);
-      for (var i = 0; i < 5; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-      expect(find.byType(AccountDevicesSection), findsOneWidget);
-      double top(String pub) =>
-          tester.getTopLeft(find.byKey(ValueKey('account-device-$pub'))).dy;
-      expect(top('p2'), lessThan(top('p1')));
-      expect(top('p1'), lessThan(top('old')));
-      expect(find.text('New'), findsNWidgets(2));
-      expect(app.newDevices, isEmpty);
+      await tester.pump();
+      // The workspace opens Machines with that device chosen (machine_devices_picker_test).
+      expect(app.machinesRequest, (devicePub: 'p1', phones: false));
+      expect(find.byType(AlertDialog), findsNothing);
     },
   );
 
@@ -516,7 +509,7 @@ void main() {
         expect(
           text,
           contains(
-            'remove it from another device (Your devices) — this computer joins on its own once it is gone.',
+            'remove it from another device (Machines) — this computer joins on its own once it is gone.',
           ),
         );
       },
@@ -578,15 +571,18 @@ void main() {
       },
     );
 
-    testWidgets('Your devices opens the list', (tester) async {
+    testWidgets('Machines opens on the key that holds it', (tester) async {
       app.deviceConflict = conflict(afterJoin: false);
       app.devices = AccountDevices(devices: [fakeDevice('holder')]);
       await mount(tester);
-      await tester.tap(find.byKey(const Key('device-conflict-review')));
-      for (var i = 0; i < 5; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-      expect(find.byType(AccountDevicesSection), findsOneWidget);
+      final button = find.byKey(const Key('device-conflict-review'));
+      expect(
+        find.descendant(of: button, matching: find.text('Machines')),
+        findsOneWidget,
+      );
+      await tester.tap(button);
+      await tester.pump();
+      expect(app.machinesRequest, (devicePub: 'holder', phones: false));
     });
 
     testWidgets('dismissed, it stays down', (tester) async {

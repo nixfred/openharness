@@ -10,10 +10,11 @@ import '../../shared/widgets/setting_row.dart';
 import '../../shortcuts/app_keymap.dart';
 import '../../widgets/key_hints.dart';
 
-/// Customize Harness ▸ Appearance: how the app looks on this Mac.
+/// Appearance ▸ Workspace: inactive pane shading, automatic tab names and the
+/// colour palette. (The class keeps its old name; the tab was Appearance.)
 ///
 /// Palettes coordinate the workspace and terminal defaults. The shared font
-/// and size are configured once in Customize Harness ▸ Terminal.
+/// and size are configured once in Appearance ▸ Terminal.
 class AppearanceSection extends StatelessWidget {
   const AppearanceSection({super.key, this.store});
   final AppearancePrefsStore? store;

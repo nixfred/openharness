@@ -14,9 +14,10 @@ String fingerprintSpoken(String fingerprint) =>
 /// How to check a key code, shown under it in a device's detail. [computer] adds the CLI route, which
 /// only a computer has.
 String fingerprintHowToCompare({required bool computer}) => computer
-    ? 'This device’s own key code. Open Your devices on that computer — the code under “This device” '
+    ? 'This device’s own key code. Open Machines on that computer — the code shown for that computer '
           'must match — or run harness status on it.'
-    : 'This device’s own key code. Open Your devices on that device — the code under “This device” must match.';
+    : 'This device’s own key code. Open Your devices on a phone, or Machines in a browser — the code shown '
+          'for “This device” must match.';
 
 /// A key code (`E2FB·0DF5·5FD8·E6C7`) set in mono, selectable, with a Copy button.
 ///

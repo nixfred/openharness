@@ -65,4 +65,5 @@ export const GATEWAY_CALLS = {
   wifi: 'gateway_wifi',
   lane: 'gateway_lane',
   observerKey: 'gateway_observer_key',
+  connectorVault: 'gateway_connector_vault',
 } as const

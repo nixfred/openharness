@@ -21,6 +21,7 @@ import '../shared/theme/appearance_prefs_store.dart';
 import '../shortcuts/app_shortcuts.dart' hide TerminalKey;
 import '../state/account_devices.dart' show registerRefusalSentence;
 import '../state/app_state.dart';
+import '../state/harness_sessions.dart' show heldLaunchDetail;
 import '../state/pane_preset.dart';
 import '../state/pane_arrangement.dart';
 import '../state/terminal_pane.dart';
@@ -1329,109 +1330,137 @@ class _PaneCell extends StatelessWidget {
           onSplit: (axis) => onSplitPane?.call(pane.id, axis),
           child: child!,
         ),
-        child: Container(
-          key: ValueKey('pane-frame:${pane.id}'),
-          decoration: BoxDecoration(
-            // UNCHANGED, and deliberately: the terminal renders its own background
-            // inside this box, so a tile that stops matching the window colour
-            // shows a seam between the header strip and the terminal under it.
-            // What changes to make the gaps visible is the field BEHIND the grid
-            // (see _GridField), which is the part the gaps actually show.
-            //
-            // Over a Background: a terminal paints its own translucent fills, so
-            // the frame adds none (two would stack); a status pane has only this.
-            color: PaneOpacity.of(context) < 1 && pane.session != null
-                ? null
-                : PaneOpacity.fill(context, grid.AppPalette.windowBg),
-            borderRadius: BorderRadius.circular(_paneRadius),
-            // The rim is always drawn — it is what gives an unfocused card its
-            // edge, now that no shared line does. It only CHANGES COLOUR on
-            // focus, so nothing resizes as focus moves.
-            border: Border.fromBorderSide(
-              // Keep the location cue when a pane is alone or zoomed, too.
-              terminalPaneBorder(focused: focused, remote: remote),
+        // Passthrough: the frame keeps the exact constraints the grid gives it. The landing is ALWAYS
+        // here, painting nothing between landings, so a landing never reparents the terminal.
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: [
+            _frame(
+              prefs,
+              focused: focused,
+              remote: remote,
+              dimmed: dimmed,
+              blocked: blocked,
             ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: _PaneLanding(notifier: notifier, pane: pane),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _frame(
+    AppearancePrefs prefs, {
+    required bool focused,
+    required bool remote,
+    required bool dimmed,
+    required bool blocked,
+  }) {
+    return Builder(
+      builder: (context) => Container(
+        key: ValueKey('pane-frame:${pane.id}'),
+        decoration: BoxDecoration(
+          // UNCHANGED, and deliberately: the terminal renders its own background
+          // inside this box, so a tile that stops matching the window colour
+          // shows a seam between the header strip and the terminal under it.
+          // What changes to make the gaps visible is the field BEHIND the grid
+          // (see _GridField), which is the part the gaps actually show.
+          //
+          // Over a Background: a terminal paints its own translucent fills, so
+          // the frame adds none (two would stack); a status pane has only this.
+          color: PaneOpacity.of(context) < 1 && pane.session != null
+              ? null
+              : PaneOpacity.fill(context, grid.AppPalette.windowBg),
+          borderRadius: BorderRadius.circular(_paneRadius),
+          // The rim is always drawn — it is what gives an unfocused card its
+          // edge, now that no shared line does. It only CHANGES COLOUR on
+          // focus, so nothing resizes as focus moves.
+          border: Border.fromBorderSide(
+            // Keep the location cue when a pane is alone or zoomed, too.
+            terminalPaneBorder(focused: focused, remote: remote),
           ),
-          // A neutral gray veil lifts inactive backgrounds and softens their text
-          // without changing terminal colors. Paint attention above the veil so
-          // a waiting question keeps its full-strength amber rim. Keep this
-          // decoration present even when clear: inserting/removing it would
-          // reparent the terminal and lose its input, scroll and selection state.
-          foregroundDecoration: BoxDecoration(
-            color: dimmed
-                ? const Color(0xFF9D9D9D).withValues(alpha: .30)
-                : null,
-            border: blocked
-                ? Border.all(color: grid.AppPalette.warn, width: 2)
-                : null,
-            borderRadius: BorderRadius.circular(_paneRadius),
-          ),
-          // Keeps a terminal's constant repainting inside its own layer instead
-          // of dirtying the whole grid. No key: nothing reads this boundary, it
-          // only has to exist.
-          child: ClipRRect(
-            // Clipped HERE rather than through Container's own clipBehavior.
-            //
-            // Both clip, but they clip to different shapes: Container's is the
-            // decoration's OUTER edge, so the child fills the full radius and
-            // paints under the rim, leaving a square-shouldered corner peeking
-            // through the 1px the rim occupies. This one takes the rim's pixel
-            // off the radius, so the fill stops exactly where the rim starts.
-            //
-            // TerminalPanel opens with a ColoredBox across its whole box, and
-            // that is what was reaching the corners.
-            borderRadius: BorderRadius.circular(_paneRadius - 1),
-            child: RepaintBoundary(
-              child: _FileDropZone(
+        ),
+        // A neutral gray veil lifts inactive backgrounds and softens their text
+        // without changing terminal colors. Paint attention above the veil so
+        // a waiting question keeps its full-strength amber rim. Keep this
+        // decoration present even when clear: inserting/removing it would
+        // reparent the terminal and lose its input, scroll and selection state.
+        foregroundDecoration: BoxDecoration(
+          color: dimmed ? const Color(0xFF9D9D9D).withValues(alpha: .30) : null,
+          border: blocked
+              ? Border.all(color: grid.AppPalette.warn, width: 2)
+              : null,
+          borderRadius: BorderRadius.circular(_paneRadius),
+        ),
+        // Keeps a terminal's constant repainting inside its own layer instead
+        // of dirtying the whole grid. No key: nothing reads this boundary, it
+        // only has to exist.
+        child: ClipRRect(
+          // Clipped HERE rather than through Container's own clipBehavior.
+          //
+          // Both clip, but they clip to different shapes: Container's is the
+          // decoration's OUTER edge, so the child fills the full radius and
+          // paints under the rim, leaving a square-shouldered corner peeking
+          // through the 1px the rim occupies. This one takes the rim's pixel
+          // off the radius, so the fill stops exactly where the rim starts.
+          //
+          // TerminalPanel opens with a ColoredBox across its whole box, and
+          // that is what was reaching the corners.
+          borderRadius: BorderRadius.circular(_paneRadius - 1),
+          child: RepaintBoundary(
+            child: _FileDropZone(
+              notifier: notifier,
+              pane: pane,
+              visible: visible,
+              child: _SwapZone(
                 notifier: notifier,
-                pane: pane,
-                visible: visible,
-                child: _SwapZone(
+                paneId: pane.id,
+                child: _DropZone(
                   notifier: notifier,
                   paneId: pane.id,
-                  child: _DropZone(
-                    notifier: notifier,
-                    paneId: pane.id,
-                    dragging: dragging,
-                    child: ValueListenableBuilder<PaneDragRef?>(
-                      valueListenable: paneDragging,
-                      // The tile being carried fades where it sits, so the grid shows
-                      // where it came FROM while the ghost shows where it is going.
-                      builder: (context, inFlight, child) => Opacity(
-                        opacity: inFlight?.paneId == pane.id ? 0.35 : 1,
-                        child: child,
-                      ),
-                      child: pane.isDevices
-                          ? devicesViewer?.call(context) ??
-                                const SizedBox.shrink()
-                          : pane.isCompanion
-                          ? companionViewer?.call(context) ??
-                                const SizedBox.shrink()
-                          : pane.agentId == null &&
-                                devicesConversation != null &&
-                                notifier.swarms.any(
-                                  (tab) =>
-                                      tab.isDevices && tab.panes.contains(pane),
-                                )
-                          ? devicesConversation!(context)
-                          : pane.agentId == null &&
-                                companionConversation != null &&
-                                notifier.swarms.any(
-                                  (tab) =>
-                                      tab.isCompanions &&
-                                      tab.panes.contains(pane),
-                                )
-                          ? companionConversation!(context)
-                          : _PaneContent(
-                              notifier: notifier,
-                              pane: pane,
-                              single: _single,
-                              visible: visible,
-                              swarmMode: swarmMode,
-                              onOpenModels: onOpenModels,
-                              onSplitPane: onSplitPane,
-                            ),
+                  dragging: dragging,
+                  child: ValueListenableBuilder<PaneDragRef?>(
+                    valueListenable: paneDragging,
+                    // The tile being carried fades where it sits, so the grid shows
+                    // where it came FROM while the ghost shows where it is going.
+                    builder: (context, inFlight, child) => Opacity(
+                      opacity: inFlight?.paneId == pane.id ? 0.35 : 1,
+                      child: child,
                     ),
+                    child: pane.isDevices
+                        ? devicesViewer?.call(context) ??
+                              const SizedBox.shrink()
+                        : pane.isCompanion
+                        ? companionViewer?.call(context) ??
+                              const SizedBox.shrink()
+                        : pane.agentId == null &&
+                              devicesConversation != null &&
+                              notifier.swarms.any(
+                                (tab) =>
+                                    tab.isDevices && tab.panes.contains(pane),
+                              )
+                        ? devicesConversation!(context)
+                        : pane.agentId == null &&
+                              companionConversation != null &&
+                              notifier.swarms.any(
+                                (tab) =>
+                                    tab.isCompanions &&
+                                    tab.panes.contains(pane),
+                              )
+                        ? companionConversation!(context)
+                        : _PaneContent(
+                            notifier: notifier,
+                            pane: pane,
+                            single: _single,
+                            visible: visible,
+                            swarmMode: swarmMode,
+                            onOpenModels: onOpenModels,
+                            onSplitPane: onSplitPane,
+                          ),
                   ),
                 ),
               ),
@@ -1439,6 +1468,54 @@ class _PaneCell extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// ⌘B's receipt (`AppNotifier.markLanding`): the selection blue washes over the pane a task just landed
+/// in, once, and fades, so the eye finds where the words went. A wash, not a rim: pane rims carry focus
+/// and location and never glow (`desktop/design/desktop-design-system.md`). Optional motion, so Reduce
+/// Motion skips it and the pane taking focus is the receipt.
+const _landingFor = Duration(milliseconds: 900);
+
+class _PaneLanding extends StatelessWidget {
+  const _PaneLanding({required this.notifier, required this.pane});
+
+  final AppNotifier notifier;
+  final TerminalPane pane;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(
+      valueListenable: notifier.paneLanding,
+      builder: (context, landing, _) {
+        if (landing == null ||
+            landing.machineId != pane.machineId ||
+            landing.agentId != pane.agentId ||
+            MediaQuery.disableAnimationsOf(context) ||
+            // Mounted after the moment has passed: nothing is landing now.
+            DateTime.now().difference(landing.at) > _landingFor) {
+          return const SizedBox.shrink();
+        }
+        return TweenAnimationBuilder<double>(
+          key: ValueKey('pane-landing:${pane.id}:${landing.seq}'),
+          tween: Tween(begin: 1, end: 0),
+          duration: _landingFor,
+          curve: Curves.easeOut,
+          onEnd: () => notifier.endLanding(landing.seq),
+          builder: (context, wash, _) => wash == 0
+              ? const SizedBox.shrink()
+              : DecoratedBox(
+                  key: ValueKey('pane-landing:${pane.id}'),
+                  decoration: BoxDecoration(
+                    color: DesktopChrome.selection.withValues(
+                      alpha: DesktopChrome.selection.a * wash,
+                    ),
+                    borderRadius: BorderRadius.circular(_paneRadius),
+                  ),
+                ),
+        );
+      },
     );
   }
 }
@@ -1604,7 +1681,7 @@ class _PaneContent extends StatelessWidget {
             notifier,
             pane.machineId,
           ).ignore(),
-          secondaryLabel: review ? 'Your devices' : null,
+          secondaryLabel: review ? 'Machines' : null,
           onSecondary: review
               ? () => showDeviceListReview(context, notifier)
               : null,
@@ -1628,6 +1705,15 @@ class _PaneContent extends StatelessWidget {
           detail: opening?.result?.error ?? 'Open to continue your saved conversation. Retained output is read only.',
           actionLabel: opening?.busy == true ? null : 'Open',
           onAction: () => notifier.openSavedPane(pane.id).ignore(),
+          banner: true,
+        );
+      } else if (agent != null && agent.launchState == 'held') {
+        // Held back by the daemon until it can start it safely: say why,
+        // rather than "Unavailable" over an empty pane.
+        notice = terminalNotice(
+          label: 'Waiting',
+          icon: AppIcons.hourglass,
+          detail: heldLaunchDetail(agent),
           banner: true,
         );
       } else if (agent == null || !agent.terminalAvailable) {
@@ -1692,6 +1778,8 @@ class _PaneContent extends StatelessWidget {
           // Launch progress/failure describes the engine, not permission to
           // type into its terminal. Connection and control ownership still
           // gate input independently in TerminalPanel/TerminalSession.
+          // A held harness stays writable: the app hears of the daemon starting
+          // it a moment late, and the pane may already be the agent's.
           readOnly:
               machine == null ||
               needsLink ||
@@ -1850,6 +1938,19 @@ class _PaneContent extends StatelessWidget {
         busy: opening?.busy == true,
         actionLabel: opening?.busy == true ? null : 'Open',
         onAction: () => notifier.openSavedPane(pane.id).ignore(),
+      );
+    }
+    // Held back by the daemon until it can start it safely (a conversation
+    // another process may have open): it says so and why, and starts by
+    // itself. It read "terminal unavailable (no verified terminal pane)".
+    if (agent != null && agent.launchState == 'held') {
+      return _PaneStatus(
+        activity: activityMark,
+        title: agentName,
+        icon: AppIcons.hourglass,
+        message: heldLaunchDetail(agent),
+        onClose: close,
+        busy: true,
       );
     }
     if (agent != null && !agent.terminalAvailable) {

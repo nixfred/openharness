@@ -45,11 +45,7 @@ export function fakeCore(over: Overrides = {}): CoreApi {
     },
     questions: { answer: vi.fn(), answerReviewed: vi.fn(async () => false), ...over.questions },
     transcripts: { databaseHistory: vi.fn(() => undefined), lastTurn: vi.fn(async () => null), ...over.transcripts },
-    external: {
-      sessions: { list: vi.fn(() => []), scan: vi.fn(async () => []) },
-      open: { known: vi.fn(() => new Map()), fresh: vi.fn(async () => new Map()) },
-      ...over.external,
-    },
+
     account: {
       mintGridName: vi.fn(async () => null),
       accessToken: vi.fn(async () => 'token'),
@@ -65,6 +61,7 @@ export function fakeCore(over: Overrides = {}): CoreApi {
       machineName: vi.fn(() => null),
       backend: vi.fn(async () => ({ status: 200, body: {} })),
       observerKey: { publicKey: vi.fn(async () => 'cHVi'), signWelcome: vi.fn(async () => 'c2ln') },
+      connectorVault: { seal: vi.fn(async () => ({})), open: vi.fn(async () => null) },
       onNotice: vi.fn(() => () => {}),
       signedIn: vi.fn(() => true),
       environment: vi.fn(() => 'prod'),

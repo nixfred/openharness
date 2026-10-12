@@ -42,6 +42,14 @@ repo once had a single tag `v1.0.52` while the manifest was already serving `1.0
 tags alone there produces a version LOWER than what users run — every app refuses it (`semverGt`)
 while the release still reports success. That local path is gone; the tag is now the only way in.
 
+**A release contains the one before it.** The script refuses a checkout that lacks the last release's
+commit (the highest `v*_desktop` tag, and the tag of the version the manifest serves): it is still on
+`origin/main`, so nothing else stopped it, and it would ship older code under a newer version to every
+app. `v1.2.36_desktop` was cut that way on October 1, 2026, twenty commits behind
+`v1.2.35_desktop`. Update the checkout (`git fetch origin && git checkout --detach origin/main`). A
+rollback, which means to do exactly this, is `make release-desktop ARGS="--allow-older"`. `--prepare`
+is not checked: it publishes nothing. `make release-web` checks the same against the last `v*_web` tag.
+
 `pubspec.yaml`'s `version:` field is never touched; it's a dev-only placeholder.
 
 ## Managed Node runtime

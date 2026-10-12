@@ -447,6 +447,12 @@ impl Drop for Screen {
     }
 }
 
+/// What a computer row that cannot be used right now says on its right (`list-compose` host rows).
+pub(crate) const OFFLINE:&str="offline";
+/// The offline computer Enter is on, by name: it is listed so ↑ ↓ reach it, never chosen.
+fn offline_choice(picker:&Picker,kind:&str)->Option<String> {
+    picker.current().filter(|r|kind=="host" && r.right==OFFLINE).map(|r|r.label.clone())
+}
 fn edit(picker:&mut Picker,key:event::KeyEvent)->crate::input::End {
     use crate::input::End;
     let ctrl=key.modifiers.contains(KeyModifiers::CONTROL);
@@ -749,6 +755,7 @@ pub fn run(args:&[String])->io::Result<i32> {
                     continue
                 }
                 if let Some(current)=&draft { if kind!="sessions" {
+                    if let Some(name)=offline_choice(&picker,kind) {picker.say(format!("{name} is offline"));continue}
                     if let Some(row)=picker.current().filter(|r|!r.disabled) {
                         if kind=="host" && host_changed(current,row,items.as_ref()) {
                             let (line,cursor)=current.change_host(&row.id).map_err(io::Error::other)?;
@@ -837,6 +844,40 @@ mod tests {
     use ratatui::style::{Color,Modifier};
     fn look(bg:&str,fg:&str,accent:&str,lists:&str)->Look {
         Look{background:bg.into(),foreground:fg.into(),accent:accent.into(),lists:lists.into()}
+    }
+    /// `@ computer` with one connected computer and the rest offline (reported: the list stood still on
+    /// "Mac Auto", counting 5/1 — the offline ones were disabled rows): ↓ ↑ reach every computer, an
+    /// offline one is drawn dim and Enter on it says so instead of choosing it.
+    #[test]
+    fn offline_computers_are_reachable_dim_and_never_chosen() {
+        let key=|code| event::KeyEvent::new(code,KeyModifiers::NONE);
+        let mut hosts=Picker::new("","");
+        configure(&mut hosts,false);
+        hosts.query="@".into();hosts.qend();
+        compose_scope_with(&mut hosts,"host",true);
+        let mut offline=Row::new("grid-dev","grid-dev").right(OFFLINE);offline.label_dim=8;
+        hosts.set_rows(vec![Row::new("Mac Auto","Mac Auto").right("connected"),Row::new("box","box").right("connected"),offline]);
+        // Drawn dim, as the list's other quiet text: the cursor is on the first row, so the two
+        // unselected rows compare.
+        let area=Rect::new(0,0,60,8);
+        let mut buf=Buffer::empty(area);
+        crate::ui::inline_fzf(&mut buf,area,&mut hosts,false,vec![],false);
+        let fg=|name:&str|(0..8).find_map(|y|{let line=row_text(&buf,y,60);line.find(name).map(|x|buf[(line[..x].chars().count() as u16,y)].fg)}).unwrap();
+        assert_ne!(fg("grid-dev"),fg("box"),"an offline computer is dim");
+        assert_eq!(hosts.visible.len(),3,"every computer counted: 3/3, not 3/2");
+        assert_eq!(offline_choice(&hosts,"host"),None);
+        edit(&mut hosts,key(KeyCode::Down));
+        edit(&mut hosts,key(KeyCode::Down));
+        assert_eq!(hosts.current_id().as_deref(),Some("grid-dev"),"↓ reaches an offline computer");
+        assert_eq!(offline_choice(&hosts,"host").as_deref(),Some("grid-dev"));
+        assert_eq!(offline_choice(&hosts,"folder"),None);
+        edit(&mut hosts,key(KeyCode::Up));
+        assert_eq!(hosts.current_id().as_deref(),Some("box"),"↑ comes back");
+        // Typed, a connected computer ranks ahead of an offline one that matches as well.
+        hosts.set_rows(vec![Row::new("dev","dev").right(OFFLINE).tier(1),Row::new("devbox","devbox").right("connected")]);
+        hosts.query="@dev".into();hosts.qend();hosts.refilter();
+        assert_eq!(hosts.current_id().as_deref(),Some("devbox"),"not the offline exact match");
+        theme::fzf_reset();
     }
     fn reset_look() {
         crate::term_out::set_theme_colours(None);crate::term_out::set_accent_override(None);apply_look(&look("","","",""));

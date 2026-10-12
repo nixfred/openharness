@@ -6,6 +6,7 @@
 #   ./scripts/release-be.sh major        # v1.1.2_backend -> v2.0.0_backend
 #   ./scripts/release-be.sh 1.4.1        # exact version -> v1.4.1_backend
 #   ./scripts/release-be.sh --dry-run    # print what it WOULD do, touch nothing
+#   ./scripts/release-be.sh --allow-older  # a rollback: older code under a higher version
 #
 # Pushing the tag is the whole point: ../.github/workflows/production-be-build.yaml triggers on
 # `vX.Y.Z_backend` tags and builds Dockerfile.k8s -> autonomous-code-be.
@@ -26,13 +27,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DRY_RUN=0
+ALLOW_OLDER=0
 BUMP="patch"
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --allow-older) ALLOW_OLDER=1 ;;
     patch|minor|major) BUMP="$arg" ;;
     [0-9]*.[0-9]*.[0-9]*) BUMP="exact"; EXACT="${arg#v}" ;;
-    *) echo "usage: $0 [patch|minor|major|X.Y.Z] [--dry-run]" >&2; exit 1 ;;
+    *) echo "usage: $0 [patch|minor|major|X.Y.Z] [--dry-run] [--allow-older]" >&2; exit 1 ;;
   esac
 done
 
@@ -67,6 +70,26 @@ LATEST="$(git tag -l 'v*_backend' \
   | { grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)_backend$' || true; } \
   | sed -E 's/^v//; s/_backend$//' \
   | sort -V | tail -1)"
+
+# --- preflight: this release must contain the one before it.
+# HEAD on origin is not enough: a checkout nobody updated is on it too, and a tag cut there deploys older
+# code under a newer version. v0.3.82_cli was tagged that way on October 12, 2026, 27 minutes after
+# v0.3.81_cli and three commits behind it. A rollback is the one release that means to do this.
+if [[ -n "$LATEST" ]]; then
+  LATEST_SHA="$(git rev-list -n1 "v${LATEST}_backend")"
+  if ! git merge-base --is-ancestor "$LATEST_SHA" "$HEAD_SHA" 2>/dev/null; then
+    if [[ "$ALLOW_OLDER" == "1" ]]; then
+      echo ">> WARNING HEAD (${HEAD_SHA:0:12}) does not contain v${LATEST}_backend (${LATEST_SHA:0:12}) — releasing older code (--allow-older)" >&2
+    else
+      echo "ERROR HEAD (${HEAD_SHA:0:12}) does not contain v${LATEST}_backend (${LATEST_SHA:0:12})." >&2
+      echo "      This release would deploy older code under a newer version, taking back" >&2
+      echo "      $(git rev-list --count "$HEAD_SHA..$LATEST_SHA") commit(s) that v${LATEST}_backend already shipped." >&2
+      echo "      Update this checkout first: git fetch origin && git checkout --detach origin/main" >&2
+      echo "      Re-run with --allow-older only to roll back on purpose." >&2
+      exit 1
+    fi
+  fi
+fi
 LATEST="${LATEST:-0.0.0}"
 
 MAJOR="${LATEST%%.*}"

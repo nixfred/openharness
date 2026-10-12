@@ -7,6 +7,7 @@ import '../core/config.dart';
 import '../core/models.dart';
 import '../core/test_run.dart';
 import '../logging/http_log.dart';
+import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
 import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
 import '../ws/local_daemon_transport.dart';
@@ -106,48 +107,6 @@ class ApiClient {
   }
 
   // -- auth (proxied by the local CLI — no credential on this leg) --
-  String _commandBarPath(String path) {
-    // A separate loopback service lets an experimental UI use the existing session daemon.
-    const override = String.fromEnvironment('JEV_COMMAND_BAR_URL');
-    if (override.isEmpty) return path;
-    final uri = Uri.parse(override);
-    if (uri.scheme != 'http' ||
-        uri.host != '127.0.0.1' ||
-        uri.userInfo.isNotEmpty ||
-        uri.hasQuery ||
-        uri.hasFragment ||
-        (uri.path.isNotEmpty && uri.path != '/')) {
-      throw const FormatException(
-        'JEV_COMMAND_BAR_URL must be a loopback HTTP origin.',
-      );
-    }
-    return uri.replace(path: path).toString();
-  }
-
-  Future<Map<String, dynamic>> commandBarStatus() async {
-    final response = await _dio.get(
-      _commandBarPath('/api/command-bar/status'),
-      options: Options(headers: {'x-adapter-local': '1'}),
-    );
-    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
-  }
-
-  Future<Map<String, dynamic>> resolveCommandBar(
-    Map<String, dynamic> request, {
-    required CancelToken cancelToken,
-  }) async {
-    final response = await _dio.post(
-      _commandBarPath('/api/command-bar/resolve'),
-      data: request,
-      cancelToken: cancelToken,
-      options: Options(
-        headers: {'x-adapter-local': '1'},
-        receiveTimeout: const Duration(seconds: 15),
-      ),
-    );
-    return Map<String, dynamic>.from(unwrapApiResponse(response) as Map);
-  }
-
   Future<Map<String, dynamic>?> me() async {
     final res = await _dio.get('/api/auth/me');
     return unwrapApiResponse(res) as Map<String, dynamic>?;
@@ -172,6 +131,20 @@ class ApiClient {
       options: Options(headers: {'x-adapter-local': '1'}),
     );
     if (res.statusCode == 404 || res.statusCode == 401) return null;
+    return unwrapApiResponse(res) as Map<String, dynamic>?;
+  }
+
+  // -- Agent Messages: the account's desk tabs, as the daemon proxies them like the desk --
+
+  /// `{revision, machines, tabs: [{id, name, panes}]}` (backend routes/agentMessages.ts). The app
+  /// reads it only to know the daemon and backend have Agent Messages, which Show Agent Messages
+  /// waits for: each tab's `enabled` a backend may still answer is not read, since whether agents
+  /// may message is the account's `agent_messages` experiment now. Null when the daemon or backend
+  /// predates Agent Messages (404): the app then offers none. Signed out (401) or a backend out of
+  /// reach (503) throws [ApiException], a moment the app waits out.
+  Future<Map<String, dynamic>?> readAgentMessageTabs() async {
+    final res = await _dio.get('/api/agent-messages');
+    if (res.statusCode == 404) return null;
     return unwrapApiResponse(res) as Map<String, dynamic>?;
   }
 
@@ -327,6 +300,37 @@ class ApiClient {
     }
   }
 
+  /// `GET /api/device-keys/acks?since=` — the acknowledgements ("It's mine" said on another device,
+  /// `viewer/device_ack.dart`) of keys added after entry [since], unchecked: the device log judges each.
+  /// Null when there are none to read (a backend from before them, signed out, or unreachable). A short
+  /// deadline: while it runs, the read of the log that asked holds back its "New device" notices.
+  Future<List<Object?>?> deviceAcks(int since) async {
+    try {
+      final res = await _dio.get(
+        '/api/device-keys/acks',
+        queryParameters: {'since': since},
+        options: Options(receiveTimeout: const Duration(seconds: 5)),
+      );
+      if (res.statusCode != 200) return null;
+      final data = unwrapApiResponse(res);
+      final acks = data is Map ? data['acks'] : null;
+      return acks is List ? acks.cast<Object?>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// `POST /api/device-keys/acks` — share this app's "It's mine" for a device with the account's other
+  /// devices. False when the backend did not keep it (or predates it).
+  Future<bool> postDeviceAck(DevAck ack) async {
+    try {
+      final res = await _dio.post('/api/device-keys/acks', data: {'ack': ack.toJson()});
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// `GET /api/device-keys/seen` — when each key last opened a session, `{pub: ms}`; empty when it
   /// cannot be read. A hint for offering to remove apps not used in a long while.
   Future<Map<String, int>> deviceKeysSeen() async {
@@ -391,12 +395,14 @@ class ApiClient {
 
   /// `POST /api/devices/dismiss` — new devices marked as seen: [pub] one, neither argument every
   /// one, [pubs] exactly those (what the person was shown), [baseline] the "Already on your account"
-  /// list. False when the daemon predates the route (an old one answers a `pubs` body with an error).
-  Future<bool> daemonDismissDevices({String? pub, List<String>? pubs, bool baseline = false}) async {
+  /// list. [confirm]: "It's mine" for the one device named — the daemon shares it with the account's
+  /// other devices (one that predates it ignores the field and only marks it seen). False when the
+  /// daemon predates the route (an old one answers a `pubs` body with an error).
+  Future<bool> daemonDismissDevices({String? pub, List<String>? pubs, bool baseline = false, bool confirm = false}) async {
     try {
       final res = await _dio.post(
         '/api/devices/dismiss',
-        data: {'pub': ?pub, 'pubs': ?pubs, if (baseline) 'baseline': true},
+        data: {'pub': ?pub, 'pubs': ?pubs, if (baseline) 'baseline': true, if (confirm) 'confirm': true},
         options: Options(headers: {'x-adapter-local': '1'}),
       );
       return res.statusCode == 200;

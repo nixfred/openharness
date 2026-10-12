@@ -120,26 +120,16 @@ describe('TerminalStreamManager', () => {
     expect((result.payload.engines as Array<{ id: string }>).map((row) => row.id)).toEqual([...ENGINES])
   })
 
-  it('records the origin only for accepted input from the owning stream, before writing bytes', async () => {
-    const onScopedInput = vi.fn(() => expect(stream.writes).toHaveLength(0))
-    await manager.stop()
-    manager = newManager({ onScopedInput })
+  it('asks no window for the tab its input came from, and still writes input from an older one that names it', async () => {
     await manager.handleFrame('web-1', 'terminal_open', {
       requestId: 'scoped', protocolVersion: 3, agentId: 'agent-1', cols: 100, rows: 30,
     })
     const ready = sent.findLast(f => f.type === 'terminal_ready')!.payload
-    expect(ready.swarmInput).toBe(true)
+    expect(ready).not.toHaveProperty('swarmInput')
     const frame = { kind: TerminalBinaryKind.input, streamId: String(ready.streamId), seq: 0,
       bytes: Buffer.from('hello\r'), compressed: false, tabId: 'swarm-a' }
-    await manager.handleBinary('wrong-owner', frame)
-    expect(onScopedInput).not.toHaveBeenCalled()
-    await manager.handleBinary('web-1', { ...frame, seq: 2 })
-    expect(onScopedInput).not.toHaveBeenCalled()
     await manager.handleBinary('web-1', frame)
-    expect(onScopedInput).toHaveBeenCalledWith('agent-1', frame.bytes, 'swarm-a', false)
     expect(stream.writes).toEqual([frame.bytes])
-    await manager.handleBinary('web-1', frame)
-    expect(onScopedInput).toHaveBeenCalledOnce()
   })
 
   it('uses the same generic path for every current engine', async () => {
@@ -195,8 +185,9 @@ describe('TerminalStreamManager', () => {
     // agent runs on a sleeping grid starts that grid. A read-only watcher's input reaches no pty, so it
     // must start nothing either.
     const typed: string[] = []
+    const person: boolean[] = []
     await manager.stop()
-    manager = newManager({ onInput: (agentId) => { typed.push(agentId) } })
+    manager = newManager({ onInput: (agentId, byPerson) => { typed.push(agentId); person.push(byPerson) } })
     await manager.handleFrame('web-1', 'terminal_open', { requestId: 'open-1', protocolVersion: 3, agentId: 'agent-1', cols: 120, rows: 40 })
     const controller = sent.find((frame) => frame.type === 'terminal_ready' && frame.connId === 'web-1')!.payload.streamId as string
     await manager.handleFrame('web-2', 'terminal_open', {
@@ -215,7 +206,11 @@ describe('TerminalStreamManager', () => {
 
     await manager.handleBinary('web-1', { kind: TerminalBinaryKind.input, streamId: controller, seq: 0, compressed: false, bytes: Buffer.from('x') })
     await manager.handleBinary('web-1', { kind: TerminalBinaryKind.paste, streamId: controller, seq: 0, compressed: false, bytes: Buffer.from('hello') })
-    expect(typed).toEqual(['agent-1', 'agent-1'])
+    // What the window's terminal answers by itself (focus, its attributes) is input too, but not the person's: every
+    // harness another agent starts opens as a pane beside its starter, and its reports made each one the person's.
+    await manager.handleBinary('web-1', { kind: TerminalBinaryKind.input, streamId: controller, seq: 1, compressed: false, bytes: Buffer.from('\x1b[I\x1b[?1;2c') })
+    expect(typed).toEqual(['agent-1', 'agent-1', 'agent-1'])
+    expect(person).toEqual([true, true, false])
   })
 
   it('opens with a keyframe, streams coalesced output, and writes ordered raw input', async () => {

@@ -76,7 +76,7 @@ it.each(['idle', 'now'] as const)('closes an unused companion with a shared Code
   expect(await service.request({ ...request, mode })).toEqual({ closed: true })
   expect(terminateDeletedAgent).toHaveBeenCalledOnce()
   expect(vi.mocked(terminateDeletedAgent).mock.calls[0][0].processIdentity?.pid).toBe(99)
-  expect(killPane).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%500' })
+  expect(killPane).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%500' }, expect.any(Function))
   expect(registry.byAgent(row.agentId)).toBeUndefined()
   const manifest = JSON.parse(readFileSync(join(checkpointDirectory, readdirSync(checkpointDirectory).find(file => /^[a-f0-9]{64}\.json$/.test(file))!), 'utf8'))
   expect(JSON.parse(readFileSync(join(checkpointDirectory, manifest.file), 'utf8')).screen).toBe(emptyComposer)
@@ -109,7 +109,7 @@ it('closes the saved shell when an unbound Codex client exits before discovery c
   expect(await service.request({ ...request, mode: 'inspect' })).toEqual({ activity: 'unknown' })
   expect(await service.request({ ...request, mode: 'idle' })).toMatchObject({ error: 'SESSION_NOT_IDLE' })
   expect(await service.request({ ...request, mode: 'now' })).toEqual({ closed: true })
-  expect(killPane).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%500' })
+  expect(killPane).toHaveBeenCalledWith({ backend: 'tmux', paneId: '%500' }, expect.any(Function))
   expect(registry.byAgent(row.agentId)).toBeUndefined()
   const manifest = JSON.parse(readFileSync(join(checkpointDirectory, readdirSync(checkpointDirectory).find(file => /^[a-f0-9]{64}\.json$/.test(file))!), 'utf8'))
   expect(JSON.parse(readFileSync(join(checkpointDirectory, manifest.file), 'utf8')).screen).toBe(screen)
@@ -125,7 +125,7 @@ it.runIf(process.env.RUN_REAL_TMUX_DISCOVERY === '1')('closes only the exited cl
   vi.mocked(processRows).mockImplementation(actualTmux.processRows)
   vi.mocked(checkPidRuntime).mockImplementation(actualStop.checkPidRuntime)
   vi.mocked(terminateDeletedAgent).mockImplementation(actualStop.terminateDeletedAgent)
-  killPane.mockImplementation(runtime => new TmuxBackend().kill(runtime))
+  killPane.mockImplementation((runtime, current) => new TmuxBackend().kill(runtime, current))
   try {
     const sibling = await server.run('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', 'close-fixture', 'sleep 600')
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`

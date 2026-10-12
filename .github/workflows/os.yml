@@ -47,11 +47,11 @@ on:
         default: false
         type: boolean
       checks:
-        description: 'Image journey, browser focus, lock/suspend, recovery, Wi-Fi/audio, Ethernet recovery, hardware, private zram, or changed-kernel recovery acceptance'
+        description: 'Image journey, sign-in, browser focus, lock/suspend, recovery, Wi-Fi/audio, Ethernet recovery, hardware, private zram, or changed-kernel recovery acceptance'
         required: false
         default: image
         type: choice
-        options: [image, browser, browser-suspend, session, recovery, essentials, network-recovery, hardware, zram, hardware-update, public-update, lock-presentation]
+        options: [image, sign-in, browser, browser-suspend, session, recovery, essentials, network-recovery, hardware, zram, hardware-update, public-update, lock-presentation]
       browser_memory:
         description: 'With checks=browser, diagnose memory in the UEFI VM only; retain ordinary workload and deadlines'
         required: false
@@ -67,6 +67,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  sign-in:
+    if: ${{ inputs.checks == 'sign-in' && !inputs.publish_run_id && !inputs.development_update }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require an existing source image
+        env:
+          IMAGE_RUN_ID: ${{ inputs.image_run_id }}
+        run: '[[ "$IMAGE_RUN_ID" =~ ^[0-9]+$ ]]'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: tui
+          shared-key: tui-x86_64-unknown-linux-musl
+          cache-bin: false
+      - name: Prepare native build and VM tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools qemu-system-x86 qemu-utils python3-pil tesseract-ocr
+          sudo chmod a+rw /dev/kvm
+      - name: Build the exact candidate TUI
+        run: cargo build --manifest-path tui/Cargo.toml --locked --release --target x86_64-unknown-linux-musl
+      - uses: actions/download-artifact@v6
+        with:
+          name: programmer-os-x86_64
+          path: os/dist
+          run-id: ${{ inputs.image_run_id }}
+          github-token: ${{ github.token }}
+      - name: Check networking before TUI launch and required sign-in
+        run: >-
+          timeout 20m python3 os/tests/sign_in_vm.py --iso os/dist/*.iso
+          --tui tui/target/x86_64-unknown-linux-musl/release/harness-tui
+      - name: Retain screenshots and validation evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: harness-os-required-sign-in
+          path: |
+            os/test-results/required-sign-in/*.json
+            os/test-results/required-sign-in/*.jsonl
+            os/test-results/required-sign-in/*.png
+            os/test-results/required-sign-in/*.txt
+            os/test-results/required-sign-in/*.log
+          retention-days: 14
+
   lock-presentation:
     if: ${{ inputs.checks == 'lock-presentation' && inputs.image_run_id != '' && !inputs.publish_run_id && !inputs.development_update }}
     runs-on: ubuntu-24.04
@@ -123,7 +171,7 @@ jobs:
           retention-days: 14
 
   image:
-    if: ${{ !inputs.image_run_id && !inputs.publish_run_id && !inputs.development_update && inputs.checks != 'zram' && inputs.checks != 'hardware-update' && inputs.checks != 'browser-suspend' && inputs.checks != 'public-update' && inputs.checks != 'network-recovery' && inputs.checks != 'lock-presentation' }}
+    if: ${{ !inputs.image_run_id && !inputs.publish_run_id && !inputs.development_update && inputs.checks != 'zram' && inputs.checks != 'hardware-update' && inputs.checks != 'browser-suspend' && inputs.checks != 'public-update' && inputs.checks != 'network-recovery' && inputs.checks != 'lock-presentation' && inputs.checks != 'sign-in' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -222,7 +270,7 @@ jobs:
 
   machine:
     needs: image
-    if: ${{ always() && !inputs.publish_run_id && !inputs.development_update && inputs.checks != 'essentials' && inputs.checks != 'hardware' && inputs.checks != 'zram' && inputs.checks != 'hardware-update' && inputs.checks != 'public-update' && inputs.checks != 'network-recovery' && inputs.checks != 'lock-presentation' && (needs.image.result == 'success' || inputs.image_run_id != '' || inputs.checks == 'browser-suspend') && !cancelled() }}
+    if: ${{ always() && !inputs.publish_run_id && !inputs.development_update && inputs.checks != 'essentials' && inputs.checks != 'hardware' && inputs.checks != 'zram' && inputs.checks != 'hardware-update' && inputs.checks != 'public-update' && inputs.checks != 'network-recovery' && inputs.checks != 'lock-presentation' && inputs.checks != 'sign-in' && (needs.image.result == 'success' || inputs.image_run_id != '' || inputs.checks == 'browser-suspend') && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     strategy:

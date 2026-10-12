@@ -4,7 +4,7 @@
 #   make install-cli ARGS="--no-restart"
 #   make release-cli ARGS="--dry-run"
 
-.PHONY: validate merge-pr desktop-test cli-test install-cli upload-cli-install-sh release-cli release-backend release-desktop release-web remote-machine upload-circle device-test
+.PHONY: validate merge-pr desktop-test cli-test install-cli upload-cli-install-sh release-cli mcpb release-backend release-desktop release-web remote-machine upload-circle upload-pro device-test
 
 ## validate: bounded independent checks with logs and a source/timing receipt.
 ## See docs/validation-and-release.md. ARGS="path/to/plan.json".
@@ -31,6 +31,13 @@ cli-test:
 ## it never appears in the published version. ARGS="--dry-run" to preview.
 release-cli:
 	bash cli/scripts/release-cli.sh $(ARGS)
+
+## mcpb: build harness-mcp.mcpb (Harness's MCP Bundle, for Claude Desktop, the Official MCP Registry and
+## Smithery) and the server.json to publish it with, into cli/packages/harness-mcp/mcpb/dist/, and print its
+## sha256. ARGS="X.Y.Z" names the CLI release it goes on (tag vX.Y.Z_cli). Uploads and publishes nothing:
+## docs/research/2026-10-11-listing-submissions.md has the steps.
+mcpb:
+	node cli/packages/harness-mcp/mcpb/build.mjs $(ARGS)
 
 ## release-backend: tag this commit vX.Y.Z_backend and push the tag — CI builds the backend's Docker
 ## image and rolls it out. ARGS=minor|major|X.Y.Z to bump differently, ARGS=--dry-run to preview.
@@ -93,6 +100,12 @@ remote-machine:
 ## upload what version.txt already says.
 upload-circle:
 	bash devices/harness-device/firmware/scripts/upload-firmware.sh $(ARGS)
+
+## upload-pro: next patch version -> build -> publish the Harness Pro's firmware OTA. MAINTAINER ONLY.
+## Same constraints as upload-circle (local IDF 5.5.4, authenticated gcloud). ARGS="--dry-run" to preview,
+## ARGS="--check-only BIN" to just vet an image. See devices/harness-pro/firmware/README.md.
+upload-pro:
+	bash devices/harness-pro/firmware/scripts/upload-firmware.sh $(ARGS)
 
 ## device-test: the firmware's host-side unit tests — frame codec, machine list, carousel ring.
 ##

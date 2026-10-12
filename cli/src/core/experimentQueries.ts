@@ -10,13 +10,14 @@
  * - `windows`: a change notice for every window on this computer (`orchestrator_changed`);
  * - `daemon`: how an agent's shell reaches this daemon, for the prompts the experiment writes;
  * - `backend`: a read or write of the account's backend under `/api/`, signed in by the core, which holds the
- *   sign-in (Tab collaboration's tab channels);
+ *   sign-in (Share's links);
  * - `observer_key`: this machine's public key, or its signature on a welcome to one observer of one share, by
  *   the gateway, which holds the identity (Share's owner);
  * - `observer_send`: a frame Share sealed for one of its observers, to the relay through the gateway.
  * The core answers them only for the experiments (core/api.ts `EXPERIMENTS`): creating an agent or
  * telling the windows something is no other process's to ask. The process's side is
- * services/processCoreApi.ts.
+ * services/processCoreApi.ts. Agent Messages, an experiment until 2026-10-12, asks a few of the same and is
+ * answered by its own link, for what it uses alone (core/messagesLink.ts).
  */
 import type { BackendSocket } from '../backendSocket.js'
 import type { AgentCreateRequest, CoreApi } from './api.js'
@@ -28,20 +29,31 @@ const QUERIES: ReadonlySet<string> = new Set(['shown', 'create', 'stop_turn', 'w
 const METHODS: ReadonlySet<string> = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
 
+/** The live agents as the apps are shown them (`shown`): each with its name, whether its terminal is there and
+ *  what its frame says about its harness. */
+export function shownAgents(core: Pick<CoreApi, 'agents'>): Payload {
+  return {
+    agents: core.agents.live().map((session) => ({
+      ...session,
+      displayName: core.agents.displayName(session),
+      terminalAvailable: core.agents.terminalAvailable(session.agentId),
+      dshContext: core.agents.dsh(session),
+    })),
+  }
+}
+
+/** How an agent's shell reaches this daemon (`daemon`). */
+export function daemonAddress(core: Pick<CoreApi, 'daemon'>): Payload {
+  return { command: core.daemon.command, port: core.daemon.port, machineId: core.daemon.machineId(), autonomousEnv: core.daemon.autonomousEnv }
+}
+
 /** The answer to an experiment's query, or null when it is not one of these. */
 export async function answerExperimentQuery(core: Core, experiments: ReadonlySet<string>, service: string, query: string, payload: Payload): Promise<Payload | null> {
   if (!QUERIES.has(query)) return null
   if (!experiments.has(service)) return { error: 'NOT_AN_EXPERIMENT' }
   switch (query) {
     case 'shown':
-      return {
-        agents: core.agents.live().map((session) => ({
-          ...session,
-          displayName: core.agents.displayName(session),
-          terminalAvailable: core.agents.terminalAvailable(session.agentId),
-          dshContext: core.agents.dsh(session),
-        })),
-      }
+      return shownAgents(core)
     case 'create': {
       if (!text(payload.engine) || !text(payload.cwd) || typeof payload.prompt !== 'string' || typeof payload.name !== 'string') return { ok: false, error: 'INVALID_REQUEST' }
       const request: AgentCreateRequest = {
@@ -82,7 +94,7 @@ export async function answerExperimentQuery(core: Core, experiments: ReadonlySet
       return { sent: core.clients.observer(connId, type, payload.payload as Payload) }
     }
     default:
-      return { command: core.daemon.command, port: core.daemon.port, machineId: core.daemon.machineId(), autonomousEnv: core.daemon.autonomousEnv }
+      return daemonAddress(core)
   }
 }
 

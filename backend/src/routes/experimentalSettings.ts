@@ -11,6 +11,7 @@ const settingBody = z.object({ accountId: z.string().min(1).max(200), feature: z
 export async function experimentalSettingsRoutes(app: FastifyInstance, opts: { daemons?: DaemonsSwitch } = {}) {
   const available = (user: { sub: string; email?: string | null } | undefined) => ({
     focus_bar_creature: daemonsFor(opts.daemons ?? DAEMONS_DARK, user), share_button: true, devices_tab: true,
+    agents_start_agents: true, agent_pull_request_line: true, agent_messages: true,
   })
   app.get('/api/experimental-settings', async (req, reply) => {
     sendSuccess(reply, { accountId: req.user!.sub, ...await readExperimentalSettings(req.user!.sub), available: available(req.user) })
@@ -24,7 +25,8 @@ export async function experimentalSettingsRoutes(app: FastifyInstance, opts: { d
     if (enabled && !availability[feature]) return sendError(reply, 'This experiment is unavailable on this server.', 'EXPERIMENT_UNAVAILABLE', 503)
     const userId = req.user!.sub
     const settings = await setExperimentalSetting(userId, feature, enabled)
-    // Existing account invalidations reach old and new daemons without changing the desk document.
+    // Existing account invalidations reach old and new daemons without changing the desk document. Each daemon reads
+    // the experiments again at it, and keeps the agents' three for its launches (cli/src/core/experiments.ts).
     void publishDeskChanged(userId, { revision: 0 })
     if (feature === 'focus_bar_creature') void publishZooChanged(userId, { revision: 0 })
     sendSuccess(reply, { accountId: userId, ...settings, available: availability })

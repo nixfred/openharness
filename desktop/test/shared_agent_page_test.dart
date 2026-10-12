@@ -124,9 +124,10 @@ void main() {
     );
     expect(link.uri, Uri.parse('https://www.autonomous.ai/harness-app'));
     expect(link.target, LinkTarget.blank);
+    // Outside a browser no build can be detected: the page that lists them.
     expect(
       WebDownloadButton.uri,
-      Uri.parse('https://www.autonomous.ai/harness-app?page=download'),
+      Uri.parse('https://harness.autonomous.ai/desktop'),
     );
     await tester.pumpWidget(const SizedBox());
   });

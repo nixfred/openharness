@@ -4,6 +4,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { createResumeAgentService } from '../../lib/resumeAgentService.js'
 import { AgentStopError, createStopAgentService } from '../../lib/stopAgentService.js'
 import { createAgentLifecycle, createPurgeRequest, createStopRequest, type LifecycleDeps } from './lifecycle.js'
+import { IdentityReadUnavailable } from '../../engines/kit/identityScan.js'
 
 vi.mock('../../lib/stopAgentService.js', async (real) => ({ ...await real<object>(), createStopAgentService: vi.fn(() => vi.fn(async () => {})) }))
 vi.mock('../../lib/resumeAgentService.js', async (real) => ({
@@ -25,6 +26,7 @@ function setup(over: Partial<LifecycleDeps> = {}) {
   const deps: LifecycleDeps = {
     registry: {
       byAgent: vi.fn(() => row()),
+      resolve: vi.fn((id: string) => (id === 'a1' || id === 's1' ? row() : undefined)),
       list: vi.fn(() => [row()]),
       deleteSavedNames: vi.fn(),
     } as unknown as LifecycleDeps['registry'],
@@ -65,7 +67,6 @@ describe('stopping, purging and resuming an agent', () => {
       tmuxBackend: null, agentReconciler: deps.agentReconciler, forgetSession: deps.forgetSession,
       markDeleted: deps.markDeleted, clearDeleted: deps.clearDeleted, stopNative: deps.stopNative,
     })
-    expect(lifecycle.stopAgent).toBe(vi.mocked(createStopAgentService).mock.results[0].value)
     expect(createResumeAgentService).toHaveBeenCalledWith({
       registry: deps.registry, stoppedAgents: deps.stoppedAgents, tmuxBackend: null, restartJobs: deps.restartJobs,
       stopJobs: lifecycle.stopJobs, pinnedControls: deps.pinnedControls, retainExitedSession: deps.retainExitedSession,
@@ -73,6 +74,26 @@ describe('stopping, purging and resuming an agent', () => {
       refreshGridWebSearch: deps.refreshGridWebSearch, clearDeleted: deps.clearDeleted, attachDsh: deps.attachDsh,
       attachSession: deps.attachSession,
     })
+  })
+
+  it('stops through the stop service, then tells the cleanup the agent was stopped, never while the stop can fail', async () => {
+    // A harness closed takes the harnesses it started with it (services/agentCleanup.ts): a window's close and Stop
+    // Harness, `harness close` and a purge all stop through here.
+    const stopped = vi.fn()
+    const { lifecycle } = setup({ stopped })
+    const stop = vi.mocked(createStopAgentService).mock.results[0].value as ReturnType<typeof vi.fn>
+    const options = { current: () => true }
+    await lifecycle.stopAgent('s1', options)
+    expect(stop).toHaveBeenCalledWith('s1', options)
+    expect(stopped).toHaveBeenCalledWith('a1')
+    // One already gone is told by the id it was asked by: its harnesses are orphans all the same.
+    await lifecycle.stopAgent('gone')
+    expect(stopped).toHaveBeenLastCalledWith('gone')
+    stop.mockRejectedValueOnce(new AgentStopError('Harness changed while saving its conversation. Try stopping again.'))
+    await expect(lifecycle.stopAgent('a1')).rejects.toThrow('Harness changed')
+    expect(stopped).toHaveBeenCalledTimes(2)
+    // With nobody to tell, a stop is a stop.
+    await expect(setup().lifecycle.stopAgent('a1')).resolves.toBeUndefined()
   })
 
   describe('purge', () => {
@@ -167,6 +188,15 @@ describe('agent_delete', () => {
     expect(unconfirmed).toStrictEqual({ error: 'STOP_UNCONFIRMED', detail: 'The process could not be verified.' })
     expect(Object.keys(unconfirmed)).toEqual(['error', 'detail'])
     await expect(request(async () => { throw new Error('tmux gone') })({ agentId: 'a1' })).rejects.toThrow('tmux gone')
+  })
+
+  it('returns an unavailable native identity as a retryable hold and permits the same Stop after recovery', async () => {
+    const error = new IdentityReadUnavailable('the native record is incomplete')
+    const stop = vi.fn().mockRejectedValueOnce(error).mockResolvedValueOnce(undefined)
+    const run = request(stop)
+    expect(await run({ agentId: 'a1' })).toStrictEqual({ error: error.code, detail: error.message, held: true, retryable: true })
+    expect(await run({ agentId: 'a1' })).toStrictEqual({ deleted: true })
+    expect(stop.mock.calls).toEqual([['a1'], ['a1']])
   })
 })
 

@@ -17,6 +17,7 @@
  * All it does is let the recap run where the agent it summarises runs.
  */
 import { spawn } from 'node:child_process'
+import { currentUserShell } from './userShell.js'
 
 /** Printed before the dump so anything a chatty rc file writes to stdout is skipped, not parsed. */
 const SENTINEL = '__HARNESS_ENV_BEGIN__'
@@ -81,8 +82,10 @@ export function warmLoginShellEnvironment(): Promise<NodeJS.ProcessEnv> {
   if (cached) return Promise.resolve(cached)
   inFlight = (async (): Promise<NodeJS.ProcessEnv> => {
     if (process.platform === 'win32') return (cached = {})
-    const shell = process.env.SHELL
-    if (!shell || !shell.startsWith('/')) return (cached = {})
+    // The account's shell when the daemon was given no `SHELL` (userShell.ts): read only from the environment, a
+    // daemon started from `docker exec` or a bare service captured nothing, and said so in its log.
+    const shell = currentUserShell()
+    if (!shell) return (cached = {})
     return (cached = await capture(shell))
   })().finally(() => {
     inFlight = null

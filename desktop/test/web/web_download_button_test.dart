@@ -4,6 +4,7 @@ library;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness/core/desktop_download.dart';
 import 'package:harness/widgets/web_download_button.dart';
 import 'package:harness/widgets/workspace_share_button.dart';
 
@@ -11,6 +12,8 @@ void main() {
   testWidgets('a click opens the download page through the new-tab opener', (
     tester,
   ) async {
+    // Settle detection first, so the link cannot change between the click and the check.
+    await tester.runAsync(DesktopDownload.warm);
     final opened = <Uri>[];
     await tester.pumpWidget(
       MaterialApp(

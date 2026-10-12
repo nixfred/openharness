@@ -527,7 +527,11 @@ class NewHarnessController extends ChangeNotifier {
     );
     // What the machine has is asked when the box opens, as the form does: an
     // engine installed in a terminal a minute ago is otherwise still "missing".
-    unawaited(app.probeEngines(_machineId, force: true));
+    unawaited(
+      app
+          .probeEngines(_machineId, force: true)
+          .then((_) => _adoptAccountAgent()),
+    );
     final initialMachine = _machineId;
     unawaited(
       app.probeDsh(initialMachine, force: true).then((_) {
@@ -622,17 +626,28 @@ class NewHarnessController extends ChangeNotifier {
       ? [for (final engine in allEngines) engine.id, kTerminalEngine]
       : selectedHarness?.supportedEngines ??
             [knownHarnessBase[canonicalHarnessId(_harnessId!)] ?? 'claude'];
+
+  /// The agent this person chose before, as stored, for the current harness;
+  /// null when nothing is remembered.
+  String? get _rememberedChoice => _desktopChoices
+      ? app.agentPreference.successfulLaunch?.engine
+      : app.agentPreference.engineFor(_harnessId) ??
+            (_harnessId == null || _harnessId == app.agentPreference.harness
+                ? app.agentPreference.value
+                : null);
+
+  /// Whether [_engine] is this person's own earlier choice rather than the
+  /// product default. Only a remembered agent that is gone asks for a
+  /// replacement: the default is installed in its pane on Create, and asking a
+  /// brand-new user to replace it stopped every first harness on a fresh Mac
+  /// (2026-10-08, "OpenCode is unavailable. Choose an agent."). Read from the
+  /// stored choice where it is used, so it always describes [_engine].
+  bool get _engineRemembered =>
+      !_initialAgentExplicit && _rememberedChoice == _engine;
+
   String _initialEngine(String? requested) {
     final allowed = compatibleEngines;
-    final remembered =
-        requested ??
-        (_desktopChoices
-            ? app.agentPreference.successfulLaunch?.engine
-            : app.agentPreference.engineFor(_harnessId) ??
-                  (_harnessId == null ||
-                          _harnessId == app.agentPreference.harness
-                      ? app.agentPreference.value
-                      : null));
+    final remembered = requested ?? _rememberedChoice;
     if (remembered != null &&
         (requested != null ||
             !_desktopChoices ||
@@ -640,11 +655,62 @@ class NewHarnessController extends ChangeNotifier {
             _harnessId == app.agentPreference.successfulLaunch?.harnessId)) {
       return remembered;
     }
+    // Nothing remembered: the agent this person already uses, when the
+    // machine says it is installed and signed in, before the product default.
+    // Everyone opened on OpenCode's free model, including people who
+    // installed Harness to run the Claude Code or Codex they pay for.
+    if (_harnessId == null) {
+      final account = _accountAgent();
+      if (account != null && allowed.contains(account)) return account;
+    }
     final preferred = allowed.contains(defaultHarnessEngine)
         ? defaultHarnessEngine
         : selectedHarness?.engine;
     if (preferred != null && allowed.contains(preferred)) return preferred;
     return allowed.first;
+  }
+
+  /// Claude Code or Codex, installed and signed in on the chosen machine; the
+  /// one used most recently when both are. Null until the machine has said.
+  String? _accountAgent() {
+    final engines = _machine?.engines;
+    if (engines == null || !engines.loaded) return null;
+    String? best;
+    var bestAt = -1;
+    for (final id in const ['claude', 'codex']) {
+      final engine = engines[id];
+      if (engine == null || !engine.installed || engine.signedIn != true) {
+        continue;
+      }
+      final at = engine.lastUsedAt ?? 0;
+      if (best == null || at > bestAt) {
+        best = id;
+        bestAt = at;
+      }
+    }
+    return best;
+  }
+
+  /// The machine's engines answered after the box opened. While the person
+  /// has not chosen and nothing was remembered, open on the agent they use.
+  void _adoptAccountAgent() {
+    if (_disposed ||
+        locked ||
+        _selectionTouched ||
+        _initialAgentExplicit ||
+        _engineRemembered ||
+        _harnessId != null) {
+      return;
+    }
+    final next = _initialEngine(null);
+    if (next == _engine) return;
+    _engine = next;
+    _restorePermissionMode();
+    if (_project.generated != null) {
+      _project = _generatedProject();
+      unawaited(_refreshGeneratedProject());
+    }
+    _refresh();
   }
 
   String _machineId;
@@ -961,7 +1027,7 @@ class NewHarnessController extends ChangeNotifier {
       _modelCatalog!.sections.any(
         (section) =>
             section.name == model.grid &&
-            section.harnessModels.any((candidate) => candidate.id == model.id),
+            section.models.any((candidate) => candidate.id == model.id),
       );
 
   String? get modelNotice {
@@ -980,7 +1046,7 @@ class NewHarnessController extends ChangeNotifier {
     if (_model != null && !_modelAvailable(_model!)) {
       return 'The selected model is unavailable. Choose another model or your subscription.';
     }
-    if (catalog.sections.every((section) => section.harnessModels.isEmpty)) {
+    if (catalog.sections.every((section) => section.models.isEmpty)) {
       return 'No models are running on your machines. Open Manage Models to start one.';
     }
     return null;
@@ -1036,7 +1102,7 @@ class NewHarnessController extends ChangeNotifier {
           catalog!.canRunLocally(_engine))
         for (final section in catalog.sections)
           ..._ranked([
-            for (final model in section.harnessModels)
+            for (final model in section.models)
               NewHarnessOption(
                 id: _modelId(
                   GridModel(id: model.id, node: model.node, grid: section.name),
@@ -1076,7 +1142,7 @@ class NewHarnessController extends ChangeNotifier {
         (catalog?.supportsModelLaunch == true && catalog!.canRunLocally(_engine)
             ? catalog.sections.fold<int>(
                 0,
-                (count, section) => count + section.harnessModels.length,
+                (count, section) => count + section.models.length,
               )
             : 0);
     return groups;
@@ -1154,7 +1220,36 @@ class NewHarnessController extends ChangeNotifier {
         ? 'A first message can be $kFirstTaskMaxLength characters; '
               'this is ${value.trim().length}.'
         : null;
+    // The desktop composer is where almost every first task is typed. Without
+    // this its harnesses kept the clock name (`opencode-2026-10-08-13-24`,
+    // "Untitled Pane") unless something else happened to rebuild the project.
+    _followTask(debounce: true);
     notifyListeners();
+  }
+
+  Timer? _projectRefresh;
+
+  /// A suggested project follows the task it will be named after; a name the
+  /// person typed is theirs and stays. Typed in the composer, the check for a
+  /// taken folder name (a directory listing, or a request to a remote machine)
+  /// waits for a pause rather than running on every keystroke; Start reserves
+  /// the folder itself either way.
+  void _followTask({bool debounce = false}) {
+    if (_project.generated case final suggested?) {
+      final next = _generatedProject();
+      if (next.generated?.generatedTask != suggested.generatedTask) {
+        _project = next;
+        _projectRefresh?.cancel();
+        if (debounce) {
+          _projectRefresh = Timer(
+            const Duration(milliseconds: 300),
+            () => unawaited(_refreshGeneratedProject()),
+          );
+        } else {
+          unawaited(_refreshGeneratedProject());
+        }
+      }
+    }
   }
 
   /// The permission mode picked, by id; an engine without it uses its default.
@@ -1330,10 +1425,15 @@ class NewHarnessController extends ChangeNotifier {
         message: '$harnessLabel is unavailable. Choose an agent or harness.',
       );
     }
+    final engineState = machine.engines[_engine];
     if (!compatibleEngines.contains(_engine) ||
         (_rememberedAgent &&
             !_selectionTouched &&
-            machine.engines[_engine]?.installed == false)) {
+            engineState?.installed == false &&
+            // The product default installs on Create; one that cannot be
+            // installed here (a custom path that is gone, an ambiguous
+            // binary) is as unavailable as a remembered one.
+            (_engineRemembered || !engineState!.installable))) {
       return (
         field: _harnessId == null
             ? NewHarnessField.harness
@@ -1518,15 +1618,7 @@ class NewHarnessController extends ChangeNotifier {
           ? 'A first message can be $kFirstTaskMaxLength characters; '
                 'this is ${value.trim().length}.'
           : null;
-      // A suggested project follows the task it will be named after; a name
-      // the person typed is theirs and stays.
-      if (_project.generated case final suggested?) {
-        final next = _generatedProject();
-        if (next.generated?.generatedTask != suggested.generatedTask) {
-          _project = next;
-          unawaited(_refreshGeneratedProject());
-        }
-      }
+      _followTask();
       notifyListeners();
       return;
     }
@@ -3279,6 +3371,51 @@ class NewHarnessController extends ChangeNotifier {
 
   /// A reply was lost; Return now checks on it instead of creating again.
   bool get checking => _attempt?.awaitingConfirmation == true;
+  bool get canCancelPending => _attempt?.canCancelPending == true;
+
+  /// The check [followHeld] is making. Nobody pressed for it, so it shows
+  /// nothing until it has an answer.
+  Future<NewHarnessOutcome>? _following;
+
+  /// Asks after a request the machine holds, without the person pressing
+  /// Check status. The machine starts a held harness by itself (an agent it is
+  /// installing, a model waking). The line said "Installing Kilo. The harness
+  /// starts once it is installed." and stayed after Kilo had started, with no
+  /// pane, until Check status was pressed (desktop 1.2.65, a fresh Ubuntu VM,
+  /// 2026-10-12). Created once it has started; failed while it still waits,
+  /// or when it was refused, which the line then says.
+  Future<NewHarnessOutcome> followHeld() {
+    if (_following case final check?) return check;
+    if (_disposed || busy || !canCancelPending) {
+      return Future.value(NewHarnessOutcome.failed);
+    }
+    final check = create(quiet: true);
+    _following = check;
+    return check.whenComplete(() => _following = null);
+  }
+
+  Future<void> cancelPending() async {
+    // A check nobody pressed for is let finish: it holds `busy` for a moment
+    // without saying so, and a Cancel pressed just then must still count.
+    if (_following case final check?) {
+      await check;
+      if (_disposed) return;
+    }
+    if (busy || !canCancelPending) return;
+    busy = true;
+    notifyListeners();
+    final problem = await app.cancelAgentCreation(_attempt!);
+    if (_disposed) return;
+    busy = false;
+    if (problem == null) {
+      _attempt = null;
+      error = null;
+      status = 'Creation cancelled.';
+    } else {
+      error = problem;
+    }
+    notifyListeners();
+  }
 
   bool _warnedAboutClosing = false;
 
@@ -3296,7 +3433,9 @@ class NewHarnessController extends ChangeNotifier {
     if (checking && !_warnedAboutClosing) {
       _warnedAboutClosing = true;
       warn(
-        _desktopChoices
+        canCancelPending
+            ? 'Your request is saved and will continue when the model is available. Cancel request to prevent that, or close again to leave it waiting.'
+            : _desktopChoices
             ? 'The harness may already exist. Check status to find it, or click Close again to leave this form.'
             : 'The harness may already exist. Return checks on it; Escape again '
                   'closes without knowing.',
@@ -3306,7 +3445,9 @@ class NewHarnessController extends ChangeNotifier {
     return !endCompletion();
   }
 
-  Future<NewHarnessOutcome> create() async {
+  /// [quiet] is [followHeld]'s: a check on a held request that changes
+  /// nothing on screen until it has an answer.
+  Future<NewHarnessOutcome> create({bool quiet = false}) async {
     if (busy || linkingProfile) {
       return NewHarnessOutcome.failed;
     }
@@ -3422,9 +3563,11 @@ class NewHarnessController extends ChangeNotifier {
     }
     final attempt = _attempt!;
     busy = true;
-    error = null;
-    status = recheck ? 'Checking on the harness…' : 'Starting harness…';
-    notifyListeners();
+    if (!(quiet && recheck)) {
+      error = null;
+      status = recheck ? 'Checking on the harness…' : 'Starting harness…';
+      notifyListeners();
+    }
     if (_model != null && !recheck) {
       await refreshModels();
       if (_disposed) return NewHarnessOutcome.failed;
@@ -3516,9 +3659,16 @@ class NewHarnessController extends ChangeNotifier {
           ? firstMessage
           : null,
       // A new project named by the person, or after its task, names the agent
-      // too — until the engine titles the session. A clock-named one leaves
-      // it to the machine ("Solder harness 9-18 13:02").
-      name: projectFolderRequest?.agentName,
+      // too — until the engine titles the session. So does a first message
+      // sent into an existing folder: a returning user's second harness in
+      // their project read "Untitled Pane" until the engine titled it (fresh
+      // macOS VM, 2026-10-08). Only a harness started with nothing to say is
+      // left to the machine ("Solder harness 9-18 13:02").
+      name:
+          projectFolderRequest?.agentName ??
+          (takesTask && firstMessage.isNotEmpty
+              ? taskProjectTitle(firstMessage)
+              : null),
       attempt: attempt,
     );
     // Before the disposed check: on an empty tab the new pane replaces this
@@ -3601,6 +3751,7 @@ class NewHarnessController extends ChangeNotifier {
     // Its files were copied out for delivery; only the list goes.
     attachments?.dispose();
     _appTick?.cancel();
+    _projectRefresh?.cancel();
     _listDebounce?.cancel();
     app.removeListener(_onApp);
     _modelUsage?.removeListener(_refresh);

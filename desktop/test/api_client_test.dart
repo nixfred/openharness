@@ -107,6 +107,70 @@ void main() {
     },
   );
 
+  test(
+    'Agent Messages: 404 is a daemon without them, 401 and 503 are a moment',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var status = 200;
+      final seen = <(String, String, String?, String)>[];
+      final subscription = server.listen((request) async {
+        seen.add((
+          request.method,
+          request.uri.path,
+          request.headers.value('x-adapter-local'),
+          await utf8.decoder.bind(request).join(),
+        ));
+        request.response
+          ..statusCode = status
+          ..headers.contentType = ContentType.json
+          ..write(
+            jsonEncode(
+              status == 200
+                  ? {
+                      'success': true,
+                      'data': {'revision': 1, 'machines': [], 'tabs': []},
+                    }
+                  : {
+                      'success': false,
+                      'error': {'message': 'Not now'},
+                    },
+            ),
+          );
+        await request.response.close();
+      });
+      try {
+        final api = ApiClient(
+          config: AppConfig(
+            apiBaseUrl: 'http://unused.invalid',
+            localCliBaseUrl: 'http://127.0.0.1:${server.port}',
+          ),
+          session: AuthSession(),
+        );
+        expect(await api.readAgentMessageTabs(), {
+          'revision': 1,
+          'machines': [],
+          'tabs': [],
+        });
+        expect(seen.last.$1, 'GET');
+        expect(seen.last.$2, '/api/agent-messages');
+        status = 404;
+        expect(await api.readAgentMessageTabs(), isNull);
+        for (final transient in [401, 503]) {
+          status = transient;
+          await expectLater(
+            api.readAgentMessageTabs(),
+            throwsA(
+              isA<ApiException>().having((e) => e.status, 'status', transient),
+            ),
+          );
+        }
+      } finally {
+        await subscription.cancel();
+        await server.close(force: true);
+      }
+    },
+  );
+
   test('machine request hits the local CLI proxy, not the backend, with no credential', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final paths = <String>[];

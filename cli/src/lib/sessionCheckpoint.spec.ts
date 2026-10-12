@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SessionCheckpointStore } from './sessionCheckpoint.js'
@@ -7,9 +7,22 @@ import { registry, type RegisteredSession } from './registry.js'
 import { sqliteReadAll } from './sqliteRead.js'
 import { env } from '../config/env.js'
 import { piSessionFolder } from './sessionSearch/externals/pi.js'
+const faults = vi.hoisted(() => ({ wrote: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async importOriginal => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
-  return { ...real, copyFile: vi.fn(real.copyFile), rm: vi.fn(real.rm) }
+  return { ...real, rm: vi.fn(real.rm), open: async (...args: Parameters<typeof real.open>) => {
+    const handle = await real.open(...args)
+    if (String(args[0]).endsWith('.history.tmp')) {
+      const write = handle.write.bind(handle)
+      handle.write = (async (...values: Parameters<typeof write>) => {
+        const result = await write(...values)
+        const fault = faults.wrote; faults.wrote = undefined
+        await fault?.(String(args[0]))
+        return result
+      }) as typeof handle.write
+    }
+    return handle
+  } }
 })
 vi.mock('./sqliteRead.js', () => ({ sqliteReadAll: vi.fn() }))
 let root: string
@@ -17,12 +30,14 @@ let history: string
 let directory: string
 let row: RegisteredSession
 let store: SessionCheckpointStore
+const transcript = (body: string) => JSON.stringify({ type: 'session_meta', payload: { id: 'conversation', cwd: '/tmp', source: 'cli' } }) + '\n' + body
 beforeEach(async () => {
+  faults.wrote = undefined
   root = await mkdtemp(join(tmpdir(), 'harness-close-checkpoint-'))
   const home = join(root, 'profile')
   await mkdir(join(home, 'sessions'), { recursive: true, mode: 0o700 })
   history = join(home, 'sessions', 'conversation.jsonl')
-  await writeFile(history, '{"history":"retained conversation"}\n', { mode: 0o600 })
+  await writeFile(history, transcript('{"history":"retained conversation"}\n'), { mode: 0o600 })
   row = registry.openPendingAgent({ engine: 'codex', cwd: '/tmp', codexHome: home, runtimes: [{ backend: 'tmux', paneId: '%777' }] })!
   Object.assign(row, { sessionId: 'conversation', transcriptPath: history })
   directory = join(root, 'checkpoints')
@@ -35,7 +50,8 @@ async function piSession() {
   const previousHome = env.PI_HOME
   env.PI_HOME = join(root, 'pi')
   // This fixture owns every possible source; never scan the developer's Pi store.
-  Object.assign(row, { engine: 'pi', sessionId: 'preallocated-session', transcriptPath: null })
+  const cwd = join(root, 'workspace'); await mkdir(cwd)
+  Object.assign(row, { engine: 'pi', sessionId: 'preallocated-session', transcriptPath: null, cwd })
   const folder = join(env.PI_HOME, 'agent', 'sessions', piSessionFolder(row.cwd!))
   await mkdir(folder, { recursive: true })
   const path = join(folder, `2026-10-04T12-00-00-000Z_${row.sessionId}.jsonl`)
@@ -74,11 +90,36 @@ it.each(['before', 'during'] as const)('backs up a Pi transcript first written %
   } finally { pi.restore() }
 })
 
-it.each(['known', 'resumed', 'unreadable', 'ambiguous', 'unreadable store'] as const)('does not replace %s Pi history with only a screen', async state => {
+it('closes a resumed Pi chat that never wrote a conversation file, keeping its screen', async () => {
+  // Found on a real machine: a Pi chat stopped before its first reply and resumed carries resumeOnly,
+  // an ID, no transcript path and no file anywhere. Close was refused for good ("conversation file is
+  // unavailable") though there was no history to lose.
+  const pi = await piSession()
+  try {
+    row.resumeOnly = true
+    await expect(store.save(row)).rejects.toThrow('Could not save this terminal')
+    await store.save(row, { screen: 'Waiting for the first reply' })
+    const saved = await manifest()
+    expect(saved.source).toBeNull()
+    expect(JSON.parse(await readFile(join(directory, saved.file), 'utf8'))).toMatchObject({ engine: 'pi', screen: 'Waiting for the first reply' })
+  } finally { pi.restore() }
+})
+
+it('still refuses a resumed Pi chat whose history file is gone once it was backed up', async () => {
+  const pi = await piSession()
+  try {
+    await writeFile(pi.path, pi.history)
+    await store.save(row)
+    await rm(pi.path)
+    row.resumeOnly = true
+    await expect(store.save(row, { screen: 'Still visible' })).rejects.toThrow('conversation file is unavailable')
+  } finally { pi.restore() }
+})
+
+it.each(['known', 'unreadable', 'ambiguous', 'unreadable store'] as const)('does not replace %s Pi history with only a screen', async state => {
   const pi = await piSession()
   try {
     if (state === 'known') row.transcriptPath = pi.path
-    if (state === 'resumed') row.resumeOnly = true
     if (state === 'unreadable') await writeFile(pi.path, '{partial')
     if (state === 'unreadable store') {
       const folder = join(pi.path, '..')
@@ -97,12 +138,31 @@ it.each(['known', 'resumed', 'unreadable', 'ambiguous', 'unreadable store'] as c
 it('does not back up a different Pi ID or a project with the same encoded folder', async () => {
   const pi = await piSession()
   try {
-    await writeFile(pi.path, `${JSON.stringify({ type: 'session', id: row.sessionId, cwd: '/different/project' })}\n`)
+    const other = join(root, 'different-project'); await mkdir(other)
+    await writeFile(pi.path, `${JSON.stringify({ type: 'session', id: row.sessionId, cwd: other })}\n`)
     await store.save(row, { screen: 'Startup screen' })
     expect((await manifest()).source).toBeNull()
     await writeFile(pi.path, `${JSON.stringify({ type: 'session', id: `other_${row.sessionId}`, cwd: row.cwd })}\n`)
     await store.save(row, { screen: 'Startup screen' })
     expect((await manifest()).source).toBeNull()
+  } finally { pi.restore() }
+})
+
+it.each(['partial', 'ambiguous', 'workspace unavailable'] as const)('holds %s Pi evidence without changing an earlier checkpoint or screen', async state => {
+  const pi = await piSession()
+  try {
+    await store.save(row, { screen: 'The original unsent draft' })
+    const before = Object.fromEntries(await Promise.all((await readdir(directory)).map(async file => [file, await readFile(join(directory, file), 'utf8')])))
+    const duplicate = join(pi.path, '..', `other_${row.sessionId}.jsonl`)
+    if (state === 'partial') await writeFile(pi.path, '{partial')
+    if (state === 'ambiguous') { await writeFile(pi.path, pi.history); await writeFile(duplicate, pi.history) }
+    if (state === 'workspace unavailable') await writeFile(pi.path, JSON.stringify({ type: 'session', id: row.sessionId, cwd: join(root, 'missing-workspace') }) + '\n')
+    await expect(store.save(row, { screen: 'A later unsent draft' })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+    const after = Object.fromEntries(await Promise.all((await readdir(directory)).map(async file => [file, await readFile(join(directory, file), 'utf8')])))
+    expect(after).toEqual(before)
+    await rm(duplicate, { force: true }); await writeFile(pi.path, pi.history)
+    await store.save(row, { screen: 'A later unsent draft' })
+    expect((await manifest()).source).toBe(pi.path)
   } finally { pi.restore() }
 })
 
@@ -139,12 +199,20 @@ it('retains the full native transcript with private permissions, independently o
   await rm(history)
   expect(await readFile(backup, 'utf8')).toContain('retained conversation')
 })
+it('retains a conversation larger than a copy chunk with exact bytes', async () => {
+  const contents = transcript('long conversation\n'.repeat(25000))
+  await writeFile(history, contents)
+  await store.save(row)
+  const saved = await manifest()
+  expect(await readFile(join(directory, saved.file), 'utf8')).toBe(contents)
+  expect(saved.bytes).toBe(Buffer.byteLength(contents))
+})
 it('reuses an unchanged checkpoint and replaces it only after a complete new save', async () => {
   await store.save(row)
   const first = await manifest()
   await store.save(row)
   expect(await manifest()).toEqual(first)
-  await writeFile(history, '{"history":"last flushed response"}\n')
+  await writeFile(history, transcript('{"history":"last flushed response"}\n'))
   await store.save(row)
   const last = await manifest()
   expect(last.file).not.toBe(first.file)
@@ -206,29 +274,25 @@ it('refuses an unset conversation path instead of inventing an empty checkpoint'
 it('rejects a transcript changed during copy and retains the last committed backup', async () => {
   await store.save(row)
   const previous = await manifest()
-  await writeFile(history, 'new turn\n')
-  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-  vi.mocked(copyFile).mockImplementationOnce(async (source, target, flags) => {
-    await real.copyFile(source, target, flags)
-    await writeFile(history, 'a response arrived while copying\n')
-  })
+  await writeFile(history, transcript('new turn\n'))
+  faults.wrote = async () => {
+    await writeFile(history, transcript('a response arrived while copying\n'))
+  }
   await expect(store.save(row)).rejects.toThrow('changed while saving')
   expect(await manifest()).toEqual(previous)
   expect(await readFile(join(directory, previous.file), 'utf8')).toContain('retained conversation')
 })
 it('rejects a checkpoint that gained an unexpected hard link before commit', async () => {
-  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-  vi.mocked(copyFile).mockImplementationOnce(async (source, target, flags) => {
-    await real.copyFile(source, target, flags)
+  faults.wrote = async target => {
     await link(target, join(root, 'unexpected-link'))
-  })
+  }
   await expect(store.save(row)).rejects.toThrow('Could not back up')
   expect((await readdir(directory)).some(file => file.endsWith('.json'))).toBe(false)
 })
 it('keeps a successful new checkpoint when cleanup of the older copy fails', async () => {
   await store.save(row)
   const before = await manifest()
-  await writeFile(history, 'new conversation state\n')
+  await writeFile(history, transcript('new conversation state\n'))
   vi.mocked(rm).mockRejectedValueOnce(new Error('file busy'))
   await store.save(row)
   const after = await manifest()

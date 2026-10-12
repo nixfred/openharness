@@ -117,21 +117,6 @@ const storeCoverArt = <String, StoreCoverArt>{
     asset: 'assets/store/covers/lab-bench.jpg',
     description: 'Canopy: an experiment in Lab Bench',
   ),
-  'autonomous/jev-browser': StoreCoverArt(
-    asset: 'assets/store/covers/jev-browser.jpg',
-    description:
-        'Jev Browser exploring pages and collecting structured results',
-    alignment: Alignment.topCenter,
-    imageSize: Size(1600, 1000),
-    viewport: Rect.fromLTWH(16, 80, 1560, 650),
-  ),
-  'autonomous/jev-sheets': StoreCoverArt(
-    asset: 'assets/store/covers/jev-sheets.jpg',
-    description: 'A typed column in Jev Sheets',
-    alignment: Alignment.topCenter,
-    imageSize: Size(1600, 1000),
-    viewport: Rect.fromLTWH(112, 120, 1408, 610),
-  ),
   'autonomous/roundtable': StoreCoverArt(
     asset: 'assets/store/covers/roundtable.jpg',
     description: 'Roundtable’s map of agreement and disagreement',
@@ -301,6 +286,13 @@ const storeCoverArt = <String, StoreCoverArt>{
     imageSize: Size(1080, 720),
     viewport: Rect.fromLTWH(0, 0, 1080, 540),
     background: Color(0xff131312),
+  ),
+  'autonomous/memories': StoreCoverArt(
+    asset: 'assets/store/covers/memories.jpg',
+    description: 'About You as a tree of light, rooted in an illustrative person’s memories',
+    imageSize: Size(1080, 720),
+    viewport: Rect.fromLTWH(0, 0, 1080, 540),
+    background: Color(0xff0e0f11),
   ),
   'autonomous/machine-monitor': StoreCoverArt(
     asset: 'assets/store/covers/machine-monitor.jpg',

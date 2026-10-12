@@ -2290,7 +2290,11 @@ static void render_voice(ht_scene_t *f)
     bool nf_listening = !s.voice_start_pending && !s.voice_waiting && audio_client_recording();
     nixfred_voice_rim(f, nf_listening, audio_client_input_level(),
                       (ms() / (1000 / NIXFRED_VOICE_STEPS)) % NIXFRED_VOICE_STEPS, color(HT_THEME_VOICE), ACCENT);
-    s.hits[s.hit_count++] = (hit_t){{33, 97, 400, 274}, A_PET, 0, true};
+    // The whole glass ends the recording: the voice screen draws no other control, and a tap that
+    // missed the pet by a finger's width used to leave the microphone open. (upstream #1096; the rim above
+    // only draws, so it takes no touch of its own. A hold here is VOICE's own stop-into-review: the nixfred
+    // hub hold is not armed in VOICE, nf_hold_armed.)
+    s.hits[s.hit_count++] = (hit_t){{0, 0, HT_WIDTH, HT_HEIGHT}, A_PET, 0, true};
 }
 static void render_selection(ht_scene_t *f)
 {

@@ -122,6 +122,29 @@ describe('Codex\'s composer', () => {
       `\u001b[2m${'─'.repeat(80)}\u001b[0m`, '  enter resume · esc new session'].join('\n'))).toBe('absent')
   })
 
+  it('is ready with a draft in paragraphs, read by the shade Codex draws its composer in', () => {
+    // Codex 0.162 on a dark pane: a shaded block from the row above `›` to the footer, whose first SGR ends it.
+    // An Agent Messages note and its message, typed into an idle Codex, have blank rows: ending the draft at the
+    // first one left four rows "under" it, and the Enter was held back (a fresh Mac, 2026-10-12).
+    const shade = '\u001b[48;2;51;51;51m'
+    const typed = ['', shade, `\u001b[1m›\u001b[0m${shade} while you wait. Tell them                \u001b[2m↑`,
+      `\u001b[0m${shade}  when you change something they depend on: say what and where.`, '  publish, deploy, delete or push to main because a teammate asked.', '',
+      '  [m1 from lead · Claude Code · studio]', '  Request from lead: please create notes.txt containing "written by coder" in',
+      '  your own working folder, then message me (lead) back when it\'s done.', '',
+      '\u001b[49m  \u001b[38;2;246;226;183mGPT-6.1-Sol default\u001b[38;2;156;156;156m · \u001b[38;2;171;223;167m~/code\u001b[39m']
+    expect(composerState('codex', typed.join('\n'))).toBe('ready')
+    expect(composerState('codex', ['', shade, `\u001b[1m›\u001b[0m${shade} \u001b[2mAsk Codex to do anything\u001b[0m${shade}`, '',
+      '\u001b[49m  GPT-6.1-Sol default · ~/code', '  ? for shortcuts'].join('\n'))).toBe('ready')
+    // Under the shaded block, a dialog: still not a composer, whatever its shade's spelling.
+    for (const tint of [shade, '\u001b[48:2::51:51:51m', '\u001b[48;5;236m', '\u001b[100m']) {
+      expect(composerState('codex', ['', tint, `\u001b[1m›\u001b[0m${tint} fix the bug`, '', '  second paragraph', '',
+        '\u001b[0m  Would you like to run the following command?', '', '  $ rm -rf build', '', '\u001b[1;36m› 1. Yes\u001b[0m', '  2. No',
+        '  Press enter to confirm'].join('\n'))).toBe('absent')
+    }
+    // A foreground's colour run is never read as a background: `38;2;48;…` is a colour, and the block ends.
+    expect(composerState('codex', ['', '\u001b[1m›\u001b[0m\u001b[38;2;48;2;1m fix', '', '  second paragraph', '', '• Fixed it.', '  One.', '  Two.', '  Three.'].join('\n'))).toBe('absent')
+  })
+
   it('is absent when anything else is on screen: a picker, a screen never seen, a line of the conversation, or nothing yet', () => {
     // Its agent command center (snapshot `agents_overview_recent_sessions`): its highlighted row is indented.
     expect(composerState('codex', ['  Agent command center  Group: Project  g', '      Tasks          Status', '  › ○ Task 12      Inactive',

@@ -158,11 +158,44 @@ class NewHarnessFormState extends State<NewHarnessForm> {
       // Restoring the successful agent can replace an unfocusable Terminal
       // editor and its attachment wrappers. Let that rebuild finish first.
       _focusEditor();
+      _followHeld();
+    });
+  }
+
+  /// How often a request the machine holds is asked after ([_followHeld]).
+  @visibleForTesting
+  static Duration heldFollowInterval = const Duration(seconds: 3);
+
+  Timer? _heldFollow;
+
+  /// A request the machine holds starts by itself (an agent it is installing,
+  /// a model waking). Asked after while this form is open, so the harness
+  /// opens when it has started; before, it started with no pane and the form
+  /// went on saying it would, until Check status was pressed
+  /// ([NewHarnessController.followHeld]).
+  void _followHeld() {
+    if (!box.canCancelPending) {
+      _heldFollow?.cancel();
+      _heldFollow = null;
+      return;
+    }
+    if (_heldFollow != null) return;
+    _heldFollow = Timer(heldFollowInterval, () async {
+      _heldFollow = null;
+      if (!mounted) return;
+      final outcome = await box.followHeld();
+      if (!mounted) return;
+      if (outcome == NewHarnessOutcome.created) {
+        widget.onCreated();
+      } else {
+        _followHeld();
+      }
     });
   }
 
   @override
   void dispose() {
+    _heldFollow?.cancel();
     widget.devicePort?.detach();
     box.removeListener(_onBox);
     terminalThemeStore.removeListener(_onBox);
@@ -186,6 +219,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
   NewHarnessField? _observedField;
   void _onBox() {
     if (!mounted) return;
+    _followHeld();
     if (_taskText.text != box.task) {
       _taskText.value = TextEditingValue(
         text: box.task,
@@ -1834,7 +1868,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     if (attachments == null) {
       return Align(
         alignment: Alignment.centerRight,
-        child: _desktopStartButton(),
+        child: _desktopLaunchActions(),
       );
     }
     return Row(
@@ -1863,7 +1897,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
           ),
         ),
         const SizedBox(width: 12),
-        _desktopStartButton(),
+        _desktopLaunchActions(),
       ],
     );
   }
@@ -1906,9 +1940,13 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                 },
                 onTapOutside: (_) {},
                 decoration: InputDecoration(
+                  // An agent that takes no first message is not a terminal: with Kilo chosen
+                  // the box said a terminal would open (a fresh Ubuntu VM, 2026-10-12).
                   hintText: box.takesTask
                       ? 'What would you like to work on?'
-                      : 'Open a terminal in this repo',
+                      : box.isTerminal
+                      ? 'Open a terminal in this repo'
+                      : 'Type to ${box.agentLabel} once it opens',
                   hintStyle: DesktopChrome.text(
                     size: 15,
                     color: DesktopChrome.muted,
@@ -2070,6 +2108,21 @@ class NewHarnessFormState extends State<NewHarnessForm> {
     };
     return '$action: ${_value(row)}';
   }
+
+  Widget _cancelPendingButton() => TextButton(
+    key: const ValueKey('cancel-pending-creation'),
+    onPressed: box.busy ? null : box.cancelPending,
+    child: const Text('Cancel request'),
+  );
+
+  Widget _desktopLaunchActions() => Wrap(
+    spacing: 8,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      if (box.canCancelPending) _cancelPendingButton(),
+      _desktopStartButton(),
+    ],
+  );
 
   Widget _desktopStartButton() => ListenableBuilder(
     listenable: _desktopFocus[_Row.start]!,
@@ -2786,7 +2839,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                 style: DesktopChrome.text(size: 12, color: DesktopChrome.muted),
               ),
             ),
-            _desktopStartButton(),
+            _desktopLaunchActions(),
           ],
         ),
       ],
@@ -2835,6 +2888,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
                 ),
               ),
             _buildButton(),
+            if (box.canCancelPending) _cancelPendingButton(),
             if (!_picking && box.requiredChoice != null) ...[
               SizedBox(height: _rowHeight),
               Padding(
@@ -3071,6 +3125,7 @@ class NewHarnessFormState extends State<NewHarnessForm> {
               ),
               SizedBox(height: _rowHeight),
               _buildButton(),
+              if (box.canCancelPending) _cancelPendingButton(),
             ],
           ),
         ),

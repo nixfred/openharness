@@ -27,6 +27,14 @@ last tag. Bumping from tags alone there would produce a version LOWER than what'
 every daemon refuses it (`shouldUpdate` / `semverGt` in `src/lib/selfUpdate.ts`) while the release
 still reports success.
 
+**A release contains the one before it.** The script refuses a checkout that lacks the last release's
+commit (the highest `v*_cli` tag, and the tag of the version the manifest serves): it is still on
+`origin/main`, so nothing else stopped it, and it would publish older code under a newer version to
+every daemon. `v0.3.82_cli` was tagged that way on October 12, 2026, from a checkout three commits
+behind `v0.3.81_cli`; its run was cancelled before it published. Update the checkout
+(`git fetch origin && git checkout --detach origin/main`). A rollback, which means to do exactly this,
+is `make release-cli ARGS="--allow-older"`. The desktop, backend and web release scripts check the same.
+
 Unlike `autonomous-harness-desktop`'s `make release`, there is no `--minor` flag: `shouldUpdate` is a
 plain "strictly newer" check with no major/minor-triggers-a-forced-update concept, so every release
 just needs to outrank what's live.
@@ -78,6 +86,31 @@ curl -fsSL https://cdn.autonomous.ai/harness/cli/install.sh | head -5   # confir
 Its command contract (flags, exit codes, what it refuses) is pinned by `cli/src/scripts/install.spec.ts`,
 which runs with the rest of `make cli-test`. Not to be confused with `cli/scripts/install-cli.sh`, the
 local dev loop below.
+
+## The npm wrapper of `harness mcp`
+
+`cli/packages/harness-mcp` is `@autonomous-ai/harness-mcp`, for MCP clients and directories that install servers
+with `npx`. It is not the CLI: it runs `harness mcp` from the installed CLI, and where there is none it offers one
+tool that says how to install it. Its `mcpName` ties it to the Official MCP Registry entry. It changes rarely, and
+apart from the CLI's releases:
+
+```bash
+npm login                                   # an account in the npm organization autonomous-ai
+cd cli/packages/harness-mcp && npm publish --access public
+```
+
+Its tests are `cli/src/agentClient/mcpPackage.spec.ts`, in `make cli-test`.
+
+`harness-mcp.mcpb`, the same server as an MCP Bundle (Claude Desktop, the Official MCP Registry, Smithery), goes on
+a CLI release as an asset, by hand, after the release workflow has cut it:
+
+```bash
+make mcpb ARGS="X.Y.Z"                      # writes cli/packages/harness-mcp/mcpb/dist/ and prints the sha256
+gh release upload vX.Y.Z_cli cli/packages/harness-mcp/mcpb/dist/harness-mcp.mcpb --repo autonomous-ai/openharness
+```
+
+Publishing it, and every other listing, is in
+[docs/research/2026-10-11-listing-submissions.md](../docs/research/2026-10-11-listing-submissions.md).
 
 ## Local install (no upload)
 

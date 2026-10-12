@@ -16,7 +16,11 @@ import { DAEMONS_DARK, DAEMONS_EVERYONE, type DaemonsSwitch } from '../lib/daemo
 import { registerAuthMiddleware } from '../middlewares/authMiddleware.js'
 import { errorHandler } from '../middlewares/errorHandler.js'
 
-type Row = { id: string; userId: string; focusBarCreature: boolean; shareButton: boolean; devicesTab?: boolean; revision: number }
+type Row = { id: string; userId: string; focusBarCreature: boolean; shareButton: boolean; devicesTab?: boolean
+  agentsStartAgents?: boolean; agentPullRequestLine?: boolean; agentMessages?: boolean; revision: number }
+const COLUMNS = ['focusBarCreature', 'shareButton', 'devicesTab', 'agentsStartAgents', 'agentPullRequestLine', 'agentMessages'] as const
+/** Every experiment off, as a new account reads them. */
+const OFF = { focus_bar_creature: false, share_button: false, devices_tab: false, agents_start_agents: false, agent_pull_request_line: false, agent_messages: false }
 describe('account experiments and retained collections', () => {
   let app: FastifyInstance
   let rows: Map<string, Row>
@@ -34,7 +38,7 @@ describe('account experiments and retained collections', () => {
     mocks.prisma.experimentalSettings.findUnique.mockImplementation(async ({ where }) => rows.get(where.id) ?? null)
     mocks.prisma.experimentalSettings.update.mockImplementation(async ({ where, data }) => {
       const row = { ...rows.get(where.id)! }
-      for (const key of ['focusBarCreature', 'shareButton', 'devicesTab'] as const) if (key in data) row[key] = data[key]
+      for (const key of COLUMNS) if (key in data) row[key] = data[key]
       row.revision++; rows.set(row.id, row); return row
     })
     mocks.prisma.experimentalSettings.upsert.mockImplementation(async ({ where, create, update }) => {
@@ -54,8 +58,8 @@ describe('account experiments and retained collections', () => {
   it('requires authentication and defaults off without writing or reading the collection', async () => {
     expect((await app.inject({ method: 'GET', url: '/api/experimental-settings' })).statusCode).toBe(401)
     expect(mocks.prisma.experimentalSettings.findUnique).not.toHaveBeenCalled()
-    expect((await read()).json().data).toEqual({ accountId: 'owner', revision: 0,
-      features: { focus_bar_creature: false, share_button: false, devices_tab: false }, available: { focus_bar_creature: true, share_button: true, devices_tab: true } })
+    expect((await read()).json().data).toEqual({ accountId: 'owner', revision: 0, features: OFF, available: {
+      focus_bar_creature: true, share_button: true, devices_tab: true, agents_start_agents: true, agent_pull_request_line: true, agent_messages: true } })
     expect(rows.size).toBe(0)
     expect((await zoo()).statusCode).toBe(404)
     expect(mocks.prisma.zoo.findUnique).not.toHaveBeenCalled()
@@ -63,7 +67,7 @@ describe('account experiments and retained collections', () => {
   it('shares choices between clients without losing concurrent changes to different switches', async () => {
     expect((await Promise.all([write('focus_bar_creature', true), write('share_button', true)])).map(r => r.statusCode)).toEqual([200, 200])
     expect((await read()).json().data).toMatchObject({ revision: 2, features: { focus_bar_creature: true, share_button: true } })
-    expect((await write('share_button', false)).json().data.features).toEqual({ focus_bar_creature: true, share_button: false, devices_tab: false })
+    expect((await write('share_button', false)).json().data.features).toEqual({ ...OFF, focus_bar_creature: true })
     expect(mocks.deskChanged).toHaveBeenCalledWith('owner', { revision: 0 })
     expect(mocks.zooChanged).toHaveBeenCalledExactlyOnceWith('owner', { revision: 0 })
   })
@@ -71,12 +75,28 @@ describe('account experiments and retained collections', () => {
     const id = experimentalSettingsId('owner')
     rows.set(id, { id, userId: 'owner', focusBarCreature: false, shareButton: true, revision: 8 })
     expect((await read()).json().data.features.devices_tab).toBe(false)
-    expect((await write('devices_tab', true)).json().data.features).toEqual({
-      focus_bar_creature: false, share_button: true, devices_tab: true,
-    })
+    expect((await write('devices_tab', true)).json().data.features).toEqual({ ...OFF, share_button: true, devices_tab: true })
     expect((await write('devices_tab', false)).json().data.features.devices_tab).toBe(false)
     mocks.auth.mockResolvedValue({ sub: 'second', role: 'user' })
     expect((await read()).json().data.features.devices_tab).toBe(false)
+  })
+  it('keeps what agents may do off until the account turns each on, one at a time, and tells its daemons', async () => {
+    // They left each computer's Settings ▸ Agents for the account (owner, 2026-10-12); a row from before has none of them.
+    const id = experimentalSettingsId('owner')
+    rows.set(id, { id, userId: 'owner', focusBarCreature: false, shareButton: true, devicesTab: true, revision: 3 })
+    expect((await read()).json().data.features).toEqual({ ...OFF, share_button: true, devices_tab: true })
+    expect((await write('agent_messages', true)).json().data.features).toEqual({ ...OFF, share_button: true, devices_tab: true, agent_messages: true })
+    expect(rows.get(id)).toMatchObject({ agentMessages: true, revision: 4 })
+    // Each daemon of the account reads them again at desk_changed, and keeps them for its launches.
+    expect(mocks.deskChanged).toHaveBeenCalledExactlyOnceWith('owner', { revision: 0 })
+    expect((await write('agents_start_agents', true)).json().data.features).toMatchObject({ agents_start_agents: true, agent_messages: true, agent_pull_request_line: false })
+    expect((await write('agent_pull_request_line', true)).json().data.features).toMatchObject({ agents_start_agents: true, agent_pull_request_line: true })
+    expect((await write('agent_messages', false)).json().data.features).toEqual({ ...OFF, share_button: true, devices_tab: true, agents_start_agents: true, agent_pull_request_line: true })
+    expect(mocks.zooChanged).not.toHaveBeenCalled()
+    // A new account's first write makes its row with every other experiment off.
+    mocks.auth.mockResolvedValue({ sub: 'second', role: 'user' })
+    expect((await write('agents_start_agents', true, 'second')).json().data).toMatchObject({ revision: 1, features: { ...OFF, agents_start_agents: true } })
+    expect(rows.get(experimentalSettingsId('second'))).toMatchObject({ focusBarCreature: false, agentPullRequestLine: false, agentMessages: false, agentsStartAgents: true })
   })
   it('rejects malformed writes and requests created before an account switch', async () => {
     expect((await write('focus_bar_creature', true, 'another-account')).statusCode).toBe(409)

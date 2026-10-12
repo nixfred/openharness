@@ -9,7 +9,9 @@
  * passed on as it comes, and its answers go back to that one connection when the viewers send them
  * (`CoreApi.clients.viewerFrame`). While the viewers are off, hung behind a full socket or failing, a
  * stream is refused at once with `viewer_close`, so a client never waits out its own timeout for a viewer
- * nobody is serving, and a surface is answered unavailable.
+ * nobody is serving, and a surface is answered unavailable. Their process runs on demand: before it has
+ * first connected, it is asked for and a stream and a surface wait for it, within a start's wait
+ * (core/viewersLink.ts, core/viewersWake.ts).
  */
 import { viewerStreamId } from '../lib/viewerFrames.js'
 import { VIEWERS_UNAVAILABLE, type ViewersPort } from './api.js'

@@ -6,6 +6,7 @@ import '../auth/auth_session.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../logging/http_log.dart';
+import '../viewer/device_ack.dart';
 import '../viewer/device_log.dart';
 import '../viewer/device_log_sync.dart' show DeviceLogAppendAnswer, DeviceLogFetched;
 import 'access_token_source.dart';
@@ -126,6 +127,37 @@ class ApiClient {
       return (head: head, error: code);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// `GET /api/device-keys/acks?since=` — the acknowledgements ("It's mine" said on another device,
+  /// `viewer/device_ack.dart`) of keys added after entry [since], unchecked: the device log judges each.
+  /// Null when there are none to read (a backend from before them, signed out, or unreachable). A short
+  /// deadline: while it runs, the read of the log that asked holds back its "New device" notices.
+  Future<List<Object?>?> deviceAcks(int since) async {
+    try {
+      final res = await _dio.get(
+        '/api/device-keys/acks',
+        queryParameters: {'since': since},
+        options: Options(receiveTimeout: const Duration(seconds: 5)),
+      );
+      if (res.statusCode != 200) return null;
+      final data = unwrapApiResponse(res);
+      final acks = data is Map ? data['acks'] : null;
+      return acks is List ? acks.cast<Object?>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// `POST /api/device-keys/acks` — share this phone's "It's mine" for a device with the account's
+  /// other devices. False when the backend did not keep it (or predates it).
+  Future<bool> postDeviceAck(DevAck ack) async {
+    try {
+      final res = await _dio.post('/api/device-keys/acks', data: {'ack': ack.toJson()});
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
     }
   }
 

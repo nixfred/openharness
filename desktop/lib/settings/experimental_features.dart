@@ -16,18 +16,41 @@ enum ExperimentalFeature {
     'Share button',
     'Show Share in the top-right corner of the workspace.',
   ),
-  devicesTab(
-    'devices_tab',
-    'Devices tab',
-    'Manage your Harness devices. Show Devices next to Harness Store and in its catalog. Off by default.',
+
+  /// What agents may do with Harness: the account's, on every computer it signs in to, each off
+  /// until turned on. They were each computer's Settings ▸ Agents until the owner made them
+  /// experiments of the account (2026-10-12). Each computer's daemon keeps a copy for its launches
+  /// (cli/src/lib/agentSettings.ts) and `harness settings` turns them from a terminal.
+  agentsStartAgents(
+    'agents_start_agents',
+    'Agents can start other agents',
+    'Turn on to let Claude Code and Codex start, wait for and close harnesses of their own; their '
+        'instructions say how. Off, each agent works alone.',
+  ),
+  agentPullRequestLine(
+    'agent_pull_request_line',
+    'Mark pull requests from agent-started harnesses',
+    'Turn on to have a harness another agent started add one line to the pull requests it opens: '
+        '🤝 Started by another agent in Harness.',
+  ),
+
+  /// Agent Messages (docs/design/2026-10-10-agent-messages.md). It replaced each tab's own switch,
+  /// a 💬 beside its × that was easy to hit by mistake and turned the tab off, failing a message
+  /// that was waiting (owner, 2026-10-12).
+  agentMessages(
+    'agent_messages',
+    'Agents in the same tab can message each other',
+    'Turn on to let Claude Code and Codex in one tab send each other messages with harness send.',
   );
 
   const ExperimentalFeature(this.id, this.label, this.description);
   final String id, label, description;
   bool get available => switch (this) {
     focusBarCreature => !kIsWeb && !kViewerMode,
-    shareButton => true,
-    devicesTab => !kIsWeb && !kViewerMode,
+    shareButton ||
+    agentsStartAgents ||
+    agentPullRequestLine ||
+    agentMessages => true,
   };
 }
 
@@ -141,11 +164,11 @@ class ExperimentalFeaturesStore extends ChangeNotifier {
         revision is! int ||
         revision < 0 ||
         features is! Map ||
+        // An experiment a server does not name is one it predates (below), not a bad answer:
+        // the agents' three reached the app before every backend had them.
         ExperimentalFeature.values.any(
           (feature) =>
-              features[feature.id] is! bool &&
-              !(feature == ExperimentalFeature.devicesTab &&
-                  !features.containsKey(feature.id)),
+              features.containsKey(feature.id) && features[feature.id] is! bool,
         )) {
       throw const FormatException('Invalid account settings');
     }

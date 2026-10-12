@@ -89,9 +89,10 @@ class _SettingsNavState extends State<SettingsNav> {
   }
 
   /// The groups, narrowed to the query. Matching is a plain case-insensitive
-  /// substring of the label — this list is short, so anything cleverer
-  /// would be machinery no one can feel. A group's own title matches too, so
-  /// typing "help" surfaces the whole run rather than nothing.
+  /// substring of the label or a row's keywords ([SettingsSection.matches]) —
+  /// this list is short, so anything cleverer would be machinery no one can
+  /// feel. A group's own title matches too, so typing "help" surfaces the
+  /// whole run rather than nothing.
   List<SettingsGroup> get _visible {
     final query = _query.trim().toLowerCase();
     // The list this build actually has: [settingsGroups] drops the developer
@@ -106,7 +107,7 @@ class _SettingsNavState extends State<SettingsNav> {
       }
       final rows = [
         for (final target in group.sections)
-          if (target.label.toLowerCase().contains(query)) target,
+          if (target.matches(query)) target,
       ];
       if (rows.isNotEmpty) groups.add(SettingsGroup(group.title, rows));
     }
@@ -171,7 +172,10 @@ class _SettingsNavState extends State<SettingsNav> {
       padding: const EdgeInsets.only(bottom: 10),
       children: [
         for (final group in visible) ...[
-          RailSectionHeader(label: group.title),
+          if (group.title.isNotEmpty)
+            RailSectionHeader(label: group.title)
+          else if (group != visible.first)
+            const SizedBox(height: 8),
           for (final target in group.sections)
             SidebarItem(
               icon: target.icon,

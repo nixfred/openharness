@@ -12,12 +12,12 @@ const agent = (over: Record<string, unknown> = {}): RegisteredSession => ({
   processIdentity: { pid: 4242, executable: 'claude', startMarker: MARKER }, ...over,
 }) as unknown as RegisteredSession
 
-type Spied = DiscoveryDeps & { findLiveSession: ReturnType<typeof vi.fn>; claudeProcessSession: ReturnType<typeof vi.fn> }
+type Spied = DiscoveryDeps & { findLiveSession: ReturnType<typeof vi.fn>; processSession: ReturnType<typeof vi.fn> }
 /** Codex is the default engine here: Claude is looked for through its process record only (its own block below). */
 function deps(over: Partial<DiscoveryDeps> = {}): Spied {
   const findLiveSession = vi.fn(async () => ({ sessionId: 's9', transcriptPath: '/t/s9.jsonl' }))
-  const claudeProcessSession = vi.fn(async () => ({ sessionId: 's9', transcriptPath: '/t/s9.jsonl' }))
-  return { findLiveSession, claudeProcessSession, isLive: () => true, ownedByOther: () => false, isRecentlyDeleted: () => false, ...over } as Spied
+  const processSession = vi.fn(async () => ({ sessionId: 's9', transcriptPath: '/t/s9.jsonl' }))
+  return { findLiveSession, processSession, isLive: () => true, ownedByOther: () => false, isRecentlyDeleted: () => false, ...over } as Spied
 }
 
 describe('sessionDiscovery', () => {
@@ -48,7 +48,7 @@ describe('sessionDiscovery', () => {
           const d = deps()
           expect(await sessionDiscovery(d)(agent({ engine, processIdentity }))).toBeNull()
           expect(d.findLiveSession).not.toHaveBeenCalled()
-          expect(d.claudeProcessSession).not.toHaveBeenCalled()
+          expect(d.processSession).not.toHaveBeenCalled()
         })
       }
     }
@@ -58,21 +58,21 @@ describe('sessionDiscovery', () => {
     it('accepts only the session the record names, and never scans the project folder', async () => {
       const d = deps()
       expect(await sessionDiscovery(d)(agent({ engine: 'claude' }))).toEqual({ engine: 'claude', sessionId: 's9', transcriptPath: '/t/s9.jsonl' })
-      expect(d.claudeProcessSession).toHaveBeenCalledWith(4242, '/w', Date.parse(MARKER))
+      expect(d.processSession).toHaveBeenCalledWith('claude', 4242, '/w', Date.parse(MARKER))
       expect(d.findLiveSession).not.toHaveBeenCalled()
     })
     it('answers nothing, with no scan to fall back on, when the record matches no session or does not exist', async () => {
-      const d = deps({ claudeProcessSession: async () => null })
+      const d = deps({ processSession: async () => null })
       expect(await sessionDiscovery(d)(agent({ engine: 'claude' }))).toBeNull()
       expect(d.findLiveSession).not.toHaveBeenCalled()
     })
     it('still refuses a record whose session has no path, is a subagent file, is owned or deleted, or whose read throws', async () => {
       const claude = (over: Partial<DiscoveryDeps>) => sessionDiscovery(deps(over))(agent({ engine: 'claude' }))
-      expect(await claude({ claudeProcessSession: async () => ({ sessionId: 's9' }) })).toBeNull()
-      expect(await claude({ claudeProcessSession: async () => ({ sessionId: 'a', transcriptPath: '/p/s/subagents/agent-a.jsonl' }) })).toBeNull()
-      expect(await claude({ ownedByOther: () => true })).toBeNull()
-      expect(await claude({ isRecentlyDeleted: () => true })).toBeNull()
-      expect(await claude({ claudeProcessSession: async () => { throw new Error('boom') } })).toBeNull()
+      await expect(claude({ processSession: async () => ({ sessionId: 's9' }) })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(claude({ processSession: async () => ({ sessionId: 'a', transcriptPath: '/p/s/subagents/agent-a.jsonl' }) })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(claude({ ownedByOther: () => true })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(claude({ isRecentlyDeleted: () => true })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(claude({ processSession: async () => { throw new Error('boom') } })).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     })
   })
 
@@ -99,23 +99,23 @@ describe('sessionDiscovery', () => {
 
   describe('refuses a match', () => {
     it('with no transcript path', async () => {
-      expect(await sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 's9' }) }))(agent())).toBeNull()
+      await expect(sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 's9' }) }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     })
     it('that is a subagent transcript', async () => {
-      expect(await sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 'agent-a', transcriptPath: '/p/proj/s/subagents/agent-a.jsonl' }) }))(agent())).toBeNull()
+      await expect(sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 'agent-a', transcriptPath: '/p/proj/s/subagents/agent-a.jsonl' }) }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     })
     it('owned by another agent', async () => {
       const ownedByOther = vi.fn(() => true)
-      expect(await sessionDiscovery(deps({ ownedByOther }))(agent())).toBeNull()
+      await expect(sessionDiscovery(deps({ ownedByOther }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
       expect(ownedByOther).toHaveBeenCalledWith('s9', 'a1')
     })
     it('that was recently deleted', async () => {
-      expect(await sessionDiscovery(deps({ isRecentlyDeleted: () => true }))(agent())).toBeNull()
+      await expect(sessionDiscovery(deps({ isRecentlyDeleted: () => true }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     })
     it('when nothing is found, or the search throws, or an ownership check throws', async () => {
       expect(await sessionDiscovery(deps({ findLiveSession: async () => null }))(agent())).toBeNull()
-      expect(await sessionDiscovery(deps({ findLiveSession: async () => { throw new Error('boom') } }))(agent())).toBeNull()
-      expect(await sessionDiscovery(deps({ ownedByOther: () => { throw new Error('boom') } }))(agent())).toBeNull()
+      await expect(sessionDiscovery(deps({ findLiveSession: async () => { throw new Error('boom') } }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(sessionDiscovery(deps({ ownedByOther: () => { throw new Error('boom') } }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     })
   })
 
@@ -149,11 +149,11 @@ describe('sessionDiscovery', () => {
   })
 
   it('refuses a match with an empty session id', async () => {
-    expect(await sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: '', transcriptPath: '/t/x.jsonl' }) }))(agent())).toBeNull()
+    await expect(sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: '', transcriptPath: '/t/x.jsonl' }) }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
   })
 
   it('refuses a subagent transcript written with backslashes, and accepts a folder that only contains the word', async () => {
-    expect(await sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 'agent-a', transcriptPath: 'C:\\p\\s\\subagents\\agent-a.jsonl' }) }))(agent())).toBeNull()
+    await expect(sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 'agent-a', transcriptPath: 'C:\\p\\s\\subagents\\agent-a.jsonl' }) }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
     expect(await sessionDiscovery(deps({ findLiveSession: async () => ({ sessionId: 's9', transcriptPath: '/p/my-subagents/s9.jsonl' }) }))(agent()))
       .toEqual({ engine: 'codex', sessionId: 's9', transcriptPath: '/p/my-subagents/s9.jsonl' })
   })
@@ -164,12 +164,27 @@ describe('sessionDiscovery', () => {
     await sessionDiscovery(deps({ isRecentlyDeleted, ownedByOther }))(agent())
     expect(isRecentlyDeleted).toHaveBeenCalledWith('s9')
     expect(ownedByOther).toHaveBeenCalledWith('s9', 'a1')
-    expect(await sessionDiscovery(deps({ isRecentlyDeleted: () => { throw new Error('boom') } }))(agent())).toBeNull()
+    await expect(sessionDiscovery(deps({ isRecentlyDeleted: () => { throw new Error('boom') } }))(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
   })
 
   it('answers with the agent\'s own engine, whatever else the match carries', async () => {
     const d = deps({ findLiveSession: async () => ({ sessionId: 's9', transcriptPath: '/t/s9.jsonl', engine: 'opencode' }) as never })
     expect(await sessionDiscovery(d)(agent({ engine: 'pi' }))).toEqual({ engine: 'pi', sessionId: 's9', transcriptPath: '/t/s9.jsonl' })
+  })
+
+  it.each(['process', 'binding', 'runtime'])('holds an in-place %s update to the actual registry row during discovery', async field => {
+    const row = agent()
+    let release!: (value: { sessionId: string; transcriptPath: string }) => void
+    const observed = vi.fn()
+    const discover = sessionDiscovery(deps({ current: () => row, observed,
+      findLiveSession: () => new Promise(resolve => { release = resolve }) }))
+    const pending = discover(row)
+    if (field === 'process') row.processIdentity!.pid = 4243
+    if (field === 'binding') row.boundAt = 42
+    if (field === 'runtime') row.runtimes = [{ backend: 'tmux', paneId: '%9' }]
+    release({ sessionId: 's9', transcriptPath: '/t/s9.jsonl' })
+    await expect(pending).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+    expect(observed).not.toHaveBeenCalled()
   })
 
   it('hands concurrent callers the very same promise', async () => {
@@ -182,8 +197,8 @@ describe('sessionDiscovery', () => {
   it('forgets a search that threw (async or not), so the next call searches again', async () => {
     for (const findLiveSession of [vi.fn(async () => { throw new Error('boom') }), vi.fn(() => { throw new Error('sync boom') })]) {
       const discover = sessionDiscovery(deps({ findLiveSession } as Partial<DiscoveryDeps>))
-      expect(await discover(agent())).toBeNull()
-      expect(await discover(agent())).toBeNull()
+      await expect(discover(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+      await expect(discover(agent())).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
       expect(findLiveSession).toHaveBeenCalledTimes(2)
     }
   })
@@ -250,7 +265,7 @@ describe('handoffProviderDeps: each dependency reaches the right function with t
       mirror: { recentAsks: vi.fn(() => ['ask']), lastFullText: vi.fn(() => 'full'), recent: vi.fn(() => []) } as never,
       databaseHistory: vi.fn(() => undefined),
       findLiveSession: vi.fn(async () => null),
-      claudeProcessSession: vi.fn(async () => null),
+      processSession: vi.fn(async () => null),
       isRecentlyDeleted: vi.fn(() => false),
       findResumedTranscript: vi.fn(async () => '/t/x.jsonl'),
       validTranscriptPath: vi.fn(() => true),
@@ -302,30 +317,30 @@ describe('handoffProviderDeps: each dependency reaches the right function with t
   it('discovery: live means a running agent; the deleted check gets the found session id; Claude goes by its process record', async () => {
     const byAgent = vi.fn(() => ({}))
     const isRecentlyDeleted = vi.fn(() => false)
-    const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: '/t/sx.jsonl' }))
-    const f = fakes({ registry: { resolve: () => undefined, byAgent, bySession: () => undefined } as never, claudeProcessSession, isRecentlyDeleted })
+    const processSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: '/t/sx.jsonl' }))
+    const f = fakes({ registry: { resolve: () => live, byAgent, bySession: () => undefined } as never, processSession, isRecentlyDeleted })
     expect(await handoffProviderDeps(f).discoverSession?.(live)).toEqual({ engine: 'claude', sessionId: 'sx', transcriptPath: '/t/sx.jsonl' })
     expect(byAgent).toHaveBeenCalledWith('a1')
     expect(isRecentlyDeleted).toHaveBeenCalledWith('sx')
-    expect(claudeProcessSession).toHaveBeenCalledWith(7, '/w', Date.parse(MARKER))
+    expect(processSession).toHaveBeenCalledWith('claude', 7, '/w', Date.parse(MARKER))
   })
 
   it('discovery owns the session check against the running registry and the stopped store', async () => {
-    const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: '/t/sx.jsonl' }))
-    const running = fakes({ registry: { resolve: () => undefined, byAgent: () => ({}), bySession: (sid: string) => (sid === 'sx' ? { agentId: 'other' } : undefined) } as never, claudeProcessSession })
-    expect(await handoffProviderDeps(running).discoverSession?.(live)).toBeNull()
-    const stopped = fakes({ registry: { resolve: () => undefined, byAgent: () => ({}), bySession: () => undefined }, stopped: { ids: () => ['old'], get: () => ({ agentId: 'old', sessionId: 'sx' }) as never }, claudeProcessSession })
-    expect(await handoffProviderDeps(stopped).discoverSession?.(live)).toBeNull()
+    const processSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: '/t/sx.jsonl' }))
+    const running = fakes({ registry: { resolve: () => live, byAgent: () => ({}), bySession: (sid: string) => (sid === 'sx' ? { agentId: 'other' } : undefined) } as never, processSession })
+    await expect(handoffProviderDeps(running).discoverSession?.(live)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
+    const stopped = fakes({ registry: { resolve: () => live, byAgent: () => ({}), bySession: () => undefined }, stopped: { ids: () => ['old'], get: () => ({ agentId: 'old', sessionId: 'sx' }) as never }, processSession })
+    await expect(handoffProviderDeps(stopped).discoverSession?.(live)).rejects.toMatchObject({ code: 'IDENTITY_UNAVAILABLE' })
   })
 
   it('creates the discovery once: two prepares for the same agent share one search while it is pending', async () => {
     let release!: (v: null) => void
-    const claudeProcessSession = vi.fn(() => new Promise<null>((resolve) => { release = resolve }))
-    const d = handoffProviderDeps(fakes({ registry: { resolve: () => undefined, byAgent: () => ({}), bySession: () => undefined } as never, claudeProcessSession }))
+    const processSession = vi.fn(() => new Promise<null>((resolve) => { release = resolve }))
+    const d = handoffProviderDeps(fakes({ registry: { resolve: () => live, byAgent: () => ({}), bySession: () => undefined } as never, processSession }))
     // The same deps object serves every request: what the provider in cli.ts does.
     const first = d.discoverSession?.(live)
     const second = d.discoverSession?.(live)
-    expect(claudeProcessSession).toHaveBeenCalledTimes(1)
+    expect(processSession).toHaveBeenCalledTimes(1)
     release(null)
     await Promise.all([first, second])
   })

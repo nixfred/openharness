@@ -24,8 +24,8 @@ export interface ServiceSpec {
   heapLimitMiB: number
   /** Resident memory past which it is restarted, MiB; 0: off. */
   rssLimitMiB: number
-  /** A process on demand (an experiment's, the devices'): not started with the others, only once the core
-   *  asks for one of its services (`want`), and then kept running like any other. */
+  /** A process on demand (an experiment's, the devices', the viewers'): not started with the others, only once
+   *  the core asks for one of its services (`want`), and then kept running like any other. */
   onDemand?: boolean
   /** The core protocol (./protocol.ts) from which a core asks for this process on demand; 3, the experiments',
    *  when unset. A core that speaks an older one never asks for it, and it is started as that core binds. */
@@ -331,7 +331,8 @@ export class ServiceSupervisor {
   /**
    * A core bound that speaks [protocol], older than this master's: every process that became on demand after it
    * starts now, since that core never asks for one and ran it as it ran every other service. A core from before
-   * `want` (2) asks for none; one from before the devices were on demand (3) never asks for theirs.
+   * `want` (2) asks for none; one from before the devices were on demand (3) never asks for theirs, and one from
+   * before the viewers were (4) never for theirs.
    */
   unasked(protocol: number): void {
     for (const each of this.services) if (each.spec.onDemand && (each.spec.askedSince ?? 3) > protocol) each.want()
@@ -374,25 +375,34 @@ export const SERVICE_HOSTS: Readonly<Record<string, ServiceHostSpec>> = {
   // Its file watches on every harness's workspace; the viewer servers it starts are processes of their
   // own, outside this budget. The Store beside them: its installs run git and the harnesses' toolchains
   // in their own processes too, and take minutes, which is what it must not spend in the core.
-  viewers: { services: ['viewers', 'store'], heapLimitMiB: 512, rssLimitMiB: 1_024 },
+  // Started only once something needs it (core/viewersWake.ts): a harness here, a Store or viewer request, or
+  // the release's own harnesses to put in place. It idled at about 96 MiB on every computer, and few harnesses
+  // have a viewer: 1 of 14 on one real machine, 2 of 35 on another (2026-10-12).
+  viewers: { services: ['viewers', 'store'], heapLimitMiB: 512, rssLimitMiB: 1_024, onDemand: true, askedSince: 5 },
   // The git work (workspaces, the project readers) runs in git's own processes, and the monitor's
   // samples in ps's and ioreg's; what it holds is the agents the core sent it and one parsed sample.
   // The monitor parses up to 8 MB of ioreg output per Monitor poll on a Mac with a GPU, hence more
   // than workspaces alone had. The recaps hold each session's last three recaps, answers (8 KiB each at
   // most) and asks, as the core did while they ran in it, and a few timers per open turn. The window
-  // names hold at most 400 short names; their model runs in its own process (lib/oneshot.ts).
-  edge: { services: ['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell'], heapLimitMiB: 384, rssLimitMiB: 768 },
+  // names hold at most 400 short names; their model runs in its own process (lib/oneshot.ts). The agent cleanup
+  // holds the harnesses the person joined (a thousand ids at most) and looks at the live ones once a minute.
+  // Agent Messages (services/messagesProcess.ts) holds its mailbox, the last 2,000 messages of each tab and the
+  // account's tabs, and runs no timer while it is off here or this computer is signed out. It had a process of its
+  // own as an experiment, 62 MiB resident at idle on every computer it was on, nearly all of it a second Node and
+  // the bundle rather than messaging: here it costs the edge host about 1 MiB on, and 0.4 MiB off
+  // (e2e/footprint.e2e.ts, 2026-10-12).
+  edge: { services: ['workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'windowNames', 'shell', 'connectors', 'agentCleanup', 'messages'], heapLimitMiB: 384, rssLimitMiB: 768 },
   // The orchestrator (services/orchestratorProcess.ts), an experiment: started only once it is on, for a
   // saved project or a request (core/api.ts `EXPERIMENTS`). Its projects' files and the frames of their
   // Directors; the agents it runs are the core's.
   orchestrator: { services: ['orchestrator'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true },
-  // The command bar (services/commandBarProcess.ts), an experiment: started at its first request. What it holds
-  // is at most eight decisions in flight and one bounded JEV answer each (lib/commandBar.ts).
-  commandBar: { services: ['commandBar'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
-  // Tab collaboration and teams, an experiment: the prompt scopes, a few drafts and fingerprints per agent, and
-  // beside them the teams, their mailbox and the tab channels (services/collaborationProcess.ts), each on its
-  // own link to the core. Started only once it is on (core/api.ts `EXPERIMENTS`).
-  teams: { services: ['teams', 'collaboration'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true },
+  // Memories (services/memoryProcess.ts), an experiment: started at its first request, another machine's
+  // Memories pane asking. It runs the Memories package's own command: writes one at a time, snapshots
+  // asked together as one read, each answer at most 8 MB.
+  memory: { services: ['memory'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
+  // The router (services/routerProcess.ts), an experiment: started at its first request. A few decisions in
+  // flight, each one bounded Jev answer.
+  router: { services: ['router'], heapLimitMiB: 128, rssLimitMiB: 384, onDemand: true },
   // Share, an experiment (services/sharingProcess.ts): its invitations, its observers' sessions and their
   // ciphers; the headless Chrome it captures a shared viewer in is a process of its own, outside this budget.
   sharing: { services: ['sharing'], heapLimitMiB: 256, rssLimitMiB: 512, onDemand: true },
@@ -494,7 +504,7 @@ export function masterRunsEngineRuntime(env: NodeJS.ProcessEnv, parentPid: numbe
  * run itself: what the master says it runs (`serviceProcessesEnv`), never what this build would choose.
  * A master too old to say runs exactly the services `HARNESSD_SERVICES` names, as every master did; a
  * core that worked it out from its own default instead took every service for out of process under a
- * released master that ran none, and answered search, the viewers, workspaces and the teams
+ * released master that ran none, and answered search, the viewers, workspaces and the experiments
  * SERVICE_UNAVAILABLE until the master restarted (e2e/releaseRehearsal.e2e.ts). None without a master.
  */
 export function servicesTheMasterRuns(env: NodeJS.ProcessEnv, known: readonly string[]): Set<string> {
@@ -512,7 +522,7 @@ export function servicesTheMasterRuns(env: NodeJS.ProcessEnv, known: readonly st
  * named as one of its services is named whole: `viewers` runs the viewers' process, the Store beside
  * them, as it ran the viewers' before the Store joined it. `HARNESSD_SERVICE_HEAP_LIMIT_MIB` gives every
  * one the same heap limit instead (tests, support). A process on demand (`onDemand`: an experiment's, the
- * devices') waits for the core to ask for it; named in `HARNESSD_SERVICES`, it starts with the others.
+ * devices', the viewers') waits for the core to ask for it; named in `HARNESSD_SERVICES`, it starts with the others.
  */
 export function serviceSpecs(env: NodeJS.ProcessEnv, hosts: Readonly<Record<string, ServiceHostSpec>>): ServiceSpec[] {
   const named = env.HARNESSD_SERVICES === undefined ? null

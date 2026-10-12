@@ -40,6 +40,11 @@ describe('agentFrame', () => {
     row.external = { orca: { terminal: 'term_15fd9a21-2ea5' }, herdr: { pane: 'w4F:p1' }, inner: 'tmux', proc: null }
     expect((await agentFrame(row, { selectedModel: null, terminalAvailable: false })).external?.source).toBe('terminal')
   })
+  it('exposes an unavailable identity reason while retaining the current session', async () => {
+    const row = { ...session(null), identityHold: 'Waiting for the saved session homes.' }
+    expect(await agentFrame(row, { selectedModel: null, terminalAvailable: true }))
+      .toMatchObject({ sessionId: 's1', status: 'active', identityHold: row.identityHold })
+  })
   it('carries only the owning machine’s cached token snapshot, including a measured zero', async () => {
     const context = { selectedModel: null, terminalAvailable: true }
     const usage = { totalTokens: 0, updatedAt: '2026-09-22T16:00:00Z' }
@@ -82,6 +87,21 @@ describe('agentFrame', () => {
     expect(frame.forkedFrom).toEqual({ agentId: 'p', name: 'P' })
     expect(JSON.stringify(frame)).not.toContain('p-sess.jsonl')
     expect(JSON.stringify(frame)).not.toContain('p-sess')
+  })
+
+  it('names the harness here that started it, and says null, never nothing, for every other', async () => {
+    const row = session(null)
+    expect(await agentFrame(row, { selectedModel: null, terminalAvailable: true })).toHaveProperty('parentAgentId', null)
+    row.startedBy = 'agent'
+    row.parentAgentId = 'lead-1'
+    expect((await agentFrame(row, { selectedModel: null, terminalAvailable: true })).parentAgentId).toBe('lead-1')
+  })
+
+  it('says another agent started it, wherever that agent runs, and null for the person\'s', async () => {
+    const row = session(null)
+    expect(await agentFrame(row, { selectedModel: null, terminalAvailable: true })).toHaveProperty('startedBy', null)
+    row.startedBy = 'agent'
+    expect((await agentFrame(row, { selectedModel: null, terminalAvailable: true })).startedBy).toBe('agent')
   })
 
   // The SCM seam (scm/scmProjects.ts) names the project's SCM and changes nothing else on it: every

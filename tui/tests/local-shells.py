@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from account_fixture import signed_in_account
 
 TUI = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get('HN_LOCAL_TEST_PORT', '19441'))
@@ -38,6 +39,7 @@ shutil.copy2(SOURCE, HN)
 ENV = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'TZ', 'NODE_PATH') if k in os.environ}
 ENV.update(HOME=str(HOME), PORT=str(PORT), HN_SOCKET_NAME=PREFIX, HN_TMPDIR=str(BASE), SHELL='/bin/sh',
            TERM='xterm-256color', HNE_REMOVE='bad', HNE_KEEP='bad', HNE_HIDDEN='bad')
+signed_in_account(ENV, BASE)
 CONF = BASE / 'tmux.conf'
 CONF.write_text('set -g default-shell /bin/sh\nset -g default-terminal tmux-256color\n'
                 'set -g pane-border-status off\nset -g status off\n'
@@ -189,7 +191,8 @@ try:
     wait(lambda: hn('display-message', '-p', '#{local_machine}|#{pane_machine}').stdout.strip() == 'mock-local|mock-local',
          'local shell and status share the machine name from the app')
     hn('workspace-menu', 'new-harness')
-    wait(lambda: ' @ local' in tm('capture-pane', '-p', '-t', 'outer').stdout, 'New Harness identifies the local destination')
+    # Its own Machine row, by the name the app gave it (not "@ local" after the project).
+    wait(lambda: 'Machine     mock-local' in tm('capture-pane', '-p', '-t', 'outer').stdout, 'New Harness identifies the local destination')
     tm('send-keys', '-t', 'outer', 'Escape')
     print('PASS daemon arrival preserves local shell and identifies the local destination', flush=True)
 

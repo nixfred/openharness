@@ -12,63 +12,83 @@
  * Moved verbatim out of `runForeground` (the core boundary, step 11: docs/design/2026-10-03-harnessd.md).
  */
 import type { BackendSocket } from '../../backendSocket.js'
-import { applyOpencodeSessionModel, parseOpencodeModelId } from '../../engines/opencode/sessionModel.js'
-import { isOpencodeV2, opencodeMajorVersion } from '../../engines/opencode/version.js'
+import * as opencodeLaunch from '../../engines/launchControl.js'
 import { binaryOnPath } from '../../lib/binaryOnPath.js'
 import { probeGatewayRuntime } from '../../lib/gatewayRuntime.js'
-import { probeGridAssignment } from '../../lib/gridAssignment.js'
-import { describeGridLaunch, gridEnvVarNames } from '../../lib/gridLaunch.js'
+import { describeGridLaunch, gridEnvVarNames } from '../../lib/gridLaunchWire.js'
 import { validateLaunchOverrides, type LaunchOverridesDeps, type LaunchSource } from '../../lib/launchOverrides.js'
 import { sid } from '../../lib/log.js'
 import type { registry, RegisteredSession } from '../../lib/registry.js'
 import { bypassPermissionFor, restartAgent } from '../../lib/restartAgent.js'
 import type { RuntimeProfileManager } from '../../lib/runtimeProfile.js'
 import { parseRuntimeProfile } from '../../lib/runtimeProfileWire.js'
-import type { ScreenReader } from '../../lib/screenReader.js'
 import type { TerminalAgentReconciler } from '../../lib/terminalAgentReconciler.js'
 import { terminalRouteKey } from '../../lib/terminalRuntime.js'
 import type { TmuxRuntimeRef } from '../../lib/terminalTypes.js'
-import { clearPaneRemainOnExit, processArgs } from '../../lib/tmux.js'
+import { clearPaneRemainOnExit } from '../../lib/tmux.js'
 import type { TmuxBackend } from '../../lib/tmuxBackend.js'
 import { workspaceMissing } from '../../lib/workspaceCheck.js'
 import type { createLaunchHelpers } from './launch.js'
 import type { PaneSwap } from './swap.js'
+import { createLaunchAuthority } from './launchAuthority.js'
+import { nativeOpencodeStore } from '../../engines/kit/nativeLocations.js'
 
 type LaunchHelpers = ReturnType<typeof createLaunchHelpers>
 
 type RetargetAgent = NonNullable<BackendSocket['onRetargetAgent']>
 
 export interface RetargetDeps {
-  readScreen: ScreenReader
+  /** Whether the engine's turn state says this session is mid-turn (normalizers.sessionTurnOpen). */
+  sessionTurnOpen: (sessionId: string) => boolean
   /** Whether a purge holds this agent (PurgeAgentService.busy). */
   purgeBusy: (agentId: string) => boolean | undefined
   tmuxBackend: TmuxBackend | null
   registry: typeof registry
   runtimeProfiles: Pick<RuntimeProfileManager, 'selectedModel'>
   launchOverridesDeps: LaunchOverridesDeps
-  captureTerminal: (target: string, historyLines?: number) => Promise<string | null>
   acquireTerminalControl: (id: string, opts?: { forAnswer?: boolean }) => (() => void) | null
   relaunchOverrides: LaunchHelpers['relaunchOverrides']
   downgradedPermission: LaunchHelpers['downgradedPermission']
-  agentReconciler: Pick<TerminalAgentReconciler, 'holdRoute' | 'releaseRoute'>
+  agentReconciler: Pick<TerminalAgentReconciler, 'holdRoute'>
   restartJobs: PaneSwap['restartJobs']
   paneSwapDeps: PaneSwap['paneSwapDeps']
   liveBypassPermission: PaneSwap['liveBypassPermission']
   announceSession: (session: RegisteredSession) => void
+  refreshGridAssignment: (session: RegisteredSession) => void
   /** OpenCode's store, whose rows a resumed session takes its model from. */
   opencodeDb: string
 }
 
 export function createAgentRetargeter({
-  readScreen, purgeBusy, tmuxBackend, registry, runtimeProfiles, launchOverridesDeps, captureTerminal, acquireTerminalControl,
+  sessionTurnOpen, purgeBusy, tmuxBackend, registry, runtimeProfiles, launchOverridesDeps, acquireTerminalControl,
   relaunchOverrides, downgradedPermission, agentReconciler, restartJobs, paneSwapDeps, liveBypassPermission,
-  announceSession, opencodeDb,
+  announceSession, refreshGridAssignment, opencodeDb,
 }: RetargetDeps) {
+  const authority = createLaunchAuthority({ byAgent: id => registry.byAgent(id),
+    revision: id => restartJobs.revision(id), cancelled: () => false })
   const retargetAgent: RetargetAgent = async ({ agentId, grid }) => {
     if (purgeBusy(agentId)) return { ok: false, error: 'AGENT_BUSY' }
     if (!tmuxBackend) return { ok: false, error: 'TMUX_UNAVAILABLE' }
-    const session = registry.resolve(agentId)
-    if (!session) return { ok: false, error: 'AGENT_NOT_FOUND' }
+    const live = registry.resolve(agentId)
+    if (!live) return { ok: false, error: 'AGENT_NOT_FOUND' }
+    // Registry observations can update a row in place while a service or pane
+    // read waits. The request keeps its original conversation and exact process.
+    const session = structuredClone(live)
+    grid = grid && structuredClone(grid)
+    const captureAuthority = () => {
+      const owns = authority(session.agentId)
+      return () => !!registry.byAgent(session.agentId) && owns()
+    }
+    let current = captureAuthority()
+    let nativeEffect: 'none' | 'uncertain' | 'applied' = 'none'
+    let replacementStarted = false
+    const failed = (error: string, detail: string) => ({ ok: false as const, error, detail: [
+      nativeEffect === 'applied' ? 'The native model change was applied.'
+        : nativeEffect === 'uncertain' ? 'The native model change may already have applied.' : '',
+      replacementStarted ? 'The replacement process started, but retarget did not complete.' : '',
+      detail,
+    ].filter(Boolean).join(' ') })
+    const changed = () => failed('AGENT_CHANGED', 'The harness changed or stopped during retarget.')
     const pane = session.runtimes.find((runtime): runtime is TmuxRuntimeRef => runtime.backend === 'tmux')
     // Only tmux panes can be respawned. Saying so is better than a generic failure the user cannot act on.
     if (!pane) return { ok: false, error: 'RETARGET_UNSUPPORTED_BACKEND', detail: `${session.engine} is not running in a tmux pane` }
@@ -115,7 +135,12 @@ export function createAgentRetargeter({
       codexHome: session.codexHome,
       ...(grid ? {} : { subscriptionModel: remembered }),
     }
-    const valid = await validateLaunchOverrides(launchOverridesDeps, session.engine, target)
+    const inspected = await launchOverridesDeps.native?.(session.engine, session, { id: session.agentId, current })
+    if (!current()) return changed()
+    if (inspected && !inspected.ok) return inspected
+    const native = inspected?.ok ? inspected.launch : undefined
+    const valid = await validateLaunchOverrides(launchOverridesDeps, session.engine, target, native)
+    if (!current()) return changed()
     if (!valid.ok) return { ok: false, error: valid.error, detail: valid.detail }
     // A resumed opencode session takes its model from its own rows in opencode.db, not from `-m`
     // (see below), and those rows are written through the `sqlite3` CLI. Without it the respawn
@@ -127,8 +152,10 @@ export function createAgentRetargeter({
     // sqlite3 (`applyOpencodeSessionModel`).
     const rewritesOpencodeSession = session.engine === 'opencode' && !!session.sessionId
       && (!!grid || !!remembered?.includes('/'))
-    const opencodeMajor = session.engine === 'opencode' ? opencodeMajorVersion() : null
-    if (rewritesOpencodeSession && !isOpencodeV2(opencodeMajor) && !binaryOnPath('sqlite3')) {
+    const opencode = session.engine === 'opencode' ? opencodeLaunch : null
+    const opencodeMajor = native ? native.opencodeMajor : opencode ? await opencode.opencodeMajorVersion() : null
+    if (!current()) return changed()
+    if (rewritesOpencodeSession && opencode && !opencode.isOpencodeV2(opencodeMajor) && !binaryOnPath('sqlite3')) {
       return {
         ok: false,
         error: 'OPENCODE_SQLITE_MISSING',
@@ -140,39 +167,52 @@ export function createAgentRetargeter({
     const missing = workspaceMissing(session.cwd)
     if (missing) return missing
     // Mid-turn is the one state where restarting costs real work: the conversation comes back but
-    // whatever the engine was doing does not. The app is told which agents these are so the user can
-    // move them once they are done, rather than being asked to choose between losing a turn and losing
-    // the grid.
-    const capture = await captureTerminal(session.agentId, 100)
-    if (!capture) return { ok: false, error: 'TMUX_FAILED' }
-    if (!(await readScreen(session, capture))?.pane.idle) return { ok: false, error: 'AGENT_BUSY' }
+    // whatever the engine was doing does not. The engine's own turn state (hooks, transcript) says
+    // so, for every engine; the screen is not read. It used to be, to keep an unsent draft, and an
+    // engine whose placeholder colour moved (OpenCode 2) then read as holding one and refused every
+    // switch until its first chat. A draft is lost to the respawn; that is the person's call.
+    const inTurn = { ok: false as const, error: 'AGENT_BUSY', detail: 'This harness is in a turn. Stop it, then switch the model.' }
+    if (session.sessionId && sessionTurnOpen(session.sessionId)) return inTurn
+    // OpenCode 2 keeps its turns where that state does not read (`opencodeV2TurnOpen`), so its own
+    // record is asked. A store it cannot read is no evidence of a turn, as for an engine with none.
+    if (session.sessionId && opencode?.isOpencodeV2(opencodeMajor)) {
+      const open = await opencode.opencodeV2TurnOpen(native ? nativeOpencodeStore(native.environment) : opencodeDb, session.sessionId)
+      if (!current()) return changed()
+      if (open) return inTurn
+    }
     // Nothing may type into the pane while it is being replaced.
-    if (restartJobs.busy(session.agentId)) return { ok: false, error: 'AGENT_BUSY' }
+    if (purgeBusy(session.agentId) || restartJobs.busy(session.agentId)) return { ok: false, error: 'AGENT_BUSY' }
     const release = acquireTerminalControl(session.agentId)
     if (!release) return { ok: false, error: 'AGENT_BUSY' }
-    // The grid's env and argv, config directory written (keyed on the agent, so moving it between
-    // grids rewrites one directory) — or nothing at all for a move back to the engine's own login
-    // (clearing uses set-environment, which every supported tmux has). Built from the override the
-    // desktop just sent, never from the row: the row is what this call REPLACES. After the refusal
-    // guards, so a refused move leaves the live process's own configuration untouched.
-    const built = await relaunchOverrides(session, target)
-    if (!built.ok) {
-      release()
-      return { ok: false, error: built.error, detail: built.detail }
-    }
-
-    // ⚠️ THE AGENT MUST ADOPT THE NEW PROCESS, OR IT STOPS BEING THE SAME AGENT.
-    //
-    // Identity in this daemon is keyed on the PROCESS, not the pane: the reconciler matches an existing
-    // record to an observation by pid + start marker (`currentProcessKey`), and its same-pane fallback
-    // only applies to an agent with no bound engine session. A respawn changes the pid, so left to
-    // discovery the new process is an unmatched observation — `onDiscovered` mints a NEW agent id, and
-    // the record the user was looking at becomes a ghost that the app still lists, still counts as "on
-    // an older target", and still offers to move. Moving it respawns the same pane again. Holding the
-    // route shuts the reconciler out for the duration; rebinding below is what ends the swap.
+    // The old restore watcher stays cancelled after this control pin is released.
+    restartJobs.cancel(session.agentId)
+    current = captureAuthority()
     const routeKey = terminalRouteKey(pane)
-    agentReconciler.holdRoute(routeKey)
+    let releaseRoute: (() => void) | undefined
     try {
+      // The grid's env and argv, config directory written (keyed on the agent, so moving it between
+      // grids rewrites one directory) — or nothing at all for a move back to the engine's own login
+      // (clearing uses set-environment, which every supported tmux has). Built from the override the
+      // desktop just sent, never from the row: the row is what this call REPLACES. After the refusal
+      // guards, so a refused move leaves the live process's own configuration untouched.
+      const built = await relaunchOverrides(session, target, current, native)
+      if (!current()) return changed()
+      if (!built.ok) return { ok: false, error: built.error, detail: built.detail }
+      const dispatchCurrent = () => current() && native?.current() !== false && built.overrides.native?.current() !== false
+      const preparationChanged = () => current()
+        ? failed('NATIVE_LAUNCH_HELD', 'Waiting for fresh executable and hook evidence.') : changed()
+      if (!dispatchCurrent()) return preparationChanged()
+
+      // ⚠️ THE AGENT MUST ADOPT THE NEW PROCESS, OR IT STOPS BEING THE SAME AGENT.
+      //
+      // Identity in this daemon is keyed on the PROCESS, not the pane: the reconciler matches an existing
+      // record to an observation by pid + start marker (`currentProcessKey`), and its same-pane fallback
+      // only applies to an agent with no bound engine session. A respawn changes the pid, so left to
+      // discovery the new process is an unmatched observation — `onDiscovered` mints a NEW agent id, and
+      // the record the user was looking at becomes a ghost that the app still lists, still counts as "on
+      // an older target", and still offers to move. Moving it respawns the same pane again. Holding the
+      // route shuts the reconciler out for the duration; rebinding below is what ends the swap.
+      releaseRoute = agentReconciler.holdRoute(routeKey, null)
       // Back to the engine's own login. Nothing is built, because there is no launch to build. If this
       // agent was launched onto a grid at creation, `new-session -e` wrote the grid's variables into
       // the pane's SESSION environment, which a bare respawn-pane would inherit — clearing them first
@@ -200,15 +240,18 @@ export function createAgentRetargeter({
       // `Unrecognized flag: -m` and a dead pane), and ships its own writer: the service's
       // `session.switchModel`. `applyOpencodeSessionModel` picks per version, and on v2 every
       // failure refuses the move — with the live process still untouched.
-      if (rewritesOpencodeSession) {
-        const model = built.overrides.sessionModel ? parseOpencodeModelId(built.overrides.sessionModel) : null
+      if (rewritesOpencodeSession && opencode) {
+        const model = built.overrides.sessionModel ? opencode.parseOpencodeModelId(built.overrides.sessionModel) : null
         if (model) {
-          const written = await applyOpencodeSessionModel({
-            opencodeMajor, dbPath: opencodeDb, sessionId: session.sessionId, model, cwd: session.cwd ?? undefined,
+          nativeEffect = 'uncertain'
+          const written = await opencode.applyOpencodeSessionModel({
+            opencodeMajor, dbPath: native ? nativeOpencodeStore(native.environment) : opencodeDb, sessionId: session.sessionId, model, cwd: session.cwd ?? undefined,
             // (A model of opencode's own is looked for in its catalogue; a grid's provider lives in
             // the pane's own config, which the service never reads.)
             checkCatalog: !grid,
-          })
+          }, { current: dispatchCurrent, ...(native?.executable ? { executable: native.executable, environment: { ...built.overrides.env, ...native.environment } } : {}) })
+          nativeEffect = written.ok ? 'applied' : (written.effect ?? 'none')
+          if (!dispatchCurrent()) return preparationChanged()
           if (!written.ok) {
             console.warn(`[grid] retarget ${sid(session.agentId)} refused · ${written.code} · ${written.detail}`)
             return { ok: false, error: written.code, detail: written.detail }
@@ -216,29 +259,34 @@ export function createAgentRetargeter({
         }
       }
       if (!grid) {
-        const cleared = await tmuxBackend.clearEnv(pane, gridEnvVarNames(session.engine))
+        const cleared = await tmuxBackend.clearEnv(pane, gridEnvVarNames(session.engine), dispatchCurrent)
+        if (!dispatchCurrent()) return preparationChanged()
         if (cleared.state !== 'succeeded') {
-          return { ok: false, error: 'GRID_CLEAR_FAILED', detail: 'reason' in cleared ? cleared.reason : 'tmux would not clear the pane environment' }
+          return failed('GRID_CLEAR_FAILED', 'reason' in cleared ? cleared.reason : 'tmux would not clear the pane environment')
         }
       }
-      const retargetPermission = await downgradedPermission(session,
-        await bypassPermissionFor(session, () => liveBypassPermission(session)), 'retarget')
+      const bypassPermission = await bypassPermissionFor(session, () => liveBypassPermission(session))
+      if (!current()) return changed()
+      const retargetPermission = await downgradedPermission(session, bypassPermission, 'retarget', native)
+      if (retargetPermission.nativeHold || native?.current() === false) return failed('NATIVE_LAUNCH_HELD', retargetPermission.nativeHold ?? 'Waiting for fresh executable and hook evidence.')
+      if (!current()) return changed()
       const outcome = await restartAgent(
-        { engine: session.engine, sessionId: session.sessionId },
+        { engine: session.engine, sessionId: session.sessionId, ...(session.resumeOnly ? { resumeOnly: true as const } : {}) },
         retargetPermission.bypassPermission === true,
-        paneSwapDeps(session, pane, built.overrides, retargetPermission.permissionMode ?? null),
+        { ...paneSwapDeps(session, pane, built.overrides, retargetPermission.permissionMode ?? null, dispatchCurrent), isCurrent: dispatchCurrent },
       )
+      replacementStarted = outcome.ok
+      if (!current()) return changed()
       if (!outcome.ok) {
         console.warn(`[grid] retarget ${sid(session.agentId)} failed · ${outcome.detail}`)
-        return { ok: false, error: 'RESPAWN_FAILED', detail: outcome.detail }
+        return failed('RESPAWN_FAILED', outcome.detail)
       }
-      // Both are read off the new pid: its cached environment, and for the grid its command line too.
-      const [gateway, assignment] = await Promise.all([
-        probeGatewayRuntime(outcome.processIdentity),
-        // Its command line, which carries a Codex or pi grid's address and model: never its executable.
-        processArgs(outcome.processIdentity).then((args) => probeGridAssignment(outcome.processIdentity, session.engine, args)),
-      ])
-      registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind, assignment)
+      // Commit the new process now. Optional grid metadata follows outside the route hold.
+      const gateway = await probeGatewayRuntime(outcome.processIdentity)
+      if (!current()) return changed()
+      await clearPaneRemainOnExit(pane.paneId, current)
+      if (!current()) return changed()
+      registry.updateProcessIdentity(session.agentId, outcome.processIdentity, gateway.kind)
       // The launch that just worked is the one a restart or a post-reboot restore must repeat — and
       // what it decided about web search is what the app shows for this agent from now on. Null for
       // a move home: the block, and the status with it, leave the frame together.
@@ -248,11 +296,10 @@ export function createAgentRetargeter({
       // agent left on a grid for a week still knows where it came from.
       if (grid && remembered) registry.setSubscriptionModel(session.agentId, remembered)
       registry.setActive(session.agentId, true)
-      await clearPaneRemainOnExit(pane.paneId)
       const refreshed = registry.byAgent(session.agentId)
       // The app decides whether to still offer a move from what it is told here, so a silent success
       // would leave the banner up over an agent that had already been moved.
-      if (refreshed) announceSession(refreshed)
+      if (refreshed) { announceSession(refreshed); refreshGridAssignment(refreshed) }
       const how = outcome.resumed ? 'resumed' : 'fresh session'
       const record = built.overrides.gridLaunchRecord
       const where = record
@@ -263,9 +310,12 @@ export function createAgentRetargeter({
       // on its model through the `/models` picker here (MODEL_SELECT_FAILED); its store is rewritten
       // before the respawn instead, see above.
       return { ok: true }
+    } catch (error) {
+      if (nativeEffect !== 'none' || replacementStarted) return failed('RETARGET_FAILED', error instanceof Error ? error.message : String(error))
+      throw error
     } finally {
       release()
-      agentReconciler.releaseRoute(routeKey)
+      releaseRoute?.()
     }
   }
   return retargetAgent

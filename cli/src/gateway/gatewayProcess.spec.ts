@@ -44,6 +44,10 @@ function stubGateway() {
       publicKey: vi.fn(async () => 'cHVi'),
       signWelcome: vi.fn(async (_m: string, shareId: string) => { if (shareId === 'bad') throw new Error('not a welcome to an observer'); return 'c2ln' }),
     },
+    connectorVault: {
+      seal: vi.fn(async (plaintext: string) => { if (!plaintext) throw new Error('nothing to seal'); return { sealed: plaintext } }),
+      open: vi.fn(async (envelope: unknown) => ((envelope as { sealed?: string })?.sealed ? { plaintext: (envelope as { sealed: string }).sealed, complete: true } : null)),
+    },
   } satisfies GatewayOps
   const sessions: Array<{ send: ReturnType<typeof vi.fn>; sendBinary: ReturnType<typeof vi.fn>; detach: ReturnType<typeof vi.fn> }> = []
   const windowRelay = {
@@ -296,6 +300,19 @@ describe('the gateway\'s process, spoken to by the core', () => {
     await expect(key.signWelcome('m', 'bad', 'cA==', 'ZQ==')).rejects.toThrow('not a welcome to an observer')
     w.gateways[0].ops.observerKey.publicKey.mockRejectedValueOnce('odd')
     await expect(key.publicKey()).rejects.toThrow('odd')
+  })
+
+  it('seals and opens the account\'s connections with the identity it holds, and none while it is not running', async () => {
+    const w = wire()
+    const vault = w.link.ops.connectorVault
+    await expect(vault.seal('{}')).rejects.toThrow(/not running/)
+    expect(await vault.open({ sealed: '{}' })).toBeNull()
+    w.connect()
+    expect(await vault.seal('{"v":1}')).toEqual({ sealed: '{"v":1}' })
+    expect(await vault.open({ sealed: '{"v":1}' })).toEqual({ plaintext: '{"v":1}', complete: true })
+    expect(await vault.open({ other: 1 })).toBeNull()
+    await expect(vault.seal('')).rejects.toThrow('nothing to seal')
+    expect(await w.options().requests[GATEWAY_CALLS.connectorVault]({ op: 'nothing' }, { local: true, owner: true })).toEqual({ error: 'UNKNOWN_OP' })
   })
 
   it('opens a window\'s session on another machine, carries it both ways, and fails it as the pool did', async () => {

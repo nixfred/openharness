@@ -1,10 +1,10 @@
-// One device in full (Settings ▸ Your devices ▸ a row, the banner's Review, a notification click):
+// One device in full (a row in Machines, the banner's Review, a notification click):
 // its facts, its whole key code, how to compare it, and what can be done about it.
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:harness/settings/sections/account_device_detail.dart';
+import 'package:harness/widgets/account_device_detail.dart';
 import 'package:harness/shared/widgets/fingerprint_text.dart';
 import 'package:harness/state/account_devices.dart';
 import 'package:harness/theme/app_theme.dart' show AppColors;
@@ -73,7 +73,26 @@ void main() {
   testWidgets('a device that is not new offers no It’s mine', (tester) async {
     await open(tester, pub: 'p1', device: fakeDevice('p1'));
     expect(find.byKey(const Key('device-detail-mine')), findsNothing);
+    expect(find.byKey(const Key('device-detail-confirmed')), findsNothing);
   });
+
+  testWidgets(
+    'a device another of the person’s devices confirmed says where, in place of a banner',
+    (tester) async {
+      AccountDevice confirmedOn(String on) => AccountDevice(
+        pub: 'p1', label: 'iPad', kind: 'viewer', machineId: '', addedAt: DateTime(2026, 9, 1),
+        fingerprint: fp, self: false, confirmedOn: on,
+      );
+      await open(tester, pub: 'p1', device: confirmedOn('studio-mac'));
+      expect(find.text('Confirmed'), findsOneWidget);
+      expect(find.text('on studio-mac'), findsOneWidget);
+      expect(find.byKey(const Key('device-detail-mine')), findsNothing);
+      await tester.tap(find.byKey(const Key('device-detail-close')));
+      await tester.pumpAndSettle();
+      await open(tester, pub: 'p1', device: confirmedOn(''));
+      expect(find.text('on another device'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'an app: kind, added, last active, the code and how to check it on the app',

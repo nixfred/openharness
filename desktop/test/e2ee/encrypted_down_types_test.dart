@@ -56,11 +56,10 @@ void main() {
     core = namesIn(cli('lib/e2ee/core.ts'), 'ENCRYPTED_DOWN_TYPES');
     final frames = cli('lib/e2ee/applicationFrames.ts');
     final relay = cli('lib/relayFrames.ts');
-    // `MACHINE_REQUESTS` also spreads the owner commands in; those are read where they are declared.
+    // `MACHINE_REQUESTS` also spreads ⌘K's route commands in; those are read where they are declared.
     machineRequests = {
       ...namesIn(frames, 'MACHINE_REQUESTS'),
       ...namesIn(cli('lib/shellProtocol.ts'), 'SHELL_REQUESTS'),
-      ...namesIn(relay, 'OWNER_COMMAND_TYPES'),
       ...namesIn(relay, 'ROUTE_COMMAND_TYPES'),
     };
     unwrapped = {
@@ -70,7 +69,10 @@ void main() {
       ...namesIn(relay, 'PAIR_REQUESTS'),
       plateRequest(relay),
       ...namesIn(cli('sharing/protocol.ts'), 'SHARE_REQUEST_TYPES'),
-      ...namesIn(cli('teams/wire.ts'), 'TEAM_REQUEST_TYPES'),
+      ...namesIn(
+        cli('messages/wire.ts'),
+        'AGENT_MESSAGES_REQUEST_TYPES',
+      ),
       ...namesIn(cli('lib/viewerFrames.ts'), 'VIEWER_DOWN_TYPES'),
     };
   });
@@ -100,7 +102,7 @@ void main() {
       'VIEWER_DOWN_TYPES',
       'PAIR_REQUESTS',
       'PLATE_REQUEST',
-      'TEAM_REQUEST_TYPES',
+      'AGENT_MESSAGES_REQUEST_TYPES',
     });
     expect(body, contains('isEncryptedDownType(type)'));
   });

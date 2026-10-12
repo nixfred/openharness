@@ -36,7 +36,8 @@ export const SYSTEM_BOOT_SOURCES: BootSources = {
   platform: process.platform,
   linuxBootId: () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8'),
   // By its full path: a daemon started from a shell whose PATH lacks /usr/sbin still finds it.
-  macosBootId: () => execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', timeout: 2_000 }),
+  // Its complaint stays out of the terminal: refused in a sandbox, it printed "Operation not permitted" into `harness status`.
+  macosBootId: () => execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] }),
   bootTimeSec: () => Math.round(Date.now() / 1000 - uptime()),
 }
 
@@ -52,12 +53,16 @@ export function currentBootId(sources: BootSources = SYSTEM_BOOT_SOURCES): strin
       if (BOOT_UUID_RE.test(value)) return `macos:${value}`
     } catch { /* sysctl unavailable: the moment the boot began, below */ }
   }
-  return `time:${sources.bootTimeSec()}`
+  // A sandbox refuses even the uptime (Codex's: `uv_uptime returned EPERM`), and `harness status` crashed on it.
+  try { return `time:${sources.bootTimeSec()}` } catch { return UNKNOWN_BOOT }
 }
+
+/** The boot this process may not ask about: no evidence of a reboot, either way. */
+export const UNKNOWN_BOOT = 'time:unknown'
 
 /** Whether `current` is a later boot than the one `saved` was written in. Nothing saved is no reboot. */
 export function bootChanged(saved: string | null, current: string, sources: BootSources = SYSTEM_BOOT_SOURCES): boolean {
-  if (!saved) return false
+  if (!saved || saved === UNKNOWN_BOOT || current === UNKNOWN_BOOT) return false
   if (saved.startsWith('linux:')) return saved !== current
   // A macOS id that cannot be read now is no evidence of a reboot.
   if (saved.startsWith('macos:')) return !current.startsWith('time:') && saved !== current

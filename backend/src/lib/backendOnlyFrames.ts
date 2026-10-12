@@ -10,7 +10,7 @@
  * forged, each one makes every window on that computer re-read from this backend, device_keys_changed),
  * and `lib/adapterWs.ts` again for `devlog_append_result`, the answer to a machine's own log append.
  */
-export const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed', 'device_keys_changed', 'devlog_append_result'])
+export const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed', 'device_keys_changed', 'connectors_changed', 'devlog_append_result'])
 
 /** A type no client may send down: the backend's own `__` control frames and the named ones above. */
 export function isBackendOnlyDownType(type: unknown): boolean {

@@ -30,6 +30,18 @@ export const LAUNCHD_LABEL = 'ai.autonomous.harness.harnessd'
 export const SYSTEMD_UNIT = 'harnessd.service'
 
 /**
+ * Harness OS ships its own user unit for the daemon (os/root/usr/lib/systemd/user/harness-daemon.service):
+ * the screen pulls it in, and the OS's updater restarts it to change the CLI. It runs `harness start
+ * --foreground` with HARNESS_NO_MASTER=1, the core alone. A daemon this CLI spawned beside it (a sign-in
+ * stops the unit's core and starts one again) runs where the OS cannot reach it: the updater's restart
+ * then gives the unit a core that finds the port taken and fails until systemd gives up (2026-10-12).
+ * The unit is the package's: this CLI starts and stops it, and never writes, enables or removes it.
+ */
+export const OS_SYSTEMD_UNIT = 'harness-daemon.service'
+export const OS_UNIT_FILE = '/usr/lib/systemd/user/harness-daemon.service'
+const OS_OWNS_IT = `Harness OS runs harnessd under ${OS_SYSTEMD_UNIT}`
+
+/**
  * launchd starts the job at most once every this many seconds (its own default, written down so it
  * does not move under us); systemd waits this long before a restart. A master that dies after running
  * a while is started again at once; one that cannot start at all is tried every ten seconds by launchd,
@@ -310,10 +322,18 @@ function properties(text: string): Record<string, string> {
 
 /** harnessd's definition and registration on one platform. */
 export class PlatformService {
-  constructor(readonly platform: PlatformName, private readonly deps: PlatformDeps) {}
+  /** `os`: the unit is Harness OS's own (OS_SYSTEMD_UNIT), not the one `harness service install` writes. */
+  constructor(readonly platform: PlatformName, private readonly deps: PlatformDeps, readonly os = false) {
+    if (os && platform !== 'systemd') throw new Error('Harness OS runs harnessd under systemd')
+  }
+
+  private get unit(): string {
+    return this.os ? OS_SYSTEMD_UNIT : SYSTEMD_UNIT
+  }
 
   /** Where the definition lives. */
   get file(): string {
+    if (this.os) return OS_UNIT_FILE
     return this.platform === 'launchd'
       ? join(this.deps.home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`)
       : join(this.deps.configHome ?? join(this.deps.home, '.config'), 'systemd', 'user', SYSTEMD_UNIT)
@@ -321,7 +341,7 @@ export class PlatformService {
 
   /** What launchctl or systemctl is told to act on. */
   get target(): string {
-    return this.platform === 'launchd' ? `gui/${this.deps.uid}/${LAUNCHD_LABEL}` : SYSTEMD_UNIT
+    return this.platform === 'launchd' ? `gui/${this.deps.uid}/${LAUNCHD_LABEL}` : this.unit
   }
 
   render(definition: ServiceDefinition): string {
@@ -338,6 +358,9 @@ export class PlatformService {
    * or stop, and a test with its own data folder never acts on the person's real registration.
    */
   ownedBy(logFile: string): boolean {
+    // The OS's unit logs to the journal. It is only ever built for the data folder it runs
+    // (lib/platformDaemon.ts osDaemonUnit), so its file on disk is enough.
+    if (this.os) return this.installed()
     const content = this.deps.readFile(this.file)
     if (content === null) return false
     return this.platform === 'launchd'
@@ -347,11 +370,13 @@ export class PlatformService {
 
   /** The definition on disk is the one this install would write. */
   current(definition: ServiceDefinition): boolean {
+    if (this.os) return true // the package's, not this install's to compare
     return this.deps.readFile(this.file) === this.render(definition)
   }
 
   /** Write the definition when it differs from the one on disk; says whether it did. */
   write(definition: ServiceDefinition): boolean {
+    if (this.os) return false
     const content = this.render(definition)
     if (this.deps.readFile(this.file) === content) return false
     this.deps.writeFile(this.file, content)
@@ -374,7 +399,7 @@ export class PlatformService {
         lastExit: /^[ \t]*last exit code = (.+?)[ \t]*$/m.exec(result.stdout)?.[1] ?? null,
       }
     }
-    const args = ['--user', 'show', SYSTEMD_UNIT, '--property=LoadState,UnitFileState,ActiveState,SubState,MainPID,Result']
+    const args = ['--user', 'show', this.unit, '--property=LoadState,UnitFileState,ActiveState,SubState,MainPID,Result']
     const result = this.deps.run('systemctl', args)
     const linger = this.linger()
     if (result.error || result.status !== 0) {
@@ -385,7 +410,8 @@ export class PlatformService {
     return {
       ...base,
       linger,
-      registered: shown.UnitFileState === 'enabled',
+      // The OS pulls its unit in with the screen rather than enabling it: loaded is registered.
+      registered: this.os ? shown.LoadState === 'loaded' : shown.UnitFileState === 'enabled',
       pid: pid > 0 ? pid : null,
       state: shown.ActiveState ? `${shown.ActiveState}${shown.SubState ? ` (${shown.SubState})` : ''}` : null,
       failed: shown.ActiveState === 'failed',
@@ -409,6 +435,7 @@ export class PlatformService {
   /** Register the definition just written, which starts the master: launchd loads the job (RunAtLoad),
    *  systemd enables the unit and starts it. */
   register(): Outcome {
+    if (this.os) return { ok: false, detail: OS_OWNS_IT }
     if (this.platform === 'launchd') {
       // A job someone disabled stays disabled through a bootstrap; installing is asking for it.
       const enabled = this.launchctl('enable', this.target)
@@ -438,8 +465,10 @@ export class PlatformService {
       if (!reloaded.ok) return reloaded
     }
     // After five failed starts systemd refuses a start until it is told to forget them.
-    this.deps.run('systemctl', ['--user', 'reset-failed', SYSTEMD_UNIT])
-    return this.systemctl('start', SYSTEMD_UNIT)
+    this.deps.run('systemctl', ['--user', 'reset-failed', this.unit])
+    // The OS's unit holds its start until the daemon answers (ExecStartPost), which can outlast
+    // COMMAND_TIMEOUT_MS. Queued instead: the caller waits for the pid file, as for any master.
+    return this.os ? this.systemctl('start', '--no-block', this.unit) : this.systemctl('start', SYSTEMD_UNIT)
   }
 
   /**
@@ -458,15 +487,16 @@ export class PlatformService {
       if (this.launchctl('print', this.target).status !== 0) return { ok: true }
       return this.checked('launchctl', ['bootout', this.target])
     }
-    const main = Number(properties(this.deps.run('systemctl', ['--user', 'show', SYSTEMD_UNIT, '--property=MainPID']).stdout).MainPID)
+    const main = Number(properties(this.deps.run('systemctl', ['--user', 'show', this.unit, '--property=MainPID']).stdout).MainPID)
     if (!(main > 0)) return { ok: true }
     // --kill-who: systemd 252 renamed it --kill-whom and kept this spelling, which older ones know.
-    return this.systemctl('kill', '--kill-who=main', '--signal=SIGTERM', SYSTEMD_UNIT)
+    return this.systemctl('kill', '--kill-who=main', '--signal=SIGTERM', this.unit)
   }
 
   /** Stop the master, unregister it and remove the definition. A unit whose file is already gone is
    *  stopped all the same. */
   unregister(): Outcome {
+    if (this.os) return { ok: false, detail: OS_OWNS_IT }
     if (this.platform === 'launchd') {
       const stopped = this.stop()
       if (!stopped.ok) return stopped
@@ -490,6 +520,7 @@ export class PlatformService {
   /** Remove the definition and nothing else: an install that could not register leaves nothing half
    *  done, so `harness start` runs the daemon as it did before. */
   discard(): void {
+    if (this.os) return
     this.deps.removeFile(this.file)
     // Best effort: a manager that could not take the unit may not take a reload either.
     if (this.platform === 'systemd') this.deps.run('systemctl', ['--user', 'daemon-reload'])

@@ -11,6 +11,8 @@ import 'package:harness/screens/login_screen.dart';
 import 'package:harness/shared/theme/app_theme.dart' as grid;
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/login_fleet_map.dart';
+import 'package:harness/widgets/sign_in_step.dart';
+import 'package:flutter/services.dart';
 
 /// Wraps the screen in the same chrome `main.dart` gives it, at the app's
 /// minimum window size — 880×560 — because that is where a card gets cramped
@@ -81,11 +83,13 @@ class _WaitingCliLogin extends CliLogin {
 AppNotifier _notifier(AppStatus status, {CliLogin? cliLogin}) {
   grid.AppTheme.brightness.value = Brightness.light;
   return AppNotifier(
-    config: AppConfig.dev,
-    authSession: AuthSession(),
-    configStore: null,
-    cliLogin: cliLogin,
-  )..status = status;
+      config: AppConfig.dev,
+      authSession: AuthSession(),
+      configStore: null,
+      cliLogin: cliLogin,
+    )
+    ..status = status
+    ..signedIn = status == AppStatus.authenticated;
 }
 
 /// WCAG 2.x relative luminance and contrast — the same arithmetic as
@@ -104,179 +108,94 @@ double _contrast(Color a, Color b) {
 }
 
 void main() {
-  testWidgets('idle offers the action and says what it costs', (tester) async {
-    final app = _notifier(AppStatus.unauthenticated);
-    await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(find.text('Your agents, wherever they run'), findsOneWidget);
-    // Two ways in, named — not one Sign in that left the choice to the browser.
-    expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.text('Continue with Apple'), findsOneWidget);
-    expect(find.text('Sign in'), findsNothing);
-    // One size, both of them.
-    expect(
-      tester.getSize(find.byKey(const Key('login-continue-google'))),
-      tester.getSize(find.byKey(const Key('login-continue-apple'))),
-    );
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-    // The real mark, from the bundle — `AppIcons.cpu` used to stand here and
-    // appeared nowhere else in the app.
-    final logo = tester.widget<Image>(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Image &&
-            widget.image is AssetImage &&
-            (widget.image as AssetImage).assetName == 'assets/app_icon.png',
-      ),
-    );
-    expect((logo.image as AssetImage).assetName, 'assets/app_icon.png');
-    // The promise the screen exists to make, in words with no jargon in them.
-    expect(
-      find.textContaining(
-        'every machine you sign in to becomes part of one desk',
-      ),
-      findsOneWidget,
-    );
-    expect(find.textContaining('Sign in through your browser'), findsOneWidget);
-    expect(find.textContaining('End-to-end encrypted'), findsOneWidget);
-  });
-
-  testWidgets('the browser wait is a state of the button, not a new screen', (
-    tester,
-  ) async {
-    // `signingIn` is what `main.dart` routes on — see the note there.
-    final app = _notifier(AppStatus.bootstrapping)
-      ..signingIn = true
-      ..pendingAuthorizeUrl = 'https://auth.example/authorize';
-    await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    // Still the same card — the workspace example never leaves, so the frame can't jump.
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-    expect(find.text('Waiting for your browser'), findsOneWidget);
-    expect(find.text('Cancel'), findsOneWidget);
-    // The idle label is gone, so the two states cannot both be on screen.
-    expect(find.text('Continue with Google'), findsNothing);
-
-    final button = tester.widget<FilledButton>(find.byType(FilledButton));
-    expect(button.onPressed, isNull, reason: 'in-flight, so not pressable');
-  });
+  testWidgets(
+    'every native login uses the onboarding page without the old card',
+    (tester) async {
+      final app = _notifier(AppStatus.unauthenticated);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(_host(app));
+      expect(find.byType(SignInStep), findsOneWidget);
+      expect(find.text(signInStepTitle), findsOneWidget);
+      for (final label in [
+        'Continue with Google',
+        'Continue with Apple',
+        'Continue with email',
+      ]) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(find.byType(LoginFleetMap), findsNothing);
+      expect(find.text('Scan with your phone'), findsNothing);
+      expect(find.byKey(const Key('login-close-button')), findsNothing);
+    },
+  );
 
   testWidgets(
-    'each button signs in with its own account, and says so while it waits',
+    'provider choices stay in place through browser wait and cancellation',
     (tester) async {
+      final cli = _WaitingCliLogin();
+      final app = _notifier(AppStatus.unauthenticated, cliLogin: cli);
+      addTearDown(app.dispose);
+      await tester.pumpWidget(_host(app));
       for (final provider in SignInProvider.values) {
-        final cli = _WaitingCliLogin();
-        final app = _notifier(AppStatus.unauthenticated, cliLogin: cli);
-        await tester.pumpWidget(_host(app));
-        await tester.pump(const Duration(milliseconds: 100));
-
         await tester.tap(find.text('Continue with ${provider.label}'));
-        await tester.pump(const Duration(milliseconds: 100));
-        expect(cli.providers, [provider]);
-
-        // The pressed button is the one working; the other stays where it was,
-        // and neither can start a second sign-in.
-        final pressed = find.byKey(Key('login-continue-${provider.name}'));
-        expect(
-          find.descendant(of: pressed, matching: find.text('Signing in…')),
-          findsOneWidget,
-        );
-        final other = SignInProvider.values.firstWhere((p) => p != provider);
-        expect(find.text('Continue with ${other.label}'), findsOneWidget);
-        for (final button in tester.widgetList<FilledButton>(
-          find.byType(FilledButton),
-        )) {
-          expect(button.onPressed, isNull);
-        }
-
-        app.cancelLogin();
-        await tester.pump(const Duration(milliseconds: 100));
-        expect(find.text('Continue with ${provider.label}'), findsOneWidget);
-        await tester.pumpWidget(const SizedBox());
-        app.dispose();
+        await tester.pump();
+        expect(cli.providers.last, provider);
+        app.pendingAuthorizeUrl = 'https://auth.example/authorize';
+        app.notifyListeners();
+        await tester.pump();
+        expect(find.byType(SignInStep), findsOneWidget);
+        expect(find.text('Continue with Google'), findsOneWidget);
+        expect(find.text('Continue with Apple'), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        expect(app.signingIn, isFalse);
+        expect(find.byType(SignInStep), findsOneWidget);
       }
     },
   );
 
-  testWidgets('Try again goes back to the account that failed', (tester) async {
+  testWidgets('a fast failure stays on the shared page and can be retried', (
+    tester,
+  ) async {
     final cli = _FailingCliLogin();
     final app = _notifier(AppStatus.unauthenticated, cliLogin: cli);
-    await app.login(SignInProvider.apple);
+    addTearDown(app.dispose);
     await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    await tester.ensureVisible(find.text('Try again'));
-    await tester.tap(find.text('Try again'));
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('Continue with Apple'));
+    await tester.pump();
+    expect(find.byKey(const Key('sign-in-step-error')), findsOneWidget);
+    await tester.tap(find.text('Continue with Apple'));
+    await tester.pump();
     expect(cli.providers, [SignInProvider.apple, SignInProvider.apple]);
   });
 
-  testWidgets('a failure names itself and offers a way on', (tester) async {
-    final app = _notifier(
-      AppStatus.unauthenticated,
-      cliLogin: _FailingCliLogin(),
-    );
-    // Drive the notifier's real failure path rather than setting the field, so
-    // the test breaks if that path ever stops recording the error.
-    await app.login();
-    await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(app.lastError, isNotNull, reason: 'the fake CLI always fails');
-    expect(find.text('Could not sign in'), findsOneWidget);
-    expect(find.text('Try again'), findsOneWidget);
-  });
-
-  testWidgets('the login illustration stays visible without idle frames', (
-    tester,
-  ) async {
-    final app = _notifier(AppStatus.unauthenticated);
-    await tester.pumpWidget(_host(app));
-    await tester.pumpAndSettle();
-    expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-    expect(tester.binding.hasScheduledFrame, isFalse);
-    await tester.pump(const Duration(milliseconds: 3200));
-    expect(tester.binding.hasScheduledFrame, isFalse);
-  });
-
-  testWidgets('Reduce Motion still shows the picture, not a blank', (
-    tester,
-  ) async {
-    final app = _notifier(AppStatus.unauthenticated);
-    await tester.pumpWidget(_host(app, reduceMotion: true));
-    // The background animation is parked with reduced motion; the workspace
-    // example is static in both modes.
-    await tester.pumpAndSettle();
-
-    // The example stays visible without depending on animation.
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-    expect(find.text('Continue with Google'), findsOneWidget);
-  });
-
-  testWidgets('holds at the 880x560 minimum window without overflowing', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(880, 560);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-
-    final app = _notifier(AppStatus.unauthenticated);
-    await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(tester.takeException(), isNull);
-    expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.text('Continue with Google').hitTestable(), findsOneWidget);
-    expect(
-      tester
-          .getRect(find.widgetWithText(FilledButton, 'Continue with Apple'))
-          .bottom,
-      lessThan(tester.view.physicalSize.height),
-    );
-  });
+  testWidgets(
+    'the shared page fits the minimum window in both palettes without idle frames',
+    (tester) async {
+      tester.view.physicalSize = const Size(880, 560);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      for (final brightness in Brightness.values) {
+        final app = _notifier(AppStatus.unauthenticated);
+        grid.AppTheme.brightness.value = brightness;
+        await tester.pumpWidget(
+          _host(app, brightness: brightness, reduceMotion: true),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('Continue with Google').hitTestable(), findsOneWidget);
+        expect(find.text('Continue with email').hitTestable(), findsOneWidget);
+        final page = tester.widget<Material>(
+          find.byKey(const Key('sign-in-step')),
+        );
+        expect(page.color, grid.AppPalette.windowBg);
+        expect(tester.binding.hasScheduledFrame, isFalse);
+        await tester.pumpWidget(const SizedBox());
+        app.dispose();
+      }
+      grid.AppTheme.brightness.value = Brightness.light;
+    },
+  );
 
   test('the diagram\'s caption clears the body-text contrast floor', () {
     // Measured with tool/contrast.py, pinned here so a later "let\'s soften
@@ -312,40 +231,6 @@ void main() {
       );
     }
     grid.AppTheme.brightness.value = Brightness.light;
-  });
-
-  testWidgets('the card survives the whole sign-in, URL or no URL', (
-    tester,
-  ) async {
-    // The regression this guards: `RootShell` and this screen both used to key
-    // the wait off `pendingAuthorizeUrl`, which only exists for the MIDDLE of
-    // the flow. The CLI has to start before it can print a URL, and the URL is
-    // cleared again while the post-login restore runs — so the user's own
-    // screen was replaced by a bare full-screen spinner twice per sign-in.
-    final app = _notifier(AppStatus.bootstrapping)..signingIn = true;
-    await tester.pumpWidget(_host(app));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    // Just pressed: in flight, no URL yet.
-    expect(app.pendingAuthorizeUrl, isNull);
-    expect(find.text('Signing in…'), findsOneWidget);
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-
-    // The CLI hands one over; nothing about the screen should change.
-    app.pendingAuthorizeUrl = 'https://auth.example/authorize';
-    app.notifyListeners();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('Waiting for your browser'), findsOneWidget);
-    expect(find.byType(LoginFleetMap), findsOneWidget);
-
-    // Signed in: the URL goes while the restore is still running. The card has
-    // to hold until the shell is actually ready.
-    app.pendingAuthorizeUrl = null;
-    app.notifyListeners();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('Signing in…'), findsOneWidget);
-    expect(find.text('Copy link'), findsNothing);
-    expect(find.byType(LoginFleetMap), findsOneWidget);
   });
 
   test('every frame of the diagram carries a sealed packet', () {
@@ -384,21 +269,5 @@ void main() {
       greaterThan(0.6),
       reason: 'too few frames show plaintext and ciphertext side by side',
     );
-  });
-
-  testWidgets('dark is drawn deliberately, not inherited', (tester) async {
-    final app = _notifier(AppStatus.unauthenticated);
-    // After the notifier, which resets the global to light for the other tests.
-    grid.AppTheme.brightness.value = Brightness.dark;
-    addTearDown(() => grid.AppTheme.brightness.value = Brightness.light);
-    await tester.pumpWidget(_host(app, brightness: Brightness.dark));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-    // Law 5: the screen wears the dark panel, not a frozen light constant.
-    // `panelBg`, not `windowBg` — in light the two ends of that pair are pure
-    // white and the card would have nothing to sit on.
-    expect(scaffold.backgroundColor, const Color(0xFF141414));
-    expect(find.text('Continue with Google'), findsOneWidget);
   });
 }

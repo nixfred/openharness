@@ -216,6 +216,10 @@ void main() {
     expect(find.text('Your device list needs a review.'), findsOneWidget);
     expect(find.byKey(const Key('device-list-review')), findsOneWidget);
     expect(find.text('Link…'), findsOneWidget, reason: 'the password stays');
+    // The review is in Machines now, where the account's devices are listed.
+    await tester.tap(find.byKey(const Key('device-list-review')));
+    await tester.pump();
+    expect(app.machinesRequest, (devicePub: null, phones: false));
     await finish(tester);
   });
 
@@ -230,7 +234,7 @@ void main() {
       find.textContaining('Your device list needs a review.'),
       findsOneWidget,
     );
-    expect(find.text('Your devices'), findsOneWidget);
+    expect(find.text('Machines'), findsOneWidget);
     expect(find.text('Link…'), findsOneWidget, reason: 'the password stays');
     await finish(tester);
   });
@@ -249,7 +253,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('needs a review'), findsNothing);
-    expect(find.text('Your devices'), findsOneWidget);
+    expect(find.text('Machines'), findsOneWidget);
     await finish(tester);
   });
 

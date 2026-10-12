@@ -1,0 +1,265 @@
+/* /app on a computer: the phone app's code to scan, and both stores. Phones never see it — they are
+   redirected to their store — so it is laid out for a desk first and stacks on a narrow window. */
+
+.page {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 64px 32px;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+/* Two slow lights behind the glass: warm from the top left, a cooler one under the code. */
+.glow {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(38% 42% at 22% 28%, rgba(255, 159, 10, 0.20), transparent 70%),
+    radial-gradient(34% 40% at 78% 70%, rgba(232, 146, 124, 0.14), transparent 70%),
+    radial-gradient(30% 30% at 70% 20%, rgba(10, 132, 255, 0.08), transparent 70%);
+  filter: blur(20px);
+  animation: drift 18s ease-in-out infinite alternate;
+}
+
+@keyframes drift {
+  from { transform: translate3d(-2%, -1%, 0) scale(1); }
+  to { transform: translate3d(2%, 2%, 0) scale(1.06); }
+}
+
+.hero {
+  position: relative;
+  width: min(1080px, 100%);
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  align-items: center;
+  gap: 72px;
+  animation: rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 22px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand img {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.eyebrow {
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 250, 240, 0.04);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(40px, 5.4vw, 64px);
+  line-height: 1.04;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.accent {
+  display: block;
+  background: linear-gradient(100deg, var(--accent-primary) 0%, var(--accent-warm) 60%, var(--accent-gold) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.lede {
+  margin: 0;
+  max-width: 30rem;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1.6;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.store {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 22px 0 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: #000;
+  color: #fff;
+  text-decoration: none;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.store:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 250, 240, 0.32);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.store:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+.storeMark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.storeText {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.storeKicker {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+.storeName {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The glass card the code sits in. */
+.scan {
+  justify-self: end;
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 32px 28px;
+  border: 1px solid rgba(255, 250, 240, 0.14);
+  border-radius: 32px;
+  background: linear-gradient(160deg, rgba(255, 250, 240, 0.09), rgba(255, 250, 240, 0.02));
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 30px 80px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+
+.qr {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  margin-bottom: 14px;
+  padding: 18px;
+  border-radius: 22px;
+  background: #fff;
+  color: #141413;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+.qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* High error correction leaves room for the mark; a white ring keeps its edge off the modules. */
+.qrMark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18%;
+  height: 18%;
+  transform: translate(-50%, -50%);
+  border-radius: 22%;
+  box-shadow: 0 0 0 5px #fff;
+}
+
+.scanTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.scanNote {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 880px) {
+  .page {
+    padding: 48px 16px;
+  }
+
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 40px;
+  }
+
+  .scan {
+    justify-self: start;
+    width: min(340px, 100%);
+  }
+}
+
+@media (max-width: 480px) {
+  .lede {
+    font-size: 16px;
+  }
+
+  .store {
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow,
+  .hero {
+    animation: none;
+  }
+
+  .store {
+    transition: none;
+  }
+}

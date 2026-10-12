@@ -28,6 +28,8 @@ import 'widgets/environment_setup_screen.dart';
 import 'widgets/export_logs_dialog.dart';
 import 'widgets/flash_firmware_dialog.dart';
 import 'widgets/linux_menu_bar.dart';
+import 'widgets/setup_tour.dart';
+import 'widgets/sign_in_step.dart';
 import 'core/startup.dart';
 import 'logging/app_log.dart';
 import 'logging/install.dart';
@@ -282,6 +284,10 @@ class _RootShellState extends ConsumerState<RootShell>
         await _menuDialog(() => showShortcutsSheet(context));
       case 'keyboardPractice':
         await _menuDialog(() => showKeyboardPractice(context));
+      case 'welcomeTour':
+        // Over the setup tour it would be the same slides twice.
+        if (ref.read(appStateProvider).setupTourShowing) return;
+        await _menuDialog(() => showWelcomeTour(context));
       case 'showAbout':
         // macOS shows AppKit's standard About panel; the Linux bar's row lands
         // here, with the version the Linux release stamps beside the binary.
@@ -362,6 +368,14 @@ class _RootShellState extends ConsumerState<RootShell>
                   )
                 : widget.authenticatedScreen(app);
         }
+        // A fresh computer's unattended install runs under the welcome tour,
+        // whatever the status says meanwhile, until the tour opens Harness.
+        final touring = app.setupTourShowing;
+        if (touring) screen = SetupTourScreen(app: app);
+        // Every signed-out desktop launch requires an account before opening
+        // the workspace, including computers that already have Harness.
+        final signInStep = !touring && app.signInStepShowing;
+        if (signInStep) screen = SignInStepScreen(app: app);
         // Preserve the fragment pin while dialogs navigate; an OAuth callback can restore it later.
         if (kIsWeb) _sharedLocation ??= SharedAgentLocation.parse(Uri.base);
         final shared = _sharedLocation;
@@ -372,9 +386,9 @@ class _RootShellState extends ConsumerState<RootShell>
         // clearance (the rail's head). Every other screen fills the window
         // with a centred card, so the strip goes over it here, once, instead
         // of inside each of them.
-        final framed = app.status == AppStatus.authenticated
-            ? screen
-            : FullWindowScreen(child: screen);
+        final home =
+            app.status == AppStatus.authenticated && !touring && !signInStep;
+        final framed = home ? screen : FullWindowScreen(child: screen);
         // The band takes a row of its own rather than floating over one. As an
         // overlay it landed on the rail's head — covering the wordmark and the
         // three buttons beside it, which is the one strip of this window that
@@ -387,21 +401,19 @@ class _RootShellState extends ConsumerState<RootShell>
             // them in its native menu bar, and this renders nothing there).
             LinuxMenuBar(onAction: runAppMenuAction),
             if (app.hasAvailableUpdate &&
+                !touring &&
+                !signInStep &&
                 app.status != AppStatus.bootstrapping &&
                 app.status != AppStatus.checkingEnvironment &&
                 app.status != AppStatus.preparingEnvironment)
               UpdateNotice(notifier: app),
-            if (app.visibleDeviceRemovals.isNotEmpty &&
-                app.status == AppStatus.authenticated)
+            if (app.visibleDeviceRemovals.isNotEmpty && home)
               DeviceRemovalNoticeBand(notifier: app),
-            if (app.departedDevices.isNotEmpty &&
-                app.status == AppStatus.authenticated)
+            if (app.departedDevices.isNotEmpty && home)
               DeviceDepartedNoticeBand(notifier: app),
-            if (app.newDevices.isNotEmpty &&
-                app.status == AppStatus.authenticated)
+            if (app.newDevices.isNotEmpty && home)
               NewDeviceNotice(notifier: app),
-            if (app.deviceConflict != null &&
-                app.status == AppStatus.authenticated)
+            if (app.deviceConflict != null && home)
               DeviceConflictNoticeBand(notifier: app),
             Expanded(child: framed),
           ],

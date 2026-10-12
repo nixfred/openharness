@@ -23,6 +23,7 @@ import 'package:harness/shortcuts/app_keymap.dart';
 import 'package:harness/shortcuts/keymap_host.dart';
 import 'package:harness/state/app_state.dart';
 import 'package:harness/widgets/machines_panel.dart';
+import 'package:harness/widgets/sign_in_step.dart';
 
 import 'keymap_host_test.dart' show MemoryKeymap, key;
 import 'support/password_cli.dart';
@@ -859,16 +860,18 @@ void main() {
   );
 
   testWidgets(
-    'guest sign-in can be cancelled and successful sign-in returns to machines',
+    'required sign-in stays open until an account arrives, then returns to machines',
     (tester) async {
       app.signedIn = false;
       await mount(tester);
       await tap(tester, find.text('Sign in'));
       expect(find.byKey(const ValueKey('machines-panel')), findsNothing);
-      await tap(tester, find.byTooltip('Close'));
-      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.byType(SignInStep), findsOneWidget);
+      expect(find.byTooltip('Close'), findsNothing);
+      await key(tester, LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byType(SignInStep), findsOneWidget);
       expect(app.refreshes, 0);
-      await tap(tester, find.text('Sign in'));
       app.signedIn = true;
       app.notifyListeners();
       await tester.pumpAndSettle();

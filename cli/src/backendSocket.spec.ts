@@ -1,3 +1,4 @@
+import { USAGE_FALLBACKS } from './core/api.js'
 import * as gitPullRequest from './lib/gitPullRequest.js'
 import * as sessionGitPullRequest from './lib/sessionGitPullRequest.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,7 +10,8 @@ import { BackendSocket } from './backendSocket.js'
 import { dispatchDown, gatewayOf, relaySocket, upstreamOf } from './testing/relaySocket.js'
 import { AGENT_OPENED_THROTTLE_MS } from './core/agents/update.js'
 import { deviceAgentListItem, deviceAgentRow } from './core/agents/list.js'
-import { grokHistoryPage } from './core/transcripts/history.js'
+import { wholeHistoryPage } from './core/transcripts/history.js'
+import { grokMessagesToEvents } from './engines/grok/normalizer.js'
 import { bindAgentList, bindAgentUpdate, bindCancelRequest, bindLaunchRequests, bindCloseRequests, bindMessageRequest, bindPurgeRequest, bindQuestionResponse, bindStopRequest, bindTerminalRequests } from './testing/socketCore.js'
 import { emptyPorts, MODELS_FALLBACKS, MODELS_OFF, MONITOR_FALLBACKS, type ModelsPort } from './core/api.js'
 import { createServiceHost, ServiceUnavailableError } from './core/serviceHost.js'
@@ -36,7 +38,7 @@ import * as scmProjects from './scm/scmProjects.js'
 import * as machineResources from './lib/machineResources.js'
 import * as projectFolder from './lib/projectFolder.js'
 import * as projectPreview from './lib/projectPreview.js'
-import * as opencodeVersion from './engines/opencode/version.js'
+import * as opencodeVersion from './engines/launchControl.js'
 import { randomUUID } from 'node:crypto'
 import { fakeGridAnswers, installFakeGrid, type FakeGrid } from './lib/__fixtures__/fakeGrid.js'
 import { clearGridMcpUrlCache } from './lib/gridMcpUrl.js'
@@ -396,30 +398,30 @@ describe('agent_update opened: one "last used" for every app', () => {
 })
 
 describe('viewer forwarding authentication', () => {
-  it('routes a sealed command_bar to the command bar with its connection, who asked, and nothing in the clear', async () => {
+  it('routes a sealed service request with its connection, who asked, and nothing in the clear', async () => {
     const socket = relaySocket('token')
     const routed: Array<{ type: string; asker: unknown }> = []
-    socket.serviceRouter = (type, _payload, asker, reply) => { routed.push({ type, asker }); reply({ selectedId: null }); return true }
+    socket.serviceRouter = (type, _payload, asker, reply) => { routed.push({ type, asker }); reply({ memories: [] }); return true }
     const ownerCommands = vi.spyOn(socket.ownerCommands, 'request')
     vi.spyOn(gatewayOf(socket).e2ee, 'hasSession').mockReturnValue(true)
     const role = vi.spyOn(gatewayOf(socket).e2ee, 'sessionRole').mockReturnValue('web')
-    const clear = { type: 'command_bar', payload: { requestId: 'one', request: { prompt: 'fixture', candidates: [] } } }
+    const clear = { type: 'memory_snapshot', payload: { requestId: 'one' } }
     vi.spyOn(gatewayOf(socket).e2ee, 'unwrapDown').mockReturnValue(clear)
-    const sealedReply = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({ type: 'command_bar_result', payload: { __e2e: 'sealed' } })
+    const sealedReply = vi.spyOn(gatewayOf(socket).e2ee, 'wrapRpcReply').mockReturnValue({ type: 'memory_snapshot_result', payload: { __e2e: 'sealed' } })
     await dispatchDown(socket, clear, 'remote')
     expect(routed).toEqual([])
-    const sealed = { type: 'command_bar', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'fixture' } } }
-    // A device's session asks as no owner: the command bar refuses it (services/commandBar.ts).
+    const sealed = { type: 'memory_snapshot', payload: { __e2e: { v: 1, k: 'p', n: 1, ct: 'fixture' } } }
+    // A device's session asks as no owner: the service refuses it (services/memory.ts).
     role.mockReturnValue('device')
     await dispatchDown(socket, sealed, 'remote')
     role.mockReturnValue('web')
     await dispatchDown(socket, sealed, 'remote')
     expect(routed).toEqual([
-      { type: 'command_bar', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
-      { type: 'command_bar', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: false, connection: 'remote', requestId: 'one' } },
+      { type: 'memory_snapshot', asker: { local: false, owner: true, connection: 'remote', requestId: 'one' } },
     ])
     expect(ownerCommands).not.toHaveBeenCalled()
-    expect(sealedReply).toHaveBeenCalledWith('remote', 'command_bar_result', 'one', { selectedId: null })
+    expect(sealedReply).toHaveBeenCalledWith('remote', 'memory_snapshot_result', 'one', { memories: [] })
     await socket.stop()
   })
 
@@ -734,6 +736,22 @@ describe('BackendSocket outbound queue', () => {
     expect((sent[1].frame as { type?: string }).type).toBe('commander_event')
     expect(sent[1]).toMatchObject({ webEligible: false, commanderEligible: true })
 
+    await socket.stop()
+  })
+
+  it('keeps a processing card\'s update for the devices tee and off the relay', async () => {
+    const socket = relaySocket('token')
+    const tee = vi.fn()
+    socket.onOutboundCommander = tee
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    const relayed = vi.fn()
+    vi.spyOn(socket as unknown as { toGateway(what: string, call: (g: unknown) => void): void }, 'toGateway')
+      .mockImplementation((_what, call) => call({ commander: relayed }))
+    socket.sendCommander({ type: 'commander_event', agentId: 's1', dbSessionId: 's1', payload: { kind: 'processing', text: 'Working', update: 'Reading the spec' } })
+    expect((tee.mock.calls[0][0] as { payload: Record<string, unknown> }).payload.update).toBe('Reading the spec')
+    expect((relayed.mock.calls[0][0] as { payload: Record<string, unknown> }).payload).toEqual({ kind: 'processing', text: 'Working' })
     await socket.stop()
   })
 
@@ -1286,7 +1304,7 @@ describe('BackendSocket outbound queue', () => {
         body: { seven_day: { utilization: 42 } },
       },
     ]
-    serveOn(socket, (host) => host.serve('usage', (core) => startUsage(core, { read: async () => readings }), fakeCore(), USAGE_REQUESTS))
+    serveOn(socket, (host) => host.start('usage', (core, ports) => { ports.usage = { read: async () => ({}), stop: () => {} }; return startUsage(core, { read: async () => readings }) }, fakeCore(), USAGE_FALLBACKS, USAGE_REQUESTS))
     socket.connect()
     const ws = wsMock.instances[0]
     ws.open()
@@ -2230,6 +2248,18 @@ describe('BackendSocket outbound queue', () => {
         type: 'agent_create_status_result', payload: { requestId: 'missing', creationId, state: 'missing' },
       }))
       socket.handleLocalFrame('local:missing-receipt', {
+        type: 'agent_create_cancel', payload: { requestId: 'cancel', creationId },
+      })
+      await vi.waitFor(() => expect(frames).toContainEqual({
+        type: 'agent_create_cancel_result', payload: { requestId: 'cancel', creationId, state: 'cancelled' },
+      }))
+      socket.handleLocalFrame('local:missing-receipt', {
+        type: 'agent_create', payload: { requestId: 'late', creationId, engine: 'claude', cwd: '/tmp/work' },
+      })
+      await vi.waitFor(() => expect(frames).toContainEqual({
+        type: 'agent_create_result', payload: { requestId: 'late', creationId, state: 'cancelled' },
+      }))
+      socket.handleLocalFrame('local:missing-receipt', {
         type: 'agent_create', payload: { requestId: 'invalid', creationId: '../bad', engine: 'claude', cwd: '/tmp/work' },
       })
       await vi.waitFor(() => expect(frames).toContainEqual(expect.objectContaining({
@@ -2571,6 +2601,25 @@ describe('desk_changed relay', () => {
     await new Promise((r) => setTimeout(r, 20))
     expect(frames.filter((f) => f.type === 'desk_changed')).toHaveLength(1)
     await socket.unregisterLocalClient('local:desk')
+    await socket.stop()
+  })
+
+  it('hands the backend\'s connectors_changed on, for the connectors service to merge, and only the backend\'s', async () => {
+    const socket = relaySocket('token')
+    const heard: unknown[] = []
+    socket.onAccountNotice = (notice) => { heard.push(notice) }
+    socket.registerLocalClient('local:vault', { sendFrame: () => true, sendBinary: () => true })
+    socket.connect()
+    const ws = wsMock.instances[0]
+    ws.open()
+    ws.message({ t: 'down', connId: '', frame: { type: 'connectors_changed', payload: { revision: 6 } } })
+    await vi.waitFor(() => expect(heard).toContainEqual({ type: 'connectors_changed', revision: 6 }))
+    // A client relayed with its own connId is not the backend.
+    ws.message({ t: 'down', connId: 'web-1', frame: { type: 'connectors_changed', payload: { revision: 99 } } })
+    socket.handleLocalFrame('local:vault', { type: 'connectors_changed', payload: { revision: 98 } })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(heard).toHaveLength(1)
+    await socket.unregisterLocalClient('local:vault')
     await socket.stop()
   })
 
@@ -3020,8 +3069,8 @@ describe('Grok session_get history', () => {
   ).split('\n').filter(Boolean)
 
   it('replays the real transcript for both legacy and web-paginated requests', () => {
-    const full = grokHistoryPage(fixture, false)
-    const paginated = grokHistoryPage(fixture, true)
+    const full = wholeHistoryPage(grokMessagesToEvents(fixture), false)
+    const paginated = wholeHistoryPage(grokMessagesToEvents(fixture), true)
 
     expect(full.events).toEqual(paginated.events)
     expect(full.events[0]).toMatchObject({ type: 'user_message' })
@@ -3240,7 +3289,7 @@ describe('agent_create with a prompt, a name and a named agent', () => {
 
   it('passes the named agent through for opencode, and null when none was given', async () => {
     // v1 — pinned, so the answer does not depend on the OpenCode installed where the suite runs.
-    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockReturnValue(1)
+    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockResolvedValue(1)
     const { seen, reply } = await create({ agent: 'harness-compute', name: 'Local model' })
     expect(seen).toEqual([expect.objectContaining({ engine: 'opencode', agent: 'harness-compute', name: 'Local model', prompt: null })])
     expect(reply).toMatchObject({ agent: expect.objectContaining({ id: 'named-1' }) })
@@ -3249,7 +3298,7 @@ describe('agent_create with a prompt, a name and a named agent', () => {
   })
 
   it('refuses a named agent for opencode v2, whose TUI exits 1 on --agent, before any pane exists', async () => {
-    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockReturnValue(2)
+    vi.spyOn(opencodeVersion, 'opencodeMajorVersion').mockResolvedValue(2)
     const { seen, reply } = await create({ agent: 'harness-compute' })
     expect(reply).toMatchObject({ error: 'AGENT_UNSUPPORTED', detail: expect.stringContaining('opencode') })
     expect(seen).toHaveLength(0)
@@ -3316,10 +3365,10 @@ describe('grid_models_list says whether this machine has a grid CLI', () => {
 describe('a move onto a grid model asks models where it goes', () => {
   /** A daemon whose models is a stub, asked over a local frame. Where the move goes, grid's set-up before
    *  it and the prewarm after it are the models service's (services/models.spec.ts). */
-  function daemon(moveTarget: ModelsPort['moveTarget'] | null) {
+  function daemon(moveTarget: ModelsPort['moveTarget'] | null, apiTarget: ModelsPort['apiTarget'] = () => Promise.reject(new Error('no APIs'))) {
     const socket = relaySocket('token')
     const moved = vi.fn()
-    if (moveTarget) socket.models = () => ({ annotation: () => null, lists: () => Promise.reject(new Error('no lists')), moveTarget, moved })
+    if (moveTarget) socket.models = () => ({ annotation: () => null, lists: () => Promise.reject(new Error('no lists')), moveTarget, moved, apiTarget })
     const retargeted = vi.fn(async (_request: { agentId: string; grid: unknown }) => ({ ok: true as const }))
     socket.onRetargetAgent = retargeted
     const frames: Array<Record<string, unknown>> = []
@@ -3365,6 +3414,33 @@ describe('a move onto a grid model asks models where it goes', () => {
       const d = daemon(down)
       expect(await d.ask('agent_retarget', { agentId: 'a1', gridModel: 'Own-Model' }))
         .toMatchObject({ error: 'GRID_UNAVAILABLE', detail: 'Models are unavailable. Try again.' })
+      expect(d.retargeted).not.toHaveBeenCalled()
+      await d.done()
+    }
+  })
+
+  const API = { networkId: 'api:router', networkName: 'Router', baseUrl: 'https://router.fixture.invalid/v1', apiKey: 'fixture-key', model: 'vendor/model-a' }
+
+  it("a move onto a saved API's model: the launch models read, its endpoint recognised from then on, no grid started", async () => {
+    const apiTarget = vi.fn(async () => ({ target: API, apiBase: API.baseUrl }))
+    const d = daemon(vi.fn(), apiTarget)
+    expect(await d.ask('agent_retarget', { agentId: 'a1', apiConnection: 'router', apiModel: ' vendor/model-a ' })).toMatchObject({ retargeted: true })
+    expect(apiTarget).toHaveBeenCalledWith({ connectionId: 'router', model: 'vendor/model-a' })
+    expect(d.retargeted).toHaveBeenCalledWith({ agentId: 'a1', grid: API })
+    // Target resolution and endpoint recognition belong to models; core forwards the launch.
+    expect(d.moved).not.toHaveBeenCalled()
+    await d.done()
+  })
+
+  it('a saved API that cannot be used says why in models\' words; models down or off says so; nothing moves', async () => {
+    const refused = daemon(vi.fn(), async () => ({ detail: 'This API is not saved. Add it in Models → APIs.' }))
+    expect(await refused.ask('agent_retarget', { agentId: 'a1', apiConnection: 'gone', apiModel: 'vendor/model-a' }))
+      .toMatchObject({ error: 'API_UNAVAILABLE', detail: 'This API is not saved. Add it in Models → APIs.' })
+    expect(refused.retargeted).not.toHaveBeenCalled()
+    await refused.done()
+    for (const d of [daemon(vi.fn(), async () => { throw new Error('models is down') }), daemon(null)]) {
+      expect(await d.ask('agent_retarget', { agentId: 'a1', apiConnection: 'router', apiModel: 'vendor/model-a' }))
+        .toMatchObject({ error: 'API_UNAVAILABLE', detail: 'The models service is not running, so this API cannot be used now. Try again in a moment.' })
       expect(d.retargeted).not.toHaveBeenCalled()
       await d.done()
     }
@@ -3445,7 +3521,7 @@ describe('the connect burst with no network', () => {
     bindAgentList(socket)
     // A grid name that never comes, as a grid read that never lands; and a vendor that never answers, asked
     // of the usage service beside models.
-    serveModels(socket, { account: { privateGridName: () => new Promise<null>(() => {}) } }).serve('usage', (core) => startUsage(core, { read: () => new Promise(() => {}) }), fakeCore(), USAGE_REQUESTS)
+    serveModels(socket, { account: { privateGridName: () => new Promise<null>(() => {}) } }).start('usage', (core, ports) => { ports.usage = { read: async () => ({}), stop: () => {} }; return startUsage(core, { read: () => new Promise(() => {}) }) }, fakeCore(), USAGE_FALLBACKS, USAGE_REQUESTS)
     const frames: Array<Record<string, unknown>> = []
     socket.registerLocalClient('local:burst', { sendFrame: (frame) => { frames.push(frame); return true }, sendBinary: () => true })
 
@@ -4018,6 +4094,6 @@ describe('relay down-frames are default-deny: sealed, or the backend\'s own', ()
     await dispatch({ type: 'message', payload: { content: 'hi', agentId: 'a1' } }, 'local:app', 'local')
     expect(onMessage).toHaveBeenCalledWith('a1', 'hi')
     await dispatch({ type: 'message', payload: { content: 'task in A', agentId: 'a1', tabId: 'swarm-a' } }, 'local:app', 'local')
-    expect(onMessage).toHaveBeenLastCalledWith('a1', 'task in A', undefined, 'swarm-a')
+    expect(onMessage).toHaveBeenLastCalledWith('a1', 'task in A')
   })
 })

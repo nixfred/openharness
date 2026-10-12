@@ -60,6 +60,14 @@ export interface DevLogDeparted {
 /** How many departed keys are kept; the oldest goes first. */
 export const DEVLOG_DEPARTED = 32
 
+/** Another of the person's trusted devices said "It's mine" for a key that was new here (deviceAck.ts),
+ *  so it is not New here any more: which device, what it was called then, and when this machine read it. */
+export interface DevLogConfirmed {
+  by: string
+  label: string
+  at: number
+}
+
 export interface DevLogFile {
   state: DevLogState | null
   recent: DevLogEntry[]
@@ -97,6 +105,9 @@ export interface DevLogFile {
   joining?: boolean
   /** New keys removed before anyone looked (oldest first, at most DEVLOG_DEPARTED). */
   departed?: DevLogDeparted[]
+  /** New keys another trusted device confirmed, by pub: "Confirmed on <label>" where a banner would have
+   *  been. Only ever the reason a key left `pending`; it trusts nothing. */
+  confirmed?: Record<string, DevLogConfirmed>
 }
 
 const empty = (): DevLogFile => ({ state: null, recent: [], frozen: null, notifiedUpTo: 0 })
@@ -118,6 +129,18 @@ const isDeparted = (v: unknown): v is DevLogDeparted => {
     && typeof d.machineId === 'string' && typeof d.fingerprint === 'string' && typeof d.addedAt === 'number'
     && typeof d.removedAt === 'number' && typeof d.removedBy === 'string' && typeof d.removedByLabel === 'string'
     && typeof d.selfRemoved === 'boolean'
+}
+
+const isConfirmed = (v: unknown): v is DevLogConfirmed => {
+  if (!v || typeof v !== 'object') return false
+  const c = v as Record<string, unknown>
+  return typeof c.by === 'string' && typeof c.label === 'string' && typeof c.at === 'number'
+}
+
+/** The confirmed marks of a stored file, each one checked; anything else is dropped. */
+function parseConfirmed(raw: unknown): { confirmed?: Record<string, DevLogConfirmed> } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  return { confirmed: Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter((e): e is [string, DevLogConfirmed] => isConfirmed(e[1]))) }
 }
 
 /** How many other accounts' files are kept (devlog.archive.json); the oldest goes first. */
@@ -147,6 +170,7 @@ function parseFile(value: unknown): DevLogFile {
     ...(raw.joining === true ? { joining: true } : {}),
     ...(isConflict(raw.conflict) ? { conflict: raw.conflict } : {}),
     ...(Array.isArray(raw.departed) ? { departed: raw.departed.filter(isDeparted) } : {}),
+    ...parseConfirmed(raw.confirmed),
   }
 }
 

@@ -2,6 +2,8 @@
 // handoff provider's dependencies (cli.ts passes the real functions, specs pass fakes). Discovery is
 // read-only: it never binds anything, and it answers only when the answer is certain — a Change agent
 // must not guess whose conversation it hands over. Consumed by lib/agentHandoff.ts.
+import { handoffSessionFact, HandoffError } from './handoffAuthority.js'
+import { sessionStoreOf } from '../engines/sessionStoreContracts.js'
 import type { AgentEngine } from '../engines/types.js'
 import type { HandoffDeps } from './agentHandoff.js'
 import { isSubagentTranscript } from './subagentTranscript.js'
@@ -12,12 +14,16 @@ import type { TurnSource } from './sessionSearch/sessionTurns.js'
 import { SQLITE_BACKED_ENGINES } from './sqliteRead.js'
 
 export interface DiscoveryDeps {
-  /** Engines other than Claude: the born, unique session of a process (sessionRepair findLiveSession). */
+  /** Engines whose process keeps no record of its session: the born, unique session of a process (sessionRepair
+   *  findLiveSession). */
   findLiveSession(engine: AgentEngine, cwd: string, startedAtMs: number, opts: { bornOnly: true; pid: number; codexHome?: string }): Promise<RepairedSession | null>
-  /** Claude: the session its per-process record names, or null. Never a scan of the project folder. */
-  claudeProcessSession(pid: number, cwd: string, startedAtMs: number): Promise<RepairedSession | null>
+  /** An engine whose process keeps a record of its session (its session store's `live.record`, Claude Code's): the
+   *  session it names, or null. Never a scan of its store. */
+  processSession(engine: AgentEngine, pid: number, cwd: string, startedAtMs: number): Promise<RepairedSession | null>
   /** The agent has a live pane (not a stopped copy). */
   isLive(agentId: string): boolean
+  current?(agentId: string): RegisteredSession | null | undefined
+  observed?(session: RegisteredSession, found: TurnSource | null): void
   /** Another agent, running or stopped, already holds this session. Must answer true when it cannot tell. */
   ownedByOther(sessionId: string, agentId: string): boolean
   isRecentlyDeleted(sessionId: string): boolean
@@ -28,8 +34,8 @@ const DATABASE_ENGINES: ReadonlySet<string> = new Set(SQLITE_BACKED_ENGINES)
 
 /**
  * `HandoffDeps.discoverSession`: the session a live, unbound, non-fork agent of a file engine runs, found by its
- * process (pid and start marker) — Claude only through its per-process record, the others only a session born to
- * that process — or null. Null too when the session is a subagent's, was just deleted, or another agent holds it.
+ * process (pid and start marker) — an engine that keeps a per-process record only through it, the others only a
+ * session born to that process — or null. Null too when the session is a subagent's, was just deleted, or another agent holds it.
  * One search per agent at a time: a second request while one runs shares it.
  */
 export function sessionDiscovery(deps: DiscoveryDeps): (session: RegisteredSession) => Promise<TurnSource | null> {
@@ -37,14 +43,21 @@ export function sessionDiscovery(deps: DiscoveryDeps): (session: RegisteredSessi
 
   async function find(session: RegisteredSession, cwd: string, pid: number, startedAt: number): Promise<TurnSource | null> {
     try {
-      const found = session.engine === 'claude'
-        ? await deps.claudeProcessSession(pid, cwd, startedAt)
+      const live = sessionStoreOf(session.engine)?.live
+      const found = live && 'record' in live
+        ? await deps.processSession(session.engine, pid, cwd, startedAt)
         : await deps.findLiveSession(session.engine, cwd, startedAt, { bornOnly: true, pid, codexHome: session.codexHome ?? undefined })
-      const path = found?.transcriptPath
-      if (!found || !found.sessionId || !path || isSubagentTranscript(path)) return null
-      if (deps.isRecentlyDeleted(found.sessionId) || deps.ownedByOther(found.sessionId, session.agentId)) return null
-      return { engine: session.engine, sessionId: found.sessionId, transcriptPath: path }
-    } catch { return null }
+      const current = deps.current?.(session.agentId)
+      if (!deps.isLive(session.agentId) || deps.current && (!current || current.identityHold
+        || handoffSessionFact(current).fingerprint !== handoffSessionFact(session).fingerprint)) throw new HandoffError('IDENTITY_UNAVAILABLE')
+      if (!found) { deps.observed?.(session, null); return null }
+      const path = found.transcriptPath
+      if (!found.sessionId || !path || isSubagentTranscript(path)
+        || deps.isRecentlyDeleted(found.sessionId) || deps.ownedByOther(found.sessionId, session.agentId)) throw new HandoffError('IDENTITY_UNAVAILABLE')
+      const source = { engine: session.engine, sessionId: found.sessionId, transcriptPath: path }
+      deps.observed?.(session, source)
+      return source
+    } catch { throw new HandoffError('IDENTITY_UNAVAILABLE') }
   }
 
   return (session) => {
@@ -57,10 +70,11 @@ export function sessionDiscovery(deps: DiscoveryDeps): (session: RegisteredSessi
     let live = false
     try { live = deps.isLive(session.agentId) } catch { live = false }
     if (!live) return Promise.resolve(null)
-    const running = pending.get(session.agentId)
+    const key = handoffSessionFact(session).fingerprint
+    const running = pending.get(key)
     if (running) return running
-    const promise = find(session, session.cwd, pid, startedAt).finally(() => { if (pending.get(session.agentId) === promise) pending.delete(session.agentId) })
-    pending.set(session.agentId, promise)
+    const promise = find(structuredClone(session), session.cwd, pid, startedAt).finally(() => { if (pending.get(key) === promise) pending.delete(key) })
+    pending.set(key, promise)
     return promise
   }
 }
@@ -93,6 +107,8 @@ export function ownedByOther(deps: OwnershipDeps, sessionId: string, agentId: st
 
 /** The real functions the provider is built from (cli.ts), so a spec can pass fakes and see each one reached. */
 export interface HandoffWiring {
+  publish?: HandoffDeps['publish']
+  observed?: DiscoveryDeps['observed']
   registry: {
     resolve(id: string): RegisteredSession | null | undefined
     byAgent(id: string): unknown
@@ -107,7 +123,7 @@ export interface HandoffWiring {
   }
   databaseHistory: HandoffDeps['readHistory']
   findLiveSession: DiscoveryDeps['findLiveSession']
-  claudeProcessSession: DiscoveryDeps['claudeProcessSession']
+  processSession: DiscoveryDeps['processSession']
   isRecentlyDeleted(sessionId: string): boolean
   findResumedTranscript: NonNullable<HandoffDeps['findTranscript']>
   validTranscriptPath(engine: AgentEngine, path: string, codexHome?: string): boolean
@@ -119,6 +135,7 @@ export interface HandoffWiring {
  */
 export function handoffProviderDeps(w: HandoffWiring): HandoffDeps {
   return {
+    publish: w.publish,
     resolve: (id) => w.registry.resolve(id) ?? w.stopped.get(id),
     readHistory: w.databaseHistory,
     recentAsks: (sid, n) => w.mirror.recentAsks(sid, n),
@@ -127,9 +144,11 @@ export function handoffProviderDeps(w: HandoffWiring): HandoffDeps {
     // A pane that has not found its session yet (a repair still pending): the session it runs, only when it is
     // certain. Never a fork, never a database engine, never one another agent holds.
     discoverSession: sessionDiscovery({
+      observed: w.observed,
       findLiveSession: w.findLiveSession,
-      claudeProcessSession: w.claudeProcessSession,
+      processSession: w.processSession,
       isLive: (id) => !!w.registry.byAgent(id),
+      current: (id) => w.registry.resolve(id),
       ownedByOther: (sid, id) => ownedByOther({
         bySession: (s) => w.registry.bySession(s), stoppedIds: () => w.stopped.ids(), stopped: (s) => w.stopped.get(s),
       }, sid, id),

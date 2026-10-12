@@ -87,6 +87,35 @@ describe('the lean bundle a release carries', () => {
     }
   })
 
+  it.each([
+    // Each a string its module alone holds: lib/questionPane.ts's, Amp's thread export's (engines/amp/threadExport.ts), and the name the bundle keeps for Cursor's sub-agents' reader
+    // (engines/cursor/subagent.ts), Devin's switch reader (engines/devin/runtimeProfile.ts), the compatibility
+    // wrappers for agy's lock lookup and Cursor discovery, and Hermes's optional adoption reader. Core
+    // identity and discovery use eager declarations/kit mechanics instead of those optional wrappers.
+    ['pane readers', 'Native screen reader must be injected'],
+    ['own code: Amp\'s', 'AMP_DISABLE_PLUGINS'],
+    ['own code: Cursor\'s', '"loadCursorReplayTaskLinks"'],
+    ['runtime profiles: Devin\'s', '"devinModelCommandResult"'],
+    ['compatibility lookup: agy\'s', '"agyConversationForPid"'],
+    ['compatibility wrapper: Cursor\'s discovery', '"CursorTranscriptDiscovery"'],
+    ['adoption: Hermes\'s reader', '"hermesProvider"'],
+  ])('leaves the other engines\' %s out of the core until it needs them', (_, marker) => {
+    // engines/inProcess.ts imports them (docs/design/2026-10-08-other-engines-out-of-core.md): a file of the
+    // core's own, which Node reads only then.
+    expect([...files].some(([name, code]) => name.startsWith('core-') && code.includes(marker))).toBe(true)
+    expect([...loads('core')].filter((name) => files.get(name)!.includes(marker))).toEqual([])
+  })
+
+  it('loads native hook declarations eagerly without importing the optional compatibility entry', () => {
+    const core = loads('core')
+    // This is native source data written into Amp's plugin file, not Amp's optional transcript reader.
+    // Readiness and launch must not depend on an import() before the core can install that file.
+    const declaration = 'Mirrors this Amp thread to the machine adapter'
+    expect([...core].filter(name => files.get(name)!.includes(declaration))).toHaveLength(1)
+    expect([...core].some(name => name.startsWith('core-hooks-'))).toBe(false)
+    expect([...files.keys()].some(name => name.startsWith('core-hooks-'))).toBe(true)
+  })
+
   it('gives the core its own code and none of the CLI\'s commands, which parsing cli.js cost it', () => {
     const core = loads('core')
     const text = [...core].map((name) => files.get(name)!).join('\n')
@@ -122,12 +151,13 @@ describe('the lean bundle a release carries', () => {
     for (const role of ['master', 'search', 'updater', 'engine-claude', 'engine-codex', ...SERVICE_HOSTS.edge.services]) expect(hasZod(loads(role)), role).toBe(false)
   })
 
-  it('brings the edge host no node:sqlite until it reads a store some engines keep a conversation in', () => {
-    // A native binding, synchronous and able to take a process down with it, in the host meant to be light.
-    // The handoff, the monitor and projects read such stores for opencode, kilo, hermes and devin alone, and
-    // `lib/sqliteRead.ts` imports the binding's loader (`lib/sqliteBuiltin.ts`) only at the first read.
+  it('keeps SQLite read mechanics eager in core and its service consumers', () => {
+    // Hook admission must not need a lazy code chunk. Loading the mechanics does not load Node's native
+    // binding: builtinSqlite resolves that only at a database read, verified in a real process below.
+    expect(hasSqlite(loads('core')), 'core admission can read its store without an import').toBe(true)
+    expect(hasSqlite(loads('usage')), 'usage shares the same eager read mechanics').toBe(true)
     expect(hasSqlite(loads('search')), 'search, the native-sqlite host, still has it').toBe(true)
-    for (const role of SERVICE_HOSTS.edge.services) expect(hasSqlite(loads(role)), role).toBe(false)
+    for (const role of ['master', 'updater']) expect(hasSqlite(loads(role)), role).toBe(false)
   })
 
   it('starts the edge host without node:sqlite, where search, whose index is SQLite, has it', async () => {

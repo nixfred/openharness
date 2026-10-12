@@ -1,14 +1,15 @@
 /**
  * The argv an engine's launch contract declares as templates (facets/launch.ts): its harness context flag,
  * its session variables as flags, and the provider it goes back to off a grid. Shared mechanics, run in core
- * on the declaration alone: a launch is session control and waits on no engine worker.
+ * on the declaration alone: a launch is session control and waits on no engine worker. The pull request line
+ * of a harness another agent started is kit/attribution.ts's, with the readers here.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ContextArgsTemplate, EnvArgsTemplate, OwnProviderContract } from '../facets/launch.js'
 
 /** `{key}` in `text` replaced by `value`, as written: never read as a `$` replacement pattern. */
-const fill = (text: string, key: string, value: string): string => text.split(`{${key}}`).join(value)
+export const fill = (text: string, key: string, value: string): string => text.split(`{${key}}`).join(value)
 
 /** The context flag's argv for `file`. */
 export function contextArgsOf(template: ContextArgsTemplate): (file: string) => string[] {
@@ -43,6 +44,25 @@ export function topLevelString(toml: string, key: string): string | null {
   return null
 }
 
+/**
+ * A top-level `key` of a TOML file as it is written, for a caller about to replace it: `absent`, or `set` to a value
+ * read exactly, or `unreadable`. Exactly is a one-line literal string (`'…'`) or a one-line basic string with no
+ * escape (`"…"`); any other value (a multi-line string, an escape, not a string) is `unreadable`, since a copy that
+ * reads it wrong would replace the person's value with another. The same small reader as `topLevelString`.
+ */
+export function topLevelEntry(toml: string, key: string): { state: 'absent' } | { state: 'set'; value: string } | { state: 'unreadable' } {
+  const named = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=(.*)$`)
+  for (const raw of toml.split('\n')) {
+    const line = stripComment(raw).trim()
+    if (line.startsWith('[')) break
+    const value = named.exec(line)?.[1]?.trim()
+    if (value === undefined) continue
+    const exact = /^'([^']*)'$/.exec(value) ?? /^"([^"\\]*)"$/.exec(value)
+    return exact ? { state: 'set', value: exact[1]! } : { state: 'unreadable' }
+  }
+  return { state: 'absent' }
+}
+
 /** Drop a trailing `#` comment, but not one inside a quoted value. */
 function stripComment(line: string): string {
   let quote: string | null = null
@@ -56,7 +76,7 @@ function stripComment(line: string): string {
 }
 
 /** Read a config file; an unreadable or absent one is "nothing configured", not an error. */
-function readConfig(path: string): string | null {
+export function readConfig(path: string): string | null {
   try { return readFileSync(path, 'utf8') } catch { return null }
 }
 

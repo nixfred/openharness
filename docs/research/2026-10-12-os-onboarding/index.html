@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness OS · Onboarding review</title>
+<style>
+  :root { color-scheme: dark; --page:#111211; --panel:#191a18; --line:#30312d; --text:#ededdf; --muted:#a0a397; --accent:#d7e5a6; --terminal:#101010; --yellow:#d9c727; --mono:ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",monospace; --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--page); color:var(--text); font:15px/1.5 var(--sans); }
+  button,input,select { font:inherit; }
+  button,a,input,select { -webkit-tap-highlight-color:transparent; }
+  button,a { touch-action:manipulation; }
+  button { cursor:pointer; }
+  button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+  button:disabled { opacity:.35; cursor:default; }
+  a { color:inherit; text-decoration:none; }
+  header { max-width:1512px; margin:auto; padding:25px 36px 22px; display:flex; align-items:center; gap:16px; border-bottom:1px solid var(--line); }
+  .identity { display:flex; align-items:center; gap:11px; font-weight:600; font-size:16px; letter-spacing:-.02em; }
+  .identity svg { width:27px; height:27px; }
+  .slash { color:#53554d; }
+  .review-label { color:var(--muted); font-size:14px; }
+  .header-actions { margin-left:auto; display:flex; align-items:center; gap:18px; font-size:13px; }
+  .header-actions a { color:var(--muted); }
+  .header-actions a:hover { color:var(--text); }
+  .tag { color:var(--accent); border:1px solid #454d34; border-radius:5px; padding:3px 8px; font-size:11px; letter-spacing:.05em; }
+  .intro { max-width:1512px; margin:auto; padding:30px 36px 26px; }
+  h1 { font-size:clamp(25px,3vw,35px); font-weight:500; letter-spacing:-.035em; margin:0 0 8px; line-height:1.2; }
+  .intro p { margin:0; color:var(--muted); max-width:850px; }
+  .path { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:21px; font-size:13px; }
+  .path a { color:#d6d8cc; }
+  .path span { color:#62675b; }
+  .path a:hover { color:var(--accent); }
+  .layout { max-width:1512px; margin:auto; padding:0 36px 60px; display:grid; grid-template-columns:208px minmax(0,1fr); gap:30px; align-items:start; }
+  aside { padding-top:7px; position:sticky; top:20px; }
+  .nav-label { color:#7c8074; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.12em; margin:8px 10px 10px; }
+  .nav-label.later { margin-top:27px; }
+  .nav-item { display:flex; gap:11px; align-items:center; padding:9px 10px; margin:2px 0; border-radius:5px; color:var(--muted); font-size:13px; }
+  .nav-item .number { font:11px var(--mono); color:#6a7061; width:19px; }
+  .nav-item[aria-current="step"] { color:var(--text); background:#24281e; }
+  .nav-item[aria-current="step"] .number { color:var(--accent); }
+  .nav-item:hover { background:#20221c; color:var(--text); }
+  .nav-tip { padding:22px 10px 0; font-size:12px; line-height:1.7; color:#7f8576; }
+  kbd { font:11px var(--mono); border:1px solid #393e31; border-bottom-width:2px; border-radius:3px; padding:1px 4px; color:#b3baaa; }
+  .preview-top { display:flex; justify-content:space-between; align-items:center; gap:16px; min-height:43px; font-size:12px; color:var(--muted); }
+  .preview-top .owner { color:var(--accent); }
+  .screen { container-type:inline-size; position:relative; width:100%; aspect-ratio:16/10; background:var(--terminal); border:1px solid #34362f; border-radius:7px; overflow:hidden; box-shadow:0 16px 48px #0003; font-family:var(--mono); color:#d8d8d8; }
+  .screen .contents { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:5cqw; font-size:1.35cqw; line-height:1.65; }
+  .form { width:52cqw; }
+  .wordmark { color:var(--yellow); margin:0 0 4.1cqw; font:1.65cqw/1.25 var(--mono); text-align:center; white-space:pre; }
+  .terminal-title { font-size:inherit; font-weight:600; margin:0 0 2.8cqw; }
+  .terminal-copy { color:#a9a9a9; margin:0 0 2.4cqw; }
+  .terminal-copy p { margin:0 0 1.15cqw; }
+  .field { display:grid; grid-template-columns:16cqw 1fr; align-items:center; gap:1cqw; margin:0 0 1.8cqw; }
+  .screen input,.screen select { appearance:none; min-width:0; border:0; border-radius:0; padding:.15cqw .65cqw; color:#d8d8d8; background:#252525; font:inherit; width:100%; }
+  .screen input:focus,.screen select:focus { background:#b9b9b9; color:#111; outline:0; }
+  .screen input[type=checkbox] { appearance:auto; width:1.2cqw; height:1.2cqw; accent-color:#c2c2c2; }
+  .notice { color:#d6bf72; margin:0 0 3.4cqw; font-size:1.15cqw; }
+  .terminal-button { display:block; background:transparent; border:0; border-radius:0; padding:.1cqw 1cqw; color:inherit; font:inherit; width:100%; text-align:left; }
+  .terminal-button:hover,.terminal-button:focus-visible { background:#3a3a36; outline:none; }
+  .terminal-button.selected { background:#b8b8b8; color:#101010; }
+  .terminal-button.center { text-align:center; width:auto; margin:2.4cqw auto 0; }
+  .terminal-button.primary { background:#b8b8b8; color:#101010; text-align:center; margin-top:3.6cqw; }
+  .centered { text-align:center; }
+  .network-list { margin-bottom:2.6cqw; }
+  .network-list button { display:flex; justify-content:space-between; gap:2cqw; }
+  .keyboard-hint { color:#777; font-size:1.1cqw; margin-top:2.8cqw; }
+  .account { width:70cqw; background:#191919; padding:2.2cqw; }
+  .account .terminal-title { margin-bottom:2.2cqw; }
+  .account .terminal-copy { margin-bottom:4.8cqw; }
+  .account .terminal-button { line-height:1.6; padding:0 .65cqw; }
+  .account .terminal-button.selected { background:#2c333c; color:#d9e5f7; }
+  .account .keyboard-hint { margin-bottom:0; }
+  .phone-layout { display:grid; grid-template-columns:1fr 18cqw; gap:2.4cqw; align-items:center; }
+  .qr { width:18cqw; aspect-ratio:1; background:#eee; color:#111; padding:1cqw; display:grid; place-items:center; }
+  .qr svg { width:100%; height:100%; }
+  .qr-label { text-align:center; font-size:.9cqw; color:#888; margin:.8cqw 0 0; }
+  .screen .error { color:#e2a585; }
+  .screen .success { color:#bed29d; }
+  .screen .muted { color:#777; }
+  .workspace { position:absolute; inset:0; display:grid; grid-template-rows:3cqw 1fr 2.5cqw; font-size:1.35cqw; line-height:1.65; }
+  .tabs { display:flex; align-items:center; gap:2cqw; padding:0 1cqw; background:#202020; font-size:1.1cqw; }
+  .tabs .active { color:#e4d498; }
+  .tabs .right { margin-left:auto; color:#8c9385; }
+  .panes { display:grid; grid-template-columns:1.2fr 1fr; min-height:0; }
+  .pane { position:relative; padding:1.3cqw; }
+  .panes>.pane { border-right:1px solid #454545; }
+  .shells { display:grid; grid-template-rows:1fr 1fr; }
+  .shells .pane:first-child { border-bottom:1px solid #454545; }
+  .pane-title { margin:-1.3cqw -1.3cqw 2cqw; padding:.3cqw 1cqw; color:#858585; font-size:1cqw; }
+  .agent-start { position:absolute; left:3cqw; right:3cqw; top:23%; }
+  .agent-name { font-weight:600; font-size:2.4cqw; letter-spacing:-.1em; color:#d8d8d8; margin-bottom:2cqw; }
+  .prompt { border-top:1px solid #40403b; border-bottom:1px solid #40403b; padding:1.2cqw 0; color:#777; margin-top:2.6cqw; }
+  .status { display:flex; gap:2cqw; padding:.25cqw 1cqw; background:#202020; color:#9b9e91; font-size:1cqw; }
+  .status .right { margin-left:auto; }
+  .cursor { display:inline-block; background:#bcbcbc; width:.75cqw; height:1.4cqw; vertical-align:-.2cqw; }
+  .power { font-family:var(--sans); color:#8e9486; font-size:1.35cqw; }
+  .boot-logo { color:var(--yellow); white-space:pre; font:1.3cqw/1.2 var(--mono); margin-bottom:3cqw; }
+  .explanation { display:grid; grid-template-columns:1fr auto; gap:24px; margin-top:22px; align-items:start; }
+  .eyebrow { color:#818878; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.11em; }
+  h2 { font-size:20px; line-height:1.3; font-weight:500; letter-spacing:-.02em; margin:7px 0 8px; }
+  #description { color:var(--muted); margin:0; max-width:720px; font-size:14px; line-height:1.6; }
+  .pager { display:flex; gap:7px; padding-top:3px; }
+  .small-button { background:var(--panel); color:var(--text); border:1px solid #3b3e34; border-radius:5px; padding:8px 13px; font-size:12px; }
+  .small-button:hover { border-color:#697457; }
+  .small-button.accent { background:var(--accent); color:#1d2514; border-color:var(--accent); }
+  .review-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:23px; padding-top:20px; border-top:1px solid var(--line); }
+  .review-controls span { color:#818878; font-size:11px; margin-right:3px; }
+  .review-controls button { background:transparent; }
+  .preview-disclaimer { margin:20px 0 0; color:#787d70; font-size:11px; line-height:1.6; }
+  .overview { display:grid; grid-template-columns:1fr 1fr; gap:26px 20px; }
+  .overview-card { cursor:pointer; }
+  .overview-card h3 { font-size:15px; font-weight:500; margin:10px 0 4px; }
+  .overview-card p { color:var(--muted); font-size:12px; margin:0; }
+  .overview-card .screen { box-shadow:none; pointer-events:none; }
+  .overview-card:hover .screen { border-color:#7a855f; }
+  [hidden] { display:none !important; }
+  @media (min-width:1600px) { .screen { max-height:72vh; aspect-ratio:auto; height:690px; } .overview .screen { height:auto; aspect-ratio:16/10; } }
+  @media (max-width:1000px) { .layout { grid-template-columns:165px minmax(0,1fr); gap:20px; padding:0 24px 40px; } header,.intro { padding-left:24px; padding-right:24px; } .nav-item { font-size:12px; gap:7px; } .explanation { display:block; } .pager { margin-top:17px; } }
+  @media (max-width:720px) { header { padding:17px 16px; gap:10px; flex-wrap:wrap; } .header-actions { gap:12px; } .review-label,.slash { display:none; } .intro { padding:25px 16px 21px; } .layout { display:block; padding:0 16px 40px; } aside { display:none; } .screen { aspect-ratio:4/3; } .overview { grid-template-columns:1fr; } .path { gap:9px; font-size:12px; } .preview-top { min-height:38px; } h2 { font-size:18px; } }
+  @media print { header,aside,.intro,.pager,.review-controls,.preview-disclaimer { display:none; } .layout { display:block; padding:0; } .overview { display:block; } .overview-card { break-inside:avoid; margin-bottom:30px; } .screen { print-color-adjust:exact; -webkit-print-color-adjust:exact; } }
+</style>
+</head>
+<body>
+<header>
+  <a class="identity" href="#install" aria-label="Harness OS onboarding start"><svg viewBox="0 0 28 28" fill="none" aria-hidden="true"><rect x=".5" y=".5" width="27" height="27" rx="5" stroke="#596345"/><path d="M8 7v14M20 7v14M8 14h12" stroke="#d7e5a6" stroke-width="2"/></svg>Harness OS</a>
+  <span class="slash">/</span><span class="review-label">Onboarding</span>
+  <div class="header-actions"><a href="#overview">All screens</a><a href="../2026-10-08-onboarding-redesign/index.html">Desktop flow ↗</a><span class="tag">PREVIEW</span></div>
+</header>
+<div class="intro">
+  <h1>Connect first. Then sign in.</h1>
+  <p>The complete OS onboarding flow. Installation and network setup belong to the OS. The TUI opens once connected and uses its standard sign-in.</p>
+  <nav class="path" aria-label="Main journey"><a href="#install">01 · Install</a><span>→</span><a href="#unlock">02 · Boot</a><span>→</span><a href="#network">03 · Connect</a><span>→</span><a href="#signin">04 · Sign in</a><span>→</span><a href="#workspace">05 · Work</a></nav>
+</div>
+<main class="layout">
+  <aside>
+    <nav aria-label="Preview screens">
+      <div class="nav-label">First use</div>
+      <a class="nav-item" data-group="install" href="#install"><span class="number">01</span>Install from USB</a>
+      <a class="nav-item" data-group="installed" href="#installed"><span class="number">02</span>Shut down &amp; restart</a>
+      <a class="nav-item" data-group="unlock" href="#unlock"><span class="number">03</span>Unlock the disk</a>
+      <a class="nav-item" data-group="network" href="#network"><span class="number">04</span>Connect to Wi-Fi</a>
+      <a class="nav-item" data-group="signin" href="#signin"><span class="number">05</span>Sign in to Harness</a>
+      <a class="nav-item" data-group="browser" href="#browser"><span class="number">↳</span>Browser sign-in</a>
+      <a class="nav-item" data-group="phone" href="#phone"><span class="number">↳</span>Phone sign-in</a>
+      <a class="nav-item" data-group="workspace" href="#workspace"><span class="number">06</span>Your workspace</a>
+      <div class="nav-label later">Returning users</div>
+      <a class="nav-item" data-group="existing" href="#existing"><span class="number">↳</span>No account yet</a>
+      <a class="nav-item" data-group="expired" href="#expired"><span class="number">↳</span>Session expired</a>
+      <a class="nav-item" data-group="offline" href="#offline"><span class="number">↳</span>Temporary outage</a>
+      <a class="nav-item" data-group="overview" href="#overview"><span class="number">▦</span>All screens</a>
+    </nav>
+    <div class="nav-tip">Click inside the screen to follow the flow.<br><kbd>←</kbd> <kbd>→</kbd> browse steps<br><kbd>↑</kbd> <kbd>↓</kbd> choose an action</div>
+  </aside>
+  <section aria-label="Interactive onboarding preview">
+    <div class="preview-top"><span id="breadcrumb">First use / Install</span><span class="owner" id="owner">OS · USB installer</span></div>
+    <div id="screen" class="screen" aria-label="OS screen preview"></div>
+    <div id="overview" class="overview" hidden></div>
+    <div id="details">
+      <div class="explanation">
+        <div aria-live="polite"><div class="eyebrow" id="step-label">Step 01</div><h2 id="title">Install from USB</h2><p id="description"></p></div>
+        <div class="pager"><button class="small-button" id="previous">← Back</button><button class="small-button accent" id="next">Next →</button></div>
+      </div>
+      <div class="review-controls" id="review-controls"></div>
+    </div>
+    <p class="preview-disclaimer">Interactive HTML mockup · 12 Oct 2026. Screens follow the repository’s OS forms and TUI sign-in. Example disks, networks, accounts and workspace content are fictional. Controls simulate transitions; they do not install, connect, or sign in. Browser and phone approval are simulated outside the OS screen.</p>
+  </section>
+</main>
+<script>
+'use strict';
+const wordmark = '<pre class="wordmark" aria-label="Harness">█ █ ▄▀█ █▀█ █▄ █ █▀▀ █▀ █▀\n█▀█ █▀█ █▀▄ █ ▀█ ██▄ ▄█ ▄█</pre>';
+const btn = (text, action, cls='') => `<button class="terminal-button ${cls}" data-action="${action}">${text}</button>`;
+const frame = (content, cls='form') => `<div class="contents"><div class="${cls}">${content}</div></div>`;
+const form = content => frame(wordmark + content);
+const hint = '<p class="keyboard-hint">↑↓ choose   enter open   esc cancel   ^C quit</p>';
+const authChoices = () => btn('› Continue with Google','google','selected') + btn('  Continue with Apple','apple') + btn('  Continue with email','email') + btn('  Continue with your phone','phone');
+const signin = (error='') => frame('<h3 class="terminal-title">Sign in to Harness</h3><div class="terminal-copy">'+ (error ? `<p class="error">${error}</p>` : '<p>All your machines. Your tabs everywhere.</p><p>Your saved tabs stay here. Running harnesses keep running.</p>') + '</div>' + authChoices() + hint, 'account');
+const qr = '<svg viewBox="0 0 29 29" aria-hidden="true" shape-rendering="crispEdges"><path fill="#111" d="M1 1h7v7H1zM21 1h7v7h-7zM1 21h7v7H1z"/><path fill="#eee" d="M2 2h5v5H2zM22 2h5v5h-5zM2 22h5v5H2z"/><path fill="#111" d="M3 3h3v3H3zM23 3h3v3h-3zM3 23h3v3H3zM10 1h2v4h-2zM14 2h3v2h-3zM17 5h2v5h-2zM10 7h5v3h-5zM1 10h4v3H1zM6 12h4v2H6zM2 16h2v3H2zM5 17h5v2H5zM10 15h4v5h-4zM12 11h6v2h-6zM16 15h2v3h-2zM20 11h3v4h-3zM25 10h3v2h-3zM23 16h5v2h-5zM19 19h4v4h-4zM25 20h3v3h-3zM10 22h3v6h-3zM14 21h3v2h-3zM15 25h4v3h-4zM21 25h2v3h-2zM25 25h3v3h-3z"/></svg>';
+function workspace(offline=false, returning=false) {
+  return `<div class="workspace"><div class="tabs"><span class="active">1 ${returning ? 'Website' : 'OpenCode'}</span><span>＋</span><span class="right">harness</span></div><div class="panes"><div class="pane"><div class="pane-title">OpenCode · ~/projects/${returning ? 'website' : ''}</div>${returning ? '<p class="muted">You</p><p>Help me build a small website.</p><br><p class="success">✓ Created the project</p><p>Changes are saved in your project.</p><div class="prompt">Ask anything… <span class="cursor"></span></div>' : '<div class="agent-start"><div class="agent-name">opencode</div><div class="prompt">Ask anything… <span class="cursor"></span></div><p class="muted">~/projects</p></div>'}</div><div class="shells"><div class="pane"><div class="pane-title">Terminal · ~/projects</div><span class="success">me@harness</span> ~/projects<br>❯ <span class="cursor"></span></div><div class="pane"><div class="pane-title">Terminal · ~/projects</div><span class="success">me@harness</span> ~/projects<br>❯</div></div></div><div class="status"><span>1:${returning ? 'Website' : 'OpenCode'}</span><span>Ctrl+b prefix</span><span class="right">${offline ? 'local work' : 'harness'}</span></div></div>`;
+}
+let provider='Google', returning=false, networkBack='signin', encrypted=true;
+const steps = {
+  install: {group:'install', owner:'OS · USB installer', label:'First use / USB', title:'Install from USB', description:'The USB boots directly into the installer. Pick the internal disk and set a local password. Encryption starts enabled. Installation works offline and does not require a Harness account.', next:'installing', controls:[['See disk picker','disk'],['Installation error','install-error']], view:()=>form('<p class="notice">The selected disk will be erased.</p><label class="field"><span>Disk</span><select aria-label="Installation disk"><option>Internal SSD · 512 GB</option><option>Secondary SSD · 1 TB</option></select></label><label class="field"><span>Encryption</span><input type="checkbox" data-encryption '+(encrypted?'checked':'')+' aria-label="Encrypt the installed disk"></label><label class="field"><span>Password</span><input type="password" value="preview-password" aria-label="Example local password" autocomplete="off"></label><label class="field"><span>Repeat password</span><input type="password" value="preview-password" aria-label="Repeat example password" autocomplete="off"></label>'+btn('Install Harness','installing','primary'))},
+  disk: {group:'install', owner:'OS · USB installer', label:'First use / Select disk', title:'Choose the installation disk', description:'The disk picker shows eligible disks. The booted USB is excluded. The selected disk returns to the installer form; choosing it does not start installation.', back:'install', next:'install', controls:[], view:()=>form('<h3 class="terminal-title">Select disk</h3>'+btn('› Internal SSD · 512 GB     /dev/nvme0n1','install','selected')+btn('  Secondary SSD · 1 TB      /dev/sda','install')+'<p class="keyboard-hint">↑↓ choose   enter select   esc back</p>')},
+  'install-error': {group:'install', owner:'OS · USB installer', label:'First use / Check password', title:'Fix the field and try again', description:'Invalid or mismatched passwords keep the user in the installer. No disk is changed before the form passes validation.', back:'install', next:'install', controls:[], view:()=>form('<label class="field"><span>Disk</span><input value="Internal SSD · 512 GB" readonly></label><label class="field"><span>Password</span><input type="password" value="preview-password" aria-label="Example password"></label><label class="field"><span>Repeat password</span><input type="password" value="wrong" aria-label="Mismatched example password"></label><p class="error">Passwords do not match.</p>'+btn('Install Harness','install','primary'))},
+  installing: {group:'install', owner:'OS · USB installer', label:'First use / Installing', title:'Installation runs on the OS screen', description:'The screen shows the current installation operation beneath the Harness wordmark. There is no account step or network check here.', back:'install', next:'installed', controls:[['Finish installation','installed']], view:()=>form('<p class="centered">Writing system files…</p>')},
+  installed: {group:'installed', owner:'OS · USB installer', label:'First use / Installation complete', title:'Shut down, remove the USB, restart', description:'Completion stays on screen until Shut down is chosen. Remove the USB, then turn on the computer to boot the installed system.', back:'installing', next:'poweroff', controls:[], view:()=>form('<p class="centered">Harness is installed. Shut down, remove the USB,<br>then turn on your computer.</p>'+btn('[ Shut down ]','poweroff','center selected'))},
+  poweroff: {group:'installed', owner:'Computer · powered off', label:'First use / Remove USB', title:'Remove the USB and turn the computer on', description:'This is a physical step. The computer is off; there is no extra welcome wizard. Use the preview control to simulate the next boot.', back:'installed', next:()=>encrypted?'unlock':'local-login', controls:[['Turn computer on','boot']], view:()=>frame('<span class="power">Computer is off</span>','centered')},
+  unlock: {group:'unlock', owner:'OS · disk unlock', label:'First use / Installed boot', title:'Unlock with the installation password', description:'On an encrypted installation, this unlocks the disk and starts the local OS session. This is the computer’s password, separate from the Harness account.', back:'installed', next:'network', controls:[['Unencrypted installation','local-login']], view:()=>frame('<pre class="boot-logo" aria-label="Harness"> _   _    _    ____  _   _ _____ ____ ____\n| | | |  / \\  |  _ \\| \\ | | ____/ ___/ ___|\n| |_| | / _ \\ | |_) |  \\| |  _| \\___ \\___ \\\n|  _  |/ ___ \\|  _ &lt;| |\\  | |___ ___) |__) |\n|_| |_/_/   \\_\\_| \\_\\_| \\_|_____|____/____/</pre><p>Enter your password</p><label><span class="muted" hidden>Example disk password</span><input aria-label="Example disk password" type="password" value="preview-password" data-enter="network" style="background:transparent;text-align:center;width:24cqw"></label>','centered')},
+  'local-login': {group:'unlock', owner:'OS · local login', label:'First use / Unencrypted boot', title:'Log in to the local OS account', description:'Without disk encryption, the user logs in as me with the password set during installation. Networking and Harness account sign-in follow.', back:'installed', next:'network', controls:[], view:()=>frame('<p>harness login: me</p><label>Password: <input aria-label="Example OS password" type="password" value="preview-password" data-enter="network" style="width:26cqw"></label>','form')},
+  network: {group:'network', owner:'OS · network setup · TUI has not started', label:'First use / Connect', title:'Connect before the TUI starts', description:'The OS owns this screen. Choose Wi-Fi and enter its password, or use Ethernet. The TUI starts automatically once connected. A working Ethernet connection skips this screen.', back:'unlock', next:'wifi-password', controls:[['Ethernet is already connected','ethernet'],['No networks found','no-networks']], view:()=>form('<h3 class="terminal-title">Connect to Wi-Fi</h3><div class="network-list">'+btn('<span>Studio</span><span>92%</span>','wifi-password','selected')+btn('<span>Home network</span><span>73%</span>','wifi-password')+btn('<span>Guest</span><span>51%</span>','wifi-password')+'</div>'+btn('[ Rescan ]','network','center')+btn('Ethernet  enp1s0','ethernet'))},
+  'wifi-password': {group:'network', owner:'OS · network setup · TUI has not started', label:'First use / Wi-Fi password', title:'Enter the network password', description:'A successful connection advances automatically to the TUI sign-in screen. A failed connection stays here for another attempt. Escape returns to the network list.', back:'network', next:'signin', controls:[['Wrong password','wifi-error']], view:()=>form('<h3 class="terminal-title">Connect to Wi-Fi</h3><p>Network     Studio</p><label class="field"><span>Password</span><input type="password" value="example-wifi" aria-label="Example Wi-Fi password" data-enter="signin"></label>'+btn('[ Connect ]','signin','center selected'))},
+  'wifi-error': {group:'network', owner:'OS · network setup · TUI has not started', label:'First use / Connection failed', title:'Stay in network setup and retry', description:'A connection failure does not open the TUI. Correct the password, choose another network, or plug in Ethernet.', back:'network', next:'signin', controls:[['Choose another network','network'],['Connect Ethernet','ethernet']], view:()=>form('<h3 class="terminal-title">Connect to Wi-Fi</h3><p>Network     Studio</p><label class="field"><span>Password</span><input type="password" aria-label="Retry example Wi-Fi password" data-enter="signin"></label><p class="error">Could not connect. Check the password and try again.</p>'+btn('[ Connect ]','signin','center selected'))},
+  'no-networks': {group:'network', owner:'OS · network setup · TUI has not started', label:'First use / No networks', title:'Rescan or use Ethernet', description:'Missing Wi-Fi does not hide the wired option. Initial setup waits here until a connection is available.', back:'network', next:'network', controls:[['Plug in Ethernet','ethernet']], view:()=>form('<h3 class="terminal-title">Connect to Wi-Fi</h3><br>'+btn('[ Rescan ]','network','center selected')+btn('Ethernet  enp1s0','ethernet')+'<p class="terminal-copy" style="margin-top:5cqw">No Wi-Fi networks found. Rescan or use Ethernet.</p>')},
+  signin: {group:'signin', owner:'TUI · shared account sign-in', label:'First use / Harness account', title:'The TUI now starts and requires sign-in', description:'Choose Google, Apple, email, or your phone. This is the same account flow as the standalone TUI. Cancelling an attempt returns here; the workspace opens after sign-in succeeds.', back:'network', next:'browser', controls:[['Open Wi-Fi settings','wifi-settings'],['Sign-in service unavailable','signin-error']], view:()=>signin()},
+  browser: {group:'browser', owner:'TUI · waiting for browser sign-in', label:'Sign in / Browser', title:()=>`Continue with ${provider}`, description:'The selected sign-in method opens in the OS browser. Complete authentication there and the TUI opens the workspace. The provider’s own screens are outside this preview; use Complete sign-in below to simulate the callback.', back:'signin', next:'workspace', controls:[['Complete sign-in','complete'],['Cancel browser sign-in','signin'],['Browser cannot open','browser-error']], view:()=>frame('<h3 class="terminal-title">Sign in to Harness</h3><div class="terminal-copy"><p>Finish signing in in your browser.</p><p>Using SSH? Cancel and choose Continue with your phone.</p></div>'+btn('› Open sign-in page','stay','selected')+btn('  Copy sign-in link','copy')+btn('  Cancel sign-in','signin')+hint,'account')},
+  phone: {group:'phone', owner:'TUI · waiting for phone approval', label:'Sign in / Phone', title:'Sign in with your phone', description:'Use Harness on a signed-in phone to scan and approve this computer. This also supports SSH sessions. Approval returns directly to the workspace. The code shown here is a visual placeholder.', back:'signin', next:'workspace', controls:[['Approve on phone','complete'],['Code expires','phone-expired'],['Cancel phone sign-in','signin']], view:()=>frame('<div class="phone-layout"><div><h3 class="terminal-title">Sign in to Harness</h3><div class="terminal-copy"><p>On your phone, open Harness → Settings → Sign in a computer.</p><p>Expires in 120s</p></div>'+btn('› Copy phone sign-in link','copy','selected')+btn('  Cancel sign-in','signin')+'</div><div><div class="qr">'+qr+'</div><p class="qr-label">Preview code · not scannable</p></div></div>'+hint,'account')},
+  'phone-expired': {group:'phone', owner:'TUI · account sign-in', label:'Sign in / Code expired', title:'Request a new phone code', description:'An expired phone code returns to sign-in. It does not delete local work or open the workspace.', back:'phone', next:'phone', controls:[['New phone code','phone']], view:()=>signin('This code expired. Choose Sign in with phone to get a new one.')},
+  'browser-error': {group:'browser', owner:'TUI · account sign-in', label:'Sign in / Browser unavailable', title:'Use the link or phone sign-in', description:'If the OS browser cannot open, the user can copy the link or return to the sign-in choices and use a phone.', back:'browser', next:'phone', controls:[['Use phone instead','phone'],['Back to sign-in','signin']], view:()=>frame('<h3 class="terminal-title">Sign in to Harness</h3><div class="terminal-copy"><p class="error">Could not open a browser. Copy the link, or use Continue with your phone.</p></div>'+btn('› Open sign-in page','browser','selected')+btn('  Copy sign-in link','copy')+btn('  Cancel sign-in','signin')+hint,'account')},
+  'signin-error': {group:'signin', owner:'TUI · account sign-in', label:'Sign in / Unavailable', title:'Sign-in can be retried', description:'When this computer has no signed-in account, unavailable authentication keeps it on sign-in. Wi-Fi settings remain accessible. Already signed-in offline use is shown separately.', back:'signin', next:'signin', controls:[['Retry sign-in','signin'],['Open Wi-Fi settings','wifi-settings']], view:()=>signin('Could not finish sign-in. Try again.')},
+  'wifi-settings': {group:'signin', owner:'OS · Wi-Fi settings opened from TUI', label:'Sign in / Network settings', title:'Wi-Fi stays reachable from sign-in', description:'Super+w opens the existing OS Wi-Fi form when reconnection is needed. Closing it returns to sign-in. Initial network setup has already finished before the TUI launch.', back:()=>networkBack, next:()=>networkBack, controls:[['Close Wi-Fi settings','close-wifi']], view:()=>form('<h3 class="terminal-title">Connect to Wi-Fi</h3><div class="network-list">'+btn('<span>Studio</span><span>Connected</span>','close-wifi','selected')+btn('<span>Home network</span><span>73%</span>','close-wifi')+'</div>'+btn('[ Rescan ]','stay','center')+btn('Ethernet  enp1s0','close-wifi')+'<p class="keyboard-hint">esc back</p>')},
+  workspace: {group:'workspace', owner:'TUI · workspace', label:'First use / Ready', title:'Start working', description:'After sign-in, the first workspace opens with OpenCode and two terminals. There is no extra OS tutorial or account wizard. Projects stay on this computer. Agent providers may ask for their own credentials when needed.', back:'signin', controls:[['Existing user without an account','existing'],['Session expires','expired'],['Network goes offline','offline']], view:()=>workspace(false,returning)},
+  existing: {group:'existing', owner:'TUI · required account sign-in', label:'Returning user / No account yet', title:'Existing unsigned users see the same sign-in', description:'After updating, an existing user who never created an account sees this screen before their saved workspace. They do not repeat installation or first-use Wi-Fi setup. Their tabs and running harnesses stay intact and reappear after sign-in.', next:'browser', controls:[['Sign in and restore work','complete'],['Open Wi-Fi settings','wifi-settings']], view:()=>signin()},
+  expired: {group:'expired', owner:'TUI · required account sign-in', label:'Returning user / Session ended', title:'Ask for sign-in again when the session is rejected', description:'A confirmed expired or rejected session returns to the required sign-in screen. Running harnesses keep running. Signing in again restores the saved workspace; cancellation stays at sign-in.', next:'browser', controls:[['Sign in again and restore work','complete'],['Open Wi-Fi settings','wifi-settings']], view:()=>signin()},
+  offline: {group:'offline', owner:'TUI · already signed in', label:'Returning user / Temporary outage', title:'Keep local work available during an outage', description:'A temporary network failure keeps an already signed-in account in its workspace. Saved tabs and local terminals remain available. Remote machines and online models need connectivity. Reconnecting does not add a sign-in step unless the session is explicitly rejected.', next:'workspace', controls:[['Network reconnects','complete'],['Session is explicitly rejected','expired']], view:()=>workspace(true,true)}
+};
+const mainPath=['install','installing','installed','poweroff','unlock','network','wifi-password','signin','browser','workspace'];
+const overviewPath=['install','installing','installed','unlock','network','wifi-password','signin','browser','phone','workspace','existing','expired','offline','wifi-settings','wifi-error','no-networks','browser-error','phone-expired'];
+const el=id=>document.getElementById(id);
+const value=v=>typeof v==='function'?v():v;
+let current='install';
+function go(id) { if(location.hash==='#'+id) render(); else location.hash=id; }
+function action(id) {
+  if(id==='stay') return;
+  if(id==='copy') { el('description').textContent='Preview only: the real TUI copies its active sign-in link. This mockup has no active account link.'; return; }
+  if(id==='boot') return go(encrypted?'unlock':'local-login');
+  if(id==='ethernet') { returning=false; return go('signin'); }
+  if(id==='close-wifi') return go(networkBack);
+  if(id==='complete') return go('workspace');
+  if(id==='wifi-settings') networkBack=current;
+  if(['google','apple','email'].includes(id)) { provider={google:'Google',apple:'Apple',email:'email'}[id]; return go('browser'); }
+  go(id);
+}
+function render() {
+  const id=location.hash.slice(1);
+  current=id==='overview'||steps[id]?id:'install';
+  document.querySelectorAll('.nav-item').forEach(a=>{ if(a.dataset.group===(steps[current]?.group||current)) a.setAttribute('aria-current','step'); else a.removeAttribute('aria-current'); });
+  const all=current==='overview';
+  el('screen').hidden=all; el('details').hidden=all; el('overview').hidden=!all;
+  if(all) {
+    el('breadcrumb').textContent='Complete flow / All screens'; el('owner').textContent='Click a screen to explore';
+    el('overview').innerHTML=overviewPath.map((id,i)=>{const s=steps[id]; return `<a class="overview-card" href="#${id}"><div class="screen" aria-hidden="true" inert>${s.view()}</div><h3>${String(i+1).padStart(2,'0')} · ${value(s.title)}</h3><p>${s.owner}</p></a>`;}).join('');
+    return;
+  }
+  if(['existing','expired','offline'].includes(current)) returning=true;
+  if(['install','network','unlock','local-login'].includes(current)) returning=false;
+  const s=steps[current];
+  el('breadcrumb').textContent=s.label; el('owner').textContent=s.owner;
+  el('screen').innerHTML=s.view();
+  el('screen').setAttribute('aria-label',value(s.title)+' — screen preview');
+  const i=mainPath.indexOf(current);
+  el('step-label').textContent=i>=0?'First-use journey':'Alternate path';
+  el('title').textContent=value(s.title); el('description').textContent=s.description;
+  el('previous').disabled=!s.back && i<=0;
+  el('next').disabled=!s.next;
+  el('next').textContent=['browser','phone'].includes(current)?'Complete sign-in →':current==='poweroff'?'Turn computer on →':'Next →';
+  el('review-controls').innerHTML='<span>Preview controls</span>'+s.controls.map(([label,id])=>`<button class="small-button" data-action="${id}">${label}</button>`).join('');
+  el('review-controls').hidden=s.controls.length===0;
+}
+el('previous').addEventListener('click',()=>{const s=steps[current]; const id=value(s?.back)||mainPath[mainPath.indexOf(current)-1]; if(id) go(id);});
+el('next').addEventListener('click',()=>{const next=value(steps[current]?.next); if(next) go(next);});
+document.addEventListener('click',event=>{const control=event.target.closest('[data-action]'); if(control) action(control.dataset.action);});
+document.addEventListener('change',event=>{if(event.target.matches('[data-encryption]')) encrypted=event.target.checked;});
+document.addEventListener('keydown',event=>{
+  if(event.altKey||event.metaKey||event.ctrlKey) return;
+  const editing=event.target.matches('input,select,textarea');
+  if(editing) { if(event.key==='Enter'&&event.target.dataset.enter) {event.preventDefault(); action(event.target.dataset.enter);} return; }
+  if(event.key==='ArrowRight') {event.preventDefault(); el('next').click();}
+  if(event.key==='ArrowLeft') {event.preventDefault(); el('previous').click();}
+  if(event.key==='Escape') { if(current==='wifi-settings') go(networkBack); else if(['browser','phone','browser-error'].includes(current)) go('signin'); else if(['wifi-password','wifi-error'].includes(current)) go('network'); }
+  if(['ArrowUp','ArrowDown'].includes(event.key)) {
+    const controls=[...el('screen').querySelectorAll('button')]; if(!controls.length) return;
+    event.preventDefault(); const previous=controls.indexOf(document.activeElement); const index=(previous+(event.key==='ArrowDown'?1:-1)+controls.length)%controls.length; controls[index].focus();
+  }
+});
+window.addEventListener('hashchange',render);
+render();
+</script>
+</body>
+</html>

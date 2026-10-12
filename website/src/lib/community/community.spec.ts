@@ -8,8 +8,8 @@ import { forkFiles, zipFiles } from './bundle';
 import { previewDocument } from './preview';
 
 describe('portable starter projects', () => {
-  it('ships eighteen real outputs with parseable scripts, covers, and a complete installable fork', async () => {
-    expect(starterHarnesses).toHaveLength(18);
+  it('ships seventeen real outputs with parseable scripts, covers, and a complete installable fork', async () => {
+    expect(starterHarnesses).toHaveLength(17);
     for (const summary of starterHarnesses) {
       const harness = (await getStarter(summary.id))!;
       expect(harness.files.length).toBeGreaterThanOrEqual(1);
@@ -26,6 +26,11 @@ describe('portable starter projects', () => {
       const zip = zipFiles(files); expect(new DataView(zip.buffer).getUint32(0, true)).toBe(0x04034b50);
       expect(new TextDecoder().decode(zip)).toContain(harness.files[0].content);
     }
+  });
+  it('reads only the output for a harness page, not a starter\'s megabytes of source', async () => {
+    const full = (await getStarter('starter-two-futures'))!, page = (await getStarter('starter-two-futures', { viewerOnly: true }))!;
+    expect(full.files.length).toBeGreaterThan(1);
+    expect(page.files).toEqual([full.files.find(file => file.path === full.viewerPath)]);
   });
   it('rejects path traversal and retains copyright from the fork lineage', async () => {
     expect(() => zipFiles([{ path: '../evil', content: 'oops' }])).toThrow('Invalid project path');

@@ -12,21 +12,29 @@ retired; only the host routes below were kept.
 |---|---|
 | `/`, `/s/:id`, `/auth/callback`, `/callback` | The Flutter app (`public/harness-web/index.html`, via `rewrites()` in `next.config.js`) |
 | `/download` (and `/install` → it) | Install page: CLI command and desktop downloads |
+| `/app` | The phone app's download code: an iPhone or iPad is redirected to the App Store and an Android device to Google Play, by user agent (`src/lib/phoneApp.ts`); anything else gets both stores |
 | `/pair` | Phone setup guidance — the mobile app and the desktop "add phone" dialog link here |
 | `/os` | The Harness operating system landing page: plain HTML/CSS, local fonts and screenshots in `public/os/` |
+| `/agents` | Harness for agents: install, the agent commands with examples and exit codes, the plugin and skill. One plain HTML file, `public/agents/index.html`, with no script |
+| `/llms.txt` | The [llms.txt](https://llmstxt.org) summary for agents, `public/llms.txt` |
 | `/os/latest` | Redirect to the newest complete published OS release; OS tags only, stable preferred, five-minute server lookup cache |
-| `/desktop` | Desktop download page |
-| `/hub`, `/hub/following`, `/hub/yours` | Public three-column gallery, followed creators, and your publications |
-| `/hub/:id` | Full-page output viewer and published conversation, with likes and comments |
+| `/desktop` | Desktop download page; offers the build for the visitor's OS and CPU (`src/lib/desktopPlatform.ts`), with links to every other build and the CLI command |
+| `/hub`, `/hub/following`, `/hub/yours` | Public three-column gallery, followed creators, and your publications; `?q=`, `?category=` and `?sort=popular` narrow and order them |
+| `/hub/:id` | Full-page output viewer (full screen) beside the published conversation, comments or source files, with likes, a copyable link and the harness's public forks |
 | `/hub/:id/fork`, `/hub/:id/download` | Desktop handoff fallback and an optional project ZIP |
 | `/hub/:id/snapshot` | Public, bounded snapshot consumed by the desktop handoff |
 | `/hub/import` | One-use desktop handoff into a private browser draft |
 | `/hub/publish` | Review and explicitly publish one portable session snapshot |
 | `/api/community/*` | Same-origin proxy for the backend's community API |
-| `/desktop/download-macos`, `/desktop/download/linux-{x64,arm64}` | Redirect to the latest build in the desktop manifest |
+| `/desktop/download-macos`, `/desktop/download/{macos-arm64,linux-x64,linux-arm64}` | Redirect to the latest build in the desktop manifest (`download-macos` is the Intel build, which every Mac runs; `macos-arm64` the Apple silicon one) |
 | `/flash-circle.sh` | The dial firmware flasher script |
 | `/install.sh`, `/cli/install.sh`, `/desktop/install.sh` | Redirect to the installers on `cdn.autonomous.ai` |
 | `ac.autonomous.ai`, `fleet.autonomous.ai` | Redirect to `harness.autonomous.ai` |
+
+`/agents` and `/llms.txt` describe commands agents run as written. `scripts/agents-site.spec.ts` checks every
+`harness` command on them against `cli/src/cli.ts`, the exit codes against the agent commands, and the install
+lines against `.claude-plugin/marketplace.json`; `scripts/check-agents-site.mjs` checks the built server serves
+both unchanged. Change them with the CLI and the [harness skill](../plugins/harness/skills/harness/SKILL.md).
 
 The CLI installer is `cli/scripts/install.sh`. The desktop installer's source is
 `scripts/desktop-install.sh` here, published with `scripts/upload-desktop-install-sh.sh`.
@@ -35,7 +43,8 @@ The CLI installer is `cli/scripts/install.sh`. The desktop installer's source is
 
 The community requires the corresponding backend release and its four `community_*` collections
 and indexes in `backend/prisma/schema.prisma`. Deploy that backend before exposing the website's
-social and publishing actions. Eighteen local examples remain browsable if
+social and publishing actions. The feed's category, order and forks filters need a backend that
+accepts them (it rejects unknown feed parameters), so deploy the backend first. Eighteen local examples remain browsable if
 the API is unavailable. Their published briefs are labeled as examples; engagement starts at zero.
 
 Push a `vX.Y.Z_web` tag — `make release-web` from the repo root cuts the next one.
@@ -124,15 +133,14 @@ by account environment. The feed loads 30 publications per page as visitors scro
 100 comments. Search filters loaded projects. Public navigation and downloads use the production
 account plane; staging API isolation is supported for backend testing.
 
-The examples live in `public/open-harnesses/`: nine self-contained Codex projects, the eight
+The examples live in `public/open-harnesses/`: nine self-contained Codex projects, the seven
 featured projects from `store/hands-on.json`, and the existing Harness Store Marp keynote. The
 featured projects reuse the Store's posters and recordings from `docs/images/`, plus editable
 source from its fixtures/templates (the Go2 trajectory comes from the existing MuJoCo project).
 Their detail page plays the existing recording and labels the conversation as a published brief,
 not the original session transcript. Forks carry the source and available native output (GLB,
-PDF, molecules and trajectory data); recordings stay on the web. The Jev Sheets example remains
-explicitly offline practice with fictional rows. Blender's portable `blender-design.json` restores
-the viewer's Shape Lab controls when imported.
+PDF, molecules and trajectory data); recordings stay on the web. Blender's portable
+`blender-design.json` restores the viewer's Shape Lab controls when imported.
 
 `source-files.json` lists each named harness's portable files. Binary artifacts use base64 in the
 snapshot and decode back to their original bytes in desktop imports and ZIPs. The snapshot limit

@@ -6,17 +6,22 @@
  * engine takes them whatever the daemon's own environment says: the desktop app starts the daemon
  * without the profile. An agent must still bind, take turns and come back after a restart.
  */
+import { createHash } from 'node:crypto'
+import { tmpdir, userInfo } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, onTestFailed } from 'vitest'
 import { LocalClient, type Frame } from './harness/client.js'
-import { CLI_ROOT, IsolatedDaemon, until } from './harness/daemon.js'
+import { assertHooksContained, CLI_ROOT, IsolatedDaemon, until } from './harness/daemon.js'
 import { sharedCodex } from './harness/sharedCodex.js'
 
 type Engine = 'claude' | 'codex'
 type Row = Record<string, any>
+
+/** The shell of the account running the tests, by name: what a daemon given no SHELL asks (lib/userShell.ts). */
+const accountShell = (() => { try { return basename(userInfo().shell ?? '') } catch { return '' } })()
 
 const rows = async (client: LocalClient): Promise<Row[]> =>
   (await client.request<{ agents: Row[] }>('agents_list', { includeStopped: true }, 30_000)).agents
@@ -50,9 +55,62 @@ const codexCommands = (sessionId: string): string[] =>
   execFileSync('ps', ['-A', '-o', 'command='], { encoding: 'utf8' }).split('\n')
     .filter((line) => /^codex\s/.test(line.trim()) && line.includes(sessionId))
 
+it.each(['legacy', 'journal', 'unconfirmed'] as const)('refuses an uncontained %s home before starting any daemon', source => {
+  const root = mkdtempSync(join(tmpdir(), 'home-containment-'))
+  try {
+    const env = { HOME: root, CODEX_HOME: join(root, 'codex'), ZDOTDIR: root, ADAPTER_DATA_DIR: root, HOOK_INSTALL_ENGINES: 'codex' }
+    const file = join(root, 'engine-homes.json'), homes = { claude: [], codex: ['/fixture-unowned-home'] }
+    if (source === 'legacy') writeFileSync(file, JSON.stringify(homes), { mode: 0o600 })
+    else {
+      mkdirSync(file + '.adoptions', { mode: 0o700 }); mkdirSync(file + '.confirmations', { mode: 0o700 })
+      const record = JSON.stringify({ version: 1, previous: null, legacyRequired: false, homes }) + '\n'
+      writeFileSync(join(file + '.adoptions', '000.json'), record, { mode: 0o600 })
+      if (source === 'journal') writeFileSync(file + '.adopted', createHash('sha256').update(record).digest('hex') + '\n', { mode: 0o600 })
+    }
+    expect(() => assertHooksContained(root, env)).toThrow(source === 'unconfirmed' ? 'unconfirmed adoption' : 'installs hooks only inside')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 describe('the person\'s engines keeping their data elsewhere', () => {
   let daemon: IsolatedDaemon | undefined
   afterEach(async () => { await daemon?.close(); daemon = undefined })
+
+  it('keeps readiness and a terminal available while a moved-home write is held, then retries and restores it', async () => {
+    const d = await IsolatedDaemon.create(); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    const home = join(d.root, 'codex-durable'), fault = join(d.root, 'adoption-unavailable')
+    mkdirSync(home, { mode: 0o700 })
+    writeFileSync(fault, 'hold', { mode: 0o600 })
+    d.env.HARNESS_HOME_ADOPTION_FAULT_FILE = fault
+    d.env.NODE_OPTIONS = `--import=${pathToFileURL(join(CLI_ROOT, 'e2e/harness/homeAdoptionFault.mjs')).href}`
+    writeFileSync(join(d.env.ZDOTDIR!, '.zshrc'), `export CODEX_HOME=${JSON.stringify(home)}\n`)
+    await d.start()
+    let client = await LocalClient.connect(d)
+    await until('the explicit durable adoption hold', () => d.log().includes('[hooks] home adoption held'))
+    expect(existsSync(join(home, 'hooks.json'))).toBe(false)
+    const terminal = await client.request('agent_create', { engine: 'terminal', cwd: d.projectsDir }, 60_000)
+    expect(terminal.error, JSON.stringify(terminal)).toBeUndefined()
+    expect((await row(client, terminal.agent.id))?.status).toBe('active')
+    renameSync(fault, fault + '.recovered')
+    await until('the pending home to receive hooks after durability recovers', () => existsSync(join(home, 'hooks.json')), 30_000)
+    await until('the adoption recovery acknowledgement', () => d.log().includes('[hooks] home adoption recovered'), 30_000)
+    const created = await client.request('agent_create', { engine: 'codex', cwd: d.projectsDir, bypassPermission: true }, 90_000)
+    expect(created.error, JSON.stringify(created)).toBeUndefined()
+    const bound = await until('the recovered home to bind', async () => {
+      const value = await row(client, created.agent.id); return value?.sessionId ? value : null
+    }, 45_000)
+    await turn(client, bound.id, 'durable adoption recovered')
+    client.close(); await d.stop()
+    // The new boot must discover the saved home even after the login shell stops naming it.
+    writeFileSync(join(d.env.ZDOTDIR!, '.zshrc'), '')
+    await d.start(); client = await LocalClient.connect(d)
+    const restored = await until('the durable home after restart without its shell variable', async () => {
+      const value = await row(client, bound.id); return value?.sessionId === bound.sessionId ? value : null
+    }, 45_000)
+    expect(restored.transcriptPath).toBe(bound.transcriptPath)
+    await turn(client, bound.id, 'the saved home survived restart')
+    client.close()
+  }, 240_000)
 
   it.each(['claude', 'codex'] as const)('%s model picker follows the login shell home', async engine => {
     const d = await IsolatedDaemon.create(); daemon = d
@@ -73,18 +131,41 @@ describe('the person\'s engines keeping their data elsewhere', () => {
     await d.start()
     await until('the core to read the login shell', () => /\[env\] read \d+ variables/.test(d.log()))
     const client = await LocalClient.connect(d)
-    const created = await client.request('agent_create', { engine, cwd: d.projectsDir, bypassPermission: true }, 90_000)
+    // A launch in the daemon's first seconds may be held while the moved home's hooks are confirmed: the base install
+    // and the home's adoption were both writing, one lost its turn, and a create with no creation id is answered
+    // NATIVE_LAUNCH_HELD at once (1 run in 4 on a 16-core Intel Mac, 2026-10-12). A hold is a wait, so it asks again,
+    // as the apps do by creation id.
+    const created = await until('the launch, once the hooks are confirmed', async () => {
+      const reply = await client.request('agent_create', { engine, cwd: d.projectsDir, bypassPermission: true }, 90_000)
+      return reply.error === 'NATIVE_LAUNCH_HELD' ? null : reply
+    }, 60_000, 1_000)
     expect(created.error, JSON.stringify(created)).toBeUndefined()
     const agent = await until('the model-picker agent to bind', async () => {
       const now = await row(client, created.agent.id); return now?.sessionId ? now : null
     }, 30_000)
-    if (engine === 'codex') expect(agent.codexHome).toBeNull()
+    if (engine === 'codex') expect(agent.codexHome).toBe(home)
     const answer = await client.request('models_list', { agentId: agent.id }, 30_000)
     expect(answer.error, JSON.stringify(answer)).toBeUndefined()
     const ids = answer.models.map((model: Row) => model.id)
     expect(ids).toContain(`runtime-v1:${agent.id}:${engine}:${engine === 'claude' ? 'sonnet' : 'gpt-6-luna'}@auto`)
     expect(ids.some((id: string) => id.includes(engine === 'claude' ? ':haiku@' : ':wrong-login-model@'))).toBe(false)
     client.close()
+  })
+
+  // zsh reads the first file and bash, as a login shell, the second: whichever the account running the tests has.
+  it.runIf(accountShell === 'zsh' || accountShell === 'bash')('reads the profile of the account\'s shell when the daemon is given no SHELL', async () => {
+    // As from `docker exec`, a CI step or a bare service: a shell hands SHELL on only when it was handed it. The
+    // daemon then read no profile at all, and a moved home named there never got its hooks.
+    const d = await IsolatedDaemon.create(); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    delete d.env.SHELL
+    const home = join(d.root, 'codex-no-shell')
+    mkdirSync(home, { mode: 0o700 })
+    for (const profile of ['.zshrc', '.bash_profile']) writeFileSync(join(d.env.HOME!, profile), `export CODEX_HOME=${JSON.stringify(home)}\n`)
+    await d.start()
+    await until('the core to read the login shell', () => /\[env\] read \d+ variables/.test(d.log()))
+    expect(d.log()).not.toContain('could not read a login shell environment')
+    await until('the moved home to receive hooks', () => existsSync(join(home, 'hooks.json')), 30_000)
   })
 
   it.each(['activity', 'resources', 'close'] as const)('a moved shared Codex server supplies %s when process environment discovery is unavailable', async operation => {
@@ -106,7 +187,7 @@ describe('the person\'s engines keeping their data elsewhere', () => {
       const agent = await until('the shared conversation to bind', async () => {
         const now = await row(client, created.agent.id); return now?.sessionId ? now : null
       }, 30_000)
-      expect(agent.codexHome).toBeNull()
+      expect(agent.codexHome).toBe(home)
       server.state.threadId = agent.sessionId
       const started = client.next(isTurn('turn_started', agent.id), 30_000)
       client.send('message', { agentId: agent.id, content: '!hold' })
@@ -151,7 +232,7 @@ describe('the person\'s engines keeping their data elsewhere', () => {
     for (const [folder, thread_name] of [[d.env.CODEX_HOME!, 'Wrong login name'], [home, 'Moved home conversation']]) {
       writeFileSync(join(folder, 'session_index.jsonl'), JSON.stringify({ id: agent.sessionId, thread_name }) + '\n')
     }
-    expect(agent.codexHome).toBeNull()
+    expect(agent.codexHome).toBe(home)
     await until('the moved-home name on the agent', async () => (await row(client, agent.id))?.name === 'Moved home conversation', 20_000)
     client.close()
   })
@@ -189,6 +270,60 @@ describe('the person\'s engines keeping their data elsewhere', () => {
     await turn(again, agent.id, 'the parent keeps its own conversation')
     again.close()
   })
+
+  it.each([false, true])('retains a saved binding with an incomplete header while readiness and a sibling work, then recovers in place: inline=%s', async inline => {
+    const d = await IsolatedDaemon.create(inline ? { env: { HARNESSD_SERVICES: 'none' } } : {}); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    await d.start()
+    let client = await LocalClient.connect(d)
+    const agents: Row[] = []
+    for (const engine of ['codex', 'claude']) {
+      const created = await client.request('agent_create', { engine, cwd: d.projectsDir, bypassPermission: true }, 90_000)
+      expect(created.error, JSON.stringify(created)).toBeUndefined()
+      agents.push(await until('the private conversation to bind', async () => {
+        const value = await row(client, created.agent.id); return value?.sessionId ? value : null
+      }, 45_000))
+    }
+    const [bound, sibling] = agents
+    await turn(client, bound!.id, 'before the incomplete header')
+    client.close(); await d.stop()
+    const original = (JSON.parse(readFileSync(join(d.dataDir, 'registry.json'), 'utf8')) as Row[])
+      .find(value => value.agentId === bound!.id)!
+    const file = original.transcriptPath as string
+    expect(file.startsWith(d.root + '/')).toBe(true)
+    const complete = readFileSync(file)
+    writeFileSync(file, complete.subarray(0, 12))
+    await d.start(); client = await LocalClient.connect(d)
+    const held = await until('the saved conversation to expose its hold', async () => {
+      const value = await row(client, bound!.id); return value?.identityHold ? value : null
+    }, 45_000)
+    expect(held).toMatchObject({ sessionId: bound!.sessionId, status: 'active' })
+    // A mistakenly installed tail would parse this valid turn record despite its invalid header.
+    // Only this fixture's file is written; no synthetic input goes to the held pane.
+    appendFileSync(file, '\n' + JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'unconfirmed held record' } }) + '\n')
+    await turn(client, sibling!.id, 'a sibling works during the hold')
+    expect(client.frames.filter(frame => frame.agentId === bound!.id && ['turn_started', 'turn_ended'].includes(frame.type))).toEqual([])
+    const cancelled = client.next(isTurn('agent_activity', bound!.id), 15_000, 'held cancellation acknowledged by core')
+    client.send('cancel', { agentId: bound!.id })
+    await cancelled
+    const saved = JSON.parse(readFileSync(join(d.dataDir, 'registry.json'), 'utf8')) as Row[]
+    expect(saved.find(value => value.agentId === bound!.id)).toMatchObject({ sessionId: bound!.sessionId, transcriptPath: file })
+    writeFileSync(file, complete)
+    await expect.poll(async () => (await row(client, bound!.id))?.identityHold, { timeout: 45_000, interval: 200 })
+      .toEqual(expect.stringMatching(/^Waiting for transcript interpretation:/))
+    const recovery = await row(client, bound!.id)
+    expect(recovery?.identityHold).toEqual(expect.stringMatching(/control boundary|replaced or truncated|boundary is an incomplete record/))
+    const confirmed = client.next(isTurn('agent_activity', bound!.id), 15_000, 'current cancellation acknowledged by core')
+    client.send('cancel', { agentId: bound!.id })
+    await confirmed
+    await until('the same live binding to recover without another restart', async () => {
+      const value = await row(client, bound!.id)
+      return value?.sessionId === bound!.sessionId && !value.identityHold ? value : null
+    }, 45_000)
+    await turn(client, bound!.id, 'after the header recovered')
+    expect(d.coresStarted()).toBe(2)
+    client.close()
+  }, 240_000)
 
   it.each(['claude', 'codex'] as const)('search finds external %s conversations in the moved home after startup', async engine => {
     const d = await IsolatedDaemon.create(); daemon = d
@@ -312,7 +447,7 @@ describe('the person\'s engines keeping their data elsewhere', () => {
   // other engine's hooks are installed here, as for a person whose moved home has none of the daemon's yet.
   // The process repair binds it from what the engine leaves for that in the home it writes in: Claude Code's
   // process record (`<home>/sessions/<pid>.json`), the rollout Codex holds open. It looked in the default
-  // folders alone (sessionRepair.ts `claudeProcessSession`, `findLiveSession`), and the tile never bound.
+  // folders alone (sessionRepair.ts `processSessionOf`, `findLiveSession`), and the tile never bound.
   it.each([
     ['claude', 'CLAUDE_CONFIG_DIR', 'codex'],
     ['codex', 'CODEX_HOME', 'claude'],
@@ -344,6 +479,124 @@ describe('the person\'s engines keeping their data elsewhere', () => {
     expect(back.status).toBe('active')
     client.close()
   }, 300_000)
+
+  it.each(['process record', 'home catalog'] as const)('an incomplete %s holds binding, Stop and Close while readiness and a sibling continue', async fault => {
+    const d = await IsolatedDaemon.create({ env: { HOOK_INSTALL_ENGINES: 'codex' } }); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    await d.start()
+    let client = await LocalClient.connect(d)
+    const opened = await client.request('agent_create', { engine: 'terminal', cwd: d.projectsDir }, 60_000)
+    expect(opened.error, JSON.stringify(opened)).toBeUndefined()
+    const tile = await until('the private terminal tile', async () => {
+      const now = await row(client, opened.agent.id); return now?.tmuxPane ? now : null
+    })
+    client.close()
+    await d.stop()
+    // Start only in this fixture's private pane while discovery is stopped. No hook can
+    // bind before the engine's own record is made incomplete, as during a crashed write.
+    await type(d, tile.tmuxPane, 'claude')
+    const records = join(d.engineConfig.claudeProjectsDir, '..', 'sessions')
+    const path = await until('the private engine process record', () => {
+      try { const files = readdirSync(records); return files.length === 1 ? join(records, files[0]) : null }
+      catch { return null }
+    })
+    const nativeBytes = readFileSync(path, 'utf8')
+    const native = JSON.parse(nativeBytes)
+    const faultFile = fault === 'process record' ? path : join(d.dataDir, 'engine-homes.json')
+    const complete = fault === 'process record' ? nativeBytes : JSON.stringify({ claude: [], codex: [] })
+    const reason = fault === 'process record' ? 'the process record is incomplete' : 'the saved engine-home catalog is incomplete'
+    writeFileSync(faultFile, '{', { mode: 0o600 })
+    await d.start()
+    client = await LocalClient.connect(d)
+    await until('the binding hold with its reason', () => d.log().includes(`binding held · Conversation identity is held: ${reason}`))
+    const held = await row(client, tile.id)
+    expect(held?.engine).toBe('claude')
+    expect(held?.sessionId).toBeFalsy()
+    expect(held?.status).toBe('active')
+    // This sibling's explicit profile is independent of the deliberately unreadable home catalog.
+    const sibling = await client.request('agent_create', { engine: 'codex', cwd: d.projectsDir, codexHome: d.env.CODEX_HOME, bypassPermission: true }, 90_000)
+    expect(sibling.error, JSON.stringify(sibling)).toBeUndefined()
+    await until('the independent sibling to bind', async () => (await row(client, sibling.agent.id))?.sessionId, 45_000)
+    const stopped = await client.request('agent_delete', { agentId: tile.id }, 60_000)
+    expect(stopped.error, JSON.stringify(stopped)).toBeTruthy()
+    const closed = await client.request('agent_close', { agentId: tile.id, sessionId: held!.sessionId,
+      createdAt: held!.createdAt, mode: 'now' }, 60_000)
+    expect(closed).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', detail: expect.stringContaining(reason) })
+    expect(IsolatedDaemon.alive(native.pid)).toBe(true)
+    expect((await row(client, tile.id))?.status).toBe('active')
+    writeFileSync(faultFile + '.complete', complete, { mode: 0o600 })
+    renameSync(faultFile + '.complete', faultFile)
+    await until('the same live process to bind after its record becomes complete', async () => {
+      const now = await row(client, tile.id)
+      return now?.status === 'active' && now.sessionId === native.sessionId
+    }, 60_000, 250)
+    client.close()
+  }, 240_000)
+
+  it.runIf(process.platform === 'darwin')('Codex binding does not wait for the optional native discovery cooldown', async () => {
+    const d = await IsolatedDaemon.create({ env: { HOOK_INSTALL_ENGINES: 'claude' } }); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    const fault = join(d.root, 'optional-native-discovery-unavailable')
+    writeFileSync(fault, 'hold', { mode: 0o600 })
+    d.env.HARNESS_NATIVE_DISCOVERY_FAULT_FILE = fault
+    d.env.NODE_OPTIONS = `--import=${pathToFileURL(join(CLI_ROOT, 'e2e/harness/nativeDescriptorFault.mjs')).href}`
+    await d.start()
+    const client = await LocalClient.connect(d)
+    const opened = await client.request('agent_create', { engine: 'terminal', cwd: d.projectsDir }, 60_000)
+    expect(opened.error, JSON.stringify(opened)).toBeUndefined()
+    const tile = await until('the private terminal tile', async () => {
+      const now = await row(client, opened.agent.id); return now?.tmuxPane ? now : null
+    })
+    await until('the optional native discovery failure', () => existsSync(fault + '.observed'), 20_000)
+    await type(d, tile.tmuxPane, 'codex')
+    const sessionId = await until('the private Codex rollout', () => conversationIn('codex', d.env.CODEX_HOME!), 10_000)
+    await until('binding under the optional discovery cooldown', async () => {
+      const now = await row(client, tile.id)
+      return now?.status === 'active' && now.sessionId === sessionId
+    }, 20_000, 250)
+    expect(Date.now() - Number(readFileSync(fault + '.observed', 'utf8'))).toBeLessThan(60_000)
+    client.close()
+  }, 120_000)
+
+  it('unavailable Codex descriptor evidence holds binding, Stop and Close, then recovers the same conversation', async () => {
+    const d = await IsolatedDaemon.create({ env: { HOOK_INSTALL_ENGINES: 'claude' } }); daemon = d
+    onTestFailed(() => console.log(`---- daemon log\n${d.log().split('\n').slice(-150).join('\n')}`))
+    const fault = join(d.root, 'native-descriptors-unavailable')
+    d.env.HARNESS_DESCRIPTOR_FAULT_FILE = fault
+    d.env.NODE_OPTIONS = `--import=${pathToFileURL(join(CLI_ROOT, 'e2e/harness/nativeDescriptorFault.mjs')).href}`
+    await d.start()
+    let client = await LocalClient.connect(d)
+    const opened = await client.request('agent_create', { engine: 'terminal', cwd: d.projectsDir }, 60_000)
+    expect(opened.error, JSON.stringify(opened)).toBeUndefined()
+    const tile = await until('the private terminal tile', async () => {
+      const now = await row(client, opened.agent.id); return now?.tmuxPane ? now : null
+    })
+    client.close(); await d.stop()
+    await type(d, tile.tmuxPane, 'codex')
+    const sessionId = await until('the private Codex rollout', () => conversationIn('codex', d.env.CODEX_HOME!), 30_000)
+    writeFileSync(fault, 'hold', { mode: 0o600 })
+    await d.start()
+    client = await LocalClient.connect(d)
+    await until('the descriptor binding hold after readiness', () => /binding held · Conversation identity is held: the native (?:lsof|descriptor)/.test(d.log()), 45_000)
+    const held = await row(client, tile.id)
+    expect(held).toMatchObject({ engine: 'codex', status: 'active' })
+    expect(held?.sessionId).toBeFalsy()
+    const sibling = await client.request('agent_create', { engine: 'claude', cwd: d.projectsDir, bypassPermission: true }, 90_000)
+    expect(sibling.error, JSON.stringify(sibling)).toBeUndefined()
+    await until('the independent sibling to bind', async () => (await row(client, sibling.agent.id))?.sessionId, 45_000)
+    const stopped = await client.request('agent_delete', { agentId: tile.id }, 60_000)
+    expect(stopped.error, JSON.stringify(stopped)).toBeTruthy()
+    const closed = await client.request('agent_close', { agentId: tile.id, sessionId: held!.sessionId, createdAt: held!.createdAt, mode: 'now' }, 60_000)
+    expect(closed).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', detail: expect.stringMatching(/native (?:lsof|descriptor)/) })
+    expect((await row(client, tile.id))?.status).toBe('active')
+    expect(conversationIn('codex', d.env.CODEX_HOME!)).toBe(sessionId)
+    renameSync(fault, fault + '.recovered')
+    await until('the same live Codex conversation to bind after native evidence recovers', async () => {
+      const now = await row(client, tile.id)
+      return now?.status === 'active' && now.sessionId === sessionId
+    }, 60_000, 250)
+    client.close()
+  }, 240_000)
 
   // A Codex agent in a moved CODEX_HOME, restarted, then stopped and opened again. Its rollout was held to the
   // daemon's own CODEX_HOME before the relaunch (portableHistory.ts) and refused as outside the profile: the

@@ -12,6 +12,8 @@ const m = vi.hoisted(() => ({
   publishChanged: vi.fn(), publishDown: vi.fn(), revoke: vi.fn(),
   seen: {} as Record<string, Record<string, string>>,
   hsetCalls: 0,
+  acks: [] as Array<{ userId: string; pub: string; addSeq: number; signer: string; ack: string; createdAt: number }>,
+  failAck: null as unknown,
 }))
 vi.mock('./prisma.js', () => ({
   prisma: {
@@ -41,6 +43,18 @@ vi.mock('./prisma.js', () => ({
         m.snaps.set(data.userId, structuredClone(data)); return data
       }),
     },
+    deviceKeyAck: {
+      create: vi.fn(async ({ data }: { data: { userId: string; pub: string; addSeq: number; signer: string; ack: string } }) => {
+        if (m.failAck) { const err = m.failAck; m.failAck = null; throw err }
+        if (m.acks.some(a => a.userId === data.userId && a.pub === data.pub && a.signer === data.signer)) {
+          throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
+        }
+        m.acks.push({ ...data, createdAt: m.acks.length }); return data
+      }),
+      findMany: vi.fn(async ({ where, take }: { where: { userId: string; addSeq: { gt: number } }; take: number }) =>
+        m.acks.filter(a => a.userId === where.userId && a.addSeq > where.addSeq.gt)
+          .sort((a, b) => a.addSeq - b.addSeq || a.createdAt - b.createdAt).slice(0, take)),
+    },
     harnessSession: { updateMany: m.revoke },
   },
 }))
@@ -61,7 +75,8 @@ vi.mock('./bus.js', () => ({
     hgetall: async (key: string) => m.seen[key] ?? {},
   },
 }))
-import { appendDeviceKey, deviceKeysSeen, readDeviceKeyLog, touchDeviceKey } from './deviceKeyLog.js'
+import { appendDeviceAck, appendDeviceKey, deviceKeysSeen, readDeviceAcks, readDeviceKeyLog, touchDeviceKey } from './deviceKeyLog.js'
+import { signDevAck, type DevAck } from './deviceAckCore.js'
 import { emptyDevLogState, nextDevLogEntry, signDevLogEntry, applyDevLogEntries, DEVLOG_MAX_ACTIVE, type DevLogState } from './deviceLogCore.js'
 import { prisma } from './prisma.js'
 
@@ -309,5 +324,77 @@ describe('when a key was last seen', () => {
     expect(await deviceKeysSeen('user-seen-2')).toEqual({ seen: {}, since: null })
     m.seen['devkeys:seen:user-seen-3'] = { _since: 'x', junk: '5' }
     expect(await deviceKeysSeen('user-seen-3')).toEqual({ seen: {}, since: null })
+  })
+})
+
+describe('acknowledgements ("It\'s mine", once for the account)', () => {
+  const stranger = key(4)
+  beforeEach(async () => {
+    m.rows.length = 0
+    m.snaps.clear()
+    m.acks.length = 0
+    m.failAck = null
+    vi.clearAllMocks()
+    m.publishChanged.mockResolvedValue(1)
+    m.publishDown.mockResolvedValue(1)
+    // box1 (seq 1), phone (seq 2), box2 (seq 3), then box2 removed by box1 (seq 4).
+    await appendDeviceKey(USER, await addEntry(box1, 'machine', MID1, 'box1'), { kind: 'machine', machineId: MID1 })
+    await appendDeviceKey(USER, await addEntry(phone, 'viewer', '', 'phone'), { kind: 'viewer' })
+    await appendDeviceKey(USER, await addEntry(box2, 'machine', MID2, 'box2'), { kind: 'machine', machineId: MID2 })
+    await appendDeviceKey(USER, await removeEntry(box2.pub, box1), { kind: 'machine', machineId: MID1 })
+    m.publishChanged.mockClear()
+  })
+  const ack = (by: { priv: Uint8Array; pub: string }, of: string, addSeq: number, extra: Partial<DevAck> = {}): DevAck =>
+    signDevAck({ v: 1, acct: USER, pub: of, addSeq, signer: by.pub, at: 9_000, ...extra }, by.priv)
+
+  it('keeps one a key active on the log signed for a key the log added there, and tells every device', async () => {
+    const a = ack(box1, phone.pub, 2)
+    expect(await appendDeviceAck(USER, a)).toEqual({ ok: true, created: true })
+    expect(m.acks).toHaveLength(1)
+    // The log's head did not move: the push is only "read again".
+    expect(m.publishChanged).toHaveBeenCalledWith(USER, (await readDeviceKeyLog(USER, 0)).head)
+    expect(await readDeviceAcks(USER, 0)).toEqual({ acks: [a] })
+  })
+
+  it('takes the same signer saying it again as done, and keeps the first', async () => {
+    const first = ack(box1, phone.pub, 2)
+    await appendDeviceAck(USER, first)
+    m.publishChanged.mockClear()
+    expect(await appendDeviceAck(USER, ack(box1, phone.pub, 2, { at: 10_000 }))).toEqual({ ok: true, created: false })
+    expect(m.publishChanged).not.toHaveBeenCalled()
+    expect((await readDeviceAcks(USER, 0)).acks).toEqual([first])
+  })
+
+  it('refuses a bad signature, an unknown or removed signer, a key vouching for itself, the wrong entry and another account', async () => {
+    const cases: Array<[unknown, string]> = [
+      [{ ...ack(box1, phone.pub, 2), at: 9_001 }, 'BAD_SIGNATURE'],
+      [ack(stranger, phone.pub, 2), 'SIGNER_NOT_ACTIVE'],
+      [ack(box2, phone.pub, 2), 'SIGNER_NOT_ACTIVE'],
+      [ack(phone, phone.pub, 2), 'SELF_ACK'],
+      [ack(box1, phone.pub, 3), 'NOT_ADDED_THERE'],
+      [ack(box1, box2.pub, 3), 'NOT_ADDED_THERE'],
+      [ack(box1, phone.pub, 2, { acct: 'someone-else' }), 'WRONG_ACCOUNT'],
+      [{ v: 1 }, 'BAD_ACK'],
+    ]
+    for (const [raw, code] of cases) expect(await appendDeviceAck(USER, raw), code).toEqual({ ok: false, status: 400, code })
+    expect(m.acks).toHaveLength(0)
+    expect(m.publishChanged).not.toHaveBeenCalled()
+  })
+
+  it('lets a failure to store it through, rather than calling it kept', async () => {
+    m.failAck = new Error('mongo down')
+    await expect(appendDeviceAck(USER, ack(box1, phone.pub, 2))).rejects.toThrow('mongo down')
+    expect(m.publishChanged).not.toHaveBeenCalled()
+  })
+
+  it('reads only the keys added after an entry, oldest key first', async () => {
+    const forPhone = ack(box1, phone.pub, 2)
+    const forBox1 = ack(phone, box1.pub, 1)
+    await appendDeviceAck(USER, forPhone)
+    await appendDeviceAck(USER, forBox1)
+    expect((await readDeviceAcks(USER, 0)).acks).toEqual([forBox1, forPhone])
+    expect((await readDeviceAcks(USER, 1)).acks).toEqual([forPhone])
+    expect((await readDeviceAcks(USER, 2)).acks).toEqual([])
+    expect((await readDeviceAcks('someone-else', 0)).acks).toEqual([])
   })
 })

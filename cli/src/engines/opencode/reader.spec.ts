@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { OpencodeReader, readOpencodeMessages } from './reader.js'
+import { opencodeV2TurnOpen } from '../launchControl.js'
 import type { LiveEvent } from '../../lib/normalize.js'
 
 const hasSqlite = (() => {
@@ -189,5 +190,35 @@ d('OpencodeReader (sqlite3 CLI)', () => {
     expect(deltas.join('')).toBe('Hello world')
     expect(deltas).toContain('Hel')
     expect(deltas).toContain('lo world')
+  })
+})
+
+d('opencodeV2TurnOpen (OpenCode 2 session_message)', () => {
+  let dir = ''
+  let db = ''
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oc-v2-turn-')); db = join(dir, 'opencode.db')
+    run(db, 'CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);')
+  })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+  const row = (seq: number, type: string, sid = SID): void =>
+    run(db, `INSERT INTO session_message VALUES ('m${seq}${sid}','${sid}','${type}',${seq},${seq},${seq},'{}');`)
+
+  // Rows as 2.0.24 writes them: system, user, assistant…, idle {outcome} — measured on a live store.
+  it('is open from the user row until its idle row, whatever the outcome', async () => {
+    expect(await opencodeV2TurnOpen(db, SID)).toBe(false)
+    row(1, 'system'); row(2, 'user'); row(3, 'assistant')
+    expect(await opencodeV2TurnOpen(db, SID)).toBe(true)
+    row(4, 'idle')
+    expect(await opencodeV2TurnOpen(db, SID)).toBe(false)
+    row(5, 'user'); row(6, 'model-switched')
+    expect(await opencodeV2TurnOpen(db, SID)).toBe(true)
+    row(7, 'user', 'ses_other'); row(8, 'idle', 'ses_other')
+    expect(await opencodeV2TurnOpen(db, SID)).toBe(true)
+  })
+
+  it('is unknown for a store it cannot read or an id it will not query', async () => {
+    expect(await opencodeV2TurnOpen(join(dir, 'missing.db'), SID)).toBeNull()
+    expect(await opencodeV2TurnOpen(db, "x' OR 1=1")).toBeNull()
   })
 })

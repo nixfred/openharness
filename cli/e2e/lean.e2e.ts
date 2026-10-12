@@ -21,7 +21,9 @@ import { LEAN_CORE_ENTRY, readLeanBundle } from '../src/harnessd/leanBundle.js'
 
 type Engine = 'claude' | 'codex'
 /** The processes the master runs the services in, and the services, each on its own link to the core. The
- *  experiments' start only once they are on (e2e/experiments.e2e.ts, from the run's bundle). */
+ *  experiments' start only once they are on (e2e/experiments.e2e.ts, from the run's bundle). The viewers' starts
+ *  only once something needs it: in each test's new home, a bundle's own harnesses, which its Store puts in place,
+ *  ask for it as the core starts (core/viewersWake.ts, e2e/viewersOnDemand.e2e.ts). */
 const PROCESSES = ['search', 'viewers', 'edge', 'models']
 const SERVICES = ['search', 'viewers', 'store', 'workspaces', 'usage', 'monitor', 'projects', 'handoff', 'recaps', 'models']
 
@@ -130,6 +132,10 @@ describe('harnessd\'s master and services lean', () => {
     // service with MODULE_NOT_FOUND until the master itself restarted. The lean bundle is only ever an
     // optimisation.
     const d = await fresh()
+    // Core readiness deliberately precedes service readiness. This case removes a RUNNING
+    // bundle, not one a freshly spawned service is still importing for the first time.
+    await until('the services to finish importing the test bundle',
+      () => SERVICES.every(name => d.log().includes(`[service ${name}] connected to the core`)) || null, 30_000, 100)
     const ours = /\[harnessd\] services run from (\S+), as this master does/.exec(d.log())![1]
     rmSync(dirname(ours), { recursive: true })
     const search = servicePids(d).get('search')!
@@ -215,6 +221,65 @@ describe('harnessd\'s master and services lean', () => {
     expect(off.log()).toContain('lean-off is there: the master, the core and the services run from')
     expect(coreCommand(off).endsWith(`${bundle} __run`)).toBe(true)
     await agentWorks(off, 'claude')
+  })
+
+  it('runs Claude Code and Codex on with the other engines\' code gone from the bundle, and says so once', async () => {
+    // A file of the core's that cannot load costs the engines whose code is in it, never the core: the loader
+    // catches it once (engines/inProcess.ts). Remove the legacy pane readers and hook installers,
+    // and Amp's own code. Amp still needs its lazy reader; eager native launch and plugin installation
+    // must survive the missing legacy installers for OpenCode, Claude Code and Codex.
+    const lean = readLeanBundle(readFileSync(bundle))!
+    const files = Object.fromEntries([...lean.files].map(([name, code]) => [name, code.toString('utf8')]))
+    for (const module of ['legacyScreen', 'hooks']) {
+      const chunk = Object.keys(files).filter((name) => name.startsWith(`core-${module}-`))
+      expect(chunk, module).toHaveLength(1)
+      delete files[chunk[0]!]
+    }
+    // And Amp's own code (engines/amp/inProcess.ts), the one engine module that holds its thread export.
+    const amp = Object.keys(files).filter((name) => name.startsWith('core-inProcess-') && files[name]!.includes('AMP_DISABLE_PLUGINS'))
+    expect(amp).toHaveLength(1)
+    delete files[amp[0]!]
+    const without = join(scratch, 'without-others', 'cli.js')
+    mkdirSync(dirname(without), { recursive: true })
+    writeFileSync(without, withLean(readFileSync(bundle, 'utf8'), files), { mode: 0o755 })
+    // Amp and OpenCode, as far as the daemon can tell: programs that answer their probes and then wait.
+    const standIn = (name: string, version: string): string => {
+      const path = join(scratch, 'without-others', name)
+      writeFileSync(path, `#!/bin/sh\ncase "$*" in *--version*|*--help*) echo "${version}"; exit 0;; esac\necho "${name} stand-in"\nexec sleep 600\n`, { mode: 0o755 })
+      return path
+    }
+    const d = await fresh({ AMP_PATH: standIn('amp', '0.0.0'), OPENCODE_PATH: standIn('opencode', 'opencode v2.0.18') }, without)
+    // The core runs from the lean bundle that lacks them, Claude Code's and Codex's hooks installed, and nothing
+    // asked for either as it started.
+    expect(coreCommand(d)).toMatch(new RegExp(` ${escape(join(d.dataDir, 'lean'))}/[0-9a-f]{16}/${escape(LEAN_CORE_ENTRY)} __run$`))
+    expect(claudeHookCommand(d)).toContain('notify.mjs')
+    const unavailable = (module: string): number => d.log().match(new RegExp(`\\[engine ${module}\\] unavailable · `, 'g'))?.length ?? 0
+    expect(unavailable('screens')).toBe(0)
+    expect(unavailable('hooks')).toBe(0)
+    expect(unavailable('amp')).toBe(0)
+    const client = await LocalClient.connect(d)
+    try {
+      const cwd = (name: string): string => { const path = join(d.projectsDir, name); mkdirSync(path, { recursive: true }); return path }
+      const created = await client.request('agent_create', { engine: 'amp', cwd: cwd('lean-amp') }, 90_000)
+      expect(created.error, JSON.stringify(created)).toBeUndefined()
+      await until('the loader to say the readers are unavailable', () => unavailable('screens') > 0 || null, 30_000, 200)
+      expect(d.log()).toMatch(/\[engine screens\] unavailable · .*core-legacyScreen-/)
+      await until('the loader to say Amp\'s code is unavailable', () => unavailable('amp') > 0 || null, 30_000, 200)
+      expect(d.log()).toMatch(/\[engine amp\] unavailable · .*core-inProcess-/)
+      // Native launch and plugin installation now belong to eager core. Losing the legacy
+      // lazy hooks module cannot prevent an OpenCode launch. Ask needs no probed flag here.
+      const launched = await client.request('agent_create', { engine: 'opencode', cwd: cwd('lean-opencode'), permissionMode: 'ask', bypassPermission: false }, 90_000)
+      expect(launched.error, JSON.stringify(launched)).toBeUndefined()
+      expect(launched.agent.engine).toBe('opencode')
+      expect(unavailable('hooks')).toBe(0)
+    } finally { client.close() }
+    await agentWorks(d, 'claude')
+    await agentWorks(d, 'codex')
+    // Each said once, for the life of the core, however often the Amp pane was looked at meanwhile.
+    expect(unavailable('screens')).toBe(1)
+    expect(unavailable('hooks')).toBe(0)
+    expect(unavailable('amp')).toBe(1)
+    expect(d.coresStarted()).toBe(1)
   })
 
   it('never hands the daemon a lean bundle that cannot start a master: everything runs from cli.js', async () => {

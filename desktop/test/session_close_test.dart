@@ -30,6 +30,14 @@ class _CloseConnection extends WsConn {
   final targetedFailures = <(String, String), Map<String, dynamic>>{};
   final requests = <String>[];
   Completer<Map<String, dynamic>>? inspecting;
+
+  /// Runs as the daemon takes a close, before it answers: what the window
+  /// hears while the daemon works on it.
+  Future<void> Function(String mode)? whileClosing;
+
+  /// Whether a close is announced as `agent_deleted` before its answer. Off,
+  /// the window still lists the harness when the answer arrives.
+  bool announceClose = true;
   @override
   Future<Map<String, dynamic>> request(
     String type, {
@@ -41,6 +49,7 @@ class _CloseConnection extends WsConn {
     closes.add(Map.of(payload));
     final mode = payload['mode'] as String;
     final agentId = payload['agentId'] as String;
+    await whileClosing?.call(mode);
     if (targetedFailures[(agentId, mode)] ?? failures[mode]
         case final failure?) {
       // Real WsConn throws refusals; returning a map would skip the production
@@ -58,10 +67,12 @@ class _CloseConnection extends WsConn {
     }
     if (mode == 'after_task') return {'deferred': true};
     if (mode == 'cancel') return {'cancelled': true};
-    await app.handleEventForTest('m', {
-      'type': 'agent_deleted',
-      'payload': {'agentId': payload['agentId']},
-    });
+    if (announceClose) {
+      await app.handleEventForTest('m', {
+        'type': 'agent_deleted',
+        'payload': {'agentId': payload['agentId']},
+      });
+    }
     return {'closed': true};
   }
 }
@@ -361,6 +372,196 @@ void main() {
     expect(modes(), ['inspect', 'idle']);
     await tester.pumpWidget(const SizedBox());
   });
+
+  test('a first conversation bound after the review is the same session', () {
+    final unbound = agent('a0', started: false);
+    final bound = agent('a0');
+    expect(bound.continuesSession(unbound), isTrue);
+    expect(unbound.continuesSession(unbound), isTrue);
+    expect(bound.continuesSession(bound), isTrue);
+    // Once a conversation was bound, another one or none is a change.
+    expect(agent('a0', sessionId: 'other').continuesSession(bound), isFalse);
+    expect(unbound.continuesSession(bound), isFalse);
+    // So is another registration under the same ID.
+    final relaunched = Agent(
+      id: 'a0',
+      name: 'Work a0',
+      engine: 'codex',
+      sessionId: 'conversation-a0',
+      createdAt: DateTime.utc(2026, 9, 30, 13),
+    );
+    expect(relaunched.continuesSession(unbound), isFalse);
+  });
+
+  /// What the daemon announces once Codex has bound its first conversation.
+  Future<void> bindConversation() => app.handleEventForTest('m', {
+    'type': 'agent_synced',
+    'payload': {
+      'agent': {
+        'id': 'a0',
+        'name': 'Work a0',
+        'engine': 'codex',
+        'sessionId': 'conversation-a0',
+        'createdAt': DateTime.utc(2026, 9, 30, 12).toIso8601String(),
+        'closeSupported': true,
+        'resumeMode': 'conversation',
+        'terminal': {'available': true},
+      },
+    },
+  });
+
+  for (final closeTab in [false, true]) {
+    final view = closeTab ? 'tab' : 'pane';
+    // Codex 0.162.1 binds no conversation for its first seconds. A pane closed
+    // a second after it started was reviewed unbound; by Stop it had bound
+    // one, and Stop answered "The session changed. Check it before closing."
+    // with the harness still running (clean macOS VM, Desktop 1.2.65).
+    testWidgets(
+      'Stop closes the $view of a harness that bound its conversation after the review',
+      (tester) async {
+        app.stateOf('m')!.agents = [agent('a0', started: false)];
+        connection.activities['a0'] = 'working';
+        final pane = app.adoptSessionForTest(terminal('a0', []));
+        final tab = app.activeSwarm;
+        await mount(tester, app);
+        unawaited(
+          closeTab
+              ? app.requestCloseSwarm(tab.id)
+              : app.requestClosePane(pane.id),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('1 session is still working.'), findsOneWidget);
+        await bindConversation();
+        expect(app.stateOf('m')!.agents.single.sessionId, 'conversation-a0');
+        await tester.tap(find.widgetWithText(FilledButton, 'Stop'));
+        await tester.pumpAndSettle();
+        expect(modes(), ['inspect', 'now']);
+        // Both name the identity reviewed: no conversation. The daemon takes
+        // that from a harness still starting that has bound one since.
+        expect(connection.closes.map((r) => r['sessionId']), ['', '']);
+        expect(
+          find.text('The session changed. Check it before closing.'),
+          findsNothing,
+        );
+        expect(find.text('Stop not confirmed'), findsNothing);
+        expect(find.byType(Dialog), findsNothing);
+        expect(app.allPanes, isEmpty);
+        expect(app.swarms, closeTab ? isNot(contains(tab)) : anything);
+        final stopped = app.stateOf('m')!.agents.single;
+        expect(stopped.isStopped, isTrue);
+        expect(stopped.sessionId, 'conversation-a0');
+        expect(app.closedHistory, hasLength(1));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'a conversation bound while the daemon closes the $view is not a change',
+      (tester) async {
+        app.stateOf('m')!.agents = [agent('a0', started: false)];
+        connection
+          ..activities['a0'] = 'working'
+          ..announceClose = false
+          // The daemon waits for the conversation, closes with it, and the
+          // window hears the bind before the answer.
+          ..whileClosing = (mode) async {
+            if (mode == 'now') await bindConversation();
+          };
+        final pane = app.adoptSessionForTest(terminal('a0', []));
+        final tab = app.activeSwarm;
+        await mount(tester, app);
+        unawaited(
+          closeTab
+              ? app.requestCloseSwarm(tab.id)
+              : app.requestClosePane(pane.id),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Stop'));
+        await tester.pumpAndSettle();
+        expect(modes(), ['inspect', 'now']);
+        expect(find.text('Stop not confirmed'), findsNothing);
+        expect(find.byType(Dialog), findsNothing);
+        expect(app.allPanes, isEmpty);
+        final stopped = app.stateOf('m')!.agents.single;
+        expect(stopped.isStopped, isTrue);
+        expect(stopped.sessionId, 'conversation-a0');
+        expect(app.closedHistory, hasLength(1));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'a $view whose bound-since harness the daemon refuses can still be dismissed',
+      (tester) async {
+        // An older CLI, or a harness the daemon will not take unbound (a
+        // resume, one typed into a terminal): its refusal is the answer.
+        app.stateOf('m')!.agents = [agent('a0', started: false)];
+        connection
+          ..activities['a0'] = 'working'
+          ..targetedFailures[('a0', 'now')] = {'error': 'AGENT_CHANGED'};
+        final pane = app.adoptSessionForTest(terminal('a0', []));
+        final tab = app.activeSwarm;
+        await mount(tester, app);
+        unawaited(
+          closeTab
+              ? app.requestCloseSwarm(tab.id)
+              : app.requestClosePane(pane.id),
+        );
+        await tester.pumpAndSettle();
+        await bindConversation();
+        await tester.tap(find.widgetWithText(FilledButton, 'Stop'));
+        await tester.pumpAndSettle();
+        expect(modes(), ['inspect', 'now']);
+        expect(find.text('Stop not confirmed'), findsOneWidget);
+        final sent = List.of(connection.closes);
+        await tester.tap(find.byKey(const Key('session-close-view')));
+        await tester.pumpAndSettle();
+        expect(connection.closes, sent);
+        expect(find.byType(Dialog), findsNothing);
+        expect(app.allPanes, isEmpty);
+        expect(app.swarms, closeTab ? isNot(contains(tab)) : anything);
+        expect(app.stateOf('m')!.agents.single.isStopped, isFalse);
+        expect(app.closedHistory, hasLength(1));
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'another conversation after the review still stops nothing in the $view',
+      (tester) async {
+        connection.activities['a0'] = 'working';
+        final pane = app.adoptSessionForTest(terminal('a0', []));
+        final tab = app.activeSwarm;
+        await mount(tester, app);
+        unawaited(
+          closeTab
+              ? app.requestCloseSwarm(tab.id)
+              : app.requestClosePane(pane.id),
+        );
+        await tester.pumpAndSettle();
+        app.stateOf('m')!.agents[0] = agent('a0', sessionId: 'replacement');
+        await tester.tap(find.widgetWithText(FilledButton, 'Stop'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('The session changed. Check it before closing.'),
+          findsOneWidget,
+        );
+        expect(modes(), ['inspect']);
+        await tester.tap(find.byKey(const Key('session-close-view')));
+        await tester.pumpAndSettle();
+        expect(app.panes, contains(pane));
+        expect(app.swarms, contains(tab));
+        expect(app.closedHistory, isEmpty);
+        expect(
+          app.stateOf('m')!.agents.firstWhere((a) => a.id == 'a0').isStopped,
+          isFalse,
+        );
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
 
   for (final closeTab in [false, true]) {
     testWidgets(

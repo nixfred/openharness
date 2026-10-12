@@ -114,6 +114,8 @@ jobs:
             /.github/
             /scripts/
             /desktop/scripts/
+            /cli/scripts/release-cli.sh
+            /backend/scripts/release-be.sh
             /.gitattributes
             /.gitignore
             /.gitmodules
@@ -122,6 +124,13 @@ jobs:
       - name: Verify declared source checkout
         run: python3 scripts/ci-source-inputs.py process
       - name: Validation deadlines, cleanup, receipts and release version guards
+        # The fixtures commit in temporary repositories. Each commit starts a detached
+        # `git maintenance run --auto`, which can still be writing objects/pack when the
+        # test removes the folder (test_queue_validated_pr: "Directory not empty: 'pack'").
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: maintenance.auto
+          GIT_CONFIG_VALUE_0: "false"
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - name: Record source inputs for CI evidence reuse
         run: python3 scripts/ci-source-inputs.py process --record "$RUNNER_TEMP/ci-source-inputs.json"
@@ -451,6 +460,14 @@ jobs:
               raise SystemExit('Failed firmware contracts: ' + ', '.join(failures))
           print(f'Passed all {len(files)} firmware host contracts')
           PY
+      - name: Run the Harness Pro host contracts
+        env:
+          PRO_FONT: ${{ github.workspace }}/devices/harness-pro/firmware/fonts/LiberationSans-Regular.ttf
+        run: |
+          python3 -m pip install --user --break-system-packages pillow==12.1.1
+          bash devices/harness-pro/firmware/test/run.sh
+          python3 devices/harness-pro/firmware/test/test_tree_isolation.py
+          python3 devices/harness-pro/firmware/test/test_fonts.py
 
   mobile-checks:
     concurrency:

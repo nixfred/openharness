@@ -1,3 +1,4 @@
+import { usageTarget, usageTargetKey, usageSnapshot, validUsage, validUsageTarget } from '../lib/agentUsageWire.js'
 /**
  * The core API a light service runs on in its own process (the edge host: usage, the monitor, the project
  * readers): the agents the core last said, and nothing else. Each process asks the core for what it reads
@@ -13,7 +14,7 @@
  * each asked of the core over its link (`ask`). The agents it reads come as the apps are shown them (`service_query shown`): each with its
  * name, whether its terminal is there and its harness's viewer.
  */
-import { CONVERSATIONS_OFF, DAEMON_UNKNOWN, DELIVERIES_OFF, LANE_OFF, OBSERVER_KEY_OFF, resolveAgent, TERMINALS_OFF, WIFI_OFF, type CoreApi, type DaemonAddress, type TerminalWatch } from '../core/api.js'
+import { CONNECTOR_VAULT_OFF, CONVERSATIONS_OFF, DAEMON_UNKNOWN, DELIVERIES_OFF, LANE_OFF, OBSERVER_KEY_OFF, resolveAgent, TERMINALS_OFF, WIFI_OFF, type CoreApi, type DaemonAddress, type TerminalWatch } from '../core/api.js'
 import type { AgentDshContext } from '../lib/agentFrame.js'
 import type { RegisteredSession } from '../lib/registry.js'
 import type { turnsLink } from './turnsLink.js'
@@ -89,6 +90,10 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
   const daemon = (): DaemonAddress => view.daemon?.() ?? DAEMON_UNKNOWN
   return {
     dataDir,
+    usage: async target => {
+      const answer = await ask?.('agentUsage', { target: usageTarget(target) }).catch(() => null)
+      return validUsageTarget(answer?.target) && usageTargetKey(answer.target) === usageTargetKey(target) && validUsage(answer?.value) ? usageSnapshot(answer.value) : null
+    },
     conversations: CONVERSATIONS_OFF,
     // Terminals are launched by the core alone (the shell service, #893): a service in its own process
     // is refused, never handed a way to start a process outside the core.
@@ -126,10 +131,7 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
     },
     questions: { answer: () => {}, answerReviewed: async () => false },
     transcripts: { databaseHistory: () => undefined, lastTurn: UNASKED.lastTurn },
-    external: {
-      sessions: { list: () => [], scan: async () => [] },
-      open: { known: () => new Map(), fresh: async () => new Map() },
-    },
+
     account: {
       mintGridName: async () => null,
       accessToken: () => Promise.reject(new Error(`${service} holds no credential`)),
@@ -139,6 +141,8 @@ export function processCoreApi(dataDir: string, service: string, view: AgentsVie
         publicKey: async () => keyAnswer(await ask('observer_key', { op: 'public' })),
         signWelcome: async (machineId, shareId, peer, ephemeral) => keyAnswer(await ask('observer_key', { op: 'sign', machineId, shareId, peer, ephemeral })),
       } : OBSERVER_KEY_OFF,
+      // The connectors service asks the core for these itself (core/connectorsQueries.ts); no other seals.
+      connectorVault: CONNECTOR_VAULT_OFF,
       privateGridName: async () => null,
       machineName: () => null,
       backend: async (method, path, body) => {

@@ -3,10 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:harness/shared/theme/app_icons.dart';
 
-import '../settings/sections/account_device_detail.dart';
-import '../settings/sections/account_device_history.dart';
-import '../settings/settings_screen.dart';
-import '../settings/settings_section.dart';
+import 'account_device_detail.dart';
+import 'account_device_history.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../state/account_devices.dart' show DeviceConflict, registerRefusalSentence;
 import '../state/app_state.dart';
@@ -65,17 +63,10 @@ class NewDeviceNotice extends StatelessWidget {
                 const SizedBox(width: 6),
                 OutlinedButton(
                   key: const Key('new-device-review'),
-                  // One new device goes straight to its key code; several go to the list, where each is a row.
-                  onPressed: () => unawaited(
-                    more == 0
-                        ? showAccountDeviceDetail(context, notifier, pub: notice.pub, isNew: true)
-                        : showSettingsScreen(
-                            context,
-                            notifier,
-                            initialSection: SettingsSection.accountDevices,
-                            source: 'new-device-notice',
-                          ),
-                  ),
+                  // One new device goes straight to its key code; several go to Machines, where each is a row.
+                  onPressed: () => more == 0
+                      ? unawaited(showAccountDeviceDetail(context, notifier, pub: notice.pub, isNew: true))
+                      : openMachines(context, notifier, devicePub: notice.pub),
                   child: Text(more == 0 ? 'Review' : 'Review devices'),
                 ),
               ],
@@ -249,9 +240,9 @@ class DeviceConflictNoticeBand extends StatelessWidget {
       maxLines: null,
       text: conflict.afterJoin
           ? 'Another key took this computer’s place on your account after it joined: $holder. '
-                'If you did not set up Harness here again, remove that key from another device now (Your devices).'
+                'If you did not set up Harness here again, remove that key from another device now (Machines).'
           : 'This computer is held by another key on your account: $holder. If that was an earlier '
-                'install of this computer, remove it from another device (Your devices) — this computer '
+                'install of this computer, remove it from another device (Machines) — this computer '
                 'joins on its own once it is gone.',
       actions: [
         TextButton(
@@ -261,31 +252,31 @@ class DeviceConflictNoticeBand extends StatelessWidget {
         ),
         OutlinedButton(
           key: const Key('device-conflict-review'),
-          onPressed: () => unawaited(
-            showSettingsScreen(
-              context,
-              notifier,
-              initialSection: SettingsSection.accountDevices,
-              source: 'device-conflict-notice',
-            ),
-          ),
-          child: const Text('Your devices'),
+          onPressed: () => openMachines(context, notifier, devicePub: conflict.pub),
+          child: const Text('Machines'),
         ),
       ],
     );
   }
 }
 
-/// Settings ▸ Your devices, from a machine that asks for its password while this app's device list is
-/// frozen ([AppNotifier.deviceListNeedsReview]): the list pins no machine again until it is reviewed.
-void showDeviceListReview(BuildContext context, AppNotifier notifier) => unawaited(
-  showSettingsScreen(
-    context,
-    notifier,
-    initialSection: SettingsSection.accountDevices,
-    source: 'needs-link',
-  ),
-);
+/// Machines, where the account's computers, phones and apps are listed, from anywhere: it steps out
+/// of Settings and any dialog over the workspace, and the workspace opens the picker
+/// ([AppNotifier.requestMachines]). [devicePub] selects that device there.
+void openMachines(
+  BuildContext context,
+  AppNotifier notifier, {
+  String? devicePub,
+  bool phones = false,
+}) {
+  Navigator.of(context, rootNavigator: true).popUntil((route) => route.isFirst);
+  notifier.requestMachines(devicePub: devicePub, phones: phones);
+}
+
+/// Machines, from a machine that asks for its password while this app's device list is frozen
+/// ([AppNotifier.deviceListNeedsReview]): the list pins no machine again until it is reviewed.
+void showDeviceListReview(BuildContext context, AppNotifier notifier) =>
+    openMachines(context, notifier);
 
 /// The line under a machine's password prompt while this app's device list is frozen — or the backend
 /// refused this app a place on the account for having too many devices: the password is one way in,
@@ -322,7 +313,7 @@ class DeviceListReviewLine extends StatelessWidget {
         TextButton(
           key: const Key('device-list-review'),
           onPressed: () => showDeviceListReview(context, notifier),
-          child: const Text('Your devices'),
+          child: const Text('Machines'),
         ),
       ],
     );

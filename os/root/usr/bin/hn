@@ -4,8 +4,8 @@
 # of keeping a second Node process resident for the lifetime of the screen.
 export HARNESS_CLI=/usr/bin/harness
 export HARNESS_CLI_ARGS='[]'
-# This computer's working tabs must survive an update without a cloud account or
-# network. hn's ordinary local sessions retain their complete pane references.
+# This computer's working tabs survive sign-out and temporary network outages.
+# hn's ordinary local sessions retain their complete pane references.
 # Signed in, these windows join the account's shared tabs as in the desktop app;
 # on sign-out, the harnesses running on this computer stay.
 export HARNESS_TUI_DESK=off HARNESS_TUI_DESK_SIGNED_IN=sync
@@ -19,5 +19,10 @@ if [ -f /etc/harness-live ]; then
     export HARNESS_TUI_TMUX_CONF=/usr/share/harness-os/tmux-live.conf
 else
     unset HARNESS_OS_LIVE
+fi
+# The OS connects before launching its interactive TUI. Commands sent to an
+# existing client must never open a form or wait for a network connection.
+if [ "${HARNESS_OS:-}" = 1 ] && [ "$#" -eq 0 ] && [ -t 0 ] && [ ! -f /etc/harness-live ]; then
+    /usr/bin/python3 /usr/lib/harness-os/onboarding.py --prepare || exit "$?"
 fi
 exec "$harness_runtime/hn" "$@"

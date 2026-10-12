@@ -19,6 +19,7 @@ import 'package:harness_mobile/state/desk_sync.dart';
 import 'package:harness_mobile/state/pane_layout_store.dart';
 import 'package:harness_mobile/terminal/terminal_binary.dart';
 import 'package:harness_mobile/terminal/terminal_session.dart';
+import 'package:harness_mobile/viewer/device_ack.dart';
 import 'package:harness_mobile/viewer/direct_auth.dart';
 import 'package:harness_mobile/viewer/direct_auth_api.dart';
 import 'package:harness_mobile/viewer/direct_link.dart';
@@ -142,6 +143,13 @@ class FakeApi extends ApiClient {
     machineFetches++;
     return onMachines();
   }
+
+  // No acknowledgements ("It's mine" said on another device) unless a test serves some: never the network.
+  @override
+  Future<List<Object?>?> deviceAcks(int since) async => null;
+
+  @override
+  Future<bool> postDeviceAck(DevAck ack) async => false;
 
   /// Answers `/api/auth/me` in place of [profile] when set — held open, or
   /// throwing.

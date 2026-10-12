@@ -9,7 +9,11 @@
  * Injected everything, so the spec runs against a real sqlite3 store and a fake registry.
  */
 import { sqliteReadAll } from './sqliteRead.js'
-import { hermesDbPath, listHermesHomes } from '../engines/hermes/home.js'
+// nixfred: the declared store and the kit's listing (as engines/hermes/home.ts `listHermesHomes` does), not
+// engines/hermes/home.ts itself: the core may reach another engine's code only through engines/inProcess.ts.
+import { HERMES_HOMES, hermesDbPath } from '../engines/hermes/contract.js'
+import { listStoreHomes } from '../engines/kit/storeHomes.js'
+import { env } from '../config/env.js'
 
 export interface HostedHermesSession {
   sessionId: string
@@ -104,7 +108,7 @@ export class HermesSessionBackend {
   private readonly now: () => number
 
   constructor(private readonly deps: HermesSessionBackendDeps) {
-    this.listHomes = deps.listHomes ?? (() => listHermesHomes())
+    this.listHomes = deps.listHomes ?? (() => listStoreHomes(HERMES_HOMES, env.HERMES_HOME))
     this.query = deps.query ?? (async (dbPath, sql, params) => {
       const result = await sqliteReadAll(dbPath, sql, params, { maxBuffer: 1 << 22 })
       return result.ok ? result.rows : null

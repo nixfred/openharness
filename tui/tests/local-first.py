@@ -110,15 +110,17 @@ try:
     assert second['machineId'] == 'b' * 32 and second['signedIn'] is False
     assert second['config']['port'] != first['config']['port']
     assert status(a)['pid'] == first['pid']
-    wait(lambda: 'Welcome to Harness' in (s := screen()) or 'New Window' in s or 'Terminal on ' in s, 'guest home or local terminal')
+    wait(lambda: 'Sign in to Harness' in screen() and 'Continue with Google' in screen(), 'required sign-in')
     assert 'OTHER_ACCOUNT_PRIVATE' not in screen()
     assert not (b / 'browser-opened').exists()
     assert not (b / 'auth/session.json').exists()
-    print('PASS: real hn starts signed out beside another user daemon, with distinct ports and no browser login', flush=True)
+    print('PASS: real hn requires sign-in beside another user daemon, with distinct ports and no unsolicited browser login', flush=True)
     outer('send-keys', '-t', 'guest', 'C-b', 'N')
-    wait(lambda: 'New Harness' in screen() and 'Project' in screen(), 'signed-out New Harness popup', 15)
+    time.sleep(.3)
+    assert 'Sign in to Harness' in screen() and 'New Harness' not in screen(), 'workspace shortcuts cannot bypass sign-in'
     assert 'OTHER_ACCOUNT_PRIVATE' not in screen()
-    print('PASS: local New Harness opens; old unscoped account cache is ignored; first daemon stays running', flush=True)
+    assert status(a)['pid'] == first['pid']
+    print('PASS: sign-in owns input; old account cache stays hidden; first daemon keeps running', flush=True)
 finally:
     (BASE / 'guest-screen.txt').write_text(outer('capture-pane', '-p', '-t', 'guest', check=False).stdout)
     for root, env in reversed(environments):

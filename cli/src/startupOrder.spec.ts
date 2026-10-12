@@ -125,6 +125,13 @@ describe('the core\'s start-up order (core/main.ts)', () => {
     }
   })
 
+  it('starts native hook maintenance after readiness without awaiting its completion', () => {
+    const source = code(SOURCE)
+    expect(source).not.toMatch(/await\s+installEngineHooks\(/)
+    expect(source.indexOf('installEngineHooks(hookPort')).toBeGreaterThan(source.indexOf('coreLink.ready()'))
+    expect(source).toContain('installedHooks?.close()')
+  })
+
   it('keeps the prologue itself incapable of throwing', () => {
     // Stronger than listing today's hazards: this is what catches the NEXT line somebody adds on top.
     const source = code(SOURCE)
@@ -139,6 +146,18 @@ describe('the core\'s start-up order (core/main.ts)', () => {
     expect([...new Set(called.filter(name => !PROLOGUE_CALLS.has(name)))].sort(),
       'only calls that cannot fail belong above the update; move this below it, or add it to PROLOGUE_CALLS with a reason')
       .toEqual([])
+  })
+
+  it('protects acknowledged bindings on every exit after registry ownership, before startup can yield', () => {
+    const source = code(SOURCE)
+    const owned = source.indexOf('await refuseServedDataFolder(')
+    const loaded = source.indexOf('registry.load()')
+    const exiting = source.indexOf("process.on('exit', () => registry.flush({ exiting: true }))")
+    expect(loaded).toBeGreaterThan(owned)
+    expect(exiting).toBeGreaterThan(loaded)
+    // An update can exit before full teardown is constructed. Install the synchronous safeguard
+    // before the first yield after load, while a duplicate daemon still exits without touching disk.
+    expect(exiting).toBeLessThan(source.indexOf('\n  await ', loaded))
   })
 
   it('only swaps in the full restart handler once everything it tears down exists', () => {
@@ -189,7 +208,7 @@ describe('the core\'s start-up order (core/main.ts)', () => {
 const BINDING = /\bbackend\.(?:ownerCommands\.)?(?:[A-Za-z_$][\w$]*\s*=(?!=)|set[A-Z][\w$]*\()/g
 
 /** The test-only hold the end-to-end harness uses for a start-up that hangs after binding. */
-const TEST_HOLD = "if (process.env.HARNESSD_TEST_HOLD_READY === '1') await new Promise<never>(() => {})"
+const TEST_HOLD = "if (harnessd.HARNESSD_TEST_HOLD_READY === '1') await new Promise<never>(() => {})"
 
 describe('the core\'s request gate (core/main.ts)', () => {
   const source = code(SOURCE)
@@ -234,11 +253,16 @@ describe('the core\'s request gate (core/main.ts)', () => {
     expect(yields, 'bind the relay callbacks before connect() first').toEqual([])
   })
 
-  it('opens the gate, tells the master it is ready, then says so — last', () => {
+  it('opens the gate, tells the master it is ready, says so, and only then launches what waits for a service', () => {
     const ready = at('coreLink.ready()', opened)
     const logged = at("console.log('[cli] ready')", ready)
     const tail = source.slice(opened, from + text.length).split('\n').map((line) => line.trim()).filter(Boolean)
-    expect(tail).toEqual(['backend.openRequests()', 'daemonBoot.openRequests = null', 'coreLink.ready()', "console.log('[cli] ready')"])
+    // Readiness never waits on a service: held agents and saved manual requests
+    // start their dependency recovery only after the master knows core is ready.
+    expect(tail).toEqual(['backend.openRequests()', 'daemonBoot.openRequests = null', 'coreLink.ready()', "console.log('[cli] ready')",
+      'installedHooks = env.DISABLE_HOOK_INSTALL ? undefined',
+      ': installEngineHooks(hookPort, { only: env.HOOK_INSTALL_ENGINES, loginShell: loginShellEnvPromise })',
+      'void heldLaunches.restoreHeld()', 'externalResumes.open()', 'launches.open()'])
     expect(logged).toBeGreaterThan(ready)
   })
 })

@@ -83,49 +83,97 @@ void main() {
     return notifier;
   }
 
-  testWidgets('Settings lists customization under Preferences', (tester) async {
-    await openSettings(tester);
-    expect(find.text('PREFERENCES'), findsOneWidget);
-    expect(find.text('HELP'), findsOneWidget);
-    expect(find.text('Usage'), findsNWidgets(2));
-    expect(find.text('Customize'), findsOneWidget);
-    expect(find.text('Experimental'), findsOneWidget);
-    expect(find.text('Keyboard shortcuts'), findsOneWidget);
-    expect(find.text('About'), findsOneWidget);
-    expect(find.text('Back to app'), findsOneWidget);
-    expect(find.text('Appearance'), findsNothing);
-    expect(find.text('Terminal'), findsNothing);
-    expect(find.byKey(const Key('appearance-ui-size-field')), findsNothing);
-    expect(
-      find.byKey(const Key('terminal-font-family-dropdown')),
-      findsNothing,
-    );
-    await tester.tap(find.text('Customize'));
-    await tester.pumpAndSettle();
-    expect(find.byType(SettingsScreen), findsNothing);
-    expect(find.byType(Placeholder), findsOneWidget);
-    expect(find.byType(HarnessCustomizePane), findsOneWidget);
-    for (final label in ['Status', 'Appearance', 'Terminal']) {
-      expect(find.text(label), findsOneWidget);
-    }
-    await tester.tap(find.byKey(const ValueKey('customize-appearance')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('appearance-ui-size-field')), findsNothing);
-    // Four tabs scroll at this window width; bring Terminal into view first.
-    final terminalTab = find.byKey(const ValueKey('customize-terminal'));
-    await tester.ensureVisible(terminalTab);
-    await tester.tap(terminalTab);
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const Key('terminal-font-family-dropdown')),
-      findsOneWidget,
-    );
-    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-    await tester.pumpAndSettle();
-    expect(find.byType(SettingsScreen), findsNothing);
-    expect(find.byType(HarnessCustomizePane), findsNothing);
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'Settings is settings only: Account, then General, Agents, Labs and Help',
+    (tester) async {
+      await openSettings(tester);
+      // Settings opens on Account, alone at the top with no caption over it.
+      expect(find.text('Account'), findsNWidgets(2));
+      for (final caption in ['GENERAL', 'AGENTS', 'LABS', 'HELP']) {
+        expect(find.text(caption), findsOneWidget, reason: caption);
+      }
+      expect(find.text('PREFERENCES'), findsNothing);
+      final rows = [
+        'Account',
+        'Appearance',
+        'Notifications',
+        'Keyboard shortcuts',
+        'Connectors',
+        'Usage',
+        'Experimental',
+        'About',
+        'Debug',
+      ];
+      final tops = [
+        for (final label in rows)
+          tester
+              .getTopLeft(
+                find.descendant(
+                  of: find.byType(SettingsNav),
+                  matching: find.text(label),
+                ),
+              )
+              .dy,
+      ];
+      expect(tops, [...tops]..sort(), reason: 'in this order');
+      // What moved out: robots to the Devices tab, devices and profiles to Machines, and what
+      // agents may do to Experimental (the account's, owner 2026-10-12).
+      expect(
+        find.descendant(of: find.byType(SettingsNav), matching: find.text('Agents')),
+        findsNothing,
+      );
+      for (final gone in [
+        'Customize',
+        'Your devices',
+        'Profiles',
+        'Autonomous robots',
+      ]) {
+        expect(find.text(gone), findsNothing, reason: gone);
+      }
+      expect(find.text('Back to app'), findsOneWidget);
+      expect(find.text('Terminal'), findsNothing);
+      expect(find.byKey(const Key('appearance-ui-size-field')), findsNothing);
+      expect(
+        find.byKey(const Key('terminal-font-family-dropdown')),
+        findsNothing,
+      );
+      // Appearance (was Customize) opens the workspace's panel, which is called Appearance too.
+      await tester.tap(find.text('Appearance'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsScreen), findsNothing);
+      expect(find.byType(Placeholder), findsOneWidget);
+      expect(find.byType(HarnessCustomizePane), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(HarnessCustomizePane),
+          matching: find.text('Appearance'),
+        ),
+        findsOneWidget,
+        reason: 'its title, and no tab of the same name under it',
+      );
+      expect(find.text('Customize Harness'), findsNothing);
+      for (final label in ['Status', 'Workspace', 'Terminal']) {
+        expect(find.text(label), findsOneWidget);
+      }
+      await tester.tap(find.byKey(const ValueKey('customize-appearance')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('appearance-ui-size-field')), findsNothing);
+      // Four tabs scroll at this window width; bring Terminal into view first.
+      final terminalTab = find.byKey(const ValueKey('customize-terminal'));
+      await tester.ensureVisible(terminalTab);
+      await tester.tap(terminalTab);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('terminal-font-family-dropdown')),
+        findsOneWidget,
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsScreen), findsNothing);
+      expect(find.byType(HarnessCustomizePane), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('settings navigation announces and changes its selected section', (
     tester,
@@ -137,33 +185,33 @@ void main() {
         of: find.byType(SettingsNav),
         matching: find.widgetWithText(InkWell, label),
       );
-      final usage = tester.getSemantics(row('Usage'));
       final account = tester.getSemantics(row('Account'));
-      expect(usage.getSemanticsData().flagsCollection.isButton, isTrue);
+      final usage = tester.getSemantics(row('Usage'));
+      expect(account.getSemanticsData().flagsCollection.isButton, isTrue);
       expect(
-        usage.getSemanticsData().flagsCollection.isSelected,
+        account.getSemanticsData().flagsCollection.isSelected,
         Tristate.isTrue,
       );
       expect(
-        account.getSemanticsData().flagsCollection.isSelected,
+        usage.getSemanticsData().flagsCollection.isSelected,
         Tristate.isFalse,
       );
-      expect(account.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+      expect(usage.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
 
       // Assistive activation must take the same route as pointer/keyboard use.
       tester
-          .renderObject(row('Account'))
+          .renderObject(row('Usage'))
           .owner!
           .semanticsOwner!
-          .performAction(account.id, SemanticsAction.tap);
+          .performAction(usage.id, SemanticsAction.tap);
       await tester.pumpAndSettle();
       expect(
         tester.widget<SettingsNav>(find.byType(SettingsNav)).section,
-        SettingsSection.account,
+        SettingsSection.usage,
       );
       expect(
         tester
-            .getSemantics(row('Account'))
+            .getSemantics(row('Usage'))
             .getSemanticsData()
             .flagsCollection
             .isSelected,
@@ -171,7 +219,7 @@ void main() {
       );
       expect(
         tester
-            .getSemantics(row('Usage'))
+            .getSemantics(row('Account'))
             .getSemanticsData()
             .flagsCollection
             .isSelected,
@@ -345,9 +393,29 @@ void main() {
 
     expect(find.text('Keyboard shortcuts'), findsOneWidget);
     // Filtering the rail preserves the open pane.
-    expect(find.text('Usage'), findsOneWidget);
+    expect(find.text('Account'), findsOneWidget);
     expect(find.text('Terminal'), findsNothing);
-    expect(find.text('PREFERENCES'), findsNothing);
+    // Its run's caption stays over it; the runs with no match go.
+    expect(find.text('GENERAL'), findsOneWidget);
+    expect(find.text('AGENTS'), findsNothing);
+
+    // Appearance by what its panel holds, and by its old name.
+    for (final query in ['wallpaper', 'customize']) {
+      await tester.enterText(
+        find.byKey(const Key('settings-search-field')),
+        query,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byType(SettingsNav),
+          matching: find.text('Appearance'),
+        ),
+        findsOneWidget,
+        reason: query,
+      );
+      expect(find.text('Keyboard shortcuts'), findsNothing, reason: query);
+    }
 
     await tester.enterText(
       find.byKey(const Key('settings-search-field')),

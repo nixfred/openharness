@@ -272,7 +272,7 @@ class ExternalSessionRef {
   /// open, or the machine predates taking over.
   final String? openIn;
 
-  /// Open, and only in a terminal: opening it here moves it, once asked.
+  /// Open, and only in a terminal: opening it here moves it.
   bool get inTerminal => open && openIn == 'terminal';
 
   /// Where it ran, as a person says it.
@@ -333,6 +333,8 @@ class SwarmDestination {
     this.isNote = false,
     this.task,
     this.external,
+    this.devicePub,
+    this.deviceIsComputer = false,
     Iterable<String?> searchFields = const [],
     int titleFields = 1,
   }) : fields = [
@@ -399,6 +401,15 @@ class SwarmDestination {
 
   /// A conversation Harness did not start; opening it resumes it as a harness.
   final ExternalSessionRef? external;
+
+  /// A phone, browser or computer signed in to the account that is not one of its machines: the
+  /// Machines picker's Phones & apps, and a signed-in computer with no machine record. Its key in
+  /// the account's device list.
+  final String? devicePub;
+
+  /// [devicePub] is a computer rather than a phone or browser.
+  final bool deviceIsComputer;
+  bool get isAccountDevice => devicePub != null;
   final bool current;
   final List<String> fields;
   bool get isProject => projectId != null;
@@ -419,7 +430,8 @@ class SwarmDestination {
       !isStoreEntry &&
       !isAgentChoice &&
       pickerQuery == null &&
-      external == null;
+      external == null &&
+      devicePub == null;
   bool get hasView => swarmId != null;
 }
 
@@ -448,56 +460,8 @@ Future<void> _resumeStoppedDestination(
   final machineId = destination.machineId;
   final agentId = destination.agentId;
   if (machineId == null || agentId == null) return;
-  final agent = app
-      .stateOf(machineId)
-      ?.agents
-      .where((agent) => agent.id == agentId)
-      .firstOrNull;
-  if (agent?.isStopped != true) return;
-  final machine = app.stateOf(machineId);
-  final terminalReady = Completer<void>();
-  void observeRuntime() {
-    if (terminalReady.isCompleted ||
-        !identical(machine, app.stateOf(machineId)) ||
-        app.pendingAgentStop(machineId, agentId) != null) {
-      return;
-    }
-    final current = app
-        .stateOf(machineId)
-        ?.agents
-        .where((row) => row.id == agentId)
-        .firstOrNull;
-    // This opens a view of the allocated terminal, not a claim that history
-    // has loaded. The native CLI may need login or hook review before it can
-    // confirm the conversation; the receipt keeps verifying in the background.
-    //
-    // The conversation has to be the one asked for — unless none was: a resume
-    // that was always going to open a new one (an engine with no resume argv, a
-    // harness paused with nothing recorded) reports a different id because it
-    // did as it was told, and the tile it opened is still this harness's.
-    final fresh =
-        agent?.resumesFreshConversation == true ||
-        current?.resumesFreshConversation == true;
-    if (current?.terminalAvailable == true &&
-        (fresh || current?.sessionId == agent!.sessionId) &&
-        current?.launchState != 'failed' &&
-        current?.isStopped == false) {
-      terminalReady.complete();
-    }
-  }
-
-  app.addListener(observeRuntime);
-  try {
-    final confirmed = app.resumeAgent(machineId, agentId).then((result) {
-      if (result.error case final error?) {
-        throw SwarmResumeFailure(destination, error);
-      }
-    });
-    observeRuntime();
-    await Future.any([confirmed, terminalReady.future]);
-  } finally {
-    app.removeListener(observeRuntime);
-  }
+  final failure = await app.resumeStoppedSession(machineId, agentId);
+  if (failure != null) throw SwarmResumeFailure(destination, failure);
 }
 
 ({String text, String terminalText, int? branchOffset}) _harnessDetail(
@@ -892,8 +856,12 @@ Future<bool> activateSwarmSearchSelection(
     final machineId = destination.machineId;
     if (machineId == null || split != null) return false;
     // A new harness that resumes it, in its own folder: the machine refuses one
-    // that is open elsewhere, or already a harness, and says so — and one open
-    // in a terminal until asked how to take it over from there.
+    // that is open elsewhere, or already a harness, and says so. One open in a
+    // terminal is moved here without a question (the owner, 2026-10-09: "why do
+    // we need to confirm? just move"): `wait` quits that terminal at once when
+    // it is between turns, and holds the move until a running turn ends. Sent
+    // with the first create, so a move the daemon must first verify (its search
+    // service busy) keeps that consent rather than stalling as open elsewhere.
     final (:error, :refusal) = await app.resumeConversation(
       machineId,
       engine: external.engine,
@@ -902,7 +870,7 @@ Future<bool> activateSwarmSearchSelection(
       name: external.title.isEmpty ? null : external.title,
       swarmId: destinationSwarmId,
       placement: placement ?? HarnessPlacement.currentTab,
-      takeOver: takeOver,
+      takeOver: takeOver ?? TakeOver.wait,
     );
     if (error != null) {
       throw SwarmResumeFailure(destination, error, code: refusal);

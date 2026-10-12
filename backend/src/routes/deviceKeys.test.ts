@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Fastify, { type FastifyInstance } from 'fastify'
-const m = vi.hoisted(() => ({ auth: vi.fn(), read: vi.fn(), append: vi.fn(), seen: vi.fn(), touch: vi.fn() }))
-vi.mock('../lib/deviceKeyLog.js', () => ({ readDeviceKeyLog: m.read, appendDeviceKey: m.append, deviceKeysSeen: m.seen, touchDeviceKey: m.touch }))
+const m = vi.hoisted(() => ({ auth: vi.fn(), read: vi.fn(), append: vi.fn(), seen: vi.fn(), touch: vi.fn(), readAcks: vi.fn(), appendAck: vi.fn() }))
+vi.mock('../lib/deviceKeyLog.js', () => ({
+  readDeviceKeyLog: m.read, appendDeviceKey: m.append, deviceKeysSeen: m.seen, touchDeviceKey: m.touch,
+  readDeviceAcks: m.readAcks, appendDeviceAck: m.appendAck,
+}))
 vi.mock('../lib/ssoAuth.js', async original => ({ ...await original<typeof import('../lib/ssoAuth.js')>(), authenticateAccessToken: m.auth }))
 import { deviceKeyRoutes } from './deviceKeys.js'
 import { registerAuthMiddleware } from '../middlewares/authMiddleware.js'
@@ -101,5 +104,58 @@ describe('device key routes', () => {
     const r = await app.inject({ method: 'POST', url: '/api/device-keys', headers: auth, payload: { other: 1 } })
     expect(r.statusCode).toBe(400)
     expect(m.append).not.toHaveBeenCalled()
+  })
+
+  describe('acknowledgements', () => {
+    it('needs a sign-in', async () => {
+      expect((await app.inject({ method: 'GET', url: '/api/device-keys/acks' })).statusCode).toBe(401)
+      expect((await app.inject({ method: 'POST', url: '/api/device-keys/acks', payload: { ack: {} } })).statusCode).toBe(401)
+      expect(m.appendAck).not.toHaveBeenCalled()
+    })
+
+    it('reads the caller\'s from an entry, uncached', async () => {
+      m.readAcks.mockResolvedValue({ acks: [{ v: 1 }] })
+      const r = await app.inject({ method: 'GET', url: '/api/device-keys/acks?since=4', headers: auth })
+      expect(r.statusCode).toBe(200)
+      expect(r.headers['cache-control']).toBe('no-store')
+      expect(r.json().data).toEqual({ acks: [{ v: 1 }] })
+      expect(m.readAcks).toHaveBeenCalledWith('user-1', 4)
+      await app.inject({ method: 'GET', url: '/api/device-keys/acks', headers: auth })
+      expect(m.readAcks).toHaveBeenLastCalledWith('user-1', 0)
+      expect((await app.inject({ method: 'GET', url: '/api/device-keys/acks?since=-1', headers: auth })).statusCode).toBe(400)
+    })
+
+    it('keeps one for the caller\'s account, and says whether it was new', async () => {
+      m.appendAck.mockResolvedValue({ ok: true, created: false })
+      const r = await app.inject({ method: 'POST', url: '/api/device-keys/acks', headers: auth, payload: { ack: { v: 1 } } })
+      expect(r.statusCode).toBe(200)
+      expect(r.json().data).toEqual({ created: false })
+      expect(m.appendAck).toHaveBeenCalledWith('user-1', { v: 1 })
+    })
+
+    it('passes a refusal through with its code', async () => {
+      m.appendAck.mockResolvedValue({ ok: false, status: 400, code: 'SIGNER_NOT_ACTIVE' })
+      const r = await app.inject({ method: 'POST', url: '/api/device-keys/acks', headers: auth, payload: { ack: {} } })
+      expect(r.statusCode).toBe(400)
+      expect(r.json().error.code).toBe('SIGNER_NOT_ACTIVE')
+    })
+
+    it('refuses a body without an acknowledgement, or with anything beside it', async () => {
+      for (const payload of [{ other: 1 }, { ack: {}, extra: 1 }, { ack: 'x' }]) {
+        expect((await app.inject({ method: 'POST', url: '/api/device-keys/acks', headers: auth, payload })).statusCode).toBe(400)
+      }
+      expect(m.appendAck).not.toHaveBeenCalled()
+    })
+
+    it('limits how often one account acknowledges, apart from its appends to the log', async () => {
+      m.auth.mockResolvedValue({ ...user, sub: 'user-acking' })
+      m.appendAck.mockResolvedValue({ ok: true, created: true })
+      m.append.mockResolvedValue({ ok: true, head })
+      const codes: number[] = []
+      for (let i = 0; i < 21; i++) codes.push((await app.inject({ method: 'POST', url: '/api/device-keys/acks', headers: auth, payload: { ack: {} } })).statusCode)
+      expect(codes.slice(0, 20).every((c) => c === 200)).toBe(true)
+      expect(codes[20]).toBe(429)
+      expect((await app.inject({ method: 'POST', url: '/api/device-keys', headers: auth, payload: { entry: {} } })).statusCode).toBe(200)
+    })
   })
 })

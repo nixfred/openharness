@@ -682,6 +682,20 @@ export function subscribeZooChanged(userId: string, cb: (msg: ZooChangedMsg) => 
   return addSub(zooChannel(userId), cb as Cb)
 }
 
+// Per-USER connector vault invalidation: some computer wrote the account's sealed connections
+// (routes/connectorVault.ts); every daemon of that user re-reads and merges it.
+export interface ConnectorsChangedMsg { revision: number }
+
+const connectorsChannel = (userId: string): string => `connvault:${userId}`
+
+export function publishConnectorsChanged(userId: string, msg: ConnectorsChangedMsg): Promise<number> {
+  return safePublish(connectorsChannel(userId), JSON.stringify(msg))
+}
+
+export function subscribeConnectorsChanged(userId: string, cb: (msg: ConnectorsChangedMsg) => void): Promise<() => void> {
+  return addSub(connectorsChannel(userId), cb as Cb)
+}
+
 // Per-USER device key log invalidation: an entry was appended to the account's log (lib/deviceKeyLog.ts).
 // Every device re-reads from its own head, so the message only needs the new head to decide whether to.
 export interface DeviceKeysChangedMsg { seq: number; hash: string }
@@ -900,6 +914,18 @@ export async function getCommanderJoinGeneration(machineId: string): Promise<num
 // Not try/caught like the presence keys above: the cache treats a throw as a miss, and swallowing it
 // here would also swallow the difference between "absent" and "Redis is down" for anyone reading logs.
 // The key is a digest of the token — see `ssoProfileCache.ts` — and the value holds no credential.
+
+/**
+ * A fixed-window counter shared by every process and pod: the count after this one. The window is in the
+ * key, so the key's expiry only cleans up. ⌘B's Jev caps (routes/jevRoute.ts) count here, because a
+ * process-local count multiplies by workers × pods and resets on every deploy.
+ */
+export async function redisCount(key: string, ttlMs: number): Promise<number> {
+  const results = await pub.multi().set(key, '0', 'PX', Math.max(1, Math.floor(ttlMs)), 'NX').incr(key).exec()
+  const counted = results?.[1]
+  if (!counted || counted[0]) throw counted?.[0] ?? new Error('redis count failed')
+  return Number(counted[1])
+}
 
 export const redisSsoProfileStore = {
   get: (key: string): Promise<string | null> => pub.get(key),

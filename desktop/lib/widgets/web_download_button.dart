@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/desktop_download.dart';
 import '../shared/theme/app_theme.dart' as grid;
 import '../shared/theme/workspace_bar_style.dart';
 import 'workspace_bar_control.dart';
@@ -12,11 +13,11 @@ import 'workspace_share_button.dart';
 Future<bool> openInNewTab(Uri uri) =>
     launchUrl(uri, webOnlyWindowName: '_blank');
 
-/// The Harness product page; its download view is one query away.
+/// The Harness product page.
 final harnessAppPage = Uri.parse('https://www.autonomous.ai/harness-app');
 
-/// The browser's consistent handoff to the existing macOS/Linux download page,
-/// in a new tab so the workspace stays open behind it.
+/// The browser's handoff to the desktop build that suits this computer
+/// ([DesktopDownload]), in a new tab so the workspace stays open behind it.
 class WebDownloadButton extends StatelessWidget {
   const WebDownloadButton({
     super.key,
@@ -30,9 +31,8 @@ class WebDownloadButton extends StatelessWidget {
   /// True fills it like Share: the bar's one filled action when Share is off.
   final bool prominent;
 
-  static final uri = harnessAppPage.replace(
-    queryParameters: {'page': 'download'},
-  );
+  /// This computer's build, or the `/desktop` page when none suits it.
+  static Uri get uri => DesktopDownload.uri;
   static const _text = 'Download app';
 
   /// Filled like Share when [prominent], a step brighter under the pointer;

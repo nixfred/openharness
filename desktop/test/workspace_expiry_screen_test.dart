@@ -50,8 +50,17 @@ void main() {
           expect(find.text('Continue with Google'), findsOneWidget);
           expect(find.text('Could not sign in'), findsNothing);
           expect(find.text('Try again'), findsNothing);
-          final notice = find.textContaining('You were signed out');
+          final notice = find.text(
+            'Your session ended. Sign in again to continue.',
+          );
           expect(notice, findsOneWidget);
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pump();
+          expect(
+            notice,
+            findsOneWidget,
+            reason: 'expiry requires sign-in again',
+          );
           expect(tester.getRect(notice).bottom, lessThanOrEqualTo(544));
           expect(
             tester.getRect(find.text('Continue with Google')).top,

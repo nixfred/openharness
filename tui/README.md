@@ -184,19 +184,24 @@ with the desktop and phone. With no daemon available, hn opens local shells inst
 PTY supervisor keeps them running through detach, reconnect and a client crash. These local
 sessions stay on this computer and remain intact when Harness reconnects.
 
-On a fresh computer `hn` starts your local daemon and opens without requiring an account.
-Choose **Sign in** in the status bar, or run `account` from `C-b :`, when you want your other
-machines, shared desk and access from your phone. The Account panel explains these benefits and
-offers browser sign-in or a phone QR code; you confirm the account before connecting it.
+`hn` requires a Harness account before opening the workspace, including in Harness OS and on existing signed-out
+installations. Continue with Google, Apple or email in your browser, or approve a phone QR code
+when using SSH. Escape cancels an attempt and returns to the sign-in choices; Ctrl+C detaches.
+Signing in opens your saved workspace automatically. Already signed-in computers open offline too.
+Harness OS connects to Wi-Fi or Ethernet before launching the TUI at that same sign-in page. Its installer
+works offline; Super+W keeps network settings accessible before sign-in. After first setup,
+an already signed-in account can reopen its workspace during a temporary outage.
+Explicit sign-out and a session the server rejects both return to required sign-in, as Desktop
+does. The background server keeps running throughout, preserving local work behind the page.
 `harness login` remains available from a shell. Signing in keeps local work in place; changing
 accounts removes the previous account's views without stopping its harnesses. If daemon startup
-fails, hn still opens a local shell. Each OS user connects through their own private Unix socket;
+fails, a signed-in computer can still open a local shell. Each OS user connects through their own private Unix socket;
 hn never attaches to another user's daemon merely because it occupies the default TCP port.
 Like `tmux new -A`, it restores your swarms if the desk has any,
 else window 0 opens your shell in the folder you ran `hn` from. `C-b s` finds every
 harness. Closing the last window ends `hn` (`[exited]`, as tmux says it); `C-b d` detaches.
 
-![Optional sign-in with local work still available](docs/account.png)
+[Required account entry (terminal capture)](../docs/research/2026-10-08-onboarding-redesign/tui-sign-in.txt)
 
 <sub>Rendered from the isolated native fixture in `tests/workspace-controls.py`.</sub>
 
@@ -690,7 +695,7 @@ arm64, musl) with a checksummed manifest that `harness tui --install` verifies.
 | `input.rs` | keys, mouse, the launcher's modes and actions |
 | `workspace_controls.rs` / `workspace_menu.rs` | pane and footer controls, stable action targets and compact menus |
 | `session_close.rs` / `agent_switch.rs` / `workspace_events.rs` | save-and-stop lifecycle, agent handoff and view updates between local clients |
-| `account.rs` / `account_scope.rs` | optional sign-in and account-aware workspace restoration |
+| `account.rs` / `account_scope.rs` | required sign-in and account-aware workspace restoration |
 | `hardware.rs` / `workspace_resources.rs` | physical device settings and workspace counts |
 | `dial.rs` | the Harness device: the ring and windows it turns through, its focus, scroll, taps and spoken tasks |
 | `modal.rs` / `picker.rs` | the launcher's rows and its fzf matching (fzf.rs, ported from fzf) |

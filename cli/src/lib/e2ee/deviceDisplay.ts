@@ -10,7 +10,7 @@ import type { DevLogHistoryRow } from './deviceHistory.js'
 /** The fields of a listing row this module reads. `seq` (log position) and `firstSeen` (when this
  *  machine first applied the add) are the two a device cannot choose for itself; both optional so a
  *  daemon that predates them still lists, just without `new`. */
-export type DeviceRow = Pick<DeviceLogListing['members'][number], 'pub' | 'label' | 'machineId' | 'addedAt' | 'fingerprint' | 'self'> & {
+export type DeviceRow = Pick<DeviceLogListing['members'][number], 'pub' | 'label' | 'machineId' | 'addedAt' | 'fingerprint' | 'self' | 'confirmed'> & {
   kind: string
   seq?: number
   firstSeen?: number
@@ -229,6 +229,9 @@ export function formatDeviceDetail(row: DeviceRow, lastSeen: number | undefined,
   lines.push(`    added        ${fullDateTime(row.addedAt)} (${relativeAgo(row.addedAt, now)})`)
   lines.push(`    last active  ${lastSeen === undefined ? 'unknown' : `${relativeAgo(lastSeen, now)} (${fullDateTime(lastSeen)})`}`)
   if (row.kind === 'machine') lines.push(`    machine      ${row.machineId.slice(0, 8)}`)
+  // Another of the person's devices said "It's mine" for it while it was new here: where, not when it
+  // was looked at here — this machine never showed it as new for long.
+  if (row.confirmed) lines.push(`    confirmed    on ${row.confirmed.label || 'another device'}`)
   lines.push(`    key code     ${row.fingerprint}`, '')
   lines.push(`  ${COMPARE_HINT}`, '')
   lines.push(row.self ? '  This is this machine.' : `  Not yours? harness devices remove ${row.fingerprint}`, '')

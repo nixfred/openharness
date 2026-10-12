@@ -29,7 +29,8 @@ import { VERSION } from './version.js'
 import { runCoreInForeground } from './core/main.js'
 import { startCoreProcess } from './coreProcess.js'
 import { GRID_MINT_TIMEOUT_MS, backendHttpBase, requestJson, postJson, controlPlaneAuth } from './lib/controlPlane.js'
-import { LEGACY_LOG_FILE, MACHINE_NAME_FILE, tildify, computerId, thisDeviceLabel, DAEMON_LOG_FILE, HARNESSD_STATUS_FILE, daemonPort, isAlive, isDaemonRunning, readPid } from './lib/daemonState.js'
+import { LEGACY_LOG_FILE, MACHINE_NAME_FILE, tildify, computerId, thisDeviceLabel, DAEMON_LOG_FILE, HARNESSD_STATUS_FILE, daemonPort, isAlive, isDaemonRunning, readPid, daemonUnreachableText } from './lib/daemonState.js'
+import { sandboxed, startRefusalText } from './lib/unreachable.js'
 import { onError, BIND_WAIT_MS, connectFailure, defaultLaunchDeps, waitForBind } from './lib/daemonLaunch.js'
 import { ensureUtf8Locale } from './lib/childLocale.js'
 import { buildLogBundle, bundleFileName, redactSecretsInText } from './lib/logBundle.js'
@@ -58,6 +59,7 @@ import { SESSION_SEARCH_FILE, searchCommand } from './lib/sessionSearch/command.
 import { dshCommand, dshUsage } from './dsh/command.js'
 import { ApiConnections } from './lib/apiConnections.js'
 import { apiCommand, apiUsage } from './lib/apiCommand.js'
+import { connectionsCommand, connectionsUsage } from './lib/connectors/command.js'
 import { remoteCommand } from './remoteCommand.js'
 import { tuiCommand } from './tui/index.js'
 import { newCommand } from './lib/newCommand.js'
@@ -100,6 +102,9 @@ Agents — after "harness start", run the vendor CLI directly inside tmux. Harne
 top-level processes automatically; it does not launch them or change their permission flags:
 ${PROCESS_ENGINES.map((engine) => `  ${ENGINE_CLI_COMMANDS[engine]}`).join('\n')}
 A launcher that hands the pane to one of these works the same — "ori claude" is a Claude Code agent.
+An agent can start, wait for, read and close other agents here: harness new, wait, show and close below, or
+harness mcp. Starting is off until the person turns it on: Settings ▸ Experimental, or harness settings
+agents-start-agents on. How: https://harness.autonomous.ai/agents
 
 Machine:
   harness login                sign in (asks: Google or Apple in your browser, or scan a QR with your phone)
@@ -135,8 +140,14 @@ Machine:
   harness machines             list the machines on this account (this computer's is marked)
   harness search <words>       find the conversation on this computer that said them: every turn of
                                every harness, live or stopped (--limit=N, --json)
-  harness channel --help       consult agents in a swarm and read shared collaboration history
-  harness team --help          advanced team commands and correlated agent replies
+  harness send <name> "text"   from an agent's pane: message a teammate in this tab (Agent Messages,
+                               Settings ▸ Experimental); \`harness send\` alone lists who is here
+  harness ps [--all]           the harnesses here: state, who started each, what each is about
+  harness show <name>          a harness's state and last turn: what it was asked and what it answered
+  harness wait <name>[,<name>] wait until they stop working (--any, --timeout 30m); exit 3 = needs the person
+  harness close <name> [--now] save a harness's screen and stop it; an agent closes only what it started
+  harness mcp                  the agent verbs as an MCP server on stdin/stdout, for agents that use MCP
+  harness settings [<name> on|off]  what agents may do (agents-start-agents, pull-request-line, agent-messages): your account's experiments in Settings ▸ Experimental, each off by default
   harness machines delete <id> remove ANOTHER machine (refuses this one; use \`harness logout\`)
   harness remote               from a Harness terminal tile: open a terminal on another of your machines and move this tile to it
   harness version              print the installed version (v${VERSION})
@@ -161,6 +172,8 @@ Grid (the fleet of AI engines the \`grid\` CLI serves — needs \`grid\` on PATH
 ${dshUsage()}
 
 ${apiUsage}
+
+${connectionsUsage}
 
 Browser end-to-end encryption:
   harness autonomous-device <command>     pair/status/list/revoke an Autonomous device
@@ -190,7 +203,8 @@ every future connect, until you change or clear it:
                                first 4+ characters); a # or a shorter start asks first, --yes skips it
   harness devices history      every device added to or removed from the account, newest first, as this
                                machine verified it (--json for the rows)
-  harness devices dismiss [<#|fp>]  mark every new device as seen, or just that one
+  harness devices dismiss [<#|fp>]  mark every new device as seen here, or say one is yours — your
+                               other devices then stop showing it as new too
   harness devices rebaseline   the device list froze (the backend served one that does not match what
                                this machine verified): show what changed, --yes to trust it again
   (both \`remote-password set\` and \`link connect\` prompt for the password interactively, or read one
@@ -891,7 +905,7 @@ async function gridLogoutCommand(args: string[]): Promise<void> {
 /**
  * `harness grid env <grid>` — `grid --remote info <grid> --env` through the harness's own `grid`, so a
  * shell can `eval` a grid's relay address and key with no `grid` of its own on PATH, or an older one
- * that refuses a resting grid. The Models view's Jev pane builds its copy-paste request on it.
+ * that refuses a resting grid: any OpenAI-compatible client can then call the grid's models.
  *
  * A passthrough like `grid logout`: the exports, the refusals and the exit code are `grid`'s. The key
  * goes to this process's stdout only — the explicit disclosure `info --env` exists for — never a log.
@@ -1020,6 +1034,11 @@ async function startCommand(foreground: boolean, repair: boolean = false): Promi
     }, {
       onWaiting: (owner) => console.log(`  the daemon is ${describeSpawnLockOwner(owner)} — waiting for it to finish…`),
     }).catch((error: unknown) => {
+      // A sandbox refuses the spawn lock (EPERM): Harness may well be running, out of this shell's reach, and an
+      // agent that read a stack trace here asked the person to let it start Harness (lib/unreachable.ts). With none
+      // running, it is told to start Harness outside the sandbox rather than that Harness runs.
+      const refusal = startRefusalText({ error, pid: readPid() })
+      if (refusal) { console.error(`\n✗ ${refusal}\n`); process.exit(1) }
       if (!(error instanceof SpawnLockBusyError)) throw error
       console.error(`\n✗ Could not start: the daemon spawn lock is ${describeSpawnLockFailure(error)}.`)
       console.error('  check   harness status   ·   stop it   harness stop')
@@ -1570,9 +1589,8 @@ async function daemonCall(method: 'GET' | 'POST', path: string, body?: unknown):
     const headers: Record<string, string> = { 'x-adapter-local': '1' } // passes the local API's CSRF gate
     if (body) headers['content-type'] = 'application/json'
     res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
-  } catch {
-    console.error('\n  ✗ The adapter is not running on this computer.')
-    console.error('    Start it first:  harness start\n')
+  } catch (error) {
+    console.error(`\n  ✗ ${daemonUnreachableText((error as { cause?: unknown }).cause ?? error)}\n`)
     process.exit(1)
   }
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
@@ -2196,8 +2214,8 @@ async function groupCommand(sub: string | undefined, arg: string | undefined, js
     try {
       const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/group/sync`, { method: 'POST', headers: { 'x-adapter-local': '1' } })
       if (!res.ok) throw new Error(String(res.status))
-    } catch {
-      console.error('\n  ✗ Harness is not running here. Run: harness start\n')
+    } catch (error) {
+      console.error(`\n  ✗ ${daemonUnreachableText((error as { cause?: unknown }).cause ?? error)}\n`)
       process.exit(1)
     }
     console.log('\n  ✓ Comparing with every reachable member now.\n')
@@ -2223,8 +2241,8 @@ async function devicesCommand(sub: string | undefined, arg: string | undefined, 
     try {
       const { res, json: out } = await daemonCall(method, path, body)
       return { status: res.status, json: out }
-    } catch {
-      console.error('\n  ✗ Harness is not running here. Run: harness start\n')
+    } catch (error) {
+      console.error(`\n  ✗ ${daemonUnreachableText((error as { cause?: unknown }).cause ?? error)}\n`)
       process.exit(1)
     }
   }
@@ -2328,10 +2346,15 @@ async function devicesCommand(sub: string | undefined, arg: string | undefined, 
       const listed = out.members.some((m) => norm(m.fingerprint).startsWith(key))
       target = gone.length === 1 && !listed ? gone[0] : resolve(arg, out.members).row
     }
-    const { status } = await call('POST', '/api/devices/dismiss', target ? { pub: target.pub } : {})
+    // One device named is "It's mine" for it: the account's other devices are told too, and stop showing
+    // it as new. Every device at once is only "seen here" — nobody vouched for each one.
+    const { status, json: out } = await call('POST', '/api/devices/dismiss', target ? { pub: target.pub, confirm: true } : {})
     needsNewerDaemon(status)
     if (status !== 200) { console.error(`\n  ✗ Could not mark ${target ? 'it' : 'them'} as seen (is this machine signed in?).\n`); process.exit(1) }
-    console.log(target ? `\n  ✓ Marked ${target.label || '(no name)'} as seen.\n` : '\n  ✓ Marked every device as seen.\n')
+    const name = target?.label || '(no name)'
+    console.log(!target ? '\n  ✓ Marked every device as seen.\n'
+      : out.shared === true ? `\n  ✓ Marked ${name} as yours, here and on your other devices.\n`
+        : `\n  ✓ Marked ${name} as seen.\n`)
     process.exit(0)
   }
   if (sub === 'rebaseline') {
@@ -2513,8 +2536,9 @@ async function status(): Promise<void> {
     // longer waits to see it, and a daemon with no backend is still serving every local agent.
     // Signed out is a WAY OF RUNNING, not a reason to say nothing: the daemon serves this computer,
     // and `machine: not signed in` in place of the whole block hid a running daemon and its agents.
+    // In a sandbox (an agent's, in Codex) the liveness check itself is refused: say what is known.
     status: !alive
-      ? '○ stopped'
+      ? (sandboxed({ pid }) ? '◌ out of reach · a sandbox keeps this shell from Harness; run harness status outside it' : '○ stopped')
       : master
         ? master
       : safeMode
@@ -2595,8 +2619,10 @@ async function logsExportCommand(json: boolean): Promise<void> {
 }
 
 import { orchestratorCommand } from './orchestrator/command.js'
-import { teamCommand } from './teams/command.js'
-import { channelCommand } from './teams/channelCommand.js'
+import { paneOwner, sendCommand } from './messages/command.js'
+import { agentOrigin, closeCommand, psCommand, showCommand, waitCommand } from './agentClient/commands.js'
+import { harnessRunner, mcpCommand } from './agentClient/mcp.js'
+import { settingsCommand } from './agentClient/settings.js'
 
 // ── arg parse ──────────────────────────────────────────────────────────────────────────────────
 // `hn` is the terminal client's short name (like tmux, fzf): the same CLI, entered at `tui`. A call
@@ -2625,11 +2651,28 @@ if (cmd === 'version' || cmd === '--version' || cmd === '-v') { console.log(VERS
 
 
 switch (cmd) {
-  case 'team':
-    teamCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+  case 'send':
+    sendCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
-  case 'channel':
-    channelCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+  case 'ps':
+    psCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'settings':
+    settingsCommand(rest, { port: daemonPort() }).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'mcp': {
+    const pane = process.env.TMUX_PANE
+    mcpCommand({ run: harnessRunner(SCRIPT_PATH), inPane: !!pane && !!paneOwner(pane) }).then(code => { process.exitCode = code }).catch(onError)
+    break
+  }
+  case 'show':
+    showCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'wait':
+    waitCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
+  case 'close':
+    closeCommand(rest).then(code => { process.exitCode = code }).catch(onError)
     break
   case 'orchestrator':
     orchestratorCommand(rest).then(code => { process.exitCode = code }).catch(onError)
@@ -2704,8 +2747,8 @@ switch (cmd) {
     else if (args[0] === 'setup') {
       gridSetupCommand({
         port: daemonPort(),
-        localMachineId: readAuthSession()?.machineId ?? null,
-        daemonRunning: isDaemonRunning,
+        localMachineId: wantedDaemonIdentity(),
+        daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
         connect: (url) => new NewCommandSocket(url),
         output: (line) => console.log(line),
         error: (line) => console.error(line),
@@ -2728,6 +2771,9 @@ switch (cmd) {
     apiCommand(rest, new ApiConnections(env.ADAPTER_DATA_DIR))
       .then(code => { process.exitCode = code }).catch(onError)
     break
+  case 'connections':
+    connectionsCommand(rest).then(code => { process.exitCode = code }).catch(onError)
+    break
   case 'new':
     // `rest`, not args/flags: a first message and a folder are words in the order they were typed.
     newCommand({
@@ -2735,8 +2781,8 @@ switch (cmd) {
       cwd: process.cwd(),
       home: homedir(),
       port: daemonPort(),
-      localMachineId: readAuthSession()?.machineId ?? null,
-      daemonRunning: isDaemonRunning,
+      localMachineId: wantedDaemonIdentity(),
+      daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
       listMachines: async () => {
         const { session, headers } = await controlPlaneAuth()
         return (await fetchMachines(headers)).map((machine) => ({
@@ -2749,6 +2795,7 @@ switch (cmd) {
       connect: (url) => new NewCommandSocket(url),
       output: (line) => console.log(line),
       error: (line) => console.error(line),
+      origin: () => agentOrigin(),
     }).then((code) => { process.exitCode = code }).catch(onError)
     break
   case 'shell-launch':
@@ -2760,9 +2807,9 @@ switch (cmd) {
   case 'remote':
     remoteCommand({
       tmuxPane: process.env.TMUX_PANE,
-      localMachineId: readAuthSession()?.machineId ?? null,
+      localMachineId: wantedDaemonIdentity(),
       port: daemonPort(),
-      daemonRunning: isDaemonRunning,
+      daemonRunning: isDaemonRunning, unreachable: () => daemonUnreachableText(),
       listMachines: async () => {
         const { session, headers } = await controlPlaneAuth()
         return (await fetchMachines(headers)).map((machine) => ({

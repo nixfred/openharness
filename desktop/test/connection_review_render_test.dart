@@ -149,14 +149,20 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          expect(find.text('Done').hitTestable(), findsOneWidget);
-          expect(find.byType(PhonePairQr).hitTestable(), findsOneWidget);
+          expect(find.text('Cancel').hitTestable(), findsOneWidget);
           await capture('add-phone');
-          // The way to the account's devices stays reachable at every size.
-          final manage = find.byKey(const ValueKey('add-phone-manage-devices'));
-          await tester.ensureVisible(manage);
-          expect(manage.hitTestable(), findsOneWidget);
-          await tester.tap(find.text('Done'));
+          // The code under "Not showing up?" opens, and shows, at every size.
+          final showCode = find.byKey(const ValueKey('add-phone-show-code'));
+          await tester.ensureVisible(showCode);
+          await tester.pumpAndSettle();
+          await tester.tap(showCode);
+          await tester.pumpAndSettle();
+          final code = find.byType(PhonePairQr);
+          await tester.ensureVisible(code);
+          await tester.pumpAndSettle();
+          expect(code.hitTestable(), findsOneWidget);
+          await capture('add-phone-code');
+          await tester.tap(find.text('Cancel'));
           await tester.pumpAndSettle();
         }
 

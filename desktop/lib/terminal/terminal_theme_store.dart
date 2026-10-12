@@ -20,7 +20,7 @@ import '../core/local_key_value_store.dart';
 /// scheme later is one value here and one `const` in `terminal_theme.dart`.
 enum TerminalThemeChoice {
   /// Today's behaviour, and still the default: ground and cursor follow the
-  /// palette chosen in Customize Harness ▸ Appearance, and the ANSI ramp its
+  /// palette chosen in Appearance ▸ Workspace, and the ANSI ramp its
   /// brightness (`darkTerminalTheme`'s or `lightTerminalTheme`'s).
   matchApp('Match app appearance', 'Matches your app palette'),
 

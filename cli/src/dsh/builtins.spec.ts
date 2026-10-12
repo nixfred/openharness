@@ -3,12 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { env } from '../config/env.js'
-import { ensureBundledCoreHarnesses, ensureBundledDevices, ensureBundledHarnessMonitor, ensureBundledModelManager,
-  DEVICES_HARNESS_ID, HARNESS_MONITOR_ID, HARNESS_MONITOR_BUILTIN_SOURCE, MODEL_MANAGER_ID, type BundledFiles } from './builtins.js'
+import { ensureBundledCoreHarnesses, ensureBundledDevices, ensureBundledHarnessMonitor, ensureBundledMemories, ensureBundledModelManager,
+  DEVICES_HARNESS_ID, HARNESS_MONITOR_ID, HARNESS_MONITOR_BUILTIN_SOURCE, MEMORIES_BUILTIN_SOURCE, MEMORIES_ID, MODEL_MANAGER_ID, type BundledFiles } from './builtins.js'
 import { dshListRows } from './wire.js'
 import { installedDsh, invalidateInstalledDsh, readInstalledIndex, upsertInstalledRecord } from './installed.js'
 import { lockDsh } from './lock.js'
 import * as packageLock from './lock.js'
+import { createHash } from 'node:crypto'
+import { bundledRevisions } from './builtinIds.js'
+import { bundledPending } from '../core/viewersWake.js'
 
 let root: string
 let original: string
@@ -43,6 +46,22 @@ it('uses the embedded release bundle and returns unavailable in unbundled develo
   vi.stubGlobal('__MODEL_MANAGER_BUNDLE__', JSON.stringify(bundle()))
   expect(ensureBundledModelManager()).toBe(true)
   expect(installedDsh(MODEL_MANAGER_ID)?.manifest.name).toBe('Model Manager')
+})
+
+it('records each harness under the revision the release build works out for the core to check (core/viewersWake.ts)', () => {
+  expect(bundledRevisions()).toEqual({})
+  // build-bundle.mjs: the sha256 of each bundle's JSON as the Store reads it back.
+  const text = JSON.stringify(bundle())
+  vi.stubGlobal('__MODEL_MANAGER_BUNDLE__', text)
+  vi.stubGlobal('__BUILTIN_REVISIONS__', JSON.stringify({ models: createHash('sha256').update(JSON.stringify(JSON.parse(text))).digest('hex') }))
+  expect(bundledPending({ revisions: bundledRevisions() })).toBe('Model Manager to put in place')
+  expect(ensureBundledModelManager()).toBe(true)
+  expect(bundledPending({ revisions: bundledRevisions() })).toBeNull()
+  // Revisions that do not read as a list of them are none.
+  for (const malformed of ['[]', 'null', '{']) {
+    vi.stubGlobal('__BUILTIN_REVISIONS__', malformed)
+    expect(bundledRevisions()).toEqual({})
+  }
 })
 
 it('joins a later attempt after another installer releases the package lock', () => {
@@ -147,7 +166,9 @@ it('refreshes every bundled core tool together and leaves ordinary Store apps al
   vi.stubGlobal('__MODEL_MANAGER_BUNDLE__', JSON.stringify(coreFiles(MODEL_MANAGER_ID)))
   vi.stubGlobal('__DEVICES_BUNDLE__', JSON.stringify(coreFiles(DEVICES_HARNESS_ID)))
   vi.stubGlobal('__HARNESS_MONITOR_BUNDLE__', JSON.stringify(coreFiles(HARNESS_MONITOR_ID)))
+  vi.stubGlobal('__MEMORIES_BUNDLE__', JSON.stringify(coreFiles(MEMORIES_ID)))
   expect(ensureBundledCoreHarnesses()).toBe(true)
+  expect(installedDsh(MEMORIES_ID)!.source).toBe(MEMORIES_BUILTIN_SOURCE)
   const oldDevices = installedDsh(DEVICES_HARNESS_ID)!, oldMonitor = installedDsh(HARNESS_MONITOR_ID)!
   vi.stubGlobal('__DEVICES_BUNDLE__', JSON.stringify(coreFiles(DEVICES_HARNESS_ID, 'next release')))
   vi.stubGlobal('__HARNESS_MONITOR_BUNDLE__', JSON.stringify(coreFiles(HARNESS_MONITOR_ID, 'next release')))
@@ -222,4 +243,21 @@ it('reports a non-Error dependency failure and still prepares the other bundled 
     expect(installedDsh(DEVICES_HARNESS_ID)).toBeDefined()
     expect(installedDsh(HARNESS_MONITOR_ID)).toBeDefined()
   } finally { failure.mockRestore() }
+})
+
+it('ships Memories with the release, adopting the Store copy and never a developer\'s linked one', () => {
+  // A person who got Memories from the Store before it shipped with Harness: the release takes it over.
+  const storeDir = join(root, 'autonomous', 'memories')
+  mkdirSync(storeDir, { recursive: true })
+  for (const [name, file] of Object.entries(coreFiles(MEMORIES_ID, 'from the store'))) writeFileSync(join(storeDir, name), file.content)
+  upsertInstalledRecord({ id: MEMORIES_ID, dir: storeDir, source: 'https://github.com/autonomous-ai/openharness', path: 'store/agents/memories',
+    ref: 'main', commit: 'b'.repeat(40), linked: false, installedAt: 9 })
+  expect(ensureBundledMemories(coreFiles(MEMORIES_ID))).toBe(true)
+  expect(installedDsh(MEMORIES_ID)!.source).toBe(MEMORIES_BUILTIN_SOURCE)
+  expect(installedDsh(MEMORIES_ID)!.installedAt).toBe(9)
+  const linked = join(root, 'developer-memories')
+  upsertInstalledRecord({ id: MEMORIES_ID, dir: linked, source: linked, ref: 'main', commit: null, linked: true, installedAt: 1 })
+  expect(ensureBundledMemories(coreFiles(MEMORIES_ID, 'next release'))).toBe(true)
+  expect(readInstalledIndex().find(row => row.id === MEMORIES_ID)!.dir).toBe(linked)
+  expect(ensureBundledMemories({})).toBe(false)
 })

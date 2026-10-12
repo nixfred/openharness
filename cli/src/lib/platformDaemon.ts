@@ -12,12 +12,18 @@
  * definition, and a shell in a tmux pane the daemon started inherits it; it would otherwise believe it
  * was the platform. What counts is the definition on disk, and what the running master wrote in its
  * status file.
+ *
+ * Harness OS is the one computer where nobody opts in: its package ships the unit (OS_UNIT_FILE), so
+ * there every start and stop of its daemon goes through that unit (osDaemonUnit).
  */
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { env } from '../config/env.js'
 import { readStatusFile } from '../harnessd/master.js'
-import { PlatformService, defaultPlatformDeps, platformFor, type PlatformName, type PlatformState, type ServiceDefinition } from '../harnessd/platform.js'
+import {
+  OS_UNIT_FILE, PlatformService, defaultPlatformDeps, platformFor, type PlatformName, type PlatformState, type ServiceDefinition,
+} from '../harnessd/platform.js'
 import { DAEMON_LOG_FILE, HARNESSD_STATUS_FILE, isAlive, readPid } from './daemonState.js'
 import { managedNodePath } from './nodeRuntime.js'
 
@@ -61,11 +67,27 @@ export function supervisingPlatform(os: NodeJS.Platform, env: NodeJS.ProcessEnv)
   return forced === 'launchd' || forced === 'systemd' ? forced : platformFor(os)
 }
 
+/** The port Harness OS's unit runs the daemon on: the default, as it sets none. */
+const OS_DAEMON_PORT = '18473'
+
+/**
+ * Whether this CLI's daemon is the one Harness OS runs under its own unit: the unit is on disk, and this
+ * CLI is on the data folder and port the unit runs, the defaults, as it sets neither. A shell with its
+ * own ADAPTER_DATA_DIR or PORT (a test, a second daemon) has a daemon of its own, which the unit is not.
+ * Never under the end-to-end suite's forced platform, whose fakes stand in for this computer's.
+ */
+export function osDaemonUnit(os: NodeJS.Platform, env: NodeJS.ProcessEnv, exists: (path: string) => boolean = existsSync): boolean {
+  if (os !== 'linux' || env.HARNESSD_TEST_PLATFORM) return false
+  if (env.ADAPTER_DATA_DIR || (env.PORT && env.PORT !== OS_DAEMON_PORT)) return false
+  return exists(OS_UNIT_FILE)
+}
+
 /** This computer's: its platform, its pid file, the status file its master writes. */
 export function platformDaemonDeps(overrides: Partial<PlatformDaemonDeps> = {}): PlatformDaemonDeps {
   const platform = supervisingPlatform(process.platform, process.env)
+  const os = platform === 'systemd' && osDaemonUnit(process.platform, process.env)
   return {
-    service: platform ? new PlatformService(platform, defaultPlatformDeps()) : null,
+    service: platform ? new PlatformService(platform, defaultPlatformDeps(), os) : null,
     logFile: DAEMON_LOG_FILE,
     readPid,
     isAlive,

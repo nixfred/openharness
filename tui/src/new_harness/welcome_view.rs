@@ -86,9 +86,8 @@ pub(super) fn draw(buf: &mut Buffer, app: &App, body: Rect, form: &mut Form) -> 
     let agent = format!("[ {} ▾ ]", form.draft.what.label);
     let agent_w = (agent.width() as u16).min(26).min(width / 3);
     control(buf, form, Rect::new(x, y, agent_w, 1), Field::Agent, &agent, plain, accent);
-    let machine = if app.fleet.machine(&form.draft.machine).is_some_and(|m| m.local) {
-        if cfg!(target_os = "macos") { "This Mac" } else { "This Computer" }
-    } else { &form.machine_label };
+    // The machine by its name; "This computer" only until it has one (machine_label).
+    let machine = &form.machine_label;
     let machine = format!("[ {machine} ▾ ]");
     let machine_w = (machine.width() as u16).min(24).min(width / 3);
     control(buf, form, Rect::new(x + agent_w + gap, y, machine_w, 1), Field::Machine, &machine, plain, accent);

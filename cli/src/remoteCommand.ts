@@ -45,6 +45,8 @@ export interface RemoteCommandDeps {
   /** The daemon's loopback port, and whether it is up at all. */
   port: number
   daemonRunning: () => boolean
+  /** What to say when the daemon cannot be reached: stopped, or kept out by a sandbox (lib/unreachable.ts). */
+  unreachable?: () => string
   listMachines: () => Promise<RemoteMachineChoice[]>
   /** Whether this computer holds [machineId]'s peer pin (`harness link list`). */
   isLinked: (machineId: string) => boolean
@@ -292,7 +294,7 @@ export async function remoteCommand(deps: RemoteCommandDeps): Promise<number> {
   }
   if (!deps.input.isTTY || !output.isTTY) { error('`harness remote` needs a terminal to choose a machine in.'); return 1 }
   if (!deps.localMachineId) { error('Not signed in. Run `harness login`.'); return 1 }
-  if (!deps.daemonRunning()) { error('The Harness daemon is not running. Run `harness start`.'); return 1 }
+  if (!deps.daemonRunning()) { error(deps.unreachable?.() ?? 'The Harness daemon is not running. Run `harness start`.'); return 1 }
   let machines: RemoteMachineChoice[]
   try { machines = await deps.listMachines() } catch (failure) {
     error(failure instanceof Error ? failure.message : String(failure))

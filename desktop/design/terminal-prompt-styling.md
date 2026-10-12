@@ -1,6 +1,6 @@
 # Prompt themes and workspace styling
 
-For the current top bar and Customize Harness → Status, follow
+For the current top bar and Appearance → Status, follow
 [Workspace status bar](workspace-status-bar.md). It replaces the pane-header
 choices described below with Standard, Robbyrussell, Pure, and Starship text
 formats. The notes below describe the older `PromptContextView` surfaces;

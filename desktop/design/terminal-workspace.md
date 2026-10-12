@@ -84,7 +84,7 @@ All panes stay at full contrast by default. **Cmd+Shift+F** toggles shading on
 and off while working (**Ctrl+Alt+F** on Linux; **Alt+Shift+F** in the browser).
 When enabled, panes outside the current focus receive the approved 30%
 neutral-gray veil; Graphite's inactive background is RGB 64,64,64.
-Customize Harness → Appearance → **Shade inactive panes** toggles this veil
+Appearance → Workspace → **Shade inactive panes** toggles this veil
 through the same saved preference and shows the current shortcut, including
 remaps. **Toggle pane shading** is also available in the command search and
 keyboard shortcuts. Turning it off leaves

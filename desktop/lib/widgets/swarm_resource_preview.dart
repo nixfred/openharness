@@ -12,8 +12,12 @@ import '../models/api_connections_controller.dart'
     show ApiModels, contextWindowLabel;
 import '../models/local_model.dart';
 import '../models/model_search_catalog.dart';
+import '../core/relative_time.dart';
 import '../shared/theme/app_theme.dart' as grid;
+import '../shared/widgets/fingerprint_text.dart';
+import '../state/account_devices.dart';
 import '../state/app_state.dart';
+import '../state/machine_devices.dart';
 import '../state/harness_sessions.dart';
 import '../state/harness_placement.dart';
 import '../state/swarm_navigation.dart';
@@ -21,6 +25,8 @@ import '../state/swarm_search.dart';
 import '../terminal/terminal_text.dart';
 import '../terminal/terminal_theme.dart';
 import '../terminal/terminal_theme_store.dart';
+import 'account_device_detail.dart'
+    show confirmDeviceAction, removeDeviceDetail;
 import 'machine_picker_form.dart';
 import 'api_picker_form.dart';
 import 'swarm_search_preview.dart';
@@ -58,13 +64,6 @@ class SearchPreviewControls {
     dispatch = null;
     commands = null;
   }
-}
-
-/// A block of text a person copies as it is — a command — drawn monospace and selectable by
-/// [_SwarmResourcePreviewState._details].
-class _Code {
-  const _Code(this.text);
-  final String text;
 }
 
 class _ResourceAction {
@@ -136,7 +135,52 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
   bool get _machineSetup =>
       row?.isCreate == true && widget.search.isMachineMode;
   bool get _isManagement =>
-      row?.isMachine == true || row?.isModel == true || _machineSetup;
+      row?.isMachine == true ||
+      row?.isModel == true ||
+      row?.isAccountDevice == true ||
+      _machineSetup;
+
+  MachineDevices? get _devices => widget.search.machineDevices;
+
+  /// The account's key for the selected row: the device itself, or the key of the machine it is.
+  AccountDevice? get _device {
+    final selected = row;
+    final devices = _devices;
+    if (selected == null || devices == null) return null;
+    if (selected.devicePub case final pub?) return devices.byPub(pub);
+    if (selected.isMachine) return devices.forMachine(selected.machineId!);
+    return null;
+  }
+
+  /// A dialog over the workspace: the picker steps aside while it is up, and takes the keys back after.
+  Future<T> _modal<T>(Future<T> Function() dialog) async {
+    widget.onModalChanged(true);
+    try {
+      return await dialog();
+    } finally {
+      widget.onModalChanged(false);
+      if (mounted) widget.onRefocus();
+    }
+  }
+
+  Future<bool> _confirm(String title, String detail, String action) => _modal(
+    () =>
+        confirmDeviceAction(context, title, detail, action, destructive: true),
+  );
+
+  /// Signs a phone, browser or a computer with no machine record out of the account, after asking.
+  Future<void> _removeDevice(AccountDevice device) async {
+    final devices = _devices;
+    if (devices == null) return;
+    final name = device.label.trim().isEmpty
+        ? 'this device'
+        : device.label.trim();
+    if (!await _confirm('Remove $name?', removeDeviceDetail, 'Remove')) return;
+    if (!mounted) return;
+    await devices.remove(device);
+  }
+
+  void _mine(AccountDevice device) => _devices?.mine(device);
   bool get _editingMachine => _machineForm != null && _formResource == row?.id;
 
   void _editMachine(MachinePickerFormKind kind) {
@@ -406,17 +450,6 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         if (row != null && widget.search.canGetModel(row)) {
           final selected = row!;
           unawaited(_run(() => widget.search.getModel(selected)));
-        }
-        // A Jev model has nothing to Use: Enter starts one of yours that is downloaded, and copies
-        // how to call one that is on a grid.
-        if (row != null && widget.search.canStartJev(row)) {
-          final selected = row!;
-          unawaited(_run(() => widget.search.startJev(selected)));
-        } else if (widget.search.models?.entries[row?.modelId] case final jev?
-            when jev.isJev &&
-                jev.gridModel != null &&
-                !widget.search.canGetModel(row)) {
-          _copyJevRequest(jev);
         }
         if (row?.isCreate == true) _addApi();
         // Model rows perform Use/Get directly; unavailable rows stay put.
@@ -745,12 +778,9 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
               widget.search.canGetModel(row) ||
               widget.search.isModelDownloadsRow(row) ||
               widget.search.isGridSetupRow(row) ||
-              widget.search.canExpandApi(row) ||
-              widget.search.isJevRow(row))
+              widget.search.canExpandApi(row))
         '$enter ${managing
             ? 'select'
-            : widget.search.isJevRow(row)
-            ? widget.search.actionLabel(row)
             : widget.search.canSelectModel(row)
             ? 'Use'
             : widget.search.canGetModel(row)
@@ -861,52 +891,6 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
       final local = model?.local;
       final api = model?.api;
       final owner = model?.controller ?? catalog.manager;
-      if (model case final jev? when jev.isJev) {
-        final mine = jev.local;
-        final operating =
-            mine != null && owner.operationFor(mine)?.active == true;
-        // An engine of yours its grid no longer serves (a `grid leave` from elsewhere) is started again,
-        // as its row says: Stop on a model the row calls not running read as the wrong button.
-        final restart =
-            mine != null && mine.canStop && mine.canStart && !mine.running;
-        return [
-          if (mine != null && mine.canStop && !restart)
-            _ResourceAction(
-              'Stop',
-              busy || operating || owner.busy
-                  ? null
-                  : () => unawaited(
-                      _run(() async {
-                        await owner.control(mine, 'stop');
-                        return owner.error;
-                      }),
-                    ),
-              command: 'picker.model_stop',
-            )
-          else if (mine != null && !mine.downloaded)
-            _ResourceAction(
-              'Get',
-              !busy && search.canGetModel(selected)
-                  ? () => unawaited(_run(() => search.getModel(selected)))
-                  : null,
-              command: 'picker.model_download',
-            )
-          else if (mine != null)
-            _ResourceAction(
-              'Start',
-              !busy && search.canStartJev(selected)
-                  ? () => unawaited(_run(() => search.startJev(selected)))
-                  : null,
-              command: 'picker.model_start',
-            ),
-          if (jev.gridModel != null)
-            _ResourceAction(
-              'Copy request',
-              () => _copyJevRequest(jev),
-              command: 'picker.accept',
-            ),
-        ];
-      }
       if (local != null) {
         final enabled =
             !busy &&
@@ -995,6 +979,25 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         ),
       ];
     }
+    if (selected.isAccountDevice) {
+      final device = _device;
+      if (device == null) return const [];
+      final removing = _devices?.removing.contains(device.pub) == true;
+      return [
+        if (_devices?.isNew(device) == true && !device.self)
+          _ResourceAction(
+            'It’s mine',
+            removing ? null : () => _mine(device),
+            command: 'picker.device_mine',
+          ),
+        if (!device.self)
+          _ResourceAction(
+            removing ? 'Removing…' : 'Remove',
+            removing ? null : () => unawaited(_removeDevice(device)),
+            command: 'picker.resource_remove',
+          ),
+      ];
+    }
     if (selected.isMachine) {
       final machine = app.stateOf(selected.machineId!);
       if (machine == null) return [];
@@ -1015,6 +1018,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
             command: 'picker.resource_rename',
           ),
         ...secondary.where((a) => a.command == 'picker.resource_remove'),
+        ...secondary.where((a) => a.command == 'picker.device_mine'),
         if (app.machineListError != null)
           _ResourceAction(
             'Retry',
@@ -1142,9 +1146,16 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           ),
         if (!machine.isLocalMachine && !machine.machine.isShared)
           _ResourceAction(
-            'Delete',
+            'Remove',
             () => _editMachine(MachinePickerFormKind.delete),
             command: 'picker.resource_remove',
+          ),
+        if (_device case final device?
+            when _devices?.isNew(device) == true && !device.self)
+          _ResourceAction(
+            'It’s mine',
+            () => _mine(device),
+            command: 'picker.device_mine',
           ),
         _ResourceAction(
           'Add machine',
@@ -1267,7 +1278,6 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     final opActive = operation?.active == true;
     // API entries have their own dedicated preview; keep main's dispatch.
     if (entry.api != null) return _apiPreview(entry);
-    if (entry.isJev) return _jevPreview(entry);
 
     String windowLabel(double? seconds) {
       if (seconds == null) return '—';
@@ -1387,7 +1397,18 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                   '${gigabytesLabel(owner.freeDiskBytes!)} free',
               ].join(' · '),
             ),
-          if ((local.sizeBytes, owner.memoryBytes) case (
+          // An NVIDIA machine's against the VRAM its card has for models, which the catalog fits to.
+          if (owner.fitsInVram) ...[
+            if ((local.sizeBytes, owner.fitBytes) case (
+              final size?,
+              final room?,
+            ))
+              labelValue(
+                'VRAM',
+                '${size <= room ? 'fits' : 'needs ${gigabytesLabel(size)}'} · '
+                    'its GPU has ${gigabytesLabel(room)} for models',
+              ),
+          ] else if ((local.sizeBytes, owner.memoryBytes) case (
             final size?,
             final memory?,
           ))
@@ -1577,87 +1598,6 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
     ], controls: true);
   }
 
-  /// A Jev model's pane: what it is, and once a grid serves it, the one command that calls it. Lean on
-  /// purpose: the title, the line under it and the row already say its name, machine, grid and whether it
-  /// serves, so the pane does not say them again — and the request it shows is the endpoint, with the
-  /// grid's address loaded by its first line, where a bare `$OPENAI_BASE_URL` read as a value to fill in.
-  Widget _jevPreview(ModelSearchEntry entry) {
-    final served = entry.gridModel;
-    final local = entry.local;
-    final catalog = widget.search.models!;
-    final owner = entry.controller ?? catalog.manager;
-    final grid = served?.grid ?? '';
-    final state = catalog.manager.sections
-        .where((section) => section.name == grid)
-        .firstOrNull
-        ?.state;
-    final operation = local == null ? null : owner.operationFor(local);
-    final here = thisComputerName();
-    final machine = local != null
-        ? '${here[0].toUpperCase()}${here.substring(1)}'
-        : entry.node;
-    // Said only when there is something to do or under way; a model that serves says so in its row.
-    final String? status = local == null
-        ? null
-        : operation?.active == true
-        ? catalog.localStatus(local, controller: owner)
-        : operation?.error ??
-              (local.running
-                  ? null
-                  : local.downloaded
-                  ? 'Start runs it on your grid.'
-                  : 'Get downloads it and runs it on your grid.');
-    return _details([
-      entry.name,
-      ['Jev model', ?machine, if (grid.isNotEmpty) grid].join(' · '),
-      '',
-      'Answers yes-or-no, choice and score questions with probabilities. It does not chat.',
-      if (status != null) ...['', status],
-      if (local != null) ...[
-        '',
-        if (local.sizeBytes case final size?) ('Size', gigabytesLabel(size)),
-        // A decision model another app downloaded (Ollama's tev1) runs in that app.
-        (
-          'Runs in',
-          local.app == null || local.app == 'Grid'
-              ? 'Grid\'s llama.cpp'
-              : local.app!,
-        ),
-      ],
-      if (served == null)
-        ...[]
-      else if (served.unavailable case final away?) ...[
-        '',
-        '${away.machine} seems offline. It answers again when that computer is back.',
-      ] else if (state == GridSectionState.asleep ||
-          state == GridSectionState.waking) ...[
-        '',
-        'Its grid is resting. Your first request wakes it, which takes a few seconds.',
-      ],
-      if (served != null) ...[
-        '',
-        'Call it from a terminal:',
-        _Code(jevRequest(grid, entry.name)),
-        ?_messages[row!.id],
-      ],
-    ], controls: true);
-  }
-
-  void _copyJevRequest(ModelSearchEntry entry) {
-    final id = row?.id;
-    unawaited(
-      Clipboard.setData(
-        ClipboardData(
-          text: jevRequest(entry.gridModel?.grid ?? '', entry.name),
-        ),
-      ).then((_) {
-        if (mounted && id != null) {
-          setState(() => _messages[id] = 'Copied. Paste it into a terminal.');
-        }
-      }),
-    );
-  }
-
   Widget _machinePreview() {
     final machine = app.stateOf(row!.machineId!);
     if (machine == null) return _details([row!.title, 'Unavailable']);
@@ -1687,8 +1627,57 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
           resources?.memoryTotalBytes != null)
         'RAM ${(resources!.memoryUsedBytes! / (1024 * 1024 * 1024)).toStringAsFixed(1)} / ${(resources.memoryTotalBytes! / (1024 * 1024 * 1024)).toStringAsFixed(0)} GB',
       '${machine.agents.length} ${machine.agents.length == 1 ? 'harness' : 'harnesses'}',
+      ..._deviceFacts(_device),
       ?app.machineListError,
       ?_messages[row!.id],
+      ?_devices?.error,
+    ], controls: true);
+  }
+
+  /// What the account's device list says about [device]: when it joined and was last active, and
+  /// its key code to compare on the device itself.
+  List<Object> _deviceFacts(AccountDevice? device) {
+    if (device == null) return const [];
+    final now = DateTime.now();
+    return [
+      '',
+      ('Added', fullDateTime(device.addedAt)),
+      if (device.lastSeen case final seen?)
+        ('Last active', device.self ? 'Now' : relativeAgo(seen, now)),
+      if (device.fingerprint.isNotEmpty) ...[
+        ('Code', ''),
+        FingerprintText(
+          device.fingerprint,
+          large: false,
+          copyKey: ValueKey('device-code-copy:${device.pub}'),
+        ),
+        device.self
+            ? 'This device’s code. Your other devices show the same code for it.'
+            : fingerprintHowToCompare(computer: device.isMachine),
+      ],
+      if (device.suspended)
+        'Not trusted here: added after this device’s list and another’s split. '
+            'Review the list to trust it again.',
+    ];
+  }
+
+  Widget _devicePreview() {
+    final device = _device;
+    if (device == null) {
+      return _details([row!.title, 'No longer on your account']);
+    }
+    return _details([
+      row!.title,
+      [
+        device.isMachine ? 'Computer' : 'App',
+        if (device.self) 'This device',
+        if (device.suspended)
+          'Suspended'
+        else if (_devices?.isNew(device) == true)
+          'New',
+      ].join(' · '),
+      ..._deviceFacts(device),
+      ?_devices?.error,
     ], controls: true);
   }
 
@@ -1741,21 +1730,9 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                 label,
                 value,
               ),
-              final _Code code => Container(
-                margin: const EdgeInsets.only(top: 4, bottom: 4),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: DesktopChrome.field,
-                  border: Border.all(color: DesktopChrome.rim),
-                  borderRadius: BorderRadius.circular(
-                    DesktopChrome.controlRadius,
-                  ),
-                ),
-                child: SelectableText(
-                  code.text,
-                  style: DesktopChrome.text(size: 11.5)
-                      .copyWith(fontFamily: grid.AppType.monoFamily),
-                ),
+              final Widget widget => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: widget,
               ),
               final line => Padding(
                 padding: EdgeInsets.only(bottom: i == 0 ? 5 : 3),
@@ -1790,10 +1767,6 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
         for (var i = 0; i < lines.length; i++)
           switch (lines[i]) {
             '' => SizedBox(height: cell.height),
-            final _Code code => SelectableText(
-              code.text,
-              style: terminalContentStyle(color: theme.foreground),
-            ),
             (final String label, final String value) => Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1809,6 +1782,7 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                 ),
               ],
             ),
+            final Widget widget => widget,
             final line => Text(
               '$line',
               style: i == 0
@@ -2028,6 +2002,18 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                         app: app,
                         kind: _machineForm!,
                         machineId: row?.machineId,
+                        signsOut:
+                            _machineForm == MachinePickerFormKind.delete &&
+                            _device != null,
+                        remove:
+                            _machineForm == MachinePickerFormKind.delete &&
+                                _devices != null
+                            ? () => _devices!.removeComputer(
+                                machineId: row!.machineId!,
+                                name: row!.title,
+                                device: _device,
+                              )
+                            : null,
                         onClose: _closeMachineForm,
                         onFocusChanged: widget.search.setManaging,
                         onSwitchPane: _switchPane,
@@ -2062,6 +2048,8 @@ class _SwarmResourcePreviewState extends State<SwarmResourcePreview> {
                       ])
                     : row?.isMachine == true
                     ? _machinePreview()
+                    : row?.isAccountDevice == true
+                    ? _devicePreview()
                     : widget.search.isModelMode
                     ? _modelPreview()
                     : SwarmSearchPreview(

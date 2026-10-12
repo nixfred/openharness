@@ -379,8 +379,9 @@ describe.skipIf(!RELEASED)('a released master and this one, each over the other\
       : 'did not answer its probe (Unknown command: __harnessd-probe) — keeping this master')
     // This master over a core too old to ask for a process on demand starts each as that core binds
     // (harnessd/services.ts `unasked`): models, which a core of protocol 4 asks for only once grid is in use,
-    // and the gateway, which it asks for only signed in or with something paired.
-    for (const name of releasedCanReexec ? [] : ['models', 'gateway']) {
+    // the gateway, which it asks for only signed in or with something paired, and the viewers, which a core of
+    // protocol 5 asks for only once something needs them.
+    for (const name of releasedCanReexec ? [] : ['models', 'gateway', 'viewers']) {
       await until(`this master to start ${name} for the older core`, () => daemon!.log().slice(from).includes(`[harnessd] service ${name} started`) || null, 30_000, 200)
     }
   })

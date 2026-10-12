@@ -25,10 +25,10 @@ import type { ScmDescription } from '../scm/types.js'
 import { sessionGitContext, SessionGitContextReader, type SessionGitContext } from './sessionGitContext.js'
 import { sessionGitHistory } from './sessionGitHistory.js'
 import { transcriptActivityAt } from './transcriptActivity.js'
-import type { AgentTokenUsage } from './agentTokenUsage.js'
+import type { AgentTokenUsage } from './agentUsageWire.js'
 import type { AgentOutputStats } from './agentOutputStats.js'
 import type { GridAssignment } from './gridAssignment.js'
-import type { GridWebSearchStatus } from './gridLaunch.js'
+import type { GridWebSearchStatus } from './gridLaunchWire.js'
 import type { AgentGridTarget, GridAnnotation } from './gridAnnotation.js'
 import { projectDisplayName, sessionDisplayTitle, type RegisteredSession } from './registry.js'
 import { engineCanFork } from './forkAgent.js'
@@ -66,6 +66,7 @@ export type AgentFrame = {
   closePlan: { state: 'waiting' | 'failed'; detail?: string } | null
   closeSupported: boolean
   launch: NonNullable<RegisteredSession['launch']>
+  identityHold?: string
   createdAt: string
   updatedAt: string
   /**
@@ -102,6 +103,17 @@ export type AgentFrame = {
   verdict: DshVerdict | null
   /** The agent this one was forked from (`agent_fork`), or null — a real answer, like `dsh: null`. */
   forkedFrom: { agentId: string; name: string } | null
+  /**
+   * The harness on this machine whose agent started this one (`harness new` or `harness_start` from its pane), by its
+   * agent id, or null: the person, an agent outside Harness, or one on another machine. A window that shows that
+   * harness in a tab opens this one beside it when it first sees it live, and its header says "started by" with the
+   * starter's current name (desktop `Agent.parentAgentId`).
+   */
+  parentAgentId: string | null
+  /** `agent` when another agent started this harness, wherever that agent runs (registry `startedBy`); null when the
+   *  person did. The agent verbs read it to keep such a harness from starting harnesses itself (agentClient/model.ts
+   *  `callerOf`): `parentAgentId` names only a starter on this machine. */
+  startedBy: 'agent' | null
   /** Whether `agent_fork` can do anything for this engine (lib/forkAgent.ts) — natively, or by a
    *  handoff. A client hides the Fork action on a false rather than offering a button that refuses. */
   forkable: boolean
@@ -221,6 +233,7 @@ export async function agentFrame(
     closePlan: s.closePlan ? { state: s.closePlan.state, ...(s.closePlan.detail ? { detail: s.closePlan.detail } : {}) } : null,
     closeSupported: true,
     launch: s.launch ?? { state: 'ready' },
+    ...((s.identityHold || s.interpretationHold || s.admissionHold) ? { identityHold: s.identityHold || s.interpretationHold || s.admissionHold } : {}),
     createdAt: new Date(s.registeredAt).toISOString(),
     updatedAt: new Date(updatedAt).toISOString(),
     // Null, never omitted, for the reason the module doc gives: a push without the key would erase
@@ -259,6 +272,8 @@ export async function agentFrame(
     viewerName: dsh?.viewerName ?? null,
     verdict: dsh?.verdict ?? null,
     forkedFrom: s.forkedFrom ? { agentId: s.forkedFrom.agentId, name: s.forkedFrom.name } : null,
+    parentAgentId: s.parentAgentId ?? null,
+    startedBy: s.startedBy === 'agent' ? 'agent' : null,
     forkable: engineCanFork(s.engine),
     resumeMode: resumeMode(s.engine),
     permissionMode: s.permissionMode ?? null,

@@ -472,6 +472,24 @@ class Agent {
 
   bool get isStopped => status == 'stopped';
 
+  /// Whether this is still the session a close reviewed as [reviewed]: the
+  /// same registration in the same conversation, or one that had no
+  /// conversation when it was reviewed and has bound its first since.
+  ///
+  /// Codex binds none for its first seconds, so a pane closed just after it
+  /// started was reviewed unbound and had bound one by the time the person
+  /// pressed Stop. Read as a change, that Stop was answered "The session
+  /// changed. Check it before closing." and the harness kept running (clean
+  /// macOS VM, Desktop 1.2.65, Codex 0.162.1, 2026-10-12). The close still
+  /// names the identity it reviewed, no conversation, and the daemon accepts
+  /// that only from a harness still starting — not one resumed, typed into a
+  /// terminal or older than a minute (cli `closeAgentService.ts` `matches`).
+  /// A different conversation once one was bound is always a change.
+  bool continuesSession(Agent reviewed) =>
+      createdAt == reviewed.createdAt &&
+      (sessionId == reviewed.sessionId ||
+          (reviewed.sessionId?.isEmpty ?? true));
+
   /// Exact saved-conversation resume is currently implemented for these engines.
   bool get canResumeConversation =>
       (engine == 'claude' || engine == 'codex') &&
@@ -548,9 +566,14 @@ class Agent {
     final launch = launchRaw is Map
         ? Map<String, dynamic>.from(launchRaw)
         : const <String, dynamic>{};
+    // `held`: the daemon will not start it yet, and says why, such as a
+    // conversation another process may have open. Read as `ready` it showed
+    // only its name over an empty pane ("Unavailable"), with no reason
+    // (onboarding reopening a team's recent conversations, 2026-10-09).
     final launchState = switch (launch['state']) {
       'starting' => 'starting',
       'failed' => 'failed',
+      'held' => 'held',
       _ => 'ready',
     };
     final grid = j['grid'] as Map<String, dynamic>?;
@@ -609,7 +632,7 @@ class Agent {
       status: (j['status'] as String?) ?? 'active',
       launchState: launchState,
       launchError: launchState == 'failed' ? _safeLabel(launch['error']) : null,
-      launchDetail: launchState == 'failed'
+      launchDetail: launchState == 'failed' || launchState == 'held'
           ? _safeDetail(launch['detail'])
           : null,
       terminalAvailable: terminalAvailable,
@@ -1174,17 +1197,11 @@ class GridModel {
   /// for every other row, and always from a daemon that predates it.
   final GridModelUnavailable? unavailable;
 
-  /// A Jev (System One) decision model (`kind: decision`): it answers typed questions at
-  /// `/v1/systemone` and cannot chat, so no harness runs on it — the picker lists it apart and
-  /// shows how to call it instead. False for every chat model, and from a daemon that predates it.
-  final bool decision;
-
   const GridModel({
     required this.id,
     required this.node,
     this.grid,
     this.unavailable,
-    this.decision = false,
   });
 }
 
@@ -1353,14 +1370,6 @@ class GridSection {
     this.lastKnownAge,
     this.wakeOutcome,
   });
-
-  /// The models a harness can run on: [models] without the decision models, which answer only at
-  /// `/v1/systemone` and cannot chat. The New Harness menu listed tev1 and kev-0.8b among the chat
-  /// models, where choosing one started a harness on a model that cannot answer it.
-  List<GridModel> get harnessModels => [
-    for (final model in models)
-      if (!model.decision) model,
-  ];
 }
 
 /// `gridName` is null when the machine has no grid yet — told apart from "a grid with nothing on
@@ -1417,7 +1426,6 @@ class GridModels {
                 node: m['node'] is String ? m['node'] as String : '',
                 grid: grid,
                 unavailable: GridModelUnavailable.fromWire(m['unavailable']),
-                decision: m['kind'] == 'decision',
               ),
             )
             .where((m) => m.id.isNotEmpty)

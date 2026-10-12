@@ -5,7 +5,9 @@ import { buildEngineLaunchArgv } from '../../lib/engineLaunch.js'
 import type { RegisteredSession } from '../../lib/registry.js'
 import { processRows } from '../../lib/terminalAgentDiscovery.js'
 import { bypassPermissionActive, resolvePaneEngineProcess } from '../../lib/tmux.js'
+import { AgentRestartCoordinator } from '../../lib/restartAgent.js'
 import { createPaneSwap, SWAP_SETTLE_MS, type PaneSwapDeps } from './swap.js'
+import type { NativeLaunch } from '../../engines/nativeLaunch.js'
 
 vi.mock('../../lib/deleteAgentFallback.js', async (real) => ({ ...await real<object>(), terminateDeletedAgent: vi.fn(async () => ({ ok: true })) }))
 vi.mock('../../lib/engineLaunch.js', async (real) => ({ ...await real<object>(), buildEngineLaunchArgv: vi.fn(() => ['zsh', '-lc', 'claude']) }))
@@ -36,11 +38,39 @@ function setup(row: RegisteredSession | null = session()) {
 }
 
 describe('the pane-process swap', () => {
+  it('passes the prepared native snapshot into the final argv builder', () => {
+    const native = { token: 'prepared-native' } as NativeLaunch
+    const prepared = setup().swap.paneSwapDeps(session(), runtime, { native })
+    prepared.buildArgv({ resumeSessionId: 's1', bypassPermission: false })
+    expect(buildEngineLaunchArgv).toHaveBeenCalledWith('claude', expect.objectContaining({ native, resumeSessionId: 's1' }))
+  })
   beforeEach(() => {
+    vi.mocked(terminateDeletedAgent).mockClear()
     vi.mocked(resolvePaneEngineProcess).mockReset().mockResolvedValue(null)
     vi.mocked(buildEngineLaunchArgv).mockClear()
   })
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
+
+  it('uses the coordinator that already owns boot restore revisions', () => {
+    const restartJobs = new AgentRestartCoordinator()
+    const boot = restartJobs.revision('a1')
+    const swap = createPaneSwap({ ...setup().deps, restartJobs })
+    expect(swap.restartJobs).toBe(restartJobs)
+    expect(swap.restartJobs.revision('a1')).toBe(boot)
+  })
+
+  it('passes revocable ownership into the final signal and tmux dispatch boundaries', async () => {
+    const { swap, tmuxBackend } = setup()
+    const current = () => false
+    const prepared = swap.paneSwapDeps(session(), runtime, {}, null, current)
+    expect(prepared.isCurrent?.()).toBe(false)
+    await prepared.holdOpen()
+    expect(tmuxBackend.holdOpen).toHaveBeenCalledWith(runtime, current)
+    await prepared.terminate()
+    expect(vi.mocked(terminateDeletedAgent).mock.lastCall?.[1].current).toBe(current)
+    await prepared.respawn(['fixture-engine'])
+    expect(tmuxBackend.respawn).toHaveBeenCalledWith(runtime, expect.objectContaining({ current }))
+  })
 
   it('restarts only the agent it was asked about: same registration, same pane, same engine', () => {
     expect(setup().swap.sameRestartTarget(session())).toBe(true)

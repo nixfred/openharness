@@ -33,8 +33,47 @@ ENV.update(HOME=str(BASE), HN_TMPDIR=str(BASE), HN_SOCKET_NAME=PREFIX, PORT=str(
            TERM='xterm-256color', COLORTERM='truecolor', SHELL='/bin/sh', HARNESS_TUI_DESK='sync',
            HARNESS_TUI_NOTIFY='off', HN_DESKTOP='off', SSH_CONNECTION='disposable-fixture',
            HARNESS_CLI=sys.executable, HARNESS_CLI_ARGS=json.dumps([str(BASE / 'cli.py')]))
+if '--os-required-sign-in' in sys.argv:
+    ENV['HARNESS_OS'] = '1'
+    # Run the shipped OS network form, replacing only NetworkManager/sudo in this
+    # private fixture. No host network or account is touched.
+    binaries = BASE / 'bin'
+    binaries.mkdir()
+    network = ROOT.parent / 'os/network.py'
+    (binaries / 'sudo').write_text('#!' + sys.executable + '\n' + f'''
+import importlib.util, os, sys
+from pathlib import Path
+assert sys.argv[1:] == ['/usr/bin/python3', '/usr/lib/harness-os/network.py', '--first-use']
+spec = importlib.util.spec_from_file_location('network', {str(network)!r})
+network = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(network)
+network.os.geteuid = lambda: 0
+network.nmcli = lambda *args, **kwargs: ''
+network.scan = lambda **kwargs: []
+network.wired_devices = lambda: []
+network.connected = lambda: (Path(os.environ['HOME']) / 'network-ready').exists()
+sys.argv = ['network.py', '--first-use']
+raise SystemExit(network.main())
+''')
+    (binaries / 'sudo').chmod(0o700)
+    ENV['PATH'] = str(binaries) + os.pathsep + ENV['PATH']
 CONF = BASE / 'tmux.conf'
 CONF.write_text('set -g automatic-rename off\n')
+launch = [str(HN), '-L', PREFIX, '--port', str(PORT), '-f', str(CONF)]
+if '--os-required-sign-in' in sys.argv:
+    # Use the actual OS launcher and onboarding script. Only installed paths
+    # and the account adapter point at this disposable fixture.
+    ENV['HARNESS_TUI_TMUX_CONF'] = str(CONF)
+    launcher = BASE / 'os-launcher'
+    source = (ROOT.parent / 'os/root/usr/bin/hn').read_text()
+    source = source.replace('. /usr/lib/harness-os/runtime-path', 'harness_runtime=' + shlex.quote(str(BASE)))
+    source = source.replace('export HARNESS_CLI=/usr/bin/harness', 'export HARNESS_CLI=' + shlex.quote(ENV['HARNESS_CLI']))
+    source = source.replace("export HARNESS_CLI_ARGS='[]'", 'export HARNESS_CLI_ARGS=' + shlex.quote(ENV['HARNESS_CLI_ARGS']))
+    source = source.replace('/usr/bin/python3 /usr/lib/harness-os/onboarding.py',
+                            shlex.join([sys.executable, str(ROOT.parent / 'os/onboarding.py')]))
+    launcher.write_text(source)
+    launcher.chmod(0o700)
+    launch = [str(launcher)]
 OUTPUT = Path(os.environ['HN_WORKSPACE_OUTPUT']) if os.environ.get('HN_WORKSPACE_OUTPUT') else None
 if OUTPUT:
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -65,6 +104,8 @@ elif args[:2] in (['remote-password', 'set'], ['remote-password', 'clear']):
     emit({'ok': True})
 elif args == ['link', 'list']:
     print('No machines linked yet.')
+elif args == ['logout']:
+    (home / 'account.json').write_text(json.dumps({'loggedIn': False}))
 elif args and args[0] == 'login':
     record('start')
     if '--qr' in args: emit({'type': 'qr', 'url': 'https://example.test/login/fixture', 'expiresIn': 120})
@@ -575,19 +616,101 @@ try:
     else:
         raise AssertionError('mock startup timeout')
     command = shlex.join(['env', '-u', 'TMUX', '-u', 'TMUX_PANE', '-u', 'HN_SOCKET',
-                         *[f'{k}={v}' for k, v in ENV.items()], str(HN), '-L', PREFIX,
-                         '--port', str(PORT), '-f', str(CONF)])
+                         *[f'{k}={v}' for k, v in ENV.items()], *launch])
     tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'test', '-x', '170', '-y', '44', command)
     started = True
+    if '--os-required-sign-in' in sys.argv:
+        shown('Connect to Wi-Fi')
+        keys('Escape', 'C-b', 'c')
+        shown('Connect to Wi-Fi')
+        assert 'Sign in to Harness' not in screen()
+        assert 'Alpha task terminal' not in screen()
+        snapshot('os-network-before-sign-in')
+        (BASE / 'network-ready').touch()
+    shown('Sign in to Harness')
+    shown('Continue with email')
+    assert 'Alpha task terminal' not in screen(), 'required sign-in covers saved work'
+    assert 'Keep using locally' not in screen()
+    keys('Escape', 'C-b', 'c')
+    shown('Sign in to Harness')
+    snapshot('required-sign-in')
+    if '--os-required-sign-in' in sys.argv:
+        hn('os-action', 'wifi')
+        shown('New terminal terminal')
+        assert 'Alpha task terminal' not in screen() and 'Beta task terminal' not in screen()
+        network_pane = value('#{pane_id}')
+        tabs = hn('list-windows', '-F', '#{window_id}').splitlines()
+        keys('C-b', 'c')
+        for action in ('new', 'terminal', 'connect'):
+            hn('os-action', action)
+        assert hn('list-windows', '-F', '#{window_id}').splitlines() == tabs
+        snapshot('os-wifi-during-required-sign-in')
+        hn('kill-pane', '-t', network_pane)
+        shown('Sign in to Harness')
+    for cols, rows in [(80, 24), (40, 12), (170, 44)]:
+        tmux('resize-window', '-t', 'test', '-x', str(cols), '-y', str(rows))
+        wait(lambda: value('#{client_width}x#{client_height}') == f'{cols}x{rows}', 'sign-in follows terminal resize')
+        # The resize is acknowledged before the frame is painted. Let the redraw
+        # settle before reading mouse coordinates or recording the terminal.
+        time.sleep(.25)
+        shown('Sign in to Harness')
+        shown('Continue with Google')
+        shown('Continue with your phone')
+        snapshot(f'required-sign-in-{cols}x{rows}')
+    click_text('Continue with Google')
+    shown('Finish signing in in your browser')
+    keys('Escape')
+    shown('Continue with Google')
+    wait(lambda: login_events() == ['start', 'cancel'], 'Escape cancels the attempt, not required sign-in')
+    click_text('Continue with email')
+    shown('Finish signing in in your browser')
+    snapshot('required-sign-in-browser')
+    (BASE / 'approve').touch()
+    wait(lambda: 'commit' in login_events(), 'successful required sign-in')
     shown('Alpha task terminal')
     shown('Beta task terminal')
-    shown('Sign in')
+    (BASE / 'approve').unlink()
+    (BASE / 'login-events').unlink()
+    print('PASS required sign-in: saved work stays covered; cancel retries; email returns to saved panes', flush=True)
+    if '--os-required-sign-in' in sys.argv:
+        # Simulate the completed first workspace. The real OS launcher now skips
+        # initial networking so subsequent signed-in launches can work offline.
+        state = BASE / '.local/state/harness-os'
+        state.mkdir(parents=True, exist_ok=True)
+        (state / 'onboarded').touch()
+        (BASE / 'network-ready').unlink()
     local, remote = api()['local'], api()['remote']
     panes = hn('list-panes', '-F', '#{pane_id}').splitlines()
     assert len(panes) == 2, panes
     alpha, beta = panes
     workspace = value('#{window_id}')
     snapshot('workspace')
+    if '--required-sign-in' in sys.argv or '--os-required-sign-in' in sys.argv:
+        hn('signout', '-y')
+        shown('Sign in to Harness')
+        shown('Continue with Google')
+        if '--os-required-sign-in' in sys.argv:
+            for action in ('new', 'terminal', 'connect'):
+                hn('os-action', action)
+                shown('Sign in to Harness')
+                assert len(hn('list-panes', '-F', '#{pane_id}').splitlines()) == 2
+        keys('Escape')
+        shown('Sign in to Harness')
+        snapshot('required-sign-in-after-signout')
+        tmux('set-window-option', '-t', TARGET, 'remain-on-exit', 'on')
+        keys('C-c')
+        wait(lambda: tmux('display-message', '-p', '-t', TARGET, '#{pane_dead}').strip() == '1', 'Ctrl+C detaches from sign-in')
+        tmux('respawn-pane', '-k', '-t', 'test', command)
+        shown('Sign in to Harness')
+        snapshot('required-sign-in-on-relaunch')
+        # An account established outside this TUI, with no network available, also opens work.
+        (BASE / 'account.json').write_text(json.dumps({'loggedIn': True, 'offline': True}))
+        tmux('respawn-pane', '-k', '-t', 'test', command)
+        shown('Alpha task terminal')
+        assert 'Sign in to Harness' not in screen()
+        snapshot('signed-in-offline-relaunch')
+        print('PASS required sign-in: sign-out, quit/relaunch, saved local work, and signed-in offline launch', flush=True)
+        sys.exit(0)
     if '--machine-prompts' in sys.argv:
         machine_prompt_journey()
         sys.exit(0)
@@ -617,15 +740,13 @@ try:
     machine_prompt_journey()
     side_bar_machines_journey()
 
-    # Local use is complete before any sign-in. The tiny footer entry explains the benefit,
-    # then lets the user return without starting an authentication request.
-    click_text('Sign in', row=43)
-    shown('Connect computers')
-    shown('Keep using locally')
-    snapshot('optional-sign-in')
-    click_text('Keep using locally')
+    # Once signed in, Account is a dismissible management panel.
+    hn('account')
+    shown('Connect a machine')
+    snapshot('account')
+    keys('Escape')
     assert not login_events()
-    wait(lambda: 'Continue with Google' not in screen(), 'back to local workspace')
+    wait(lambda: 'Connect a machine' not in screen(), 'back to workspace')
 
     # The title's agent and model labels act on the captured pane even if external focus changes.
     x, y = map(int, value('#{pane_left} #{pane_top}', alpha).split())
@@ -723,28 +844,29 @@ try:
     assert next(t for t in api()['desk']['tabs'] if t['id'] == 'remote')['name'] == 'Remote'
     hn('select-window', '-t', workspace)
 
-    # A phone approval is explicit. Closing its UI cancels the driver, and reopening never
+    # Runtime expiry requires sign-in again, as Desktop does. A phone approval is explicit.
+    (BASE / 'account.json').write_text(json.dumps({'loggedIn': False}))
+    # Closing its UI cancels the driver, and reopening never
     # accepts a previously selected row as consent to a different account.
     hn('account')
-    click_text('Sign in with your phone')
+    click_text('Continue with your phone')
     shown('Cancel sign-in')
     snapshot('phone-sign-in')
     keys('Escape')
     wait(lambda: login_events() == ['start', 'cancel'], 'closing account cancels the pending login')
     hn('account')
-    click_text('Sign in with your phone')
+    click_text('Continue with your phone')
     shown('Cancel sign-in')
     (BASE / 'approve').touch()
-    shown('Sign in as review@example.test')
-    assert not (BASE / 'account.json').exists()
-    snapshot('confirm-account')
-    click_text('Sign in as review@example.test')
-    wait(lambda: 'commit' in login_events(), 'explicit account confirmation commits')
+    # The phone that approved is signed in to the account: no second question here.
+    wait(lambda: 'commit' in login_events(), 'a phone approval commits without another step')
+    wait(lambda: 'Sign in to Harness' not in screen(), 'sign-in restores the workspace')
+    hn('account')
     shown('Connect a machine')
     assert json.loads((BASE / 'account.json').read_text())['loggedIn']
     snapshot('signed-in')
-    click_text('Back to workspace')
-    print('PASS workspace: tab identity survives focus changes; phone login requires explicit account confirmation', flush=True)
+    keys('Escape')
+    print('PASS workspace: tab identity survives focus changes; phone login signs in as soon as the phone approves', flush=True)
 
     # Save failures preserve the session, and a busy session needs an explicit Stop action.
     hn('select-window', '-t', workspace)
@@ -896,7 +1018,7 @@ try:
         shown('Commands')
         snapshot(f'workspace-menu-{cols}x{rows}')
         click_text('Account')
-        shown('Back to workspace')
+        shown('Sign out')
         snapshot(f'account-{cols}x{rows}')
         keys('Escape')
         hn('workspace-menu')

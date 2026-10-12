@@ -1,5 +1,6 @@
+import { withoutUpdate } from './lib/cardUpdate.js'
 import type { PurgeAgentService } from './lib/purgeAgentService.js'
-import { SHARE_REQUESTS, TEAMS_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
+import { MESSAGES_REQUESTS, SHARE_REQUESTS, type Asker, type LocalWindows, type WindowSurface, type BackendNotice, type GatewayEvents, type GatewayPort, type ModelsPort, type RemoteClient, type RemoteRole, type RemoteTransport } from './core/api.js'
 import { ServiceUnavailableError } from './core/serviceHost.js'
 import { countWindows } from './lib/windowSurfaces.js'
 import type { ViewerStreams } from './core/viewerStreams.js'
@@ -26,16 +27,15 @@ import type { CloseAgentService } from './lib/closeAgentService.js'
 import { ENGINES, type AgentEngine } from './engines/types.js'
 import { gridCliPresence } from './lib/gridBinary.js'
 import { GRID_FLEET_PROTOCOL, GRID_FLEET_MAX_TIMEOUT_MS } from './lib/gridFleetProtocol.js'
-import { ApiConnectionError, ApiConnections } from './lib/apiConnections.js'
-import { resolveApiTarget } from './lib/apiModels.js'
-import { isApiLaunch, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunch.js'
+import { isApiLaunch, parseGridLaunchOverride, type GridLaunchOverride } from './lib/gridLaunchWire.js'
 import type { ScmLaunchRecord } from './scm/types.js'
+import type { StartedBy } from './lib/agentAttribution.js'
 import { probeEngines } from './lib/engineProbe.js'
 import { engineInstallRecipe } from './lib/engineInstall.js'
 import { agentFrame, type AgentDshContext, type AgentFrame } from './lib/agentFrame.js'
-import { agentTokenUsage } from './lib/agentTokenUsage.js'
+import type { AgentTokenUsage } from './lib/agentUsageWire.js'
 import { terminalHandoffRequest } from './lib/terminalHandoff.js'
-import { OwnerCommands, OWNER_COMMAND_TYPES, ROUTE_COMMAND_TYPES } from './lib/ownerCommands.js'
+import { OwnerCommands, ROUTE_COMMAND_TYPES } from './lib/ownerCommands.js'
 import { VIEWER_DOWN_TYPES } from './lib/viewerFrames.js'
 import type { TerminalStreamManager } from './lib/terminalStreamManager.js'
 import { encodeTerminalLocal, type TerminalBinaryClear } from './lib/terminalBinary.js'
@@ -47,8 +47,8 @@ export { isLocalClientId, type DownTransport }
 /** Requests one local connection may queue before the daemon is ready (see `openRequests`). The app
  *  sends a handful on connect; hundreds is a client looping, not a person. */
 const MAX_REQUESTS_BEFORE_READY = 256
-/** The teams' requests, which the frame log leaves out: they carry what agents ask each other. */
-const TEAM_REQUESTS: ReadonlySet<string> = new Set(TEAMS_REQUESTS)
+/** Agent Messages' requests, which the frame log leaves out: they carry what agents say to each other. */
+const MESSAGE_REQUESTS: ReadonlySet<string> = new Set(MESSAGES_REQUESTS)
 /** Share's requests, which the frame log leaves out as well: they carry who a harness is shared with. */
 const SHARE_REQUEST_TYPES: ReadonlySet<string> = new Set(SHARE_REQUESTS)
 
@@ -63,7 +63,6 @@ export class BackendSocket {
   /** This machine's name as Harness shows it (Machines), from the backend's `machine_meta`. Null
    *  until the first one arrives. */
   private machineDisplayName: string | null = null
-  private readonly apiConnections = new ApiConnections(env.ADAPTER_DATA_DIR)
   /** The relay and its E2EE (gateway/gateway.ts): the one way to a remote client. Null in a unit test
    *  that has none, which then serves this computer alone. */
   private gatewayPort: GatewayPort | null = null
@@ -110,7 +109,7 @@ export class BackendSocket {
   onCommanderJoin: (() => void) | null = null
   /** Called only when commander presence crosses zero; drives the disposable recap-worker grace. */
   onCommanderPresenceChanged: ((connected: boolean) => void) | null = null
-  /** Cancels an agent's turn, for the teams and the orchestrator (cli.ts binds core/turns/cancel.ts). */
+  /** Cancels an agent's turn, for the orchestrator (cli.ts binds core/turns/cancel.ts). */
   onCancel: ((sessionId: string) => void) | null = null
   /** Takes a `cancel` frame, a turn interrupted with C-c (cli.ts binds core/turns/cancel.ts). */
   cancelProvider: ((payload: Record<string, unknown>) => void) | null = null
@@ -166,6 +165,12 @@ export class BackendSocket {
     /** What the SCM that prepared `cwd` needs on every relaunch (registry `scmLaunch`). Present only
      *  when this create prepared a folder, and null when no SCM made it (a new folder, a clone). */
     scmLaunchRecord?: ScmLaunchRecord | null
+    /** `agent` when another agent started it (`harness new` from its pane); absent for the person. Kept on the
+     *  row: every launch of it adds a line to the pull requests it opens (lib/agentAttribution.ts). */
+    startedBy?: StartedBy | null
+    /** The harness here whose agent started it, when one in a Harness pane did (registry `parentAgentId`); only with
+     *  `startedBy: 'agent'`. The windows open the new harness beside it and say who started it. */
+    parentAgentId?: string | null
   }) =>
     Promise<{ ok: true; session: RegisteredSession } | { ok: false; error: string; detail?: string }>) | null = null
   /** Called on `remote_terminal_handoff` — cli.ts names the agent whose tile is that tmux pane, or null. */
@@ -192,7 +197,7 @@ export class BackendSocket {
    *  (services/orchestrator.ts, through its port). One that throws costs it that frame, never the apps. */
   onFrameSent: ((frame: Frame) => void) | null = null
   /** The account's notices the backend announces (`desk_changed`, …), for the experiments that hear them
-   *  (Tab collaboration reads its tab channels again), as well as the windows here. */
+   *  (Agent Messages reads its tabs again), as well as the windows here. */
   onAccountNotice: ((notice: BackendNotice) => void) | null = null
   /**
    * Called on `agent_retarget` — cli.ts re-execs an EXISTING agent's pane against a different grid,
@@ -213,6 +218,7 @@ export class BackendSocket {
    *  core/agents/launches.ts). Null answers UNSUPPORTED_ON_REMOTE, or UNSUPPORTED for a status. */
   createProvider: ((payload: Record<string, unknown>, asker: { local: boolean; owner: boolean }, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   createStatusProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
+  cancelCreateProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   restartProvider: ((type: string, payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   forkProvider: ((payload: Record<string, unknown>, reply: (result: Record<string, unknown>) => void) => Promise<void>) | null = null
   /** Opens a NEW agent that starts with `agentId`'s whole history (lib/forkAgent.ts), exactly as
@@ -224,9 +230,9 @@ export class BackendSocket {
       | { ok: false; error: string; detail?: string }
     >) | null = null
   /** Called when the web/device sends chat input to an agent terminal. */
-  onMessage: ((sessionId: string, content: string, deliveryId?: string, tabId?: string) => void) | null = null
+  onMessage: ((sessionId: string, content: string, deliveryId?: string) => void) | null = null
   /** Takes a `message` frame: text a person typed for an agent, into its pane (cli.ts binds core/input.ts).
-   *  The teams and the orchestrator deliver through `onMessage` above. */
+   *  Agent Messages and the orchestrator deliver through `onMessage` above. */
   messageProvider: ((payload: Record<string, unknown>) => void) | null = null
   /** Answers `agent_update` through its last argument, before the windows hear of the change: a rename, a
    *  model and effort, or an app opening the agent (cli.ts binds core/agents/update.ts). */
@@ -271,6 +277,7 @@ export class BackendSocket {
   /** Answers `theme_set` with the whole reply: the desktop's pane colours, to become this machine's tmux
    *  `window-style` (cli.ts binds core/terminals/requests.ts). Null answers UNSUPPORTED. */
   themeProvider: ((payload: Record<string, unknown>) => Record<string, unknown>) | null = null
+  tokenUsageProvider: ((session: RegisteredSession) => AgentTokenUsage | null) | null = null
   runtimeProfileProvider: ((session: RegisteredSession) => string | null) | null = null
   /** Backend-resolved machine id, persisted by the SSO login preflight. */
   readonly machineId: string
@@ -421,7 +428,7 @@ export class BackendSocket {
    * can be switched off or run in a process of its own; set by core/main.ts. Unset (tests), it reads as
    * models being off.
    */
-  models: (() => Pick<ModelsPort, 'annotation' | 'lists' | 'moveTarget' | 'moved'>) | null = null
+  models: (() => Pick<ModelsPort, 'annotation' | 'lists' | 'moveTarget' | 'moved' | 'apiTarget'>) | null = null
 
   /** Set the account's private grid name from the reconcile that just confirmed it, so the RPCs
    *  answer with it at once rather than waiting for the next `machine_meta` (`lib/gridAttach.ts`). */
@@ -595,7 +602,8 @@ export class BackendSocket {
   sendCommander(frame: Frame): void {
     this.onOutboundCommander?.(frame)
     if (env.LOG_FRAMES) logFrame('→', 'device', frame)
-    this.toGateway('device', (gateway) => gateway.commander(frame))
+    // The sentence a processing card carries for the Pro's cable stays on this computer (onOutboundCommander).
+    this.toGateway('device', (gateway) => gateway.commander(withoutUpdate(frame)))
   }
 
   /** Attach one authenticated loopback desktop client to the same RPC and event plane as cloud web. */
@@ -741,7 +749,7 @@ export class BackendSocket {
   private emitReply(connId: string, type: string, requestId: unknown, payload: Record<string, unknown>): void {
     const resultType = rpcResultType(type)
     // Before the E2EE wrap: an RPC reply is only readable here.
-    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
+    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('viewer_') && type !== 'phone_pair' && type !== 'api_connections' && type !== 'connectors' && type !== 'orchestrator' && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) logFrame('→', connId ? `conn:${sid(connId)}` : 'backend', { type: resultType, payload: { requestId, ...payload } })
     if (this.localClients.has(connId)) {
       this.sendTo(connId, { type: resultType, payload: { requestId, ...payload } })
       return
@@ -800,7 +808,7 @@ export class BackendSocket {
     // actually asked for rather than as an opaque __e2e envelope.
     // Terminal frames contain raw keystrokes, paste text and screen bytes after
     // unwrap. Never pass them to the frame logger, even in diagnostic mode.
-    if (env.LOG_FRAMES && !TEAM_REQUESTS.has(type) && !OWNER_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
+    if (env.LOG_FRAMES && !MESSAGE_REQUESTS.has(type) && !ROUTE_COMMAND_TYPES.has(type) && !type.startsWith('terminal_') && !type.startsWith('viewer_') && !type.startsWith('grid_fleet_') && type !== 'agent_read_file' && type !== 'project_preview' && type !== 'git_project_info' && type !== 'scm_project_info' && type !== 'git_pull_request' && type !== 'agent_handoff_prepare' && type !== 'orchestrator' && type !== 'api_connections' && type !== 'connectors' && type !== 'phone_pair' && !SHARE_REQUEST_TYPES.has(type) && !type.startsWith('pair')) {
       logFrame('←', connId ? `conn:${sid(connId)}` : 'backend', frame)
     }
     const reply = (t: string, rid: unknown, p: Record<string, unknown>): void => this.emitReply(connId, t, rid, p)
@@ -946,7 +954,7 @@ export class BackendSocket {
           // A full probe starts interactive login shells and is intentionally detached from this
           // connection's ordered RPC chain. Request ids make its eventual reply safe to deliver out
           // of order; keeping it awaited here made a Create click sit behind an unrelated sweep.
-          void this.engineProbeProvider(asked && asked.length > 0 ? asked : undefined)
+          void this.engineProbeProvider(asked && asked.length > 0 ? asked : undefined, { accounts: true })
             .then((availability) => reply(type, requestId, {
               engines: availability.map((entry) => ({
                 engine: entry.engine,
@@ -954,10 +962,15 @@ export class BackendSocket {
                 command: entry.command,
                 installable: entry.installable,
                 installCommand: entry.installable ? engineInstallRecipe(entry.engine)?.command ?? null : null,
+                ...(entry.signedIn !== undefined ? { signedIn: entry.signedIn, lastUsedAt: entry.lastUsedAt ?? null } : {}),
                 // Static per-CLI-version capability, not a probe result: its mere presence is what
                 // lets an older CLI (which never sends the field) keep reading as "unknown" rather
                 // than "no", per the desktop app's `EngineAvailability.fromJson`.
                 ...(entry.engine === 'codex' ? { supportsCodexHome: true } : {}),
+                // Static too: a pane whose engine is still downloading beside Desktop Harness's setup
+                // waits for that download (engineLaunch.ts `harness_wait_download`) rather than
+                // installing it again, so the desktop may open the pane before the download ends.
+                waitsForDownload: true,
               })),
             }))
             .catch(() => reply(type, requestId, { error: 'ENGINE_PROBE_FAILED' }))
@@ -981,6 +994,11 @@ export class BackendSocket {
           else answer({ error: 'UNSUPPORTED' })
           return
 
+        case 'agent_create_cancel':
+          if (this.cancelCreateProvider) await this.cancelCreateProvider(payload, answer)
+          else answer({ error: 'UNSUPPORTED' })
+          return
+
         // A new agent (core/agents/launches.ts, bound by cli.ts).
         case 'agent_create':
           if (this.createProvider) await this.createProvider(payload, asker, answer)
@@ -1001,9 +1019,10 @@ export class BackendSocket {
           // not know. A client that sends the full `grid` object still works unchanged.
           const picked = typeof payload.gridModel === 'string' ? payload.gridModel : ''
           // `apiConnection` + `apiModel`: a model of an API saved on this machine. Same rule as a grid
-          // model — the app names it, and the endpoint and key are read here, from the store — and
-          // only for whoever may manage those APIs (`api_connections`): this machine's own app, or
-          // its owner's paired session. The key itself never leaves this daemon either way.
+          // model — the app names it, and the endpoint and key are read on this machine, from its store, by
+          // the models service that keeps it (`ModelsPort.apiTarget`) — and only for whoever may manage those
+          // APIs (`api_connections`): this machine's own app, or its owner's paired session. The key itself
+          // never leaves this daemon either way.
           const api = typeof payload.apiConnection === 'string' ? payload.apiConnection : ''
           if (api && (picked || payload.grid !== undefined || clear)) {
             reply(type, requestId, { error: 'INVALID_GRID', detail: 'Choose an API model, a grid model or the own login, not several.' })
@@ -1011,15 +1030,17 @@ export class BackendSocket {
           }
           if (api) {
             if (!owner) { reply(type, requestId, { error: 'OWNER_REQUIRED' }); return }
-            try {
-              payload.grid = await resolveApiTarget(this.apiConnections, api, typeof payload.apiModel === 'string' ? payload.apiModel.trim() : '')
-            } catch (error) {
+            const model = typeof payload.apiModel === 'string' ? payload.apiModel.trim() : ''
+            const resolved = this.models ? await this.models().apiTarget({ connectionId: api, model }).catch(() => null) : null
+            if (!resolved || !('target' in resolved)) {
               reply(type, requestId, {
                 error: 'API_UNAVAILABLE',
-                detail: error instanceof ApiConnectionError ? error.message : 'This API could not be used. Try again.',
+                detail: resolved?.detail ?? 'The models service is not running, so this API cannot be used now. Try again in a moment.',
               })
               return
             }
+            // An agent on it from now on reports that API's model, as when the socket read the store itself.
+            payload.grid = resolved.target
           }
           if (picked && payload.grid === undefined && !clear) {
             // The grid the model was picked FROM, when the picker says (a shared grid's section); the
@@ -1154,7 +1175,7 @@ export class BackendSocket {
   /** A stopped agent's frame: no pane, no terminal, nothing to fork. */
   async toStoppedProject(s: RegisteredSession): Promise<AgentFrame> {
     const frame = await agentFrame(s, { selectedModel: s.model, terminalAvailable: false, dsh: this.dshFrameProvider?.(s) ?? null,
-      tokenUsage: agentTokenUsage.get(s), gridAnnotation: this.gridAnnotation })
+      tokenUsage: this.tokenUsageProvider?.(s) ?? null, gridAnnotation: this.gridAnnotation })
     return {
       ...frame,
       status: 'stopped',
@@ -1168,7 +1189,7 @@ export class BackendSocket {
   /** Map a registered tmux session onto the web's Project shape (tabs in ProjectTabs). */
   toProject(s: RegisteredSession): Promise<AgentFrame> {
     return agentFrame(s, {
-      tokenUsage: agentTokenUsage.get(s),
+      tokenUsage: this.tokenUsageProvider?.(s) ?? null,
       selectedModel: this.runtimeProfileProvider?.(s) ?? null,
       terminalAvailable: registry.terminalAvailable(s.agentId),
       dsh: this.dshFrameProvider?.(s) ?? null,

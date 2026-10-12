@@ -11,8 +11,8 @@ import '../shared/widgets/app_dialog.dart';
 import 'desktop_chrome.dart';
 import 'prompt_customize.dart';
 
-/// Opens customization over the workspace so appearance changes remain visible
-/// on the terminals. All global entry points use this same right-side panel.
+/// Opens Appearance over the workspace so its changes remain visible on the
+/// terminals. All global entry points use this same right-side panel.
 Future<void> showHarnessCustomizePane(
   BuildContext context, {
   ValueChanged<bool>? onCurrentChanged,
@@ -39,7 +39,9 @@ Future<void> showHarnessCustomizePane(
   ),
 );
 
-/// Customization tabs share the app's existing preference stores.
+/// Appearance: Status, Workspace, Wallpaper and Terminal, sharing the app's
+/// existing preference stores. Settings' rail, the Harness menu, the account
+/// menu and ⌘P all call it Appearance.
 class HarnessCustomizePane extends StatelessWidget {
   const HarnessCustomizePane({super.key, required this.onClose, this.store});
   final VoidCallback onClose;
@@ -74,14 +76,14 @@ class HarnessCustomizePane extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          'Customize Harness',
+                          'Appearance',
                           style: DesktopChrome.heading(),
                         ),
                       ),
                       IconButton(
                         key: const ValueKey('harness-customize-close'),
                         autofocus: true,
-                        tooltip: 'Close customization',
+                        tooltip: 'Close Appearance',
                         onPressed: onClose,
                         style:
                             IconButton.styleFrom(
@@ -128,10 +130,12 @@ class HarnessCustomizePane extends StatelessWidget {
                       height: tabHeight,
                       child: const _CustomizeTabLabel('Status'),
                     ),
+                    // Keyed `customize-appearance` still; it holds the workspace's
+                    // pane shading, tab naming and colour palette.
                     Tab(
                       key: const ValueKey('customize-appearance'),
                       height: tabHeight,
-                      child: const _CustomizeTabLabel('Appearance'),
+                      child: const _CustomizeTabLabel('Workspace'),
                     ),
                     Tab(
                       key: const ValueKey('customize-wallpaper'),

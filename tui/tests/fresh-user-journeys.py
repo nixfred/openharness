@@ -148,12 +148,13 @@ def folders(u):
     # Invalid paths remain in the picker and can be corrected without dismissing the form.
     u.form('codex')
     u.choose('Project', 'open folder', 'Search projects')
-    u.wait('Choose a machine'); u.keys('Enter'); u.wait('Use this folder')
+    # No machine question (the Machine field has it); the first row names the folder.
+    u.wait('Use ~')
     u.keys('C-l', 'C-u'); u.text(str(u.home / 'does-not-exist')); u.keys('Enter')
     u.wait('Could not')
     u.record('missing-folder-browse-error')
     u.keys('C-l', 'C-u'); u.text('~/harnesses/Retry-Project'); u.keys('Enter')
-    u.wait('Use this folder'); u.keys('Enter')
+    u.wait('Use ~/harnesses/Retry-Project'); u.keys('Enter')
     session = u.launch('codex', 'tilde-path-recovery-agent-reuse')
     assert session['cwd'] == '~/harnesses/Retry-Project'
     u.close_view()

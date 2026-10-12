@@ -16,6 +16,7 @@
 #   bash desktop/scripts/release-web.sh --minor      # bump the MINOR version
 #   bash desktop/scripts/release-web.sh --website-only # preserve the deployed Flutter bundle
 #   bash desktop/scripts/release-web.sh 1.3.0        # an explicit version
+#   bash desktop/scripts/release-web.sh --allow-older  # a rollback: older code under a higher version
 #
 # RESUMING: after a failure, re-run with the SAME explicit version — an existing tag is reused rather
 # than moved, and the script only waits for its run. A tag whose build failed is not retried by moving
@@ -41,13 +42,15 @@ RUN_APPEAR_TIMEOUT="${RUN_APPEAR_TIMEOUT:-180}"   # seconds for the tag's workfl
 DRY_RUN=0
 DO_MINOR=0
 WEBSITE_ONLY=0
+ALLOW_OLDER=0
 NEW_VER=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --minor) DO_MINOR=1 ;;
     --website-only) WEBSITE_ONLY=1 ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-older) ALLOW_OLDER=1 ;;
+    -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "ERROR unknown flag: $arg" >&2; exit 1 ;;
     *) NEW_VER="${arg#v}" ;;
   esac
@@ -80,6 +83,8 @@ git fetch --tags --quiet origin
 LAST_VER="$(git tag -l 'v*_web' \
   | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+_web$' || true; } \
   | sed -E 's/^v//; s/_web$//' | sort -V | tail -1)"
+LAST_TAG=""
+[ -z "$LAST_VER" ] || LAST_TAG="v${LAST_VER}_web"
 LAST_VER="$(printf '%s\n%s\n' "${LAST_VER:-0.0.0}" "$VERSION_FLOOR" | sort -V | tail -1)"
 if [ -n "$NEW_VER" ]; then
   VER="$NEW_VER"
@@ -105,6 +110,18 @@ else
   SHA="$(git rev-parse HEAD)"
   git merge-base --is-ancestor "$SHA" "origin/$BRANCH" 2>/dev/null \
     || die "HEAD is not on origin/$BRANCH — merge and push it first; the web ships from $BRANCH"
+  # This release must contain the one before it. HEAD on origin/$BRANCH is not enough: a checkout nobody
+  # updated is on it too, and a tag cut there ships older code under a newer version. v1.3.17_web was cut
+  # that way on October 1, 2026, twenty commits behind v1.3.16_web, and v0.3.82_cli on October 12. A
+  # rollback is the one release that means to do this.
+  if [ -n "$LAST_TAG" ]; then
+    LAST_SHA="$(git rev-list -n1 "$LAST_TAG")"
+    if ! git merge-base --is-ancestor "$LAST_SHA" "$SHA" 2>/dev/null; then
+      [ "$ALLOW_OLDER" -eq 1 ] \
+        || die "HEAD (${SHA:0:12}) does not contain $LAST_TAG (${LAST_SHA:0:12}): this release would ship older code under a newer version, taking back $(git rev-list --count "$SHA..$LAST_SHA") commit(s) that $LAST_TAG already shipped. Update this checkout first (git fetch origin && git checkout --detach origin/$BRANCH), or re-run with --allow-older to roll back on purpose."
+      say "WARNING HEAD (${SHA:0:12}) does not contain $LAST_TAG (${LAST_SHA:0:12}) — releasing older code (--allow-older)"
+    fi
+  fi
   [ "$(printf '%s\n%s\n' "$VER" "$LAST_VER" | sort -V | tail -1)" = "$VER" ] && [ "$VER" != "$LAST_VER" ] \
     || die "$VER is not higher than the last web release $LAST_VER"
 fi

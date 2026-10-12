@@ -150,8 +150,12 @@ describe('two daemons on one computer', () => {
     await dev.start()
     const installed = () => [join(release.env.HOME!, '.claude', 'settings.json'), join(release.env.CODEX_HOME!, 'hooks.json')]
       .map((file) => readFileSync(file, 'utf8'))
+    // A daemon installs its hooks just after it reports ready (readiness does not wait on hook maintenance, #1166),
+    // so the entries are read until they are that daemon's.
+    const owns = (daemon: IsolatedDaemon) => until(`the installed hooks to name port ${daemon.port}`,
+      () => installed().every((file) => file.includes(`--port ${daemon.port} `)), 20_000, 100)
     // The precondition of the incident: the entries every engine started from here on runs are the dev daemon's.
-    for (const file of installed()) expect(file).toContain(`--port ${dev.port} `)
+    await owns(dev)
 
     const atRelease = await LocalClient.connect(release)
     const atDev = await LocalClient.connect(dev)
@@ -180,7 +184,7 @@ describe('two daemons on one computer', () => {
     // And the other way round: restarted, the release daemon owns the entries; a new dev agent reaches dev.
     atRelease.close()
     await release.restart()
-    for (const file of installed()) expect(file).toContain(`--port ${release.port} `)
+    await owns(release)
     const later = await create(dev, atDev, 'claude', 'dev-later')
     await turn(atDev, later.id, 'a dev turn after the release daemon restarted')
     await reachedOnlyItsOwn(dev, release, later, 'claude')

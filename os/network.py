@@ -317,8 +317,8 @@ class NetworkPage:
                 curses.curs_set(0)
             except curses.error:
                 pass
-            # Both entry points share the same layout. Super+t remains available
-            # from the compositor when setup cannot finish without a terminal.
+            # Initial setup and later Wi-Fi settings share the same layout.
+            # First use advances only once a network connection is available.
             visible = max(1, min(10, height - self.top - 14 - len(self.wired)))
             offset = max(0, min(self.selected, len(self.networks) - 1) - visible + 1)
             networks = self.networks[offset:offset + visible]

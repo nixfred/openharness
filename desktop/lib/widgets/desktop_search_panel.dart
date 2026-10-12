@@ -13,6 +13,7 @@ import 'box_chrome.dart' show ReadlineKeys;
 import 'swarm_switcher.dart';
 import 'swarm_search_input.dart';
 import 'key_hints.dart';
+import 'machine_picker_extras.dart';
 
 /// A desktop command palette over the existing search and activation pipeline.
 /// Category buttons edit the same query as keyboard prefixes; no second index.
@@ -27,6 +28,7 @@ class DesktopSearchPanel extends StatelessWidget {
     required this.onRefocus,
     required this.previewBuilder,
     this.showsBack = false,
+    this.machineHooks,
   });
 
   final SwarmSearchController search;
@@ -39,6 +41,27 @@ class DesktopSearchPanel extends StatelessWidget {
   /// True puts a clickable Back before the scopes while a machine or project
   /// is open — the click for what Escape does.
   final bool showsBack;
+
+  /// What Machines needs beyond its rows: which computer this window shows, the account's device
+  /// notices, and Add machine · Add phone · History… under the list. Null leaves Machines its rows.
+  final MachinePickerHooks? machineHooks;
+
+  /// The least height the window needs for Machines' extras above and below its list: a window
+  /// too short for both keeps the list, and the extras come back with the room.
+  static const machineExtrasMinHeight = 560.0;
+
+  MachinePickerHooks? _machineHooks(BuildContext context) =>
+      MediaQuery.sizeOf(context).height >=
+          MediaQuery.textScalerOf(context).scale(machineExtrasMinHeight)
+      ? machineHooks
+      : null;
+
+  void _addMachine() {
+    search.setQuery('@');
+    final index = search.rows.indexWhere((row) => row.isCreate);
+    if (index >= 0) search.move(index - search.cursor);
+    onRefocus();
+  }
 
   static const maxWidth = 1120.0;
   static const maxHeight = 680.0;
@@ -204,6 +227,13 @@ class DesktopSearchPanel extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (_machineHooks(context) case final hooks?)
+                  ListenableBuilder(
+                    listenable: search,
+                    builder: (context, _) => search.isMachineMode
+                        ? MachinePickerHeader(search: search, hooks: hooks)
+                        : const SizedBox.shrink(),
+                  ),
                 Flexible(
                   child: ListenableBuilder(
                     listenable: search,
@@ -222,6 +252,24 @@ class DesktopSearchPanel extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (_machineHooks(context) case final hooks?)
+                  ListenableBuilder(
+                    listenable: search,
+                    builder: (context, _) => search.isMachineMode
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Divider(height: 1, color: DesktopChrome.rim),
+                              MachinePickerFooter(
+                                search: search,
+                                hooks: hooks,
+                                onAddMachine: _addMachine,
+                              ),
+                            ],
+                          )
+                        : const SizedBox.shrink(),
+                  ),
                 if (KeyHints.visibleOf(context)) ...[
                   Divider(height: 1, color: DesktopChrome.rim),
                   Padding(

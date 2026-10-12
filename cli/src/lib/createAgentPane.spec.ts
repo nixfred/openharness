@@ -127,6 +127,21 @@ describe('createAndRegisterPane', () => {
     expect(registry.byAgent(result.pending.agentId)).toMatchObject({ agent: 'harness-compute' })
   })
 
+  it('records which harness here started it, only when another agent did', async () => {
+    const { registry } = await loadRegistryModule()
+    registry.load()
+    const started = await createAndRegisterPane({
+      tmuxBackend: fakeTmux([succeeded('%1')]), registry, engine: 'claude', cwd: '/tmp/demo', sessionLabel: 'harness-claude-1',
+      argv: ['claude'], startedBy: 'agent', parentAgentId: 'lead-1',
+    })
+    expect(started.ok && started.pending).toMatchObject({ startedBy: 'agent', parentAgentId: 'lead-1' })
+    const person = await createAndRegisterPane({
+      tmuxBackend: fakeTmux([succeeded('%2')]), registry, engine: 'claude', cwd: '/tmp/demo', sessionLabel: 'harness-claude-2',
+      argv: ['claude'], parentAgentId: 'lead-1',
+    })
+    expect(person.ok && person.pending).not.toHaveProperty('parentAgentId')
+  })
+
   it('does not retry a tmux spawn failure', async () => {
     const { registry } = await loadRegistryModule()
     registry.load()

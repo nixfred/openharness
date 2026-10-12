@@ -11,9 +11,10 @@
  * `require` via the banner so ws's try/catch fallback works without them.
  */
 import * as esbuild from 'esbuild'
+import { createHash } from 'node:crypto'
 import { appendFileSync, readFileSync, copyFileSync, rmSync, writeFileSync } from 'fs'
 import { readDshRegistry } from './scripts/lib/dshRegistry.mjs'
-import { readBuiltinBundle, readHarnessMonitorBundle, readModelManagerBundle } from './scripts/lib/modelManagerBundle.mjs'
+import { readBuiltinBundle, readHarnessMonitorBundle, readMemoriesBundle, readModelManagerBundle } from './scripts/lib/modelManagerBundle.mjs'
 import { readProcessImageBundle } from './scripts/lib/processImageBundle.mjs'
 import { leanBlock } from './scripts/lib/leanBlock.mjs'
 import { asciiOnly } from './scripts/lib/asciiOnly.mjs'
@@ -22,6 +23,16 @@ import { basename } from 'node:path'
 const modelManagerBundle = JSON.stringify(readModelManagerBundle(fileURLToPath(new URL('../store/agents/autonomous-grid', import.meta.url))))
 const devicesBundle = JSON.stringify(readBuiltinBundle(fileURLToPath(new URL('../store/agents/devices', import.meta.url)), ['harness.json', 'AGENTS.md', 'LICENSE', 'template']))
 const harnessMonitorBundle = JSON.stringify(readHarnessMonitorBundle(fileURLToPath(new URL('../store/agents/harness-monitor', import.meta.url))))
+const memoriesBundle = JSON.stringify(readMemoriesBundle(fileURLToPath(new URL('../store/agents/memories', import.meta.url))))
+// What src/dsh/builtins.ts records in the installed index as each bundled harness's revision once it is in place: the
+// sha256 of its files' JSON, as it reads them back (src/dsh/bundledFiles.ts). The core checks the index against these
+// as it starts, without loading the files, and starts the Store's process only when one is not in place
+// (src/core/viewersWake.ts). A harness whose files are missing is never put in place, so it has none.
+const builtinRevisions = JSON.stringify(Object.fromEntries(
+  [['models', modelManagerBundle], ['devices', devicesBundle], ['monitor', harnessMonitorBundle], ['memories', memoriesBundle]]
+    .filter(([, bundle]) => JSON.parse(bundle)['harness.json'])
+    .map(([name, bundle]) => [name, createHash('sha256').update(JSON.stringify(JSON.parse(bundle))).digest('hex')]),
+))
 
 const version =
   process.env.ADAPTER_VERSION ||
@@ -52,6 +63,8 @@ const options = {
     __MODEL_MANAGER_BUNDLE__: JSON.stringify(modelManagerBundle),
     __DEVICES_BUNDLE__: JSON.stringify(devicesBundle),
     __HARNESS_MONITOR_BUNDLE__: JSON.stringify(harnessMonitorBundle),
+    __MEMORIES_BUNDLE__: JSON.stringify(memoriesBundle),
+    __BUILTIN_REVISIONS__: JSON.stringify(builtinRevisions),
     __DARWIN_PROCESS_IMAGES__: processImages ? JSON.stringify(processImages) : 'undefined',
   },
   // The copyright line is MIT's one condition — it has to travel with the copy the user actually

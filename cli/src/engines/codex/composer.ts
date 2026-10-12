@@ -1,5 +1,5 @@
 import type { ComposerState } from '../facets/screen.js'
-import { screenLines, startsBold, typedToken } from '../kit/composer.js'
+import { rowBackgrounds, screenLines, startsBold, typedToken } from '../kit/composer.js'
 
 /** Codex's composer row: `›` (or `»`) at the left edge, never a numbered row of a picker. */
 const CODEX_COMPOSER = /^[›»](?:\s|$)/
@@ -11,12 +11,18 @@ export function composerState(capture: string): ComposerState {
   // Bold, on a row of its own under a blank one: not a line of the conversation, nor a disabled composer.
   if (composer < 0 || !startsBold(raw[composer]) || (composer > 0 && lines[composer - 1].trim())) return 'absent'
   // The draft's further lines, then a blank row and the footer: nothing more is drawn under Codex's
-  // composer, so more is some other screen under a line of the conversation.
+  // composer, so more is some other screen under a line of the conversation. Codex shades its composer
+  // (0.162 on a dark pane): the shaded rows are the draft, blank ones included. Ending a draft at its first
+  // blank row instead read a message in paragraphs, typed into an idle Codex, as a prompt something had
+  // covered, and its Enter was held back (a fresh Mac, 2026-10-12). Unshaded, a draft ends at a blank row.
+  const shades = rowBackgrounds(raw)
+  const shade = shades[composer]
   let end = composer + 1
-  while (end < lines.length && lines[end].trim()) end++
+  if (shade) while (end < lines.length && shades[end] === shade) end++
+  else while (end < lines.length && lines[end].trim()) end++
   const footer = lines.slice(end).filter((line) => line.trim())
   if (footer.length > 3) return 'absent'
-  const draft = [lines[composer].replace(/^[›»]\s?/, ''), ...lines.slice(composer + 1, end).map((line) => line.trim())].join(' ').trim()
+  const draft = [lines[composer].replace(/^[›»]\s?/, ''), ...lines.slice(composer + 1, end).map((line) => line.trim()).filter(Boolean)].join(' ').trim()
   const token = typedToken(draft)
   // A voice send was refused as popup_open even though the recording had transcribed. Looking through
   // twenty conversation rows also matched command examples and old menu hints. A popup is the block

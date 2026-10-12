@@ -21,6 +21,9 @@ class EngineAvailability {
     this.supportsCodexHome = false,
     this.installable = false,
     this.installCommand,
+    this.signedIn,
+    this.lastUsedAt,
+    this.waitsForDownload = false,
   });
 
   final String engine;
@@ -51,6 +54,19 @@ class EngineAvailability {
   /// [installable] covers remote ones — is not a thing to do unannounced.
   final String? installCommand;
 
+  /// Claude Code and Codex: whether the machine holds a credential for it.
+  /// Null when the machine did not say (another engine, or an older CLI).
+  final bool? signedIn;
+
+  /// Claude Code and Codex: the engine's latest session activity, ms since
+  /// the epoch. Null when unknown.
+  final int? lastUsedAt;
+
+  /// Explicit capability: a pane of this engine opened while Desktop Harness is still downloading it
+  /// beside setup waits for that download instead of installing it again. Older CLIs do not say, and
+  /// a create then waits for the download itself before it opens the pane.
+  final bool waitsForDownload;
+
   static EngineAvailability? fromJson(Object? raw) {
     if (raw is! Map) return null;
     final engine = raw['engine'];
@@ -66,6 +82,11 @@ class EngineAvailability {
       installCommand: installCommand is String && installCommand.isNotEmpty
           ? installCommand
           : null,
+      signedIn: raw['signedIn'] is bool ? raw['signedIn'] as bool : null,
+      lastUsedAt: raw['lastUsedAt'] is num
+          ? (raw['lastUsedAt'] as num).toInt()
+          : null,
+      waitsForDownload: raw['waitsForDownload'] == true,
     );
   }
 }

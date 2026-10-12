@@ -1,6 +1,6 @@
 import { uptime } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { BOOT_TOLERANCE_SEC, bootChanged, currentBootId, SYSTEM_BOOT_SOURCES, type BootSources } from './bootId.js'
+import { BOOT_TOLERANCE_SEC, bootChanged, currentBootId, SYSTEM_BOOT_SOURCES, UNKNOWN_BOOT, type BootSources } from './bootId.js'
 
 /** Which boot of the machine this is, and whether a saved mark was written in an earlier one. */
 const LINUX = 'd6c8c2f0-3a5e-4b8f-9f3e-1c2d3e4f5a6b'
@@ -26,6 +26,14 @@ describe('naming this boot', () => {
     expect(currentBootId(sources({ platform: 'linux', linuxBootId: () => 'garbage' }))).toBe(`time:${BOOTED}`)
     // Never sysctl off macOS, whatever it would say.
     expect(currentBootId(sources({ platform: 'freebsd' }))).toBe(`time:${BOOTED}`)
+  })
+
+  it('as unknown where even the uptime is refused, as in Codex\'s sandbox, which no reboot is judged by', () => {
+    // `uv_uptime returned EPERM`: `harness status` crashed on it in an agent's shell (2026-10-12).
+    const sandbox = sources({ macosBootId: () => { throw new Error('sysctl: Operation not permitted') }, bootTimeSec: () => { throw new Error('EPERM') } })
+    expect(currentBootId(sandbox)).toBe(UNKNOWN_BOOT)
+    expect(bootChanged(`time:${BOOTED}`, UNKNOWN_BOOT, sandbox)).toBe(false)
+    expect(bootChanged(UNKNOWN_BOOT, `macos:${MAC}`, sources())).toBe(false)
   })
 
   it('reads this machine for real: an id on Linux and macOS, a moment elsewhere', () => {

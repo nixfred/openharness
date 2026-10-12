@@ -11,10 +11,13 @@ import { createResumeAgentService, type ResumeAgentServiceDeps } from '../../lib
 import type { SessionCheckpointStore } from '../../lib/sessionCheckpoint.js'
 import type { StoppedAgentStore } from '../../lib/stoppedAgents.js'
 import { AgentStopError, createStopAgentService, type StopAgentServiceDeps } from '../../lib/stopAgentService.js'
+import { IdentityReadUnavailable } from '../../engines/kit/identityScan.js'
 
 import type { ResumeAgent } from './launches.js'
 
 export interface LifecycleDeps {
+  settlePane?: StopAgentServiceDeps['settlePane']
+  cancelExternal?: StopAgentServiceDeps['cancelExternal']
   registry: typeof registry
   stoppedAgents: StoppedAgentStore
   restartJobs: StopAgentServiceDeps['restartJobs']
@@ -39,12 +42,15 @@ export interface LifecycleDeps {
   attachDsh: ResumeAgentServiceDeps['attachDsh']
   attachSession: ResumeAgentServiceDeps['attachSession']
   relaunchMarks?: ResumeAgentServiceDeps['relaunchMarks']
+  /** An agent was stopped: closed (`agent_close`), Stop Harness, or purged. The harnesses it started close with it
+   *  (services/agentCleanup.ts `closed`). */
+  stopped?: (agentId: string) => void
 }
 
 export function createAgentLifecycle({
-  registry, stoppedAgents, restartJobs, tmuxBackend, agentReconciler, forgetSession, markDeleted, clearDeleted, stopNative,
+  registry, stoppedAgents, restartJobs, tmuxBackend, agentReconciler, forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   sessionCheckpoints, mirror, sessionSearch, send, pinnedControls, retainExitedSession, announceSession,
-  relaunchOverrides, prepareSessionResume, refreshGridWebSearch, attachDsh, attachSession, relaunchMarks,
+  relaunchOverrides, prepareSessionResume, refreshGridWebSearch, attachDsh, attachSession, relaunchMarks, stopped,
 }: LifecycleDeps) {
   /**
    * Stop Harness (`agent_delete`) archives its conversation and launch settings, removes the live
@@ -52,10 +58,19 @@ export function createAgentLifecycle({
    * SIGTERM/SIGKILL fallback. Engine conversation files, recaps and the Harness name remain on disk.
    */
   const stopJobs = new Map<string, Promise<void>>()
-  const stopAgent = createStopAgentService({
+  const stop = createStopAgentService({
     registry, stoppedAgents, restartJobs, stopJobs, tmuxBackend, agentReconciler,
-    forgetSession, markDeleted, clearDeleted, stopNative,
+    forgetSession, markDeleted, clearDeleted, stopNative, settlePane, cancelExternal,
   })
+  /**
+   * Every stop goes through here: a window's close and Stop Harness, `harness close`, a purge. Told once the stop is
+   * done, never while it can still fail: a harness closed takes the harnesses it started with it, so none of them
+   * goes on working, spending the person's tokens, for a starter that will never read it (owner, October 12).
+   */
+  const stopAgent: typeof stop = (target, options) => {
+    const agentId = registry.resolve(target)?.agentId ?? target
+    return stop(target, options).then(() => { stopped?.(agentId) })
+  }
   const purgeAgentService = new PurgeAgentService({
     live: id => registry.byAgent(id), sessions: () => [...registry.list(), ...stoppedAgents.list()],
     stopped: stoppedAgents, checkpoints: sessionCheckpoints, stop: stopAgent,
@@ -102,6 +117,7 @@ export function createStopRequest({ byAgent, stop }: {
     }
     try { await stop(target) }
     catch (error) {
+      if (error instanceof IdentityReadUnavailable) return { error: error.code, detail: error.message, held: true, retryable: true }
       if (!(error instanceof AgentStopError)) throw error
       return { error: error.code, detail: error.message }
     }

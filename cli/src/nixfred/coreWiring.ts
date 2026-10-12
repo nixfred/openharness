@@ -26,7 +26,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { GateVerdict } from '../lib/actionPolicy.js'
 import type { AskQuestionDeps, QuestionAnswerPayload, QuestionAnswerResult } from '../lib/askQuestion.js'
-import { agentTokenUsage } from '../lib/agentTokenUsage.js'
+import type { AgentTokenUsage } from '../lib/agentTokenUsage.js'
 import { isRecentlyDeleted } from '../lib/deletedSessions.js'
 import { transcriptIsFirstTurn } from '../lib/firstTurnReplay.js'
 import { HermesSessionBackend, hermesSessionBackendConfig } from '../lib/hermesSessionBackend.js'
@@ -62,6 +62,8 @@ export interface NixfredCoreDeps {
   cancelAgent: (agentId: string, confirmed: boolean) => Promise<boolean>
   submitAgent: (agentId: string, text: string) => void
   hookPort: () => number
+  /** An agent's token count as the usage service last read it (core/usageLink.ts), null when unknown. */
+  tokenUsage: (session: RegisteredSession) => AgentTokenUsage | null
   /** A `nixfred.*` frame for every plugged-in dial, through the devices' port. */
   toDial: (msg: { t: string; [key: string]: unknown }) => void
   /** The stock pane functions an Orca router falls back to for every pane-backed row. */
@@ -97,7 +99,7 @@ export function createNixfredCore(deps: NixfredCoreDeps) {
     sendLocal: (frame) => deps.sendLocal(frame),
     sendError: (agentId, dbSessionId, message) => deps.send({ type: 'error', agentId, dbSessionId, payload: { message } }),
     cancelAgent: (agentId, confirmed) => deps.cancelAgent(agentId, confirmed),
-    tokenUsage: (s) => { const r = registry.resolve(s.agentId); return r ? agentTokenUsage.get(r) : null },
+    tokenUsage: (s) => { const r = registry.resolve(s.agentId); return r ? deps.tokenUsage(r) : null },
     hookPort: () => deps.hookPort(),
     sendToAgent: (agentId, text) => deps.submitAgent(agentId, text),
     toDial: (msg) => deps.toDial(msg),

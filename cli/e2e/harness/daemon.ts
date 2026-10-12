@@ -20,6 +20,7 @@ import { promisify } from 'node:util'
 import { isolatedTmux, type IsolatedTmux } from '../../src/testing/isolatedTmux.js'
 import { artifactLog, artifactsEnabled } from './artifacts.js'
 import { daemonEnvironment } from '../../src/testing/daemonEnvironment.js'
+import { readAdoptedHomes } from '../../src/engines/kit/homeAdoption.js'
 
 const exec = promisify(execFile)
 const here = dirname(fileURLToPath(import.meta.url))
@@ -37,6 +38,8 @@ export interface EngineConfig {
   /** Note every submitted prompt and hold a `!latestart` turn's start at a file gate (submission tests). */
   submissionGate?: boolean
   codexModel?: string
+  /** Keep the real interpreter/entrypoint argv, so macOS ps can also read the fixture environment. */
+  preserveProcessArgs?: boolean
   /** The test's throwaway root: the engine runs no hooks from settings outside it. */
   root: string
   /** Where the engine notes each hook it ran. */
@@ -44,6 +47,8 @@ export interface EngineConfig {
   version?: string
   without?: string[]
   startDelayMs?: number
+  /** Hold a descriptor the daemon's process reader cannot classify for this long once started (Codex 0.162.1's first seconds). */
+  unreadableDescriptorMs?: number
   /** Hold startup before the transcript opens until this disposable path's .release file exists. */
   startupGate?: string
   firstHookDelayMs?: number
@@ -64,6 +69,8 @@ export interface DaemonOptions {
   /** Note every submitted prompt and hold a `!latestart` turn's start at a file gate (submission tests). */
   submissionGate?: boolean
   codexModel?: string
+  /** Process-evidence tests need the real entrypoint; Node's process.title hides its env on macOS. */
+  preserveProcessArgs?: boolean
   /** Boot the core on its own (`__run`) instead of under harnessd's master (`__harnessd`). */
   noMaster?: boolean
   /** Start as a supervisor does, `harness start -f`: the master in the foreground, the core its child. */
@@ -101,8 +108,14 @@ const inside = (root: string, path: string): boolean => {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
-/** The engines whose hooks a daemon under test may install: the two the fake engines stand in for. */
-const HOOK_ENGINES = new Set(['claude', 'codex'])
+/** Native-hook acceptance may opt in only with every destination explicitly under its private root. */
+const NATIVE_HOOK_PATHS: Record<string, readonly string[]> = {
+  cursor: ['CURSOR_CONFIG_DIR', 'CURSOR_DATA_DIR'], opencode: ['OPENCODE_PLUGIN_DIR'],
+  kilo: ['KILO_PLUGIN_DIR'], pi: ['PI_HOME'], amp: ['AMP_PLUGIN_DIR', 'AMP_SESSIONS_DIR'],
+  hermes: ['HERMES_HOME'], devin: ['DEVIN_CONFIG_PATH'], commandcode: ['COMMANDCODE_HOME'],
+  grok: ['GROK_HOME'], agy: ['AGY_CONFIG_DIR'], copilot: ['COPILOT_HOME'],
+}
+const HOOK_ENGINES = new Set(['claude', 'codex', ...Object.keys(NATIVE_HOOK_PATHS)])
 /** The shell profiles a login shell in a pane reads, where a person moves an engine's home. */
 const PROFILES = { ZDOTDIR: ['.zshenv', '.zprofile', '.zshrc', '.zlogin'], HOME: ['.bash_profile', '.bash_login', '.profile', '.bashrc'] }
 
@@ -118,7 +131,7 @@ export function assertHooksContained(root: string, env: NodeJS.ProcessEnv): void
   if (env.DISABLE_HOOK_INSTALL === 'true') return
   const engines = (env.HOOK_INSTALL_ENGINES ?? '').split(',').map((name) => name.trim()).filter(Boolean)
   if (!engines.length || engines.some((name) => !HOOK_ENGINES.has(name))) {
-    throw new Error(`HOOK_INSTALL_ENGINES is ${env.HOOK_INSTALL_ENGINES ?? 'unset'}: a daemon under test installs Claude Code's and Codex's hooks alone (claude,codex)`)
+    throw new Error(`HOOK_INSTALL_ENGINES is ${env.HOOK_INSTALL_ENGINES ?? 'unset'}: a daemon under test must name supported hook engines with isolated destinations`)
   }
   const refuse = (what: string, path: string | undefined): never => {
     throw new Error(`${what} is ${path ?? 'unset'}: a daemon under test installs hooks only inside ${root}`)
@@ -130,6 +143,9 @@ export function assertHooksContained(root: string, env: NodeJS.ProcessEnv): void
   check('CODEX_HOME', env.CODEX_HOME)
   if (env.CLAUDE_CONFIG_DIR !== undefined) check('CLAUDE_CONFIG_DIR', env.CLAUDE_CONFIG_DIR)
   check('ZDOTDIR', env.ZDOTDIR)
+  for (const engine of engines) for (const name of NATIVE_HOOK_PATHS[engine] ?? []) check(name, env[name])
+  // OpenCode's TUI plugin is a sibling of its legacy plugin directory.
+  if (engines.includes('opencode')) check('OpenCode plugin parent', dirname(env.OPENCODE_PLUGIN_DIR!))
   // Not a hook, but what routes every hook: a record outside the root would send the person's hooks here.
   if (env.HARNESS_HOOK_ROUTES_DIR !== undefined) check('HARNESS_HOOK_ROUTES_DIR', env.HARNESS_HOOK_ROUTES_DIR)
   for (const [folder, names] of Object.entries(PROFILES) as Array<[keyof typeof PROFILES, string[]]>) {
@@ -145,12 +161,20 @@ export function assertHooksContained(root: string, env: NodeJS.ProcessEnv): void
       }
     }
   }
-  try {
-    const remembered = JSON.parse(readFileSync(join(env.ADAPTER_DATA_DIR!, 'engine-homes.json'), 'utf8')) as Record<string, unknown>
-    for (const [engine, homes] of Object.entries(remembered)) {
-      for (const home of Array.isArray(homes) ? homes : []) check(`the ${engine} home remembered in engine-homes.json`, String(home))
-    }
-  } catch { /* none remembered yet */ }
+  // Incomplete published records can be recovered during boot; an unreadable catalog cannot
+  // justify starting a daemon whose recovered destinations have not passed containment.
+  const file = join(env.ADAPTER_DATA_DIR!, 'engine-homes.json')
+  let remembered: ReturnType<typeof readAdoptedHomes>['homes']
+  try { remembered = readAdoptedHomes(file).homes }
+  catch (error) {
+    // A malformed legacy catalog cannot be imported or repaired by adoption. Published journal
+    // intent can recover at boot, so its destinations must pass the guard before starting.
+    if (existsSync(file + '.adoptions') || existsSync(file + '.adopted') || existsSync(file + '.confirmations')) throw error
+    return
+  }
+  for (const [engine, homes] of Object.entries(remembered)) {
+    for (const home of homes) check(`the ${engine} home remembered in engine-homes.json`, home)
+  }
 }
 
 /**
@@ -219,6 +243,7 @@ export class IsolatedDaemon {
     const config: EngineConfig = {
       port, dataDir: dirs.data, claudeProjectsDir: dirs.claudeProjects, codexHome: dirs.codexHome,
       claudeModel: options.claudeModel, codexModel: options.codexModel, modelControlGate: options.modelControlGate,
+      ...(options.preserveProcessArgs ? { preserveProcessArgs: true } : {}),
       ...(options.submissionGate ? { submissionGate: true } : {}),
       root, hookLog: join(own, 'fake-engine-hooks.log'),
       ...(options.trustPrompt ? { trustPrompt: true } : {}),

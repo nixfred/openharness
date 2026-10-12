@@ -7,7 +7,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BackendSocket } from './backendSocket.js'
@@ -15,7 +15,9 @@ import { relaySocket } from './testing/relaySocket.js'
 import { bindHandoffRequest } from './testing/socketCore.js'
 import { prepareAgentHandoff, type HandoffDeps } from './lib/agentHandoff.js'
 import { CommanderMirror } from './lib/commander.js'
-import { handoffProviderDeps, type HandoffWiring } from './lib/handoffDiscovery.js'
+import type { HandoffWiring } from './lib/handoffDiscovery.js'
+import { createHandoffDependencies } from './core/handoffDependencies.js'
+import { env } from './config/env.js'
 import type { LiveEvent } from './lib/normalize.js'
 import type { RegisteredSession } from './lib/registry.js'
 
@@ -27,6 +29,7 @@ const gitEnv = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CON
 
 let root: string
 let ws: string
+let projects: string
 let socket: BackendSocket
 let frames: Frame[]
 
@@ -34,6 +37,8 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'handoff-wire-')))
   ws = join(root, 'ws')
   mkdirSync(ws)
+  projects = join(env.CLAUDE_PROJECTS_DIR, basename(root))
+  mkdirSync(projects, { recursive: true, mode: 0o700 })
   socket = relaySocket('token')
   frames = []
   socket.registerLocalClient('local:w', { sendFrame: (frame) => { frames.push(frame as Frame); return true }, sendBinary: () => true })
@@ -42,6 +47,7 @@ afterEach(async () => {
   await socket.unregisterLocalClient('local:w')
   await socket.stop()
   rmSync(root, { recursive: true, force: true })
+  rmSync(projects, { recursive: true, force: true })
 })
 
 const git = (...args: string[]) => execFileSync('git', ['-C', ws, '-c', 'user.name=t', '-c', 'user.email=t@e', ...args], { env: gitEnv })
@@ -54,11 +60,11 @@ function makeRepo(): void {
 }
 
 function transcript(): string {
-  const path = join(root, 'tx.jsonl')
+  const path = join(projects, 'sess-1.jsonl')
   const at = (m: number) => `2026-09-20T10:0${m}:00.000Z`
   writeFileSync(path, [
-    JSON.stringify({ type: 'user', uuid: 'u0', timestamp: at(0), message: { role: 'user', content: 'Fix the login bug' } }),
-    JSON.stringify({ type: 'assistant', uuid: 'a1', timestamp: at(1), message: { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }], stop_reason: 'end_turn' } }),
+    JSON.stringify({ sessionId: 'sess-1', cwd: ws, isSidechain: false, type: 'user', uuid: 'u0', timestamp: at(0), message: { role: 'user', content: 'Fix the login bug' } }),
+    JSON.stringify({ sessionId: 'sess-1', cwd: ws, isSidechain: false, type: 'assistant', uuid: 'a1', timestamp: at(1), message: { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }], stop_reason: 'end_turn' } }),
   ].join('\n') + '\n')
   return path
 }
@@ -74,7 +80,7 @@ const session = (over: Record<string, unknown> = {}): RegisteredSession => ({
  * reader); `fakes` replaces a function the factory is built from.
  */
 function wire(sessions: RegisteredSession[], over: Partial<HandoffDeps> = {}, fakes: Partial<HandoffWiring> = {}): void {
-  const deps = handoffProviderDeps({
+  const deps = createHandoffDependencies({
     // As cli.ts's registry: `resolve` answers by agent id or session id, so the file is named by the resolved agent id.
     registry: {
       resolve: (id) => sessions.find((s) => s.agentId === id || (!!s.sessionId && s.sessionId === id)) ?? null,
@@ -85,12 +91,12 @@ function wire(sessions: RegisteredSession[], over: Partial<HandoffDeps> = {}, fa
     mirror: { recentAsks: () => [], lastFullText: () => undefined, recent: () => [] },
     databaseHistory: () => undefined,
     findLiveSession: async () => null,
-    claudeProcessSession: async () => null,
+    processSession: async () => null,
     isRecentlyDeleted: () => false,
     findResumedTranscript: async () => null,
     validTranscriptPath: (_engine, path) => existsSync(path),
     ...fakes,
-  })
+  }, join(root, 'daemon-data'))
   bindHandoffRequest(socket, (req) => prepareAgentHandoff({ ...deps, ...over }, req))
 }
 
@@ -151,12 +157,12 @@ describe('agent_handoff_prepare, socket + real provider', () => {
     wire([session({ engine: 'opencode', transcriptPath: null })], { readHistory: () => () => hung, deadlineMs: 300 })
     ask('r1', 'agent-1', CHANGE)
     ask('r2', 'agent-1', OTHER)
-    expect(await reply('r2')).toEqual({ requestId: 'r2', error: 'BUSY' })
-    expect(await reply('r1')).toEqual({ requestId: 'r1', error: 'TIMEOUT' })
+    expect(await reply('r2')).toMatchObject({ requestId: 'r2', error: 'BUSY', held: true, retryable: true })
+    expect(await reply('r1')).toMatchObject({ requestId: 'r1', error: 'TIMEOUT', held: true, retryable: true })
     expect(existsSync(join(ws, '.harness'))).toBe(false)
   })
 
-  it('hands over the stored recaps of a real mirror, with cli.ts\'s own deps, when the transcript is gone', async () => {
+  it('holds an unavailable native transcript even when the real mirror has stored recaps', async () => {
     // The mirror as the daemon keeps it on disk: recaps newest first, no asks, no full answer. Without the
     // `recaps` dep this agent had "nothing to hand off" (file null) though the old prompt path would send them.
     const dataDir = join(root, 'data')
@@ -169,17 +175,13 @@ describe('agent_handoff_prepare, socket + real provider', () => {
     wire([session({ transcriptPath: join(root, 'missing.jsonl') })], {}, { mirror })
     ask('r1', 'agent-1')
     const r = await reply('r1')
-    expect(r).toEqual({ requestId: 'r1', agentId: 'agent-1', file: `.harness/handoff/agent-1-${CHANGE}.md`, gitRepo: false, cwd: ws, degraded: ['transcript', 'git'] })
-    const md = readFileSync(join(ws, '.harness', 'handoff', `agent-1-${CHANGE}.md`), 'utf8')
-    const last = md.slice(md.indexOf('## Last answer'), md.indexOf('## Recent activity'))
-    expect(last).toContain('Retry added to fetchUser')
-    expect(md).not.toContain('abcdefgh1234')
-    expect(readFileSync(join(ws, '.harness', 'handoff', `agent-1-${CHANGE}.transcript.md`), 'utf8')).toContain('README updated')
+    expect(r).toMatchObject({ requestId: 'r1', error: 'IDENTITY_UNAVAILABLE', held: true, retryable: true })
+    expect(existsSync(join(ws, '.harness'))).toBe(false)
   })
 
   it('answers with no file when the agent has said nothing yet', async () => {
-    const empty = join(root, 'empty.jsonl')
-    writeFileSync(empty, '')
+    const empty = join(projects, 'empty.jsonl')
+    writeFileSync(empty, JSON.stringify({ type: 'system', sessionId: 'sess-1', cwd: ws, isSidechain: false }) + '\n')
     wire([session({ transcriptPath: empty })])
     ask('r1', 'agent-1')
     expect(await reply('r1')).toEqual({ requestId: 'r1', agentId: 'agent-1', file: null, gitRepo: false, cwd: ws, degraded: [] })
@@ -190,10 +192,10 @@ describe('agent_handoff_prepare, socket + real provider', () => {
 describe('agent_handoff_prepare, socket + real provider: hostile text (R2S1)', () => {
   /** A Claude transcript of one request and one answer, as given. */
   function talk(ask: string, answer: string): string {
-    const path = join(root, 'hostile.jsonl')
+    const path = join(projects, 'hostile.jsonl')
     writeFileSync(path, [
-      JSON.stringify({ type: 'user', uuid: 'u0', timestamp: '2026-09-20T10:00:00.000Z', message: { role: 'user', content: ask } }),
-      JSON.stringify({ type: 'assistant', uuid: 'a1', timestamp: '2026-09-20T10:01:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: answer }], stop_reason: 'end_turn' } }),
+      JSON.stringify({ sessionId: 'sess-1', cwd: ws, isSidechain: false, type: 'user', uuid: 'u0', timestamp: '2026-09-20T10:00:00.000Z', message: { role: 'user', content: ask } }),
+      JSON.stringify({ sessionId: 'sess-1', cwd: ws, isSidechain: false, type: 'assistant', uuid: 'a1', timestamp: '2026-09-20T10:01:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: answer }], stop_reason: 'end_turn' } }),
     ].join('\n') + '\n')
     return path
   }
@@ -258,13 +260,13 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
   const T0 = Date.parse('2026-09-20T10:00:00.000Z')
   const at = (seconds: number): string => new Date(T0 + seconds * 1000).toISOString()
   /** A Claude transcript: `Fix the login bug` at 0 s, its answer at 5 s, then `later` at 30 s. */
-  function parentFile(name: string, later: string): string {
-    const path = join(root, name)
+  function parentFile(name: string, later: string, sessionId = 'sp-1'): string {
+    const path = join(projects, name)
     writeFileSync(path, [
-      JSON.stringify({ type: 'user', uuid: 'u0', timestamp: at(0), message: { role: 'user', content: 'Fix the login bug' } }),
-      JSON.stringify({ type: 'assistant', uuid: 'a1', timestamp: at(5), message: { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }], stop_reason: 'end_turn' } }),
-      JSON.stringify({ type: 'user', uuid: 'u2', timestamp: at(30), message: { role: 'user', content: later } }),
-      JSON.stringify({ type: 'assistant', uuid: 'a3', timestamp: at(35), message: { role: 'assistant', content: [{ type: 'text', text: 'Done later.' }], stop_reason: 'end_turn' } }),
+      JSON.stringify({ sessionId, cwd: ws, isSidechain: false, type: 'user', uuid: 'u0', timestamp: at(0), message: { role: 'user', content: 'Fix the login bug' } }),
+      JSON.stringify({ sessionId, cwd: ws, isSidechain: false, type: 'assistant', uuid: 'a1', timestamp: at(5), message: { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }], stop_reason: 'end_turn' } }),
+      JSON.stringify({ sessionId, cwd: ws, isSidechain: false, type: 'user', uuid: 'u2', timestamp: at(30), message: { role: 'user', content: later } }),
+      JSON.stringify({ sessionId, cwd: ws, isSidechain: false, type: 'assistant', uuid: 'a3', timestamp: at(35), message: { role: 'assistant', content: [{ type: 'text', text: 'Done later.' }], stop_reason: 'end_turn' } }),
     ].join('\n') + '\n')
     return path
   }
@@ -283,7 +285,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
   it('W1: a legacy fork switched at once gets its parent\'s conversation up to the fork', async () => {
     const findLiveSession = vi.fn(async () => null)
     const claudeProcessSession = vi.fn(async () => null)
-    wire([parent(), fork()], {}, { findLiveSession, claudeProcessSession })
+    wire([parent(), fork()], {}, { findLiveSession, processSession: claudeProcessSession })
     ask('r1', 'fork-1')
     expect(await reply('r1')).toEqual({ requestId: 'r1', agentId: 'fork-1', file: `.harness/handoff/fork-1-${CHANGE}.md`, gitRepo: false, cwd: ws, degraded: ['git'] })
     expect(md()).toContain('Fix the login bug')
@@ -295,7 +297,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
 
   it('W2: a recorded session is read after the parent moved to another one, never the parent\'s current one', async () => {
     // The recorded file names its session, as Claude's do.
-    const dir = join(root, 'projects')
+    const dir = join(projects, 'old')
     mkdirSync(dir)
     const oldFile = join(dir, 'sp-1.jsonl')
     writeFileSync(oldFile, readFileSync(parentFile('seed.jsonl', 'POST-FORK ask')))
@@ -311,26 +313,26 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
   it('W3: a legacy fork whose parent was bound after the fork inherits nothing', async () => {
     wire([parent({ boundAt: T0 + 20_000 }), fork()])
     ask('r1', 'fork-1')
-    expect(await reply('r1')).toEqual({ requestId: 'r1', agentId: 'fork-1', file: null, gitRepo: false, cwd: ws, degraded: ['transcript'] })
+    expect(await reply('r1')).toEqual(nothing('fork-1'))
     expect(existsSync(join(ws, '.harness'))).toBe(false)
   })
 
   it('W4: an unbound agent that is not a fork is handed the session the daemon found for it', async () => {
-    const found = parentFile('found.jsonl', 'later ask')
+    const found = parentFile('found.jsonl', 'later ask', 'sx')
     const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: found }))
-    wire([unbound('fork-1')], {}, { claudeProcessSession })
+    wire([unbound('fork-1')], {}, { processSession: claudeProcessSession })
     ask('r1', 'fork-1')
     expect((await reply('r1')).file).toBe(`.harness/handoff/fork-1-${CHANGE}.md`)
     expect(claudeProcessSession).toHaveBeenCalledTimes(1)
-    expect(claudeProcessSession).toHaveBeenCalledWith(4242, ws, Date.parse('Fri Oct  2 16:58:26 2026'))
+    expect(claudeProcessSession).toHaveBeenCalledWith('claude', 4242, ws, Date.parse('Fri Oct  2 16:58:26 2026'))
     expect(md()).toContain('Fix the login bug')
   })
   // Verifier additions (unit-INT-a3-r1): discovery refusals through the real provider and socket.
-  const nothing = (agentId: string) => ({ requestId: 'r1', agentId, file: null, gitRepo: false, cwd: ws, degraded: ['transcript'] })
+  const nothing = (_agentId: string) => ({ requestId: 'r1', error: 'IDENTITY_UNAVAILABLE', held: true, retryable: true, reason: 'Waiting for verified conversation history.' })
   it('W5: a discovered session another agent holds is never handed over', async () => {
     const other = session({ agentId: 'other-1', sessionId: 'sx', transcriptPath: parentFile('other.jsonl', 'OTHER ask') })
     const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: other.transcriptPath! }))
-    wire([unbound('new-1'), other], {}, { claudeProcessSession })
+    wire([unbound('new-1'), other], {}, { processSession: claudeProcessSession })
     ask('r1', 'new-1')
     expect(await reply('r1')).toEqual(nothing('new-1'))
     expect(claudeProcessSession).toHaveBeenCalledTimes(1)
@@ -342,7 +344,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
     mkdirSync(dir, { recursive: true })
     const sub = join(dir, 'agent-a.jsonl')
     writeFileSync(sub, readFileSync(parentFile('sub-seed.jsonl', 'SUBAGENT ask')))
-    wire([unbound('new-1')], {}, { claudeProcessSession: async () => ({ sessionId: 'agent-a', transcriptPath: sub }) })
+    wire([unbound('new-1')], {}, { processSession: async () => ({ sessionId: 'agent-a', transcriptPath: sub }) })
     ask('r1', 'new-1')
     expect(await reply('r1')).toEqual(nothing('new-1'))
     expect(existsSync(join(ws, '.harness'))).toBe(false)
@@ -350,7 +352,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
 
   it('W7: a fork whose record is malformed is neither discovered nor inherited', async () => {
     const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: parentFile('found.jsonl', 'later ask') }))
-    wire([parent(), fork({ forkedFrom: 'parent-1', processIdentity: { pid: 4242, executable: 'claude', startMarker: 'Fri Oct  2 16:58:26 2026' } })], {}, { claudeProcessSession })
+    wire([parent(), fork({ forkedFrom: 'parent-1', processIdentity: { pid: 4242, executable: 'claude', startMarker: 'Fri Oct  2 16:58:26 2026' } })], {}, { processSession: claudeProcessSession })
     ask('r1', 'fork-1')
     expect(await reply('r1')).toEqual(nothing('fork-1'))
     expect(claudeProcessSession).not.toHaveBeenCalled()
@@ -358,7 +360,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
 
   it('W8: a discovery that never answers does not hold the reply, and a later change reuses the search still running', async () => {
     const claudeProcessSession = vi.fn(() => new Promise<null>(() => {}))
-    wire([unbound('new-1')], { discoverMs: 50 }, { claudeProcessSession })
+    wire([unbound('new-1')], { discoverMs: 50 }, { processSession: claudeProcessSession })
     ask('r1', 'new-1')
     expect(await reply('r1')).toEqual(nothing('new-1'))
     ask('r2', 'new-1', OTHER)
@@ -370,7 +372,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
   it('W9: a discovered session is never handed over while one stopped record cannot be read (ownership fails closed)', async () => {
     const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: parentFile('found.jsonl', 'later ask') }))
     const stopped = { ids: () => ['ok-1', 'bad-1'], get: (id: string) => { if (id === 'bad-1') throw new Error('Could not read the saved stopped harness.'); return { agentId: id, sessionId: 'other' } as unknown as RegisteredSession } }
-    wire([unbound('new-1')], {}, { claudeProcessSession, stopped })
+    wire([unbound('new-1')], {}, { processSession: claudeProcessSession, stopped })
     ask('r1', 'new-1')
     expect(await reply('r1')).toEqual(nothing('new-1'))
     expect(claudeProcessSession).toHaveBeenCalledTimes(1)
@@ -378,7 +380,7 @@ describe('agent_handoff_prepare, socket + real provider: a fork that has not ans
 
   it('W10: a Claude pane with no process identity is not searched for at all', async () => {
     const claudeProcessSession = vi.fn(async () => ({ sessionId: 'sx', transcriptPath: parentFile('found.jsonl', 'later ask') }))
-    wire([unbound('new-1', { processIdentity: null })], {}, { claudeProcessSession })
+    wire([unbound('new-1', { processIdentity: null })], {}, { processSession: claudeProcessSession })
     ask('r1', 'new-1')
     expect(await reply('r1')).toEqual(nothing('new-1'))
     expect(claudeProcessSession).not.toHaveBeenCalled()

@@ -139,16 +139,16 @@ class User:
             self.choose('Agent', engine, 'Search agents')
 
     def project(self, action, value):
+        # The machine is its own field already chosen: Open, New and Clone ask for no machine.
         self.choose('Project', action, 'Search projects')
-        self.wait('Choose a machine')
-        self.keys('Enter')
         if action == 'open folder':
-            self.wait('Use this folder')
+            # The browser's first row names the folder: "Use ~/…", not "Use this folder".
+            self.wait('Use ~')
             self.keys('C-l', 'C-u')
             self.wait('/path/to/project')
             self.text(value)
             self.keys('Enter')
-            self.wait('Use this folder')
+            self.wait('Use ')
             self.keys('Enter')
         else:
             self.wait('Folder name' if action == 'new folder' else 'GitHub URL')

@@ -10,13 +10,29 @@ Follow the [desktop design system](desktop-design-system.md) and
 illustrate data and interaction rules, not the current tab geometry.
 
 ```text
-api ?    web ⠹    blender ✓  +                   Search  Bell  (✿ Harness Store)
+api ?    web ⠹    blender ✓  +             Search  Bell  Devices  Store  (Sign in)
 
                                  panes
 
 Harnesses 118   Machines 3   Models 4   [Claude icon] 68%   [Codex icon] 18%
                                                      M2 > project > branch > #439
 ```
+
+The top row's right end reads like a browser's toolbar (owner, 2026-10-11):
+Search, the bell (where this app draws the row; on a Mac it is in the menu
+bar), Devices and Harness Store are icons side by side, each named by its
+tooltip, and the row's last control is the account's. While this computer
+holds no account that is **Sign in**, the only control in the row with a word
+and a fill; it opens the sign-in over the workspace. Signed in, the same place
+is the account's initial in a circle, and a click opens a short menu: who is
+signed in, then Add Phone, Appearance,
+Notifications, Settings and Sign out, each opening what the app already has.
+Nothing is drawn between the icons and the account control; `controlGap`
+separates them. A narrow window drops Devices first; the account control
+always stays. A viewer build (the browser) draws none of this. Flutter draws it
+with `WorkspaceStoreButton`, `WorkspaceSignInButton` and `WorkspaceAvatarButton`,
+AppKit with `SwarmStoreButton` and `SwarmAccountButton`; the menu is
+`widgets/account_menu.dart` on both. Run `workspace_account_test.dart`.
 
 The context follows the focused pane. The branch stays clickable in the
 footer; pane headers do not repeat it. An empty New Tab and the first welcome
@@ -96,7 +112,7 @@ Ties within one trait use pane order. Focus does not affect the name.
 This keeps `blender` useful beside coding tabs, uses project names when all work
 is code, and uses machine names for the same project on different computers.
 Tabs with identical contents can still share a name; their positions distinguish
-them, and holding Command reveals their actual shortcut hints. Preserve the full name for inspection when its visible label is truncated.
+them. Preserve the full name for inspection when its visible label is truncated.
 
 Center each name and its adjacent status as one group in compact, content-sized
 tabs, capped at 240 points. An idle name centers on its own. Use the
@@ -104,10 +120,24 @@ shared 10-point upper corners, 8-point outward lower shoulders and 6-point top
 inset. Keep space after `+` available for dragging the window. Scroll overflow
 and reveal the selected tab on keyboard navigation. Narrow viewports can show
 smaller tabs while preserving their controls.
-The right accessory reveals × on hover. While Command is held, the actual
-shortcut replaces the status beside the name without changing the tab width.
-Hover never moves the title. Cmd-W, remapped shortcuts, native menu access,
-and middle-click closing remain available.
+Hovering a tab reveals × at its right; its status stays. Holding Command replaces
+the status with the original small shortcut label (⌘1, ⌘2, ⌘3…), using the current
+keymap. Release or window deactivation restores the status. A tab shows nothing of
+[Agent Messages](../../docs/design/2026-10-10-agent-messages.md), at rest or
+hovered: traffic between its agents shows nothing on it, since messages arrive
+when they arrive, and there is no on/off on the tab. Its 💬 beside × was easy to
+hit by mistake and turned the tab off, failing a message that was waiting
+(owner, 2026-10-12); whether agents in the same tab may message each other is
+now one switch of the account, Settings ▸ Experimental, off by default. Hovering never
+changes the tab width. At rest the name and status have the whole tab, so a
+128-point tab shows an ordinary name whole beside its status; hovered, a name
+that would run into × moves left only as far as it needs, then gives up its
+tail. × is a 20-point-wide, 32-point-tall target. The tab's menu and File carry
+Show Agent Messages beside Rename Tab and Close Tab, only for a tab the desk
+holds (not the Store, Devices, Companions, an orchestrator or a draft tab) and
+only once the daemon and backend have answered for Agent Messages; an older CLI
+or backend shows none. Cmd-W, remapped
+shortcuts, native menu access, and middle-click closing remain available.
 Preserve reorder, rename, keyboard focus, and terminal sessions. Cmd-T opens a
 tab. Cmd-O opens the shared picker with `#` for projects; Cmd-P opens it directly
 on harnesses. Cmd-Shift-P opens commands (`>`). The projects list has
@@ -141,6 +171,12 @@ utility tabs have no harness activity mark. Keep the existing engine icon.
 The mark replaces the native tab's old orange attention indicator; it adds no
 new bar, counter, badge, or permanent legend. Hover and accessibility descriptions
 explain each symbol.
+
+Right after the activity mark, a pane header briefly says Agent Messages traffic:
+`→ api` on the sender's pane and `← lead` on each recipient's, in quieter title
+ink, for about five seconds or until that pane is focused (`PaneMessageMarkView`,
+which listens to `AgentMessagesController` itself so the cached header never
+rebuilds). A sender the rate limit stopped shows `→ rate limited` in warning ink.
 
 ![Activity marks in existing tabs and pane headers, rendered with synthetic state at 640 px](images/workspace-activity.png)
 
@@ -443,7 +479,7 @@ system SF Mono face at 18 pt; the dialog itself follows the selected terminal
 font, size and palette. The same suite checks narrow windows, enlarged text,
 alternate palettes, and retained keyboard focus when appearance changes.
 
-Customize Harness → Status offers twelve saved themes, grouped into Minimal
+Appearance → Status offers twelve saved themes, grouped into Minimal
 and Powerline, with a preview of the same sample pane beneath each choice.
 Selection covers only the name row. Tab and Shift-Tab move between choices;
 Enter or Space selects, scrolls the choice into view, and saves it. The selected

@@ -21,6 +21,7 @@ import tempfile
 import termios
 import threading
 import time
+from account_fixture import signed_in_account
 
 TUI = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get('HN_NATIVE_TEST_PORT', '19433'))
@@ -39,6 +40,7 @@ ENV = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'TZ') if k in os.env
 ENV.update(HOME=str(HOME), HN_TMPDIR=str(BASE), HN_SOCKET_NAME=PREFIX, PORT=str(PORT),
            SHELL='/bin/sh', TERM='xterm-256color', HARNESS_TUI_DESK='off',
            HARNESS_TUI_NOTIFY='off', HN_DESKTOP='off', PS1='$ ')
+signed_in_account(ENV, BASE)
 CONF = BASE / 'tmux.conf'
 CONF.write_text('set -g default-shell /bin/sh\nset -g @hn-look tmux\n'
                 'set -g automatic-rename off\nset -g status off\n'

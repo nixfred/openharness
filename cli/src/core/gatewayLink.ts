@@ -317,6 +317,18 @@ export function createGatewayLink(deps: GatewayLinkDeps) {
       publicKey: () => ownerKey({ op: 'public' }),
       signWelcome: (machineId, shareId, peer, ephemeral) => ownerKey({ op: 'sign', machineId, shareId, peer, ephemeral }),
     },
+    // The account's connected services, sealed and opened by the gateway (lib/e2ee/connectorVault.ts).
+    connectorVault: {
+      seal: async (plaintext) => {
+        const answer = await deps.call(GATEWAY_CALLS.connectorVault, { op: 'seal', plaintext }, LANE_WAIT_MS)
+        if (answer.envelope && typeof answer.envelope === 'object') return record(answer.envelope)
+        throw new Error(typeof answer.error === 'string' && !answer.error.startsWith('SERVICE_') ? answer.error : 'the gateway holds no key just now: it is not running')
+      },
+      open: async (envelope) => {
+        const answer = await deps.call(GATEWAY_CALLS.connectorVault, { op: 'open', envelope }, LANE_WAIT_MS)
+        return typeof answer.plaintext === 'string' ? { plaintext: answer.plaintext, complete: answer.complete === true } : null
+      },
+    },
   }
 
   /** A window's session through the gateway: to another of the owner's machines, or to a harness shared

@@ -10,7 +10,14 @@ import 'box_chrome.dart';
 import 'desktop_chrome.dart';
 
 /// The Flutter counterpart of the AppKit tab: a centered name/status group
-/// and a trailing hover close action. Command replaces status with its hint.
+/// and, at its trailing edge, the close action.
+///
+/// At rest the name and status have the whole tab; hovering reveals ×.
+/// Holding Command replaces the status with the tab's shortcut, as before.
+/// Agent Messages has nothing on a tab: traffic between its agents shows nothing,
+/// since messages arrive when they arrive, and its on/off is Settings ▸
+/// Experimental's. The 💬 that sat beside × was easy to hit by mistake and turned
+/// the tab off, failing a message that was waiting (owner, 2026-10-12).
 class DesktopWorkspaceTab extends StatefulWidget {
   const DesktopWorkspaceTab({
     super.key,
@@ -20,12 +27,12 @@ class DesktopWorkspaceTab extends StatefulWidget {
     required this.showShortcuts,
     required this.onSelect,
     required this.onClose,
-    this.shortcutHint,
     this.tooltip,
     this.activity,
     this.activityLabel,
     this.highlighted = false,
     this.onRename,
+    this.shortcutHint,
   });
 
   final String id, label;
@@ -34,6 +41,8 @@ class DesktopWorkspaceTab extends StatefulWidget {
   final VoidCallback? onSelect, onClose;
   final VoidCallback? onRename;
   final String? shortcutHint, tooltip, activityLabel;
+
+  /// The status cell: an [ActivityMark].
   final Widget? activity;
 
   static double _measure(BuildContext context, String text, TextStyle style) {
@@ -48,10 +57,13 @@ class DesktopWorkspaceTab extends StatefulWidget {
     return width;
   }
 
-  // Reserve the full close target inside the tab's curved body on both sides,
-  // keeping the name centered and clear of the hover action.
-  static const _contentInset = 32.0 + grid.AppDesktop.tabCloseInset;
-  static const _indicatorGap = 6.0;
+  // × inside the tab's curved body, shown only on hover; at rest the name and
+  // status have the whole tab. A 20pt target: 16pt was easy to click by
+  // mistake (owner, 2026-10-12).
+  static const closeWidth = 20.0;
+  static const _restingInset = grid.AppDesktop.tabShoulder + 6;
+  static const _revealedInset = closeWidth + grid.AppDesktop.tabCloseInset;
+  static const _statusWidth = 16.0, _indicatorGap = 6.0;
 
   static TextStyle _hintStyle({Color? color}) =>
       DesktopChrome.metadata(color: color).copyWith(
@@ -64,7 +76,7 @@ class DesktopWorkspaceTab extends StatefulWidget {
     required bool hasActivity,
   }) => math
       .max(
-        hasActivity ? 16.0 : 0.0,
+        hasActivity ? _statusWidth : 0.0,
         hint == null || hint.isEmpty
             ? 0.0
             : _measure(context, hint, _hintStyle()),
@@ -74,20 +86,44 @@ class DesktopWorkspaceTab extends StatefulWidget {
   static double labelWidth(BuildContext context, String label) =>
       _measure(context, label, DesktopChrome.control());
 
+  /// The width that shows [label] whole while hovered, when × takes its room
+  /// — where a tooltip appears.
   static double naturalWidth(
     BuildContext context,
     String label, {
-    String? shortcutHint,
     bool hasActivity = false,
+    String? shortcutHint,
+  }) =>
+      labelWidth(context, label) +
+      _restingInset +
+      _revealedInset +
+      ((hasActivity || (shortcutHint?.isNotEmpty ?? false))
+          ? indicatorWidth(context, shortcutHint, hasActivity: hasActivity) +
+                _indicatorGap
+          : 0);
+
+  /// The name's left edge and width: centered with its status, and when
+  /// revealed moved left only as far as × needs, then shortened. A name with
+  /// room never moves.
+  static (double, double) titleLayout({
+    required double tabWidth,
+    required double labelWidth,
+    required bool hasActivity,
+    required bool revealed,
+    double indicatorWidth = _statusWidth,
   }) {
-    final indicator = indicatorWidth(
-      context,
-      shortcutHint,
-      hasActivity: hasActivity,
+    final status = hasActivity ? indicatorWidth + _indicatorGap : 0.0;
+    final right = revealed ? _revealedInset : _restingInset;
+    final width = math.min(
+      labelWidth,
+      math.max(0.0, tabWidth - _restingInset - right - status),
     );
-    return labelWidth(context, label) +
-        _contentInset * 2 +
-        (indicator == 0 ? 0 : indicator + _indicatorGap);
+    final group = width + status;
+    final left = math.max(
+      _restingInset,
+      math.min((tabWidth - group) / 2, tabWidth - right - group),
+    );
+    return (left, width);
   }
 
   /// Tabs share the available width, then scroll at their readable minimum.
@@ -108,11 +144,57 @@ class DesktopWorkspaceTab extends StatefulWidget {
 class _DesktopWorkspaceTabState extends State<DesktopWorkspaceTab> {
   bool _hovered = false, _focused = false;
 
+  /// The tab's trailing control: shown, it takes the pointer, focus and
+  /// semantics; hidden, it keeps its place and none of them.
+  Widget _accessory({
+    required bool visible,
+    required double width,
+    required Widget child,
+  }) => SizedBox(
+    width: width,
+    child: Center(
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: ExcludeFocus(
+          excluding: !visible,
+          child: ExcludeSemantics(
+            excluding: !visible,
+            child: Opacity(opacity: visible ? 1 : 0, child: child),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  /// A quiet glyph that takes full ink on hover, focus and press.
+  ButtonStyle _accessoryStyle(Color foreground, double resting) =>
+      IconButton.styleFrom(
+        backgroundColor: Colors.transparent,
+        overlayColor: Colors.transparent,
+        side: BorderSide.none,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ).copyWith(
+        animationDuration: Duration.zero,
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (states) => foreground.withValues(
+            alpha:
+                states.any(
+                  (state) =>
+                      state == WidgetState.hovered ||
+                      state == WidgetState.focused ||
+                      state == WidgetState.pressed,
+                )
+                ? 1
+                : resting,
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     grid.AppTheme.watch(context);
     final enabled = widget.onSelect != null;
-    final quietCloseOpacity = MediaQuery.highContrastOf(context) ? .7 : .45;
+    final quietOpacity = MediaQuery.highContrastOf(context) ? .7 : .45;
     final focusVisible = _focused || widget.highlighted;
     // Workspace palettes can stay dark beside light app surfaces. Match the
     // native tab bar's ink to its own surface, independent of terminal colors.
@@ -147,29 +229,27 @@ class _DesktopWorkspaceTabState extends State<DesktopWorkspaceTab> {
             builder: (context, constraints) => ValueListenableBuilder(
               valueListenable: widget.showShortcuts,
               builder: (context, showHints, _) {
+                final revealed = enabled && _hovered;
                 final showHint =
                     enabled &&
                     showHints &&
                     (widget.shortcutHint?.isNotEmpty ?? false);
+                final hasActivity = widget.activity != null || showHint;
                 final indicator = DesktopWorkspaceTab.indicatorWidth(
                   context,
-                  widget.shortcutHint,
+                  showHint ? widget.shortcutHint : null,
                   hasActivity: widget.activity != null,
                 );
-                final indicatorSpace = widget.activity != null || showHint
-                    ? indicator + DesktopWorkspaceTab._indicatorGap
-                    : 0.0;
-                final labelWidth = math.min(
-                  DesktopWorkspaceTab.labelWidth(context, widget.label),
-                  math.max(
-                    0.0,
-                    constraints.maxWidth -
-                        DesktopWorkspaceTab._contentInset * 2 -
-                        indicatorSpace,
+                final (groupLeft, labelWidth) = DesktopWorkspaceTab.titleLayout(
+                  tabWidth: constraints.maxWidth,
+                  labelWidth: DesktopWorkspaceTab.labelWidth(
+                    context,
+                    widget.label,
                   ),
+                  hasActivity: hasActivity,
+                  revealed: revealed,
+                  indicatorWidth: indicator,
                 );
-                final groupLeft =
-                    (constraints.maxWidth - labelWidth - indicatorSpace) / 2;
                 return Stack(
                   children: [
                     Positioned.fill(
@@ -220,7 +300,7 @@ class _DesktopWorkspaceTabState extends State<DesktopWorkspaceTab> {
                                       ),
                                     ),
                                   ),
-                                  if (indicatorSpace > 0)
+                                  if (hasActivity)
                                     Positioned(
                                       left:
                                           groupLeft +
@@ -255,65 +335,24 @@ class _DesktopWorkspaceTabState extends State<DesktopWorkspaceTab> {
                     ),
                     Positioned(
                       right: grid.AppDesktop.tabCloseInset,
-                      width: 32,
                       top: 0,
                       bottom: 0,
-                      child: Center(
-                        child: IgnorePointer(
-                          ignoring: !_hovered || !enabled,
-                          child: ExcludeFocus(
-                            excluding: !_hovered || !enabled,
-                            child: ExcludeSemantics(
-                              excluding: !_hovered || !enabled,
-                              child: Opacity(
-                                opacity: _hovered && enabled ? 1 : 0,
-                                child: IconButton(
-                                  key: ValueKey('tab-close:${widget.id}'),
-                                  tooltip: 'Close tab',
-                                  onPressed: widget.onClose,
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints.tightFor(
-                                    width: 32,
-                                    height: 32,
-                                  ),
-                                  style:
-                                      IconButton.styleFrom(
-                                        foregroundColor: ink,
-                                        backgroundColor: Colors.transparent,
-                                        overlayColor: Colors.transparent,
-                                        side: BorderSide.none,
-                                        tapTargetSize:
-                                            MaterialTapTargetSize.shrinkWrap,
-                                      ).copyWith(
-                                        animationDuration: Duration.zero,
-                                        foregroundColor:
-                                            WidgetStateProperty.resolveWith(
-                                              (states) => foreground.withValues(
-                                                alpha:
-                                                    states.any(
-                                                      (state) =>
-                                                          state ==
-                                                              WidgetState
-                                                                  .hovered ||
-                                                          state ==
-                                                              WidgetState
-                                                                  .focused ||
-                                                          state ==
-                                                              WidgetState
-                                                                  .pressed,
-                                                    )
-                                                    ? 1
-                                                    : quietCloseOpacity,
-                                              ),
-                                            ),
-                                      ),
-                                  icon: const Icon(
-                                    AppIcons.close,
-                                    size: AppIcons.closeSize,
-                                  ),
-                                ),
-                              ),
-                            ),
+                      child: _accessory(
+                        visible: revealed,
+                        width: DesktopWorkspaceTab.closeWidth,
+                        child: IconButton(
+                          key: ValueKey('tab-close:${widget.id}'),
+                          tooltip: 'Close tab',
+                          onPressed: widget.onClose,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(
+                            width: DesktopWorkspaceTab.closeWidth,
+                            height: 32,
+                          ),
+                          style: _accessoryStyle(foreground, quietOpacity),
+                          icon: const Icon(
+                            AppIcons.close,
+                            size: AppIcons.closeSize,
                           ),
                         ),
                       ),

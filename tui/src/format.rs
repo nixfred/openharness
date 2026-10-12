@@ -1826,6 +1826,9 @@ mod tests {
     /// What the status line renders when the current window is `filled` and the tab name is `pane`.
     #[test]
     fn default_tab_format_includes_the_working_state_after_its_name() {
+        // This compares two expansions, not animation timing. Hold the spinner
+        // still so a wall-clock frame boundary cannot change the expected icon.
+        crate::theme::begin_animation_frame(false);
         let mut app = status_fixture(1, 1);
         app.tabs[0].root = Some(crate::layout::Node::new(1, 80, 24));
         let fmt = crate::options::status_window_format("tmux", true);

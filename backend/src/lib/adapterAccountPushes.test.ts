@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const m = vi.hoisted(() => ({
-  desk: vi.fn(), zoo: vi.fn(), machines: vi.fn(), keys: vi.fn(),
-  deskUnsub: vi.fn(), zooUnsub: vi.fn(), machinesUnsub: vi.fn(), keysUnsub: vi.fn(),
+  desk: vi.fn(), zoo: vi.fn(), machines: vi.fn(), keys: vi.fn(), vault: vi.fn(),
+  deskUnsub: vi.fn(), zooUnsub: vi.fn(), machinesUnsub: vi.fn(), keysUnsub: vi.fn(), vaultUnsub: vi.fn(),
 }))
 vi.mock('./bus.js', () => ({
   subscribeDeskChanged: m.desk, subscribeZooChanged: m.zoo, subscribeDeviceMachineListChanged: m.machines,
-  subscribeDeviceKeysChanged: m.keys,
+  subscribeDeviceKeysChanged: m.keys, subscribeConnectorsChanged: m.vault,
 }))
 
 import { relayAccountPushes } from './adapterAccountPushes.js'
@@ -21,6 +21,17 @@ describe('account pushes on a daemon socket', () => {
     m.zoo.mockResolvedValue(m.zooUnsub)
     m.machines.mockResolvedValue(m.machinesUnsub)
     m.keys.mockResolvedValue(m.keysUnsub)
+    m.vault.mockResolvedValue(m.vaultUnsub)
+  })
+
+  it('hands the daemon a change to the account\'s sealed connections, for it to re-read and merge', async () => {
+    const send = vi.fn()
+    const stop = await relayAccountPushes('user-1', send, on)
+    expect(m.vault).toHaveBeenCalledWith('user-1', expect.any(Function))
+    m.vault.mock.calls[0][1]({ revision: 9 })
+    expect(send).toHaveBeenCalledWith({ t: 'down', connId: '', frame: { type: 'connectors_changed', payload: { revision: 9 } } })
+    stop()
+    expect(m.vaultUnsub).toHaveBeenCalledOnce()
   })
 
   it('listens on the channels of the account that owns the socket', async () => {

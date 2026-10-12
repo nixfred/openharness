@@ -35,6 +35,16 @@ class StoreDiscipline {
 }
 
 const storeDisciplines = <String, StoreDiscipline>{
+  'Essentials': StoreDiscipline(
+    name: 'Essentials',
+    headline: 'Made by Harness,\nfor every desk.',
+    description:
+        'Your agents\u2019 memories in one place, and every harness at a glance. '
+        'Free to run on OpenCode; switch to any agent from the pane.',
+    invitation: 'One click each. Nothing to set up.',
+    color: Color(0xfff0b9a6),
+    featured: ['autonomous/memories', 'autonomous/harness-monitor'],
+  ),
   'Coding': StoreDiscipline(
     name: 'Coding',
     headline: 'Start with what\nyou know.',
@@ -105,11 +115,11 @@ const storeDisciplines = <String, StoreDiscipline>{
     name: 'Productivity',
     headline: 'Give your thinking\na little room.',
     description:
-        'Make a deck that tells the story, a document worth keeping, '
-        'or a spreadsheet that answers a question. Shape the work around your idea.',
+        'Make a deck that tells the story or a document worth keeping. '
+        'Shape the work around your idea.',
     invitation: 'Turn a rough thought into something you can share.',
     color: Color(0xfff2e3a6),
-    featured: ['autonomous/marp', 'autonomous/typst', 'autonomous/jev-sheets'],
+    featured: ['autonomous/marp', 'autonomous/typst'],
   ),
   'Science & Data': StoreDiscipline(
     name: 'Science & Data',
@@ -162,7 +172,7 @@ const storeDisciplines = <String, StoreDiscipline>{
         'that matter. Give your curiosity somewhere to go deeper.',
     invitation: 'Bring a question you have been meaning to explore.',
     color: Color(0xffbce6cf),
-    featured: ['autonomous/roundtable', 'autonomous/jev-browser'],
+    featured: ['autonomous/roundtable'],
   ),
   'Local AI': StoreDiscipline(
     name: 'Local AI',

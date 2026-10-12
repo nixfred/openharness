@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { appendDeviceKey, deviceKeysSeen, readDeviceKeyLog, touchDeviceKey } from '../lib/deviceKeyLog.js'
+import { appendDeviceAck, appendDeviceKey, deviceKeysSeen, readDeviceAcks, readDeviceKeyLog, touchDeviceKey } from '../lib/deviceKeyLog.js'
 import { validateBody, validateQuery } from '../middlewares/validation.js'
 import { sendError, sendSuccess } from '../utils/response.js'
 
@@ -15,22 +15,32 @@ const query = z.object({
 /** Appends per account per minute, per process — a viewer appends its key once per sign-in and a
  *  removal when someone asks. Generous for that; a loop cannot rebuild the log on every request. */
 const APPENDS_PER_MINUTE = 20
-const appendWindows = new Map<string, { start: number; count: number }>()
-function allowAppend(userId: string, now = Date.now()): boolean {
-  const w = appendWindows.get(userId)
-  if (!w || now - w.start >= 60_000) {
-    if (appendWindows.size >= 10_000) appendWindows.clear()
-    appendWindows.set(userId, { start: now, count: 1 })
-    return true
+/** At most [perMinute] calls per account per minute, per process. */
+function limiter(perMinute: number): (userId: string, now?: number) => boolean {
+  const windows = new Map<string, { start: number; count: number }>()
+  return (userId, now = Date.now()) => {
+    const w = windows.get(userId)
+    if (!w || now - w.start >= 60_000) {
+      if (windows.size >= 10_000) windows.clear()
+      windows.set(userId, { start: now, count: 1 })
+      return true
+    }
+    return ++w.count <= perMinute
   }
-  return ++w.count <= APPENDS_PER_MINUTE
 }
+const allowAppend = limiter(APPENDS_PER_MINUTE)
+// An acknowledgement is one "It's mine" a person pressed, on one device: the same budget, kept apart so
+// confirming devices never costs the log its appends. Each one replays the log to check it.
+const allowAck = limiter(APPENDS_PER_MINUTE)
 const body = z.object({ entry: z.record(z.string(), z.unknown()) }).strict()
+const acksQuery = z.object({ since: z.coerce.number().int().min(0).default(0) })
+const ackBody = z.object({ ack: z.record(z.string(), z.unknown()) }).strict()
 
 /**
  * The account's device key log (lib/deviceKeyLog.ts), for the viewer apps: read it from a head, append a
  * viewer's own key or a viewer-signed removal. Machines append over their adapter socket instead
- * (`devlog_append`), which is what ties an entry to the machine that sent it.
+ * (`devlog_append`), which is what ties an entry to the machine that sent it. Beside the log, for every
+ * device: the acknowledgements ("It's mine") of keys on it.
  *
  * A Harness session (a phone signed in by a QR) may append: that phone is one of the account's devices.
  */
@@ -63,5 +73,24 @@ export async function deviceKeyRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({ success: false, error: { code: result.code, message: 'The log moved on; read it again.' }, data: { head: result.head } })
     }
     sendError(reply, 'This entry was refused.', result.code, result.status)
+  })
+
+  // "It's mine", once for the account (lib/deviceAckCore.ts): a device's signed acknowledgement that a key
+  // on the log is the person's own, so the other devices stop showing it as New. Its own route beside the
+  // log, never an entry in it: a client that predates it never asks, never sees one, and keeps working
+  // as before. A device asks from just below the oldest key it still shows as New (`since`, an entry seq).
+  app.get<{ Querystring: z.infer<typeof acksQuery> }>('/api/device-keys/acks', { preHandler: validateQuery(acksQuery) }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    sendSuccess(reply, await readDeviceAcks(req.user!.sub, req.query.since))
+  })
+
+  // Machines and apps alike: an acknowledgement's authority is its signature by a key active on the log,
+  // which every device checks itself, so the channel it came over adds nothing.
+  app.post<{ Body: z.infer<typeof ackBody> }>('/api/device-keys/acks', { preHandler: validateBody(ackBody) }, async (req, reply) => {
+    const user = req.user!
+    if (!allowAck(user.sub)) return sendError(reply, 'Too many changes to your devices. Try again in a minute.', 'RATE_LIMITED', 429)
+    const result = await appendDeviceAck(user.sub, req.body.ack)
+    if (result.ok) return sendSuccess(reply, { created: result.created })
+    sendError(reply, 'This acknowledgement was refused.', result.code, result.status)
   })
 }

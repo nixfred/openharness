@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PlatformService, defaultPlatformDeps, type PlatformName } from '../harnessd/platform.js'
+import { OS_SYSTEMD_UNIT, OS_UNIT_FILE, PlatformService, SYSTEMD_UNIT, defaultPlatformDeps, type PlatformName } from '../harnessd/platform.js'
 import { fakePlatform, type FakePlatform } from '../testing/fakePlatform.js'
 import { serviceDefinition } from './platformDaemon.js'
 import { SERVICE_USAGE, serviceCommand, serviceCommandDeps, type ServiceCommandDeps } from './serviceCommand.js'
@@ -87,6 +87,28 @@ describe('harness service', () => {
       ])
       await expect(serviceCommand(['status', '--json'], none)).resolves.toBe(0)
       expect(c.out).toEqual(['{"supported":false}'])
+    } finally { rmSync(c.dir, { recursive: true, force: true }) }
+  })
+
+  it('installs and removes nothing on Harness OS, whose package runs harnessd under its own unit, and says how it stands', async () => {
+    const c = computer('systemd')
+    try {
+      const base = { ...defaultPlatformDeps({ env: { PATH: c.fake.bin }, uid: 501, home: c.home }), run: c.fake.run }
+      const os = { ...c.deps, service: new PlatformService('systemd', { ...base, readFile: (path) => (path === OS_UNIT_FILE ? '[Service]\n' : base.readFile(path)) }, true) }
+      c.runOutside(2288)
+      await expect(serviceCommand(['install'], os)).resolves.toBe(1)
+      await expect(serviceCommand(['uninstall'], os)).resolves.toBe(1)
+      expect(c.err).toEqual([
+        `Harness OS runs harnessd under ${OS_SYSTEMD_UNIT} already: \`harness start\` and \`harness stop\` go through it, and there is nothing to install.`,
+        `Harness OS runs harnessd under ${OS_SYSTEMD_UNIT} already: \`harness start\` and \`harness stop\` go through it, and there is nothing to uninstall.`,
+      ])
+      expect(c.stops).toEqual([])
+      expect(c.outside.pid).toBe(2288)
+      expect(c.fake.calls()).toEqual([])
+      expect(existsSync(join(c.home, '.config', 'systemd', 'user', SYSTEMD_UNIT))).toBe(false)
+      c.fake.set({ loaded: true, pid: 4242 })
+      await expect(serviceCommand(['status', '--json'], os)).resolves.toBe(0)
+      expect(JSON.parse(c.out.at(-1)!)).toMatchObject({ supported: true, file: OS_UNIT_FILE, target: OS_SYSTEMD_UNIT, installed: true, current: true, registered: true, pid: 4242 })
     } finally { rmSync(c.dir, { recursive: true, force: true }) }
   })
 })

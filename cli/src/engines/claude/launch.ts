@@ -1,11 +1,14 @@
 import type { EngineLaunch } from '../facets/launch.js'
 
-// The existing CLI contracts: auto still runs Claude Code's safety checks; full is explicit.
+// The existing CLI contracts: auto still runs Claude Code's safety checks; full is explicit. Ask names its mode:
+// Claude Code 2.1.296 started a session given no flag in auto mode, so an Ask harness never asked (a fresh Mac,
+// 2026-10-12). `default` is the asking mode's name in every version with the flag; 2.1.296 calls it manual, still
+// takes `default`, and shows "manual mode on".
 const permissionModes = {
   auto: ['--permission-mode', 'auto'],
   acceptEdits: ['--permission-mode', 'acceptEdits'],
   plan: ['--permission-mode', 'plan'],
-  ask: [],
+  ask: ['--permission-mode', 'default'],
   full: ['--dangerously-skip-permissions'],
 }
 export const launch: EngineLaunch = {
@@ -25,4 +28,28 @@ export const launch: EngineLaunch = {
     home: { variable: 'CLAUDE_CONFIG_DIR', otherwise: 'home' }, file: '.claude.json',
     format: 'json', projects: 'projects', accepted: 'hasTrustDialogAccepted', entry: { allowedTools: [] },
   },
+  /**
+   * Claude Code's `attribution.pr`: the text it adds to a pull request it opens. Set, it replaces Claude Code's own
+   * line, so the value keeps that line first (2.1.296 `rro`: `pr: h.pr ?? <own line>`). `--settings` overrides the
+   * person's user, project and local settings key by key (lodash `mergeWith`), so their `attribution.commit` stays.
+   * `attribution: false`, a `pr` of "" and the older `includeCoAuthoredBy: false` each hide the line: nothing is added
+   * then, and the last would otherwise bring the commit trailer back (setting `pr` ends it).
+   */
+  attribution: {
+    kind: 'setting',
+    home: { variable: 'CLAUDE_CONFIG_DIR', otherwise: { folder: '.claude' } }, file: 'settings.json',
+    folder: ['.claude/settings.json', '.claude/settings.local.json'],
+    key: 'attribution', field: 'pr', legacy: { key: 'includeCoAuthoredBy', until: ['commit', 'pr'] },
+    own: '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+    args: ['--settings', '{settings}'],
+    // Told as well: Claude Code 2.1.296, started by another agent and asked for "a short body saying it fixes a typo",
+    // opened the pull request with that body and neither line (2026-10-11, in a clean VM). Codex, told in these words,
+    // kept ours.
+    instruction: 'When you create or update a pull request, its body must include this exact line once, near the end and '
+      + 'after any other attribution line: `{line}` It says another agent started this session in Harness. Do not add it '
+      + 'to commit messages.',
+  },
+  // Recorded with the rest of the system prompt on the conversation's first request and kept on every resume
+  // (`--system-prompt-snapshot`, on by default), so it is given at each launch and read once.
+  harnessInstructions: { kind: 'append', args: ['--append-system-prompt', '{text}'] },
 }

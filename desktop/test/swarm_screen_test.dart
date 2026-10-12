@@ -88,7 +88,7 @@ TerminalSession terminal(String id, List<TerminalBinaryFrame> input) =>
 
 void main() {
   testWidgets(
-    'tabs show names, reveal hover close and Command hints, and preserve Command-W',
+    'tabs reveal Command hints and hover close, and preserve Command-W',
     (tester) async {
       final app = createApp();
       final first = app.activeSwarm;
@@ -109,24 +109,35 @@ void main() {
       await mouse.moveTo(tester.getCenter(label));
       await tester.pumpAndSettle();
       expect(close.hitTestable(), findsOneWidget);
+      // Hover reveals ×; hints wait for Command, and a name with room keeps
+      // its place.
+      expect(find.text('⌘1'), findsNothing);
+      expect(find.text('⌘2'), findsNothing);
       expect(tester.getRect(label), nameBounds);
       await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
       await tester.pump();
       expect(find.text('⌘1'), findsOneWidget);
       expect(find.text('⌘2'), findsOneWidget);
-      expect(close.hitTestable(), findsOneWidget);
-      final commandName = tester.getRect(label);
-      final commandHint = tester.getRect(find.text('⌘2'));
-      expect(commandHint.left - commandName.right, closeTo(6, .1));
       expect(
-        (commandName.left + commandHint.right) / 2,
-        closeTo(tester.getCenter(tab).dx, .1),
+        find.byKey(ValueKey('tab-close:${first.id}')).hitTestable(),
+        findsNothing,
       );
-      expect(commandName.size, nameBounds.size);
+      expect(close.hitTestable(), findsOneWidget);
       expect(app.activeSwarm, same(second));
       await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
       await tester.pump();
+      expect(find.text('⌘1'), findsNothing);
+      expect(find.text('⌘2'), findsNothing);
       expect(close.hitTestable(), findsOneWidget);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaRight);
+      await tester.pump();
+      expect(find.text('⌘1'), findsOneWidget);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(find.text('⌘1'), findsNothing, reason: 'focus loss clears hints');
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaRight);
+      await tester.pump();
       await mouse.removePointer();
       await tester.pump();
       expect(close.hitTestable(), findsNothing);

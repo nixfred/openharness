@@ -1,13 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { env } from '../config/env.js'
-import { PlatformService, defaultPlatformDeps, type PlatformName, type PlatformState } from '../harnessd/platform.js'
+import {
+  OS_SYSTEMD_UNIT, OS_UNIT_FILE, PlatformService, SYSTEMD_UNIT, defaultPlatformDeps, type PlatformName, type PlatformState,
+} from '../harnessd/platform.js'
 import { fakePlatform, type FakePlatform } from '../testing/fakePlatform.js'
 import { HARNESSD_STATUS_FILE } from './daemonState.js'
 import {
-  CARRIED_ENV, describeState, installedPlatform, platformDaemonDeps, serviceDefinition, startUnderPlatform, stopUnderPlatform,
+  CARRIED_ENV, describeState, installedPlatform, osDaemonUnit, platformDaemonDeps, serviceDefinition, startUnderPlatform, stopUnderPlatform,
   supervisingPlatform, waitForMaster, waitGone, type PlatformDaemonDeps,
 } from './platformDaemon.js'
 
@@ -115,6 +117,50 @@ describe.each(['launchd', 'systemd'] as const)('under %s', (platform) => {
     expect(stopUnderPlatform(w.deps)).toEqual({ ok: true, stopped: null })
     w.fake.set(platform === 'launchd' ? { fail: { 'launchctl print': { status: 1, stderr: 'no' } } } : { pid: 4242, fail: { 'systemctl kill': { status: 1, stderr: 'no' } } })
     expect(stopUnderPlatform(w.deps)).toEqual(platform === 'launchd' ? { ok: true, stopped: null } : { ok: false, detail: expect.stringContaining('no') })
+  })
+})
+
+describe('on Harness OS', () => {
+  const there = (path: string) => path === OS_UNIT_FILE
+
+  it('runs its daemon under the package\'s unit, for the data folder and port that unit runs', () => {
+    expect(osDaemonUnit('linux', {}, there)).toBe(true)
+    expect(osDaemonUnit('linux', { PORT: '18473' }, there)).toBe(true)
+    expect(osDaemonUnit('linux', {}, () => false)).toBe(false)
+    expect(osDaemonUnit('linux', { ADAPTER_DATA_DIR: '/tmp/test-daemon' }, there)).toBe(false)
+    expect(osDaemonUnit('linux', { PORT: '18474' }, there)).toBe(false)
+    expect(osDaemonUnit('linux', { HARNESSD_TEST_PLATFORM: 'systemd' }, there)).toBe(false)
+    expect(osDaemonUnit('darwin', {}, there)).toBe(false)
+  })
+
+  let w: ReturnType<typeof world>
+  let os: PlatformDaemonDeps
+  beforeEach(() => {
+    w = world('systemd')
+    const base = { ...defaultPlatformDeps({ env: { PATH: w.fake.bin }, uid: 1000, home: w.home }), run: w.fake.run }
+    os = { ...w.deps, service: new PlatformService('systemd', { ...base, readFile: (path) => (there(path) ? '[Service]\n' : base.readFile(path)) }, true) }
+  })
+  afterEach(() => rmSync(w.dir, { recursive: true, force: true }))
+
+  it('starts through the unit and waits for its core, writing no definition of its own', async () => {
+    expect(installedPlatform(os)).toBe('systemd')
+    await expect(startUnderPlatform(w.definition, os, 1_000)).resolves.toEqual({ ok: true, pid: 4242, refreshed: false })
+    expect(existsSync(join(w.home, '.config', 'systemd', 'user', SYSTEMD_UNIT))).toBe(false)
+    expect(w.fake.calls()).toEqual([
+      ['systemctl', '--user', 'reset-failed', OS_SYSTEMD_UNIT],
+      ['systemctl', '--user', 'start', '--no-block', OS_SYSTEMD_UNIT],
+    ])
+  })
+
+  it('stops the unit\'s own core, and leaves a daemon started beside the unit to the signals', () => {
+    w.fake.set({ pid: 4242 })
+    expect(stopUnderPlatform(os)).toEqual({ ok: true, stopped: 4242 })
+    expect(w.fake.calls()).toContainEqual(['systemctl', '--user', 'kill', '--kill-who=main', '--signal=SIGTERM', OS_SYSTEMD_UNIT])
+    // A sign-in before this fix restarted the daemon outside the unit: the unit runs nothing, and
+    // `harness stop` goes on to signal the pid on file, as it stops any daemon `harness start` spawned.
+    writeFileSync(w.pidFile, '2288\n')
+    expect(stopUnderPlatform(os)).toEqual({ ok: true, stopped: null })
+    for (const call of w.fake.calls()) expect(call.filter((word) => ['stop', 'restart'].includes(word))).toEqual([])
   })
 })
 

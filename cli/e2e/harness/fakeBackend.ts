@@ -4,6 +4,11 @@
  * that leaves this machine.
  *
  * - `GET /api/machines`: the account's machines, each `running` or `offline` as the test says.
+ * - `GET /api/agent-messages`: the account's tabs and who is in each, as the test sets them.
+ * - `PATCH /api/agent-messages/tabs/:id`: one tab's old Agent Messages flag turned, as an older window turns it
+ *   through its daemon; no daemon reads it now (the account's experiment decides).
+ * - `GET`/`PATCH /api/experimental-settings`: the account's experiments, every one off until turned on, as the test
+ *   or a daemon turns them; a change is `desk_changed` to every node, as the real backend publishes it.
  * - `/api/adapter-ws`: each daemon's own socket, as the node of its machine. Frames for it arrive as
  *   `{t:'down', connId, frame}`; what it sends comes back as `{t:'up', targetConnId?, commanderEligible?, frame}`.
  * - `/api/device-ws`: a daemon's lane to its owner's other machines, as a device holding a commander
@@ -25,6 +30,13 @@
  *   invitation, answered 200; what a node sends to one of Share's observers (`observer:` connections) is
  *   kept in `targeted`, so a test can open what Share sealed for it.
  *
+ * - The account's device key log, once a test turns it on (`enableDeviceLog`), as the real backend keeps
+ *   it (backend lib/deviceKeyLog.ts): `GET /api/device-keys?since=`, a machine's `devlog_append` over its
+ *   own socket (its own key only), and `device_keys_changed` to every node after each change. Beside it,
+ *   the acknowledgements ("It's mine", lib/e2ee/deviceAck.ts): `GET`/`POST /api/device-keys/acks`,
+ *   checked as the real one checks them — or, with `deviceAcks` off, a backend from before them (404).
+ *   Off, every one of these is a 404, as before.
+ *
  * Everything else is answered 404. Requests are recorded in `seen`, so a test can say what was asked.
  *
  * And it can misbehave, as a relay under stress does: every socket dropped at once, down for a while,
@@ -37,6 +49,11 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { decodeTerminalHop, encodeTerminalHop, parseTerminalBinaryEnvelope, TerminalHopDirection } from '../../src/lib/terminalBinary.js'
+import { checkDevAck } from '../../src/lib/e2ee/deviceAck.js'
+import { applyDevLogEntries, DevLogError, emptyDevLogState, type DevLogEntry, type DevLogHead, type DevLogState } from '../../src/lib/e2ee/deviceLog.js'
+
+/** The account every machine and phone of a fake backend belongs to, as its device key log names it. */
+export const FAKE_ACCOUNT = 'e2e-user'
 
 export interface FakeMachine {
   machineId: string
@@ -67,6 +84,12 @@ const bytes = (raw: RawData): Uint8Array => new Uint8Array(Array.isArray(raw) ? 
 
 export class FakeBackend {
   readonly seen: string[] = []
+  /** What `GET /api/agent-messages` answers: the account's tabs and who is in each; null, a 404. */
+  agentMessages: Record<string, unknown> | null = null
+  /** The account's experiments (backend lib/experimentalSettings.ts): off until turned on. `setExperiment` turns one as
+   *  another computer would, telling every node. */
+  readonly experiments: Record<string, boolean> = {}
+  private experimentsRevision = 0
   private readonly machines = new Map<string, FakeMachine>()
   private readonly online = new Map<string, boolean>()
   private readonly nodes = new Map<string, WebSocket>()
@@ -89,6 +112,10 @@ export class FakeBackend {
   readonly deviceSent: Frame[] = []
   /** What a node sent to a connection that is neither a device's nor a web client's (Share's observers), by id. */
   readonly targeted = new Map<string, Frame[]>()
+  /** The account's device key log and the acknowledgements beside it; null until `enableDeviceLog`. */
+  deviceLog: { entries: DevLogEntry[]; state: DevLogState; acks: unknown[] } | null = null
+  /** Off: a backend from before acknowledgements — their routes answer 404. */
+  deviceAcks = true
 
   private constructor(private readonly server: Server, readonly port: number) {}
 
@@ -108,11 +135,43 @@ export class FakeBackend {
         res.end(json({ success: true, data: { machines: backend.rows() } }))
         return
       }
+      if (req.method === 'GET' && req.url?.split('?')[0] === '/api/agent-messages' && backend.agentMessages) {
+        res.end(json({ success: true, data: backend.agentMessages }))
+        return
+      }
+      // A tab's switch, as the window turns it through its daemon: that tab's flag in what the test set.
+      const tabSwitch = req.method === 'PATCH' ? /^\/api\/agent-messages\/tabs\/([^/?]+)$/.exec(req.url?.split('?')[0] ?? '') : null
+      if (tabSwitch && backend.agentMessages) {
+        let raw = ''
+        req.on('data', (chunk) => { raw += chunk })
+        req.on('end', () => {
+          const tab = (backend.agentMessages!.tabs as Array<Record<string, unknown>>).find((t) => t.id === tabSwitch[1])
+          const enabled = (JSON.parse(raw || '{}') as { enabled?: unknown }).enabled
+          if (!tab || typeof enabled !== 'boolean') { res.statusCode = 404; res.end(json({ success: false, error: { code: 'NOT_FOUND' } })); return }
+          tab.enabled = enabled
+          res.end(json({ success: true, data: { tabId: tab.id, enabled } }))
+        })
+        return
+      }
+      if (req.url?.split('?')[0] === '/api/experimental-settings' && (req.method === 'GET' || req.method === 'PATCH')) {
+        if (req.method === 'GET') { res.end(json({ success: true, data: backend.experimentalSettings() })); return }
+        let raw = ''
+        req.on('data', (chunk) => { raw += chunk })
+        req.on('end', () => {
+          const body = JSON.parse(raw || '{}') as { accountId?: unknown; feature?: unknown; enabled?: unknown }
+          if (body.accountId !== FAKE_ACCOUNT) { res.statusCode = 409; res.end(json({ success: false, error: { code: 'ACCOUNT_CHANGED', message: 'Your account changed.' } })); return }
+          if (typeof body.feature !== 'string' || typeof body.enabled !== 'boolean') { res.statusCode = 400; res.end(json({ success: false, error: { code: 'BAD_REQUEST', message: 'bad body' } })); return }
+          backend.setExperiment(body.feature, body.enabled)
+          res.end(json({ success: true, data: backend.experimentalSettings() }))
+        })
+        return
+      }
       if ((req.method === 'PUT' || req.method === 'DELETE') && /^\/api\/harness-(links|shares)\/[^/?]+$/.test(req.url?.split('?')[0] ?? '')) {
         req.resume()
         res.end(json({ success: true, data: {} }))
         return
       }
+      if (backend.deviceLog && backend.deviceKeysRoute(req, res)) return
       res.statusCode = 404
       res.end(json({ success: false, error: { code: 'NOT_FOUND', message: 'not on the fake backend' } }))
     })
@@ -148,6 +207,81 @@ export class FakeBackend {
   /** A phone or a browser of this account: the token it opens the web socket with. */
   addUser(token: string): void {
     this.userTokens.add(token)
+  }
+
+  // ── the device key log ──────────────────────────────────────────────────────────────────────
+
+  /** Serve the account's device key log (and its acknowledgements) from now on, starting empty. */
+  enableDeviceLog(): void {
+    this.deviceLog = { entries: [], state: emptyDevLogState(FAKE_ACCOUNT), acks: [] }
+  }
+
+  /** Append one signed entry as the real backend does — refused when it does not continue the log or
+   *  breaks a rule — and tell every node. What a phone's `POST /api/device-keys` does, for a test. */
+  appendDeviceEntry(entry: DevLogEntry): { head: DevLogHead } | { error: string; head?: DevLogHead } {
+    const log = this.deviceLog
+    if (!log) return { error: 'NOT_FOUND' }
+    if (entry.seq !== log.state.head.seq + 1 || entry.prev !== log.state.head.hash) return { error: 'STALE_HEAD', head: log.state.head }
+    try {
+      log.state = applyDevLogEntries(log.state, [entry]).state
+    } catch (err) {
+      return { error: err instanceof DevLogError ? err.code : 'BAD_ENTRY' }
+    }
+    log.entries.push(entry)
+    this.deviceKeysChanged()
+    return { head: log.state.head }
+  }
+
+  /** `device_keys_changed` to every node: read the log (and its acknowledgements) again. */
+  private deviceKeysChanged(): void {
+    const head = this.deviceLog?.state.head
+    for (const machineId of this.nodes.keys()) this.sendNode(machineId, '', { type: 'device_keys_changed', payload: { ...head } })
+  }
+
+  /** The device key log's routes; false when the request is not one of them. */
+  private deviceKeysRoute(req: IncomingMessage, res: import('node:http').ServerResponse): boolean {
+    const log = this.deviceLog!
+    const url = new URL(req.url ?? '/', this.httpUrl)
+    const since = Number(url.searchParams.get('since') ?? 0) || 0
+    if (req.method === 'GET' && url.pathname === '/api/device-keys') {
+      res.end(json({ success: true, data: { acct: FAKE_ACCOUNT, head: log.state.head, entries: log.entries.filter((e) => e.seq > since) } }))
+      return true
+    }
+    if (url.pathname !== '/api/device-keys/acks' || !this.deviceAcks) return false
+    if (req.method === 'GET') {
+      const acks = log.acks.filter((a) => (a as { addSeq: number }).addSeq > since)
+      res.end(json({ success: true, data: { acks } }))
+      return true
+    }
+    if (req.method !== 'POST') return false
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      let ack: unknown
+      try { ack = (JSON.parse(Buffer.concat(chunks).toString()) as { ack?: unknown }).ack } catch { ack = null }
+      // Checked as the real backend checks it (backend lib/deviceKeyLog.ts appendDeviceAck).
+      const checked = checkDevAck(log.state, ack)
+      if (!checked.ok) {
+        res.statusCode = 400
+        res.end(json({ success: false, error: { code: checked.code } }))
+        return
+      }
+      const fresh = !log.acks.some((a) => (a as { pub: string }).pub === checked.ack.pub && (a as { signer: string }).signer === checked.ack.signer)
+      if (fresh) log.acks.push(checked.ack)
+      res.end(json({ success: true, data: { created: fresh } }))
+      if (fresh) this.deviceKeysChanged()
+    })
+    return true
+  }
+
+  /** A machine's own append to the log, over its socket: only about itself, as the real backend allows. */
+  private devlogAppend(machineId: string, payload: Record<string, unknown> | undefined): void {
+    const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
+    const entry = payload?.entry as DevLogEntry | undefined
+    const signer = entry && this.deviceLog?.state.active[entry.signer]
+    const own = !!entry && (entry.op === 'add' ? entry.kind === 'machine' && entry.machineId === machineId : signer?.kind === 'machine' && signer.machineId === machineId)
+    const answer = !entry ? { error: 'BAD_ENTRY' } : !own ? { error: 'WRONG_CHANNEL' } : this.appendDeviceEntry(entry)
+    this.sendNode(machineId, '', { type: 'devlog_append_result', payload: { requestId, ...answer } })
   }
 
   /** The web clients bound to a machine now, by connection id. */
@@ -290,6 +424,8 @@ export class FakeBackend {
     let envelope: { t?: string; targetConnId?: string; commanderEligible?: boolean; webEligible?: boolean; frame?: Frame }
     try { envelope = JSON.parse(raw.toString()) } catch { return }
     if (envelope.t !== 'up' || !envelope.frame) return
+    // The backend's own business, answered to this machine alone: never relayed.
+    if (envelope.frame.type === 'devlog_append' && this.deviceLog) { this.devlogAppend(machineId, envelope.frame.payload); return }
     const tagged = { ...envelope.frame, machineId }
     if (envelope.targetConnId) {
       const owner = this.connOwners.get(envelope.targetConnId)
@@ -313,6 +449,19 @@ export class FakeBackend {
     if (client) this.relay(() => {
       if (client.ws.readyState === WebSocket.OPEN) client.ws.send(hop.clientFrame)
     })
+  }
+
+  /** The account's experiments as `GET /api/experimental-settings` answers them. */
+  experimentalSettings(): Record<string, unknown> {
+    const features = { focus_bar_creature: false, share_button: false, devices_tab: false, agents_start_agents: false, agent_pull_request_line: false, agent_messages: false, ...this.experiments }
+    return { accountId: FAKE_ACCOUNT, revision: this.experimentsRevision, features, available: Object.fromEntries(Object.keys(features).map((name) => [name, true])) }
+  }
+
+  /** Turns an experiment of the account, as Settings ▸ Experimental on any computer does: every node hears `desk_changed`. */
+  setExperiment(feature: string, enabled: boolean): void {
+    this.experiments[feature] = enabled
+    this.experimentsRevision++
+    for (const machineId of this.nodes.keys()) this.sendNode(machineId, '', { type: 'desk_changed', payload: { revision: 0 } })
   }
 
   private sendNode(machineId: string, connId: string, frame: Frame): boolean {

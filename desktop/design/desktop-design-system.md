@@ -168,6 +168,10 @@ Avoid repeatedly drawing cards inside a dialog.
   controls do not show a hand cursor. Color is never the only status signal.
 - Increase Contrast strengthens boundaries. Reduce Motion removes optional
   motion. Live terminal content is never blurred or scaled for decoration.
+- The welcome tour (first-run setup and Help ▸ Welcome Tour) has its own two
+  colours: amber `AppPalette.onboardingAccent` for the kicker, the current
+  pager dot and the install bar, and gold `AppPalette.onboardingTagline` for
+  the tagline. Nothing else uses them; actions there stay neutral or blue.
 
 The terminal's chosen color palette remains independent from UI focus blue.
 All modal veils share one 95% token: black in dark appearance, white in light.
@@ -322,7 +326,7 @@ its clone action and an invalid submission reveals inline validation. Do not
 add a duplicate example line or an empty results area beneath an empty field.
 
 **Workspace tabs and pane frames** — tabs share one width, independent of label
-length, selection, activity and shortcut hints. Divide the available tab area
+length, selection and activity. Divide the available tab area
 equally, capped at 256 points; shrink together down to 128 points, then scroll.
 A tab area narrower than 128 points can show one clipped tab. Mirror these limits
 in Flutter and AppKit. Tabs use the 13-point system control face, independent of
@@ -331,12 +335,17 @@ status as one compact group, without permanent number prefixes. Navigation ink
 follows the tab-bar surface, including beside light app content. The default label
 is New Tab. A small right-hand close icon appears on hover, with its 32-point
 target inset 8 points from the outer tab bounds. This puts the cross's center
-16 points inside the curved body edge. Reserve that space before truncating
-the title so hover never crowds the name or status. Holding Command
-temporarily replaces the status with the actual remapped shortcut beside the
-name. An idle tab has no empty status slot; its name centers on its own. Hover
-never moves the name, and Command never changes tab width. Long names truncate
-and retain a full-name tooltip. Selection, dragging, middle-click close and the
+16 points inside the curved body edge. × is the tab's only control: Agent
+Messages' 💬 that sat left of it was removed, since it was easy to hit by mistake
+and turned the tab off (owner, 2026-10-12); the account's Settings ▸ Experimental
+holds that switch now, off by default. At rest the name and status have the whole tab; on hover a name that would run
+into × moves left only as far as it needs, then truncates, so hover never
+crowds the name or status. Holding Command shows the original small shortcut
+label in each tab's status slot. Release or window deactivation restores the
+status; remapped and unbound shortcuts follow the current keymap. An idle tab
+has no empty status slot when Command is released; its name centers
+on its own. Hover never changes tab width. Long names truncate and retain a
+full-name tooltip. Selection, dragging, middle-click close and the
 existing keyboard commands keep their meaning.
 
 Devices and Harness Store use compact 28-point capsules, centered in the

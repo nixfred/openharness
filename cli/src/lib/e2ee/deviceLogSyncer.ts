@@ -16,13 +16,18 @@
  *    account (or by the backend itself) is seen. Decided from the log alone, never from what the trust
  *    group already holds: a roster that outran the log must not hide it.
  *  - history:    what the log says about every add and remove, as this machine verified it.
+ *  - confirm:    "It's mine" here (`dismiss` with `confirm`) is signed and shared beside the log
+ *    (deviceAck.ts), and one another trusted device shared takes a key off `pending` here — so the person
+ *    confirms a new device once, on any of their devices, not on every one.
  */
 import {
   applyDevLogEntries, compareDevLogHead, DevLogError, devLogHash, devLogMessage, emptyDevLogState, nextDevLogEntry,
   parseDevLogEntry, signDevLogEntry, type DevLogEntry, type DevLogHead, type DevLogMember, type DevLogState,
 } from './deviceLog.js'
+import { checkDevAck, DEVACK_VERSION, signDevAck, type DevAck } from './deviceAck.js'
 import {
-  DEVLOG_DEPARTED, DEVLOG_RECENT, type DevLogConflict, type DevLogDeparted, type DevLogFile, type DevLogFreeze, type DeviceLogStore,
+  DEVLOG_DEPARTED, DEVLOG_RECENT, type DevLogConfirmed, type DevLogConflict, type DevLogDeparted, type DevLogFile, type DevLogFreeze,
+  type DeviceLogStore,
 } from './deviceLogStore.js'
 import { devLogHistory, type DevLogHistoryRow } from './deviceHistory.js'
 import { b64d, fingerprint, verify } from './core.js'
@@ -66,6 +71,13 @@ export interface DeviceLogSyncerDeps {
   fetch: (since: number) => Promise<DeviceLogFetched | null>
   /** Append one signed entry; null when the backend could not be reached. */
   append: (entry: DevLogEntry) => Promise<DeviceLogAppendAnswer | null>
+  /** The acknowledgements ("It's mine", deviceAck.ts) of keys added after entry `since`, as the backend
+   *  keeps them — unchecked: every one is judged here. null when there are none to read (a backend from
+   *  before them answers 404, which is null too). Absent: none are ever read. */
+  fetchAcks?: (since: number) => Promise<unknown[] | null>
+  /** Keep one acknowledgement this machine signed; false when the backend did not take it. Absent: none
+   *  is shared, and "It's mine" here stays here. */
+  postAck?: (ack: DevAck) => Promise<boolean>
   /** This machine is moving from one account's log to another's (a sign-in by hand, or a review of the
    *  other account's list): put away what `from` trusted here and bring back what `to` did. Called before
    *  the new log is written, so what it snapshots as already trusted (`trustedNow`) is `to`'s. */
@@ -110,7 +122,8 @@ export interface DeviceLogListing {
   head: DevLogHead | null
   frozen: DevLogFreeze | null
   self: string
-  members: Array<DevLogMember & { fingerprint: string; self: boolean; firstSeen?: number; pending: boolean; suspended: boolean }>
+  /** `confirmed`: another trusted device said "It's mine" for it while it was new here — which, and when. */
+  members: Array<DevLogMember & { fingerprint: string; self: boolean; firstSeen?: number; pending: boolean; suspended: boolean; confirmed?: DevLogConfirmed }>
   /** Machines whose own copy of the log is frozen, as their last `group_sync` said. */
   frozenPeers: string[]
   /** Keys that joined after this machine did and nobody has marked as seen. */
@@ -481,6 +494,10 @@ export class DeviceLogSyncer {
       this.endJoin()
     }
     this.reconcile()
+    // After the entries, so a key added and confirmed while this machine was away is first announced, as
+    // every new key is — the one-time "New device: X" never waits on, or is skipped for, anyone's word —
+    // and only then taken off the list.
+    await this.applyAcks()
   }
 
   /**
@@ -604,6 +621,80 @@ export class DeviceLogSyncer {
     return uniq(keys ?? []).filter((k) => state.active[k] !== undefined)
   }
 
+  /** The confirmed marks of keys still active, as a file field (none when there are none). */
+  private keptConfirmed(marks: Record<string, DevLogConfirmed> | undefined, state: DevLogState): { confirmed?: Record<string, DevLogConfirmed> } {
+    const kept = Object.entries(marks ?? {}).filter(([k]) => state.active[k] !== undefined)
+    return kept.length ? { confirmed: Object.fromEntries(kept) } : {}
+  }
+
+  /**
+   * Take off `pending` every key another of the person's trusted devices said "It's mine" for
+   * (deviceAck.ts), and remember which device did ("Confirmed on <label>").
+   *
+   * The backend's word counts for nothing: each acknowledgement must check out against the log as THIS
+   * machine verified it (signature, a signer active on it, the key added at the entry it names), and
+   * against this machine's own marks. The key must still be new here and not suspended — an
+   * acknowledgement never lifts a suspension; only the person does, on this machine, with "It's mine" on
+   * that very device. The signer must be a device this machine trusts: not new here itself (two new
+   * devices must not vouch for each other), not suspended, not removed (a departed key is not active),
+   * not unpaired or tombstoned here, and not this machine (its own "It's mine" already took the key off).
+   * Nothing is read while the log is frozen or not yet this sign-in's. Never throws.
+   */
+  private async applyAcks(): Promise<void> {
+    const fetchAcks = this.deps.fetchAcks
+    if (!fetchAcks) return
+    try {
+      const candidates = this.ackable(this.deps.store.read())
+      // Nothing new here: nothing to ask (and no request at all, on every read, for most of a device's life).
+      if (!candidates.length) return
+      const raw = await fetchAcks(Math.min(...candidates.map((m) => m.seq)) - 1)
+      if (!raw?.length) return
+      // Judged against the file as it is NOW: the log may have moved, or a key been looked at, meanwhile.
+      const file = this.deps.store.read()
+      const state = file.state
+      const open = new Set(this.ackable(file).map((m) => m.pub))
+      if (!state || !open.size) return
+      const selfPub = this.deps.identity().pub
+      const pending = new Set(file.pending ?? [])
+      const suspended = new Set(this.suspendedKeys())
+      const confirmed: Record<string, DevLogConfirmed> = {}
+      for (const r of raw) {
+        const checked = checkDevAck(state, r)
+        if (!checked.ok) continue
+        const { ack } = checked
+        if (!open.has(ack.pub) || confirmed[ack.pub]) continue
+        if (ack.signer === selfPub || pending.has(ack.signer) || suspended.has(ack.signer)
+          || this.deps.blocked(ack.signer) || this.deps.tombstoned(ack.signer)) continue
+        confirmed[ack.pub] = { by: ack.signer, label: state.active[ack.signer].label, at: this.now() }
+      }
+      const pubs = Object.keys(confirmed)
+      if (!pubs.length) return
+      this.deps.store.write({
+        ...file,
+        pending: (file.pending ?? []).filter((k) => !confirmed[k]),
+        ...this.keptConfirmed({ ...file.confirmed, ...confirmed }, state),
+      })
+      for (const pub of pubs) {
+        const c = confirmed[pub]
+        this.deps.log?.(`[devlog] ${state.active[pub].label || '(no name)'} (${fp(pub)}) was confirmed as yours on ${c.label || 'another device'} (${fp(c.by)}): no longer new here`)
+      }
+      this.deps.changed?.()
+    } catch (err) {
+      // The list stays as it was; the next read asks again.
+      this.deps.log?.(`[devlog] could not read which devices were confirmed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** The keys an acknowledgement could take off `pending` in `file`: new here, still active, not
+   *  suspended, not this machine — and none at all from a log that is frozen or not this sign-in's. */
+  private ackable(file: DevLogFile): DevLogMember[] {
+    const state = file.state
+    if (!state || file.frozen || !this.ownsFile(file)) return []
+    const selfPub = this.deps.identity().pub
+    const suspended = new Set(this.suspendedKeys())
+    return uniq(file.pending ?? []).map((k) => state.active[k]).filter((m): m is DevLogMember => !!m && m.pub !== selfPub && !suspended.has(m.pub))
+  }
+
   /** The notice for a `remove` that took `gone` out, or null when there is nothing to say: this
    *  machine's own removal, this machine's own key, or a removal from before it joined. `known` says
    *  what each key was called, and what kind it was, BEFORE this removal — the remove entry's own label
@@ -673,7 +764,7 @@ export class DeviceLogSyncer {
     const conflictOver = !!file.conflict && (!!applied.state.active[selfPub] || !applied.state.active[file.conflict.pub])
     // A key taken into the "already on your account" list after that list was acknowledged: show it.
     const unseen = joining && file.baselineSeen !== false && applied.added.some((m) => m.pub !== selfPub)
-    const { conflict: _c, ...rest } = file
+    const { conflict: _c, confirmed: _k, ...rest } = file
     this.deps.store.write(this.carrySuspensions({
       ...rest,
       ...(unseen ? { baselineSeen: false } : {}),
@@ -688,6 +779,7 @@ export class DeviceLogSyncer {
       announced: this.prune([...announced, ...toAnnounce.map((m) => m.pub)], applied.state),
       suspended: this.prune(file.suspended, applied.state),
       ...this.withDeparted(file.departed, departed),
+      ...this.keptConfirmed(file.confirmed, applied.state),
     }))
     this.trustState(applied.state, bootstrap ? Object.values(applied.state.active) : [...applied.added, ...applied.relabeled])
     for (const m of applied.removed) this.deps.drop(m.pub)
@@ -1049,8 +1141,24 @@ export class DeviceLogSyncer {
    * when it is only part of a list that was looked at; `pub` — "It's mine" on that very device — is the
    * person vouching for it, and lifts its suspension here (and in every kept account's log). A key that
    * joined and left before anyone looked (`departed`) is cleared the same way: named, or every one.
+   *
+   * `confirm` — "It's mine", pressed for ONE device (`pub`, or `pubs` naming only it) — also tells the
+   * account's other devices, with an acknowledgement this machine signs (deviceAck.ts): they stop showing
+   * it as New too. Never for a list that was only looked at, every device at once, or the baseline: only
+   * an explicit "It's mine" vouches. Marking it seen here is done before this returns; the promise says
+   * whether the other devices were told (false: the backend did not take it, or there was nothing to tell).
    */
-  dismiss(opts: { pub?: string; pubs?: string[]; baseline?: boolean } = {}): void {
+  dismiss(opts: { pub?: string; pubs?: string[]; baseline?: boolean; confirm?: boolean } = {}): Promise<boolean> {
+    const one = opts.pub ?? (opts.pubs?.length === 1 ? opts.pubs[0] : undefined)
+    const wasNew = one !== undefined && (this.marks().pending ?? []).includes(one)
+    this.markSeen(opts)
+    // Only a key that was new here, and that this machine trusts now: one a fork suspended here (and
+    // "It's mine" did not lift) is not this machine's to vouch for.
+    if (!opts.confirm || opts.baseline || one === undefined || !wasNew || this.suspendedKeys().includes(one)) return Promise.resolve(false)
+    return this.shareAck(one)
+  }
+
+  private markSeen(opts: { pub?: string; pubs?: string[]; baseline?: boolean }): void {
     const file = this.marks()
     if (!file.state) return
     const suspended = file.suspended ?? []
@@ -1075,6 +1183,29 @@ export class DeviceLogSyncer {
       this.deps.resume?.()
     }
     this.deps.changed?.()
+  }
+
+  /** Sign "It's mine" for `pub` and hand it to the backend for the account's other devices. Only from a
+   *  log this machine verified, is on, and that is not frozen (a frozen list is not one to vouch from),
+   *  about a key on it that is not this machine. Never throws. */
+  private async shareAck(pub: string): Promise<boolean> {
+    const post = this.deps.postAck
+    if (!post) return false
+    try {
+      const file = this.deps.store.read()
+      const state = file.state
+      const { pub: selfPub, priv } = this.deps.identity()
+      if (!state || file.frozen || !this.ownsFile(file) || pub === selfPub || !state.active[selfPub]) return false
+      const member = state.active[pub]
+      if (!member) return false
+      const ack = signDevAck({ v: DEVACK_VERSION, acct: state.acct, pub, addSeq: member.seq, signer: selfPub, at: this.now() }, priv)
+      const kept = await post(ack)
+      if (!kept) this.deps.log?.(`[devlog] could not tell your other devices that ${member.label || '(no name)'} (${fp(pub)}) is yours: they still show it as new`)
+      return kept
+    } catch (err) {
+      this.deps.log?.(`[devlog] could not share "It's mine": ${err instanceof Error ? err.message : String(err)}`)
+      return false
+    }
   }
 
   /**
@@ -1152,7 +1283,11 @@ export class DeviceLogSyncer {
     const suspended = file.suspended ?? []
     const members = Object.values(file.state?.active ?? {})
       .sort((a, b) => a.seq - b.seq)
-      .map((m) => ({ ...m, fingerprint: fp(m.pub), self: m.pub === selfPub, pending: pending.includes(m.pub), suspended: suspended.includes(m.pub) }))
+      .map((m) => {
+        const row = { ...m, fingerprint: fp(m.pub), self: m.pub === selfPub, pending: pending.includes(m.pub), suspended: suspended.includes(m.pub) }
+        const confirmed = file.confirmed?.[m.pub]
+        return confirmed ? { ...row, confirmed } : row
+      })
     const labels = new Map(members.map((m) => [m.pub, m.label]))
     const frozenPeers = [...this.frozenPeers].filter(([, frozen]) => frozen).map(([pub]) => labels.get(pub) ?? fp(pub))
     // Each row carries when this machine first applied it (never the entry's self-chosen `at`).

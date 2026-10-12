@@ -68,6 +68,10 @@ export async function serviceCommand(argv: string[], deps: ServiceCommandDeps): 
     else deps.err('harness service runs harnessd under launchd (macOS) or systemd (Linux); this computer has neither.')
     return verb === 'status' ? 0 : 1
   }
+  if (deps.service.os && verb !== 'status') {
+    deps.err(`Harness OS runs harnessd under ${deps.service.target} already: \`harness start\` and \`harness stop\` go through it, and there is nothing to ${verb}.`)
+    return 1
+  }
   if (verb === 'install') return installService(deps)
   if (verb === 'uninstall') return uninstallService(deps)
   return serviceStatus(deps, json)

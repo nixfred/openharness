@@ -131,9 +131,11 @@ function hasPlaceholderSgr(value: string): boolean {
  * effect rather than treating "no change" as a change.
  *
  * Grey is judged by the colour itself: equal channels, and dark enough to read as secondary next to
- * the near-white a composer draws real text in. OpenCode's placeholder is `38;2;128;128;128` and its
- * own text `38;2;255;255;255`; the 256-colour ramp (232–255) and SGR 90 are the same intent spelled
- * differently.
+ * the near-white a composer draws real text in. OpenCode 1.18's placeholder is `38;2;128;128;128`,
+ * OpenCode 2's `38;2;180;180;180` (measured on 2.0.24: above the old 0xb0 bound, so a new harness read
+ * as holding a draft and every model switch was AGENT_BUSY), and its own text `38;2;255;255;255`;
+ * up to 0xc0 is still well short of that white. The 256-colour ramp (232–255) and SGR 90 are the
+ * same intent spelled differently.
  */
 function sgrMutedForeground(params: readonly string[]): boolean | null {
   for (let index = 0; index < params.length; index += 1) {
@@ -143,7 +145,7 @@ function sgrMutedForeground(params: readonly string[]): boolean | null {
       if (kind === '2') {
         const [r, g, b] = [params[index + 2], params[index + 3], params[index + 4]].map(Number)
         if (![r, g, b].every(Number.isFinite)) return null
-        return r === g && g === b && r >= 0x40 && r <= 0xb0
+        return r === g && g === b && r >= 0x40 && r <= 0xc0
       }
       if (kind === '5') {
         const n = Number(params[index + 2])

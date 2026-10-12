@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fakePlatform, type FakePlatform } from '../testing/fakePlatform.js'
 import {
-  COMMAND_TIMEOUT_MS, LAUNCHD_LABEL, PLATFORM_ENV, PlatformService, RESTART_THROTTLE_S, STOP_TIMEOUT_S, SYSTEMD_UNIT,
+  COMMAND_TIMEOUT_MS, LAUNCHD_LABEL, OS_SYSTEMD_UNIT, OS_UNIT_FILE, PLATFORM_ENV, PlatformService, RESTART_THROTTLE_S, STOP_TIMEOUT_S, SYSTEMD_UNIT,
   currentUid, defaultPlatformDeps, launchdPlist, platformFor, platformFromEnv, systemdUnit,
   type CommandResult, type PlatformDeps, type ServiceDefinition,
 } from './platform.js'
@@ -369,6 +369,52 @@ describe('PlatformService over fake systemctl', { timeout: FAKE_COMMANDS_TIMEOUT
     expect(existsSync(service.file)).toBe(true)
     fake.set({ fail: { 'systemctl show': { status: 1, stderr: 'Failed to connect to bus' } }, linger: null })
     expect(service.inspect()).toMatchObject({ registered: false, linger: null, unreachable: expect.stringContaining('Failed to connect to bus') })
+  })
+})
+
+describe('Harness OS\'s own unit', () => {
+  const unitFile = { [OS_UNIT_FILE]: '[Service]\nExecStart=/usr/bin/harness start --foreground\n' }
+
+  it('is the package\'s harness-daemon.service, and only under systemd', () => {
+    const { deps } = stubDeps({}, { ...unitFile })
+    const service = new PlatformService('systemd', deps, true)
+    expect(service.file).toBe(OS_UNIT_FILE)
+    expect(service.target).toBe(OS_SYSTEMD_UNIT)
+    expect(() => new PlatformService('launchd', deps, true)).toThrow('Harness OS runs harnessd under systemd')
+  })
+
+  it('is never written, registered or removed from here, and counts as this daemon\'s while it is on disk', () => {
+    const { deps, calls, files } = stubDeps({}, { ...unitFile })
+    const service = new PlatformService('systemd', deps, true)
+    expect(service.write(definition())).toBe(false)
+    expect(service.current(definition())).toBe(true)
+    expect(service.ownedBy('/anything/harness.log')).toBe(true)
+    expect(service.register()).toEqual({ ok: false, detail: `Harness OS runs harnessd under ${OS_SYSTEMD_UNIT}` })
+    expect(service.unregister()).toEqual({ ok: false, detail: `Harness OS runs harnessd under ${OS_SYSTEMD_UNIT}` })
+    service.discard()
+    expect(files).toEqual(unitFile)
+    expect(calls).toEqual([])
+    expect(new PlatformService('systemd', stubDeps({}).deps, true).ownedBy('/anything/harness.log')).toBe(false)
+  })
+
+  it('starts the unit without waiting on its readiness check, and stops its main process with a signal, never a stop job', () => {
+    const { deps, calls } = stubDeps({ 'systemctl --user show harness-daemon.service --property=MainPID': ok('MainPID=1347\n') }, { ...unitFile })
+    const service = new PlatformService('systemd', deps, true)
+    expect(service.start(false)).toEqual({ ok: true })
+    expect(service.stop()).toEqual({ ok: true })
+    expect(calls).toEqual([
+      `systemctl --user reset-failed ${OS_SYSTEMD_UNIT}`,
+      `systemctl --user start --no-block ${OS_SYSTEMD_UNIT}`,
+      `systemctl --user show ${OS_SYSTEMD_UNIT} --property=MainPID`,
+      `systemctl --user kill --kill-who=main --signal=SIGTERM ${OS_SYSTEMD_UNIT}`,
+    ])
+  })
+
+  it('counts as registered once systemd has loaded it: the OS pulls it in with the screen rather than enabling it', () => {
+    const { deps } = stubDeps({ 'systemctl --user show': ok('LoadState=loaded\nUnitFileState=disabled\nActiveState=active\nSubState=running\nMainPID=1347\nResult=success\n') }, { ...unitFile })
+    expect(new PlatformService('systemd', deps, true).inspect()).toMatchObject({ installed: true, registered: true, pid: 1347, state: 'active (running)', target: OS_SYSTEMD_UNIT })
+    const { deps: gone } = stubDeps({ 'systemctl --user show': ok('LoadState=not-found\nActiveState=inactive\nMainPID=0\n') })
+    expect(new PlatformService('systemd', gone, true).inspect()).toMatchObject({ installed: false, registered: false, pid: null })
   })
 })
 

@@ -14,7 +14,9 @@ import '../store/experimental_harnesses.dart';
 import '../core/machine_resources.dart';
 import '../core/models.dart'
     show Agent, ConnectionStatus, GridModels, GridModel;
+import '../core/relative_time.dart';
 
+import 'account_devices.dart' show AccountDevice;
 import 'app_state.dart';
 import 'agent_switch_handoff.dart';
 import 'harness_placement.dart';
@@ -22,6 +24,7 @@ import 'pane_arrangement.dart';
 import 'swarm_catalog.dart';
 import 'swarm_navigation.dart';
 import 'harness_sessions.dart';
+import 'machine_devices.dart';
 import 'search_when.dart';
 import 'session_content_search.dart';
 
@@ -29,6 +32,15 @@ const kSwarmSearchHint = 'Search harnesses';
 const kHarnessPickerHint = kSwarmSearchHint;
 
 const kSwarmCreateRowId = 'create:harness';
+
+/// The Machines picker's two runs of rows: the account's computers, then its phones and apps.
+enum MachineSearchSection {
+  computers('Computers'),
+  phones('Phones & apps');
+
+  const MachineSearchSection(this.label);
+  final String label;
+}
 
 typedef SwarmGroupScope = ({
   String id,
@@ -244,18 +256,11 @@ class SwarmSearchController extends ChangeNotifier {
     ].any((word) => word.contains(words) || words.contains(word));
   }
 
-  /// A section's heading in the list. The downloads, chat models' and decision models', name the
-  /// machine they are for.
+  /// A section's heading in the list. The downloads name the machine they are for.
   String modelSectionLabel(ModelSearchSection section) =>
-      models != null &&
-          (section == ModelSearchSection.catalog ||
-              section == ModelSearchSection.jevCatalog)
-      ? models!.catalogHeadingFor(section)
+      section == ModelSearchSection.catalog && models != null
+      ? models!.catalogHeading
       : section.label;
-
-  /// A Jev (System One) model's row: nothing to Use, its pane says how to call it.
-  bool isJevRow(SwarmDestination? row) =>
-      models?.entries[row?.modelId]?.isJev == true;
 
   String? modelRowAction(SwarmDestination row) {
     final entry = models?.entries[row.modelId];
@@ -264,14 +269,6 @@ class SwarmSearchController extends ChangeNotifier {
         ? 'Use'
         : canGetModel(row)
         ? 'Get'
-        : canStartJev(row)
-        ? 'Start'
-        // A Jev model on a grid: Enter copies how to call it — a resting grid wakes on that call,
-        // so its rest is the pane's to say, not the row's.
-        : entry.isJev &&
-              entry.gridModel != null &&
-              entry.gridModel!.unavailable == null
-        ? 'Copy'
         : null;
   }
 
@@ -299,11 +296,7 @@ class SwarmSearchController extends ChangeNotifier {
     // A subscription says how much of it is left — the one figure worth a glance; Enter on it is
     // the preview's to say. Other rows with no weights here say what Enter does.
     if (entry.subscription != null) return entry.status;
-    if (local == null) {
-      return _jevServing(entry)
-          ? 'Serving'
-          : modelRowAction(row) ?? entry.status;
-    }
+    if (local == null) return modelRowAction(row) ?? entry.status;
     final owner = entry.controller ?? catalog.manager;
     final operation = owner.operationFor(local);
     if (operation?.active == true ||
@@ -316,15 +309,6 @@ class SwarmSearchController extends ChangeNotifier {
     if (usingModelId == row.modelId) {
       return local.downloaded ? 'Starting' : 'Downloading';
     }
-    // A decision model on a grid says it is serving. Enter copies how to call it, which the pane and
-    // its hint say; "Copy" at the end of the row read as the model's state.
-    if (_jevServing(entry)) return 'Serving';
-    // A decision model of yours says one of two things: Serving, or Start. "Running" (its engine up while
-    // the grid sleeps) is serving — the first call wakes the grid — and "Downloaded" beside Serving and
-    // Start read as a third state to work out, for a model that is only ever started.
-    if (entry.isJev && local.downloaded) {
-      return local.running ? 'Serving' : 'Start';
-    }
     return modelRowAction(row) ??
         (local.running
             ? 'Running'
@@ -332,12 +316,6 @@ class SwarmSearchController extends ChangeNotifier {
             ? 'Downloaded'
             : null);
   }
-
-  /// A decision model a grid serves now, to be called — its row says Serving, live.
-  bool _jevServing(ModelSearchEntry entry) =>
-      entry.isJev &&
-      entry.gridModel != null &&
-      entry.gridModel!.unavailable == null;
 
   static const inUseWord = '● In use';
 
@@ -392,7 +370,7 @@ class SwarmSearchController extends ChangeNotifier {
     if (entry == null || catalog == null) return false;
     if (modelRowInUse(row)) return true;
     final local = entry.local;
-    if (local == null) return _jevServing(entry);
+    if (local == null) return false;
     final owner = entry.controller ?? catalog.manager;
     return owner.operationFor(local)?.active == true ||
         owner.pendingId == local.id ||
@@ -427,13 +405,9 @@ class SwarmSearchController extends ChangeNotifier {
     return '${size.padLeft(6)}  ${speed.padLeft(9)}';
   }
 
-  /// A chat model's download, folded under "More models" past the first few. Never a Jev model's: its
-  /// own section is the only place it is offered, and it ranks after every chat download, so folding
-  /// it with them hid it.
-  bool _foldedDownload(SwarmDestination row) {
-    final entry = models?.entries[row.modelId];
-    return entry != null && entry.needsDownload && !entry.isJev;
-  }
+  /// A download, folded under "More models" past the first few.
+  bool _foldedDownload(SwarmDestination row) =>
+      models?.entries[row.modelId]?.needsDownload == true;
 
   bool canGetModel(SwarmDestination? row) {
     if (!isModelMode) return false;
@@ -453,46 +427,16 @@ class SwarmSearchController extends ChangeNotifier {
     if (!canGetModel(row)) return null;
     final entry = models!.entries[row.modelId]!;
     final owner = entry.controller!;
-    // A Jev model's Get is the whole of it — download, an engine new enough to serve it, and the model
-    // on the grid — since nothing else would ever start one.
     await owner.control(
       entry.local!,
-      entry.isJev || !owner.supportsDownload ? 'start' : 'download',
+      owner.supportsDownload ? 'download' : 'start',
     );
     return owner.error;
-  }
-
-  /// A Jev model of yours that is downloaded and not running: Start runs it on your grid, beside the
-  /// models already there.
-  bool canStartJev(SwarmDestination? row) {
-    if (!isModelMode) return false;
-    final entry = models?.entries[row?.modelId];
-    final local = entry?.local, owner = entry?.controller;
-    return entry != null &&
-        entry.isJev &&
-        local != null &&
-        owner != null &&
-        local.downloaded &&
-        !local.running &&
-        local.canStart &&
-        owner.operationFor(local)?.active != true &&
-        owner.inventoryAvailable &&
-        !owner.busy &&
-        owner.machine?.connectionStatus == ConnectionStatus.connected &&
-        owner.machine?.needsLink == false;
-  }
-
-  Future<String?> startJev(SwarmDestination row) async {
-    if (!canStartJev(row)) return null;
-    final entry = models!.entries[row.modelId]!;
-    await entry.controller!.control(entry.local!, 'start');
-    return entry.controller!.error;
   }
 
   String? modelUseReason(SwarmDestination? row) {
     final entry = models?.entries[row?.modelId];
     if (entry == null || canSelectModel(row)) return null;
-    if (entry.isJev) return 'Jev model';
     if (modelSelectionEngine == null) return 'No active harness';
     if (entry.subscription case final subscription?) {
       if (subscription['engine'] != modelSelectionEngine) {
@@ -618,10 +562,7 @@ class SwarmSearchController extends ChangeNotifier {
       }
     }
     final offered = entry?.gridModel;
-    // A Jev model answers decisions, not a harness's turns: there is nothing to run on it.
-    if (offered == null || offered.unavailable != null || offered.decision) {
-      return null;
-    }
+    if (offered == null || offered.unavailable != null) return null;
     for (final section in _modelChoices!.sections) {
       if (section.name != offered.grid && !(section.own && entry!.own)) {
         continue;
@@ -679,7 +620,6 @@ class SwarmSearchController extends ChangeNotifier {
     return model != null &&
         owner != null &&
         entry!.own &&
-        !entry.isJev &&
         model.downloaded &&
         !model.running &&
         model.canStart &&
@@ -712,22 +652,18 @@ class SwarmSearchController extends ChangeNotifier {
   /// running on that machine is stopped first ([otherRunningModel]): it runs one at a time.
   bool canGetModelForUse(SwarmDestination? row) =>
       canGetModel(row) &&
-      !models!.entries[row!.modelId]!.isJev &&
       modelSelectionEngine != null &&
       _modelChoices?.reachable == true &&
       _modelChoices?.canRunLocally(modelSelectionEngine) == true &&
-      models!.entries[row.modelId]!.own;
+      models!.entries[row!.modelId]!.own;
 
-  /// Another chat model of yours running on [row]'s machine — the one to stop before [row]'s can run.
-  /// Never a Jev model: it runs beside chat models, and Use on a chat model stopped one.
+  /// Another model of yours running on [row]'s machine — the one to stop before [row]'s can run.
   LocalModel? otherRunningModel(SwarmDestination? row) {
     final entry = models?.entries[row?.modelId];
     final local = entry?.local, owner = entry?.controller;
-    if (local == null || owner == null || local.decision) return null;
+    if (local == null || owner == null) return null;
     return owner.localModels
-        .where(
-          (model) => model.canStop && model.id != local.id && !model.decision,
-        )
+        .where((model) => model.canStop && model.id != local.id)
         .firstOrNull;
   }
 
@@ -1145,6 +1081,8 @@ class SwarmSearchController extends ChangeNotifier {
       : isModelMode
       ? '[ Add ]'
       : 'New Harness';
+
+  /// What the create row's preview says, in full: the steps, for Add machine.
   String get createDescription => isMachineMode
       ? 'On the other computer:\n\n1. Install the app or CLI.\n2. Sign in to the same account.\n\nIt appears here and connects on its own.'
       : isModelMode
@@ -1153,6 +1091,13 @@ class SwarmSearchController extends ChangeNotifier {
             'fal.ai or Replicate: harness agents can call it as a tool.\n\n'
             'The key stays on this computer.'
       : 'Choose a harness, machine, and project.';
+
+  /// The create row's own subtitle, one line that says something by itself: a row shows only its
+  /// first line, and Add machine's first line of [createDescription] is only "On the other
+  /// computer:". The steps stay in the preview beside it.
+  String get createDetail => isMachineMode
+      ? 'Install Harness there and sign in to the same account'
+      : createDescription;
   SwarmGroupScope? _groupScope;
   bool get canGoBack => _groupScope != null;
   String? get scopedBranch => _groupScope?.branch;
@@ -1412,8 +1357,8 @@ class SwarmSearchController extends ChangeNotifier {
           ? 'create:$scopePrefix'
           : kSwarmCreateRowId,
       title: title,
-      detail: name ?? createDescription,
-      terminalDetail: createDescription,
+      detail: name ?? createDetail,
+      terminalDetail: createDetail,
       swarmId: null,
       current: false,
       isCreate: true,
@@ -1469,13 +1414,9 @@ class SwarmSearchController extends ChangeNotifier {
       ? 'Use'
       : canGetModel(row)
       ? 'Get'
-      : canStartJev(row)
-      ? 'Start'
-      : isJevRow(row) && models!.entries[row!.modelId]!.gridModel != null
-      ? 'Copy request'
       : row?.isModel == true
       ? 'Unavailable'
-      : setupLayout && row?.isMachine == true
+      : row?.isAccountDevice == true || (setupLayout && row?.isMachine == true)
       ? 'Manage'
       : row?.isStoreEntry == true
       ? 'Open in Store'
@@ -1686,6 +1627,147 @@ class SwarmSearchController extends ChangeNotifier {
     }
   }
 
+  MachineDevices? _machineDevices;
+
+  /// The account's signed-in devices, while the picker lists machines: read the first time it does,
+  /// and kept for the rest of the visit.
+  MachineDevices? get machineDevices => _machineDevices;
+
+  MachineDevices? _ensureMachineDevices() {
+    if (_disposed || history != null) return _machineDevices;
+    if (_machineDevices case final devices?) return devices;
+    final devices = _machineDevices = MachineDevices(app)
+      ..addListener(_machineDevicesChanged);
+    // Read after this filter: an answer that is already there would otherwise filter again from
+    // inside it.
+    scheduleMicrotask(() {
+      if (!_disposed && identical(_machineDevices, devices)) devices.start();
+    });
+    return devices;
+  }
+
+  void _machineDevicesChanged() {
+    if (_disposed || !isMachineMode) return;
+    final previousSelection = selected?.id;
+    _filter(keepOrder: true);
+    if (previousSelection != null) {
+      final index = rows.indexWhere((row) => row.id == previousSelection);
+      if (index >= 0) {
+        cursor = index;
+        _selectedId = previousSelection;
+      }
+    }
+    notifyListeners();
+  }
+
+  /// Which run of the Machines picker [row] belongs to.
+  MachineSearchSection machineSection(SwarmDestination row) =>
+      row.isAccountDevice && !row.deviceIsComputer
+      ? MachineSearchSection.phones
+      : MachineSearchSection.computers;
+
+  /// Selects the device row for [pub] — a deep link to one device (a new one to review). False when
+  /// the list holds no such row (yet).
+  bool selectDevice(String pub) {
+    final index = rows.indexWhere(
+      (row) =>
+          row.devicePub == pub ||
+          (row.isMachine &&
+              _machineDevices?.forMachine(row.machineId!)?.pub == pub),
+    );
+    if (index < 0) return false;
+    if (index != cursor) move(index - cursor);
+    return true;
+  }
+
+  /// Selects the first phone or app, for a way in that is about them (Add Phone's Manage devices…).
+  bool selectFirstPhone() {
+    final index = rows.indexWhere(
+      (row) => machineSection(row) == MachineSearchSection.phones,
+    );
+    if (index < 0) return false;
+    if (index != cursor) move(index - cursor);
+    return true;
+  }
+
+  final _decoratedMachines =
+      <String, (SwarmDestination, int, SwarmDestination)>{};
+
+  /// The machines, and beside them every device signed in to the account that is not one: phones,
+  /// browsers, and a computer with no machine record. A machine's row adds what its key says — this
+  /// computer's code, when another was last active, whether it is new.
+  List<SwarmDestination> _machineCandidates() {
+    final machines = _catalog.where((row) => row.isMachine).toList();
+    final devices = _ensureMachineDevices();
+    if (devices == null || devices.devices == null) return machines;
+    final ids = {for (final row in machines) row.machineId!};
+    final now = DateTime.now();
+    return [
+      for (final row in machines) _machineRow(row, devices, now),
+      for (final device in devices.rows(ids)) _deviceRow(device, devices, now),
+    ];
+  }
+
+  SwarmDestination _machineRow(
+    SwarmDestination row,
+    MachineDevices devices,
+    DateTime now,
+  ) {
+    final device = devices.forMachine(row.machineId!);
+    if (device == null) return row;
+    final cached = _decoratedMachines[row.id];
+    if (cached != null &&
+        identical(cached.$1, row) &&
+        cached.$2 == devices.stamp) {
+      return cached.$3;
+    }
+    final local =
+        device.self || app.stateOf(row.machineId!)?.isLocalMachine == true;
+    final code = device.fingerprint.split('·').first;
+    final decorated = SwarmDestination(
+      id: row.id,
+      title: row.title,
+      detail: [
+        row.detail,
+        if (local) ...[
+          'This computer',
+          if (code.isNotEmpty) 'code $code…',
+        ] else
+          activityPhrase(
+            lastSeen: device.lastSeen,
+            addedAt: device.addedAt,
+            now: now,
+          ),
+        if (device.suspended) 'Suspended' else if (devices.isNew(device)) 'New',
+      ].join(' · '),
+      machineId: row.machineId,
+      swarmId: row.swarmId,
+      current: row.current,
+      members: row.members,
+      searchFields: [...row.fields.skip(1), device.fingerprint, device.label],
+    );
+    _decoratedMachines[row.id] = (row, devices.stamp, decorated);
+    return decorated;
+  }
+
+  SwarmDestination _deviceRow(
+    AccountDevice device,
+    MachineDevices devices,
+    DateTime now,
+  ) => SwarmDestination(
+    id: 'device:${device.pub}',
+    devicePub: device.pub,
+    deviceIsComputer: device.isMachine,
+    title: device.label.trim().isEmpty ? 'Unnamed device' : device.label.trim(),
+    detail: devices.detail(device, now: now),
+    swarmId: null,
+    current: false,
+    searchFields: [
+      device.fingerprint,
+      device.isMachine ? 'computer' : 'app phone browser',
+    ],
+  );
+
   void _filter({bool keepOrder = false}) {
     final previous = rows;
     if (isAgentMode) {
@@ -1778,7 +1860,7 @@ class SwarmSearchController extends ChangeNotifier {
         : isProjectMode
         ? _catalog.where((row) => row.isProject).toList()
         : isMachineMode
-        ? _catalog.where((row) => row.isMachine).toList()
+        ? _machineCandidates()
         : placement != null || _groupScope != null
         ? _catalog
               .where(
@@ -1905,7 +1987,14 @@ class SwarmSearchController extends ChangeNotifier {
       });
     }
     if (isMachineMode && matchQuery.trim().isEmpty) {
+      // Signed-in devices keep the order the account's list gives them (new first, then by activity),
+      // after the machines.
+      final deviceOrder = {
+        for (final (index, row) in rows.indexed)
+          if (row.isAccountDevice) row.id: index,
+      };
       int priority(SwarmDestination row) {
+        if (row.isAccountDevice) return 4;
         final machine = app.stateOf(row.machineId!);
         if (machine == null) return 3;
         if (machine.isLocalMachine) return 1;
@@ -1919,6 +2008,9 @@ class SwarmSearchController extends ChangeNotifier {
       rows.sort((a, b) {
         final group = priority(a).compareTo(priority(b));
         if (group != 0) return group;
+        if (a.isAccountDevice && b.isAccountDevice) {
+          return deviceOrder[a.id]!.compareTo(deviceOrder[b.id]!);
+        }
         final name = compareNatural(
           a.title.toLowerCase(),
           b.title.toLowerCase(),
@@ -1976,6 +2068,17 @@ class SwarmSearchController extends ChangeNotifier {
         (canSubmit(row) ? available : unavailable).add(row);
       }
       rows = [...available, ...unavailable];
+    }
+    // Computers, then phones and apps: the order the picker draws them in, so the arrows walk the
+    // rows in the order the eye does.
+    if (isMachineMode) {
+      rows = [
+        for (final section in MachineSearchSection.values)
+          for (final row in rows)
+            if (!row.isCreate && machineSection(row) == section) row,
+        for (final row in rows)
+          if (row.isCreate) row,
+      ];
     }
     // Creation has a stable place beside the prompt. Filtering changes the
     // matches above it, never the position of the action itself.
@@ -2226,12 +2329,11 @@ class SwarmSearchController extends ChangeNotifier {
     if (destination.isModel &&
         !canSelectModel(destination) &&
         !canGetModel(destination)) {
-      // A Jev model has nothing to Use: clicking one shows its pane, which says how to call it.
-      if (isJevRow(destination)) {
-        final index = rows.indexWhere((row) => row.id == destination.id);
-        if (index >= 0 && index != cursor) move(index - cursor);
-      }
       return null;
+    }
+    if (destination.isAccountDevice) {
+      // A device is managed in the preview beside it; a click only chooses it.
+      return setupLayout ? SwarmSearchSelection(destination) : null;
     }
     if (setupLayout && (destination.isMachine || destination.isModel)) {
       return SwarmSearchSelection(destination);
@@ -2283,7 +2385,7 @@ class SwarmSearchController extends ChangeNotifier {
         sessionId: external.sessionId,
       ));
       if (external.open || previewed?.openElsewhere == true) {
-        // One in a terminal can be moved here: opening it asks how.
+        // One in a terminal can be moved here: opening it moves it.
         final where = previewed?.openIn ?? external.openIn;
         if (where == 'terminal') return null;
         if (where == 'harness') return 'Already in Harness';
@@ -2309,6 +2411,8 @@ class SwarmSearchController extends ChangeNotifier {
 
   bool canSubmit(SwarmDestination? row) => row?.agentEngine != null
       ? canSelectAgent(row!.agentEngine!)
+      : row?.devicePub != null
+      ? isMachineMode && _machineDevices?.byPub(row!.devicePub!) != null
       : row?.isNote == true ||
             sessionUnavailable(row) != null ||
             sessionFilter == SessionFilter.needsInput &&
@@ -2422,6 +2526,8 @@ class SwarmSearchController extends ChangeNotifier {
     models?.removeListener(_modelsChanged);
     app.gridPictures.removeListener(_modelChoicesChanged);
     app.sessionPreviews.removeListener(_previewChanged);
+    _machineDevices?.removeListener(_machineDevicesChanged);
+    _machineDevices?.dispose();
     _previewPage.dispose();
     _previewLine.dispose();
     _resultPage.dispose();

@@ -509,8 +509,9 @@ const SHARE: u16 = 9;
 const PALETTE_SHARE_H: u16 = 7;
 /// Large: as wide as this at most, however wide the window.
 const LARGE_MAX_W: u16 = 160;
-/// (Room for a command's name, its hint and its key apart.)
-const PALETTE_W: u16 = 96;
+/// (Room for a command's name and its key apart: no description beside them any more. Commands,
+/// Keybinds and Layout are the palettes, and they keep one width so the panel stays put between them.)
+const PALETTE_W: u16 = 76;
 /// (New harness's form: its chooser opens beside it where there is room.)
 const FORM_W: u16 = 60;
 /// A form keeps this many rows however short the window (its action stays on screen), up to the
@@ -872,7 +873,12 @@ impl PanelList<'_> {
         let hint: String = if details { row.detail.iter().map(|s| s.content.as_ref()).collect() } else { String::new() };
         let hx = at + 28;
         let with_hint = !hint.is_empty() && hx + 8 < end;
-        at += put(buf, at, y, if with_hint { 26 } else { end.saturating_sub(at) }, &row.label, style);
+        // A label's dim part (`label_dim`: an offline computer's whole name) in the quiet colour,
+        // as fzf's own lists draw it; the cursor's row keeps its highlight.
+        let label_w = if with_hint { 26 } else { end.saturating_sub(at) };
+        let split = row.label.char_indices().nth(row.label_dim).map_or(row.label.len(), |(i, _)| i);
+        let dim = put(buf, at, y, label_w, &row.label[..split], if here { style } else { c.muted });
+        at += dim + put(buf, at + dim, y, label_w.saturating_sub(dim), &row.label[split..], style);
         let quiet = if here { style.remove_modifier(Modifier::BOLD) } else { c.muted };
         if with_hint { put(buf, hx.max(at + 2), y, end - hx.max(at + 2), &hint, quiet); }
         else if !details && at + 10 < end {
@@ -1341,7 +1347,10 @@ pub(crate) mod oracle {
             let hint: String = if details { row.detail.iter().map(|s| s.content.as_ref()).collect() } else { String::new() };
             let hx = at + 28;
             let with_hint = !hint.is_empty() && hx + 8 < end;
-            at += put(buf, at, y, if with_hint { 26 } else { end.saturating_sub(at) }, &row.label, style);
+            let label_w = if with_hint { 26 } else { end.saturating_sub(at) };
+            let split = row.label.char_indices().nth(row.label_dim).map_or(row.label.len(), |(i, _)| i);
+            let dim = put(buf, at, y, label_w, &row.label[..split], if here { style } else { c.muted });
+            at += dim + put(buf, at + dim, y, label_w.saturating_sub(dim), &row.label[split..], style);
             let quiet = if here { style.remove_modifier(Modifier::BOLD) } else { c.muted };
             if with_hint { put(buf, hx.max(at + 2), y, end - hx.max(at + 2), &hint, quiet); }
             else if !details && at + 10 < end {
@@ -1650,12 +1659,12 @@ mod tests {
         let medium = Rect::new(0, 0, 120, 40);
         assert_eq!(area(medium, PanelSize::Large, 0), Rect::new(6, 2, 108, 36));
         // (Rows and chrome; at most seven tenths of the height; in the upper third.)
-        assert_eq!(area(medium, PanelSize::Palette, 5), Rect::new(12, 6, 96, 13));
-        assert_eq!(area(medium, PanelSize::Palette, 100), Rect::new(12, 6, 96, 28));
+        assert_eq!(area(medium, PanelSize::Palette, 5), Rect::new(22, 6, 76, 13));
+        assert_eq!(area(medium, PanelSize::Palette, 100), Rect::new(22, 6, 76, 28));
         assert_eq!(area(medium, PanelSize::Form, 20), Rect::new(30, 10, 60, 20));
         let wide = Rect::new(0, 0, 400, 60);
         assert_eq!(area(wide, PanelSize::Large, 0), Rect::new(120, 3, 160, 54));
-        assert_eq!(area(wide, PanelSize::Palette, 5), Rect::new(152, 10, 96, 13));
+        assert_eq!(area(wide, PanelSize::Palette, 5), Rect::new(162, 10, 76, 13));
         assert_eq!(area(wide, PanelSize::Form, 20), Rect::new(170, 20, 60, 20));
     }
 

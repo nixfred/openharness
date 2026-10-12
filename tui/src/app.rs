@@ -713,6 +713,8 @@ pub struct App {
     /// A disposable USB session offers direct try, install and network actions on its home.
     pub os_live: bool,
     pub os_welcome: crate::os_welcome::State,
+    /// A computer's first hn opening OpenCode with a task typed (first_run.rs).
+    pub first_run: crate::first_run::State,
     pub os_first_use: bool,
     /// While a command runs in another session (`-t work:2`): the session to come back to.
     pub swap_back: Option<u32>,
@@ -941,6 +943,7 @@ impl App {
             os_session: std::env::var("HARNESS_OS").as_deref() == Ok("1"),
             os_live: std::env::var("HARNESS_OS").as_deref() == Ok("1") && std::env::var("HARNESS_OS_LIVE").as_deref() == Ok("1"),
             os_welcome: Default::default(),
+            first_run: Default::default(),
             os_first_use: std::env::var("HARNESS_OS_FIRST_USE").as_deref() == Ok("1"),
             wait_channels: HashMap::new(),
             cli_held: std::collections::VecDeque::new(),
@@ -1259,6 +1262,7 @@ impl App {
                 app.follow_account(status.get("signedIn").and_then(Value::as_bool).unwrap_or(false));
                 app.connect(&id);
                 app.refresh_machines();
+                crate::account::daemon_status(app, &status);
             }
             Err(_) => {
                 app.daemon_down = true;
@@ -1642,7 +1646,10 @@ impl App {
                     let what = if failed { format!("{name} failed{}", agent.did.as_ref().filter(|d| !d.is_empty()).map(|d| format!(": {d}")).unwrap_or_default()) } else { format!("{name} finished") };
                     if !replay && !subagent && looking.as_ref() != Some(&key) {
                         agent.unread = true;
-                        if mine && !visible.contains(&key) { self.say(what.clone(), if failed { theme::DANGER } else { theme::ONLINE }) }
+                        // Only a failure is said on the status line. "… finished" took the whole bar
+                        // into the message colours for seconds as the window's spinner became its ✓,
+                        // which says the same: the bar seemed to flash whenever a window was done.
+                        if mine && failed && !visible.contains(&key) { self.say(what.clone(), theme::DANGER) }
                     } else if looking.as_ref() == Some(&key) { self.mark_seen_key(key) }
                     if mine && !self.terminal_focused && !replay && !subagent { crate::notify("Harness", &what) }
                     if !replay && !subagent && !failed { crate::commands::notify_harness(self, "harness-done", &hook_key) }
@@ -5726,6 +5733,7 @@ impl App {
     /// started in — once, when the desk has answered and this computer's daemon is connected.
     /// Until then (or if it never connects: not signed in) the window shows what it can.
     pub fn maybe_start_shell(&mut self) {
+        if crate::account::entry_required(self) { return }
         if self.shell_asked || !self.desk_answered || self.capture.is_some() { return }
         // A headless client makes only the sessions it is asked for.
         if self.headless { self.shell_asked = true; return }
@@ -5753,6 +5761,13 @@ impl App {
         if !(self.tabs.len() == 1 && self.tabs[0].root.is_none()) { self.shell_asked = true; return }
         if self.link(&self.fleet.local_id).is_none() { return }
         self.shell_asked = true;
+        // A computer's first hn, as the installer marked it: OpenCode with a task typed, not a shell
+        // (first_run.rs). Only a plain `hn`: `hn new`, its folder, its command and a chain after it
+        // are asked for, and get them.
+        if self.start_session.is_none() && self.start_then.is_empty() && crate::first_run::take() {
+            crate::first_run::start(self);
+            return;
+        }
         // The desk's first shell: where hn was started (-c: where it was asked to), running what
         // `hn new` asked for.
         let start = self.start_session.take().unwrap_or_default();
@@ -6112,14 +6127,18 @@ impl App {
         // The accounts' rate limits, from each machine that holds one (every five minutes; the
         // first a few seconds in).
         if self.started.elapsed() > Duration::from_secs(4) && self.usage_checked.map(|t| t.elapsed() > Duration::from_secs(300)).unwrap_or(true) {
+            // (Half a minute, not five, after a machine that could not be asked or whose first read
+            // failed — this computer's connection is not up yet a few seconds after a signed-in start.)
+            let soon = || Instant::now().checked_sub(Duration::from_secs(270));
             self.usage_checked = Some(Instant::now());
             let ids: Vec<String> = self.fleet.machines.iter().filter(|m| m.usable()).map(|m| m.id.clone()).collect();
+            if ids.is_empty() { self.usage_checked = soon() }
             for id in ids {
-                let Some(link) = self.link(&id) else { continue };
+                let Some(link) = self.link(&id) else { self.usage_checked = soon(); continue };
                 let generation = link.generation;
                 self.spawn(async move { link.rpc("usage_read", json!({}), Duration::from_secs(30)).await }, move |app, reply| {
                     if app.connection_generation(&id) != Some(generation) { return }
-                    let Ok(reply) = reply else { return };
+                    let Ok(reply) = reply else { if !app.usage.contains_key(&id) { app.usage_checked = soon() } return };
                     let readings: Vec<fleet::Usage> = reply.get("providers").and_then(Value::as_array).map(|p| p.iter().filter_map(fleet::usage_from).collect()).unwrap_or_default();
                     app.usage.insert(id, readings);
                 });
@@ -6325,6 +6344,7 @@ impl App {
 
     pub fn on_tick(&mut self) {
         crate::os_welcome::tick(self);
+        crate::first_run::tick(self);
         self.run_start_then();
         crate::new_harness::welcome_tick(self);
         self.ask_said();
@@ -6803,6 +6823,23 @@ mod recovery_tests {
         app.on_frame("test-peer", "agent_renamed", json!({"agentId": "agent-1", "name": "Deploy checklist", "engine": "claude"}));
         let agent = app.fleet.agent("test-peer", "agent-1").unwrap();
         assert_eq!((agent.name.as_str(), agent.engine.as_str(), agent.project.as_str(), agent.branch.as_str()), ("Deploy checklist", "claude", "webapp", "main"));
+    }
+
+    /// A harness finishing in a window not shown is its tab's ✓ — not "… finished" taking the whole
+    /// status line into the message colours, which read as the bar flashing. A failure is still said.
+    #[tokio::test]
+    async fn a_harness_finishing_out_of_sight_leaves_the_status_line_alone() {
+        let mut app = fixture();
+        app.fleet.merge_roster("test-peer", &[json!({"id": "agent-1", "name": "fix-login", "engine": "claude"})]);
+        // Open in a pane of its own, not in the window being shown.
+        app.panes.insert(99, crate::pane::Pane::new(99, "test-peer", "agent-1", 80, 24));
+        app.toast = None;
+        app.on_frame("test-peer", "turn_ended", json!({"agentId": "agent-1"}));
+        assert!(app.toast.is_none(), "a finish is not said on the status line: {:?}", app.toast);
+        assert!(app.fleet.agent("test-peer", "agent-1").unwrap().unread, "it is done and unread: its tab shows ✓");
+        app.fleet.agents.get_mut(&("test-peer".to_string(), "agent-1".to_string())).unwrap().errored = true;
+        app.on_frame("test-peer", "turn_ended", json!({"agentId": "agent-1"}));
+        assert!(app.toast.as_ref().is_some_and(|t| t.0.contains("failed")), "a failure is still said: {:?}", app.toast);
     }
 
     /// `set -g @hn-window-name …` by hand (or from a config file) changes the tab as Appearance does.

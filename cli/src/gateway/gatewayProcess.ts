@@ -251,6 +251,17 @@ export function runGatewayService(options: GatewayServiceOptions): ServiceProces
         return { error: error instanceof Error ? error.message : String(error) }
       }
     },
+    // The account's connected services (lib/e2ee/connectorVault.ts): an envelope sealed, or one opened.
+    [GATEWAY_CALLS.connectorVault]: async (p: Payload): Promise<Payload> => {
+      const vault = ops().connectorVault
+      try {
+        if (p.op === 'seal') return { envelope: await vault.seal(text(p.plaintext)) }
+        if (p.op === 'open') { const opened = await vault.open(p.envelope); return opened === null ? {} : { ...opened } }
+        return { error: 'UNKNOWN_OP' }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    },
   }
 
   return (options.run ?? runServiceProcess)({

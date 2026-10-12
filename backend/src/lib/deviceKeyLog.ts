@@ -7,6 +7,7 @@ import {
   applyDevLogEntries, DevLogError, emptyDevLogState, parseDevLogEntry,
   type DevLogEntry, type DevLogHead, type DevLogState,
 } from './deviceLogCore.js'
+import { checkDevAck } from './deviceAckCore.js'
 
 /**
  * The account's device key log, as the backend keeps it (the format and every rule are
@@ -173,6 +174,47 @@ export async function appendDeviceKey(userId: string, raw: unknown, channel: Dev
   for (const gone of applied.removed) await signOut(userId, gone.kind, gone.machineId, gone.pub, sessions.get(gone.pub))
   logger.info('device key log appended', { userId, seq: entry.seq, op: entry.op, kind: entry.kind })
   return { ok: true, head }
+}
+
+// ── "It's mine", once for the account ─────────────────────────────────────────────────────────────
+// A device that confirms a new one signs an acknowledgement (lib/deviceAckCore.ts), and the account's
+// other devices stop showing that key as New. Kept beside the log, never in its chain, so an older
+// client never sees one. Checked here against the log as it stands — a bad one is refused rather than
+// kept for every device to throw away — but no device takes this side's word for it: each checks the
+// signature and the signer against its own verified log, and its own marks on both keys.
+
+/** The acknowledgements one read returns. Each key has at most one per signer, and a device asks only
+ *  from just below the oldest key it still shows as New, so a page holds what any real account has. */
+const ACK_PAGE = 500
+
+export type DeviceAckAppendResult = { ok: true; created: boolean } | { ok: false; status: 400; code: string }
+
+export async function appendDeviceAck(userId: string, raw: unknown): Promise<DeviceAckAppendResult> {
+  const { state } = await currentState(userId)
+  const checked = checkDevAck(state, raw)
+  if (!checked.ok) return { ok: false, status: 400, code: checked.code }
+  const { ack } = checked
+  try {
+    await prisma.deviceKeyAck.create({ data: { userId, pub: ack.pub, addSeq: ack.addSeq, signer: ack.signer, ack: JSON.stringify(ack) } })
+  } catch (err) {
+    // This signer already said so for this key: the first one stands, and saying it again is no error
+    // (a device that retries, or two of its windows).
+    if (isUniqueViolation(err)) return { ok: true, created: false }
+    throw err
+  }
+  // The head did not move; the push only tells every device to read again, which reads acknowledgements.
+  await publishDeviceKeysChanged(userId, state.head).catch(() => { /* best effort: devices also re-read on their own */ })
+  touchDeviceKey(userId, ack.signer)
+  logger.info('device key acknowledged', { userId, addSeq: ack.addSeq })
+  return { ok: true, created: true }
+}
+
+/** The acknowledgements of keys added after entry [since], oldest key first, as the devices sent them. */
+export async function readDeviceAcks(userId: string, since: number): Promise<{ acks: unknown[] }> {
+  const rows = await prisma.deviceKeyAck.findMany({
+    where: { userId, addSeq: { gt: since } }, orderBy: [{ addSeq: 'asc' }, { createdAt: 'asc' }], take: ACK_PAGE,
+  })
+  return { acks: rows.map(r => JSON.parse(r.ack) as unknown) }
 }
 
 /**

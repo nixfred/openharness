@@ -11,6 +11,7 @@ import 'package:harness_mobile/e2ee/keys.dart';
 import 'package:harness_mobile/notify/system_notices.dart';
 import 'package:harness_mobile/state/app_state.dart';
 import 'package:harness_mobile/state/pane_layout_store.dart';
+import 'package:harness_mobile/viewer/device_ack.dart';
 import 'package:harness_mobile/viewer/device_log.dart';
 import 'package:harness_mobile/viewer/device_log_sync.dart';
 import 'package:harness_mobile/viewer/direct_auth_api.dart';
@@ -133,6 +134,22 @@ class _Api extends FakeApi {
   @override
   Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) =>
       backend.append(entry);
+
+  /// The acknowledgements the backend keeps ("It's mine" said on a device), as it serves them.
+  final acks = <Object?>[];
+
+  /// What this phone shared.
+  final posted = <DevAck>[];
+
+  @override
+  Future<List<Object?>?> deviceAcks(int since) async => [...acks];
+
+  @override
+  Future<bool> postDeviceAck(DevAck ack) async {
+    posted.add(ack);
+    acks.add(ack.toJson());
+    return true;
+  }
 }
 
 /// The phone's own storage, kept across "restarts". [holdDevLogRead] parks one read of the device log
@@ -349,6 +366,39 @@ void main() {
     apps.remove(first);
     final (second, _) = await launch();
     expect(pubs(second.newDevices), [b64e(box3.pub)]);
+  });
+
+  test('"It’s mine" is shared with the account; one another trusted device shared takes the banner down', () async {
+    final older = await E2eeIdentity.fromSeed(List.filled(32, 4));
+    // On the account before this phone: a device it trusts to vouch.
+    await backend.add(older, 'machine', 'd' * 32, 'older');
+    final (app, _) = await launch();
+    final api = app.api as _Api;
+    await backend.add(box2, 'machine', _mid2, 'box2');
+    await backend.add(box3, 'machine', _mid3, 'box3');
+    await app.deviceLog!.refresh();
+    await settle();
+    expect(pubs(app.newDevices), [b64e(box2.pub), b64e(box3.pub)]);
+
+    app.dismissNewDevice(b64e(box2.pub));
+    await settle();
+    expect(api.posted.map((a) => a.pub), [b64e(box2.pub)]);
+
+    api.acks.add(
+      (await signDevAck(
+        DevAck(v: 1, acct: _acct, pub: b64e(box3.pub), addSeq: backend.state.active[b64e(box3.pub)]!.seq, signer: b64e(older.pub), at: 9000),
+        older,
+      )).toJson(),
+    );
+    await app.deviceLog!.refresh();
+    await settle();
+    expect(app.newDevices, isEmpty);
+    final row = (await app.deviceListing()).members.firstWhere((r) => r.member.pub == b64e(box3.pub));
+    expect(row.confirmed?.label, 'older');
+    // Opening the list tells nobody.
+    app.seenNewDevices(pending: [b64e(box3.pub)]);
+    await settle();
+    expect(api.posted, hasLength(1));
   });
 
   test('opening the list (seenNewDevices) holds across a restart', () async {

@@ -73,7 +73,9 @@ pub fn areas(area: Rect, parts: Parts) -> Areas {
 /// [text] as lines of at most [width] columns, broken between words, in [style].
 pub fn wrap(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     if text.is_empty() { return Vec::new() }
-    crate::workspace_menu::wrap(text, width as usize).into_iter().map(|l| Line::styled(l, style)).collect()
+    // (Each line of [text] wrapped on its own: a line break starts a new line, an empty one a gap.)
+    text.split('\n').flat_map(|para| if para.trim().is_empty() { vec![String::new()] } else { crate::workspace_menu::wrap(para, width as usize) })
+        .map(|l| Line::styled(l, style)).collect()
 }
 
 /// [text] cut to [width] columns, ending in … where it was cut.

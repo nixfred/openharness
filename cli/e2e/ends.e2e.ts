@@ -5,7 +5,7 @@
  * that finds a conversation until it is purged. A close never takes a turn that is still working unless
  * it was asked to; a purge leaves nothing of the conversation behind.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, onTestFailed } from 'vitest'
 import { LocalClient, type Frame } from './harness/client.js'
@@ -91,6 +91,43 @@ describe('how an agent\'s life ends', () => {
     client.close()
   })
 
+  it.each(engines)('%s: unavailable transcript identity holds Close and Resume until the same conversation is restored', async engine => {
+    const d = await fresh()
+    const client = await LocalClient.connect(d)
+    const agent = await create(d, client, engine, `identity-hold-${engine}`)
+    await turn(client, agent.id, 'History that must survive')
+    const paths = transcriptsOf(d, agent.sessionId)
+    expect(paths).toHaveLength(1)
+    const file = paths[0], original = readFileSync(file, 'utf8')
+    const lines = original.split('\n'), first = JSON.parse(lines[0])
+    if (engine === 'codex') first.payload.id = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    else first.sessionId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    lines[0] = JSON.stringify(first)
+    const foreign = lines.join('\n')
+    writeFileSync(file, foreign)
+    expect(await close(client, agent, 'now')).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', detail: expect.any(String) })
+    expect(await row(client, agent.id)).toMatchObject({ status: 'active', sessionId: agent.sessionId })
+    expect(client.frames.filter(frame => frame.type === 'agent_deleted' && frame.payload?.agentId === agent.id)).toHaveLength(0)
+    expect((await d.tmux.run('list-panes', '-a', '-F', '#{pane_id}')).trim().split('\n')).toContain(agent.tmuxPane)
+    writeFileSync(file, original)
+    expect(await close(client, agent, 'now')).toMatchObject({ closed: true })
+    await stopped(client, agent.id)
+    const saved = readFileSync(file, 'utf8')
+    writeFileSync(file, foreign)
+    const refused = await client.request('agent_resume', { agentId: agent.id }, 90_000)
+    expect(refused).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', detail: expect.any(String) })
+    expect(await row(client, agent.id)).toMatchObject({ status: 'stopped', sessionId: agent.sessionId })
+    expect(readFileSync(file, 'utf8')).toBe(foreign)
+    writeFileSync(file, saved)
+    expect((await client.request('agent_resume', { agentId: agent.id }, 90_000)).error).toBeUndefined()
+    await until('the held conversation to resume', async () => {
+      const latest = await row(client, agent.id)
+      return latest?.status === 'active' && latest.sessionId === agent.sessionId ? latest : null
+    }, 60_000, 500)
+    await turn(client, agent.id, 'History survives the hold')
+    client.close()
+  })
+
   it.each(engines)('%s: closed only when idle, a working agent is left working and says so', async (engine) => {
     const d = await fresh()
     const client = await LocalClient.connect(d)
@@ -104,6 +141,32 @@ describe('how an agent\'s life ends', () => {
     await ended
     expect((await row(client, agent.id))?.status).toBe('active')
     await turn(client, agent.id, 'still here')
+    client.close()
+  })
+
+  it.each(engines)('%s: a queued Close keeps its intent while native history is held, then recovers', async engine => {
+    const d = await fresh()
+    const client = await LocalClient.connect(d)
+    const agent = await create(d, client, engine, `close-held-${engine}`)
+    await turn(client, agent.id, 'Keep this conversation through recovery')
+    expect(await close(client, agent, 'after_task')).toMatchObject({ deferred: true })
+    const paths = transcriptsOf(d, agent.sessionId)
+    expect(paths).toHaveLength(1)
+    const file = paths[0], original = readFileSync(file, 'utf8')
+    const lines = original.split('\n'), first = JSON.parse(lines[0])
+    if (engine === 'codex') first.payload.id = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    else first.sessionId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+    lines[0] = JSON.stringify(first)
+    writeFileSync(file, lines.join('\n'))
+    // More than two idle checks: the same durable request must keep waiting.
+    await new Promise(resolve => setTimeout(resolve, 12_000))
+    expect(await row(client, agent.id)).toMatchObject({ status: 'active', sessionId: agent.sessionId,
+      closePlan: { state: 'waiting' } })
+    expect(client.frames.filter(frame => frame.type === 'agent_deleted' && frame.payload?.agentId === agent.id)).toHaveLength(0)
+    expect((await d.tmux.run('list-panes', '-a', '-F', '#{pane_id}')).trim().split('\n')).toContain(agent.tmuxPane)
+    writeFileSync(file, original)
+    await stopped(client, agent.id, 60_000)
+    expect(readFileSync(file, 'utf8')).toContain('Keep this conversation through recovery')
     client.close()
   })
 
@@ -235,6 +298,28 @@ describe('how an agent\'s life ends', () => {
     client.close()
   })
 
+  // A failed start (Claude Code that cannot reach Anthropic) keeps its pane on the shell it leaves,
+  // where its last screen says why: agent_deleted names that shell as `successor`. An agent that
+  // exits after doing work still ends as before (#262).
+  it('an agent that exits before any conversation hands its pane to the shell; one after a turn does not', async () => {
+    const d = await fresh()
+    const client = await LocalClient.connect(d)
+    const early = await create(d, client, 'claude', 'exit-at-start')
+    const gone = client.next((frame) => frame.type === 'agent_deleted' && frame.payload?.agentId === early.id, 45_000, 'agent_deleted (early)')
+    client.send('message', { agentId: early.id, content: '!exit' })
+    const deleted = await gone
+    const successor = deleted.payload?.successor as string | undefined
+    expect(successor, JSON.stringify(deleted.payload)).toBeTruthy()
+    const shell = await until('the successor shell row', async () => (await row(client, successor!)) ?? null, 30_000, 500)
+    expect(shell.engine).toBe('terminal')
+
+    const worked = await create(d, client, 'claude', 'exit-after-work')
+    await turn(client, worked.id, 'a real first task')
+    const ended = client.next((frame) => frame.type === 'agent_deleted' && frame.payload?.agentId === worked.id, 45_000, 'agent_deleted (after work)')
+    client.send('message', { agentId: worked.id, content: '!exit' })
+    expect((await ended).payload?.successor).toBeUndefined()
+  })
+
   it('a close for an agent that is not the one asked about changes nothing', async () => {
     const d = await fresh()
     const client = await LocalClient.connect(d)
@@ -266,6 +351,16 @@ describe('how an agent\'s life ends', () => {
     const forged = await client.request('agent_purge', { agentId: agent.id, sessionId: agent.sessionId, createdAt, mode: 'delete', reviewId: 'not-a-review' }, 60_000)
     expect(forged.error).toBe('DELETE_REFUSED')
     expect((await row(client, agent.id))?.status).toBe('active')
+    // A location is not authority to delete it. Hold this exact unexpired confirmation while
+    // its native header is incomplete; restoring the same file permits the reviewed retry.
+    const transcript = files[0], original = readFileSync(transcript, 'utf8')
+    writeFileSync(transcript, '{')
+    const held = await client.request('agent_purge', { agentId: agent.id, sessionId: agent.sessionId, createdAt, mode: 'delete', reviewId: review.reviewId }, 60_000)
+    expect(held, JSON.stringify(held)).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', retryable: true, stopped: false })
+    expect(held.detail).toEqual(expect.any(String))
+    expect((await row(client, agent.id))?.status).toBe('active')
+    expect(readFileSync(transcript, 'utf8')).toBe('{')
+    writeFileSync(transcript, original)
     const deleted = await client.request('agent_purge', { agentId: agent.id, sessionId: agent.sessionId, createdAt, mode: 'delete', reviewId: review.reviewId }, 90_000)
     expect(deleted, JSON.stringify(deleted)).toMatchObject({ deleted: true, sessionDeleted: true })
     for (const file of files) expect(existsSync(file), file).toBe(false)

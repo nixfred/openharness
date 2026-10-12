@@ -86,8 +86,8 @@ Other machines are reached through that daemon: it links to them with a per-mach
 terminates the encryption locally, and hands the app plaintext. Machines ▸ Link Machine… runs the
 link flow; the CLI equivalent is under [The daemon and CLI](#the-daemon-and-cli).
 
-Settings ▸ Profiles keeps that one sign-in and chooses which computer's tabs
-this window draws. **All machines** is the shared desk. A computer's row hides
+**Show in this window**, at the top of Machines, keeps that one sign-in and chooses which
+computer's tabs this window draws. **All machines** is the shared desk. Choosing a computer hides
 tabs whose agents run anywhere else. Those tabs stay on the account, so another
 window, or **All machines** here, still has them. Closing the last visible tab
 opens an empty tab on this computer; it does not reveal a hidden one. A tab

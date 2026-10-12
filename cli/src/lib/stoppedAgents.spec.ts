@@ -20,6 +20,18 @@ afterEach(() => {
 })
 
 describe('saved catalog reads', () => {
+  it('saves a held conversation without persisting its transient identity verdict', async () => {
+    const { saved, store } = await fixture()
+    store.save({ ...saved, identityHold: 'The session-home catalog is unavailable.', evidenceRevision: 3, interpretationHold: 'pending', admissionHold: 'Waiting for native source' })
+    const raw = JSON.parse(readFileSync(join(directory, 'stopped-agents', `${saved.agentId}.json`), 'utf8'))
+    expect(raw.session.sessionId).toBe(saved.sessionId)
+    expect(raw.session).not.toHaveProperty('identityHold')
+    expect(raw.session).not.toHaveProperty('admissionHold')
+    expect(raw.session).not.toHaveProperty('interpretationHold')
+    expect(raw.session).not.toHaveProperty('evidenceRevision')
+    expect(store.get(saved.agentId)).not.toHaveProperty('identityHold')
+  })
+
   it('does not reread unchanged records for status snapshots, but resume still reads the file', async () => {
     const { saved, store } = await fixture()
     store.save(saved)
@@ -255,6 +267,27 @@ describe('stopped harness persistence', () => {
     expect(fresh().list().find(row => row.agentId === fork.agentId)).toBeTruthy()
   })
 
+  // Another harness took its conversation (core/agents/conversationOwners.ts): moved aside, never deleted.
+  it('sets a record aside, with its reservation, and lists it no more', async () => {
+    const { StoppedAgentStore, saved, store } = await fixture()
+    store.save(saved)
+    expect(store.beginResume(saved.agentId)).toBeTruthy()
+    const before = readFileSync(join(directory, 'stopped-agents', `${saved.agentId}.json`), 'utf8')
+    expect(store.list()).toHaveLength(1)
+    expect(store.supersede(saved.agentId)).toMatchObject({ agentId: saved.agentId, sessionId: 'conversation-123' })
+    expect(readFileSync(join(directory, 'stopped-agents', 'superseded', `${saved.agentId}.json`), 'utf8')).toBe(before)
+    expect(statSync(join(directory, 'stopped-agents', 'superseded')).mode & 0o777).toBe(0o700)
+    expect(store.resumeReservedAt(saved.agentId)).toBeNull()
+    expect(store.get(saved.agentId)).toBeNull()
+    expect(store.list()).toEqual([])
+    expect(store.ids()).toEqual([])
+    expect(new StoppedAgentStore(join(directory, 'stopped-agents')).list()).toEqual([])
+    // Nothing to set aside: an unsafe id, an absent record, one already set aside.
+    expect(store.supersede('../escape')).toBeNull()
+    expect(store.supersede('never-saved')).toBeNull()
+    expect(store.supersede(saved.agentId)).toBeNull()
+  })
+
   it('hides a running identity or conversation, without discarding its archive', async () => {
     const { saved, store } = await fixture()
     store.save(saved)
@@ -414,6 +447,47 @@ it('an unbound observation of the same process keeps its confirmed conversation'
   saved.transcriptPath = '/history.jsonl'; saved.boundAt = 1; saved.source = 'hook'; store.save(saved)
   store.save({ ...saved, sessionId: '', transcriptPath: null, title: 'Renamed', boundAt: null, source: null })
   expect(store.get(saved.agentId)).toMatchObject({ sessionId: saved.sessionId, transcriptPath: '/history.jsonl', title: 'Renamed', boundAt: 1, source: 'hook' })
+})
+it.each(['same', 'missing', 'different'] as const)('preserves an unbound Hermes conversation only with a compatible home: %s', async mode => {
+  const { saved, store } = await fixture()
+  Object.assign(saved, { engine: 'hermes', hermesHome: '/fixture/hermes' })
+  store.save(saved)
+  const hermesHome = mode === 'missing' ? undefined : mode === 'same' ? saved.hermesHome : '/fixture/other-hermes'
+  store.save({ ...saved, sessionId: '', transcriptPath: null, hermesHome })
+  expect(store.get(saved.agentId)).toMatchObject({
+    sessionId: mode === 'different' ? '' : saved.sessionId,
+    hermesHome: mode === 'different' ? hermesHome : saved.hermesHome,
+  })
+})
+it('a pathless observation of the same conversation keeps its captured native path', async () => {
+  const { saved, store } = await fixture()
+  saved.hermesHome = '/fixture/hermes'
+  store.save({ ...saved, transcriptPath: '/history.jsonl', source: 'stop-repair' })
+  store.save({ ...saved, transcriptPath: null, title: 'A newer title', source: 'hook' })
+  expect(store.get(saved.agentId)).toMatchObject({ sessionId: saved.sessionId,
+    transcriptPath: '/history.jsonl', title: 'A newer title', source: 'hook' })
+  store.save({ ...saved, transcriptPath: '/replacement.jsonl' })
+  expect(store.get(saved.agentId)?.transcriptPath).toBe('/replacement.jsonl')
+})
+it.each(['agent', 'conversation', 'engine', 'registration', 'profile', 'hermes home', 'missing process', 'pid', 'start', 'ticks', 'executable'])
+('never transfers a captured path across a changed identity: %s', async mode => {
+  const { saved, store } = await fixture()
+  saved.processIdentity!.startTicks = 100
+  store.save({ ...saved, transcriptPath: '/history.jsonl' })
+  const next: RegisteredSession = { ...saved, transcriptPath: null, processIdentity: { ...saved.processIdentity! } }
+  if (mode === 'agent') next.agentId = 'another-agent'
+  if (mode === 'conversation') next.sessionId = 'another-conversation'
+  if (mode === 'engine') next.engine = 'claude'
+  if (mode === 'registration') next.registeredAt++
+  if (mode === 'profile') next.codexHome = '/another/profile'
+  if (mode === 'hermes home') next.hermesHome = '/another/hermes'
+  if (mode === 'missing process') next.processIdentity = null
+  if (mode === 'pid') next.processIdentity!.pid++
+  if (mode === 'start') { delete next.processIdentity!.startTicks; next.processIdentity!.startMarker = 'new' }
+  if (mode === 'ticks') next.processIdentity!.startTicks = 200
+  if (mode === 'executable') next.processIdentity!.executable = 'other'
+  store.save(next)
+  expect(store.get(next.agentId)?.transcriptPath).toBeNull()
 })
 it.each(['engine', 'missing', 'previous missing', 'pid', 'start', 'executable'])('does not transfer a binding to a different process: %s', async mode => {
   const { saved, store } = await fixture()

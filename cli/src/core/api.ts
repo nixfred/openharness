@@ -1,3 +1,6 @@
+import type { PreparedHandoff, HandoffPermit, HandoffOutcome } from '../lib/handoffAuthority.js'
+import type { AgentTokenUsage, AgentUsageTarget } from '../lib/agentUsageWire.js'
+import type { GridAssignmentProcess, GridAssignmentAnswer } from '../lib/gridAssignmentWire.js'
 /**
  * The boundary the services stand on (docs/design/2026-10-03-harnessd.md, "The core boundary"):
  * `CoreApi` is what a service may ask of the core, and `CorePorts` is what the core asks of services.
@@ -17,26 +20,27 @@ import type { AppSwarms } from '../cable/cableSession.js'
 import type { UnreadNotification } from '../lib/notificationRead.js'
 import type { AutonomousDeviceAgent, AutonomousDeviceDelivery, AutonomousDeviceReceipt } from '../lib/autonomous-device/service.js'
 import type { StoreAgent } from '../lib/autonomous-device/store.js'
+import type { DshLaunchAnswer, DshLaunchRequest, DshMaterializeAnswer, DshMaterializeRequest } from '../dsh/launchWire.js'
 import type { AgentDshContext } from '../lib/agentFrame.js'
 import type { GridAccess } from '../lib/gridAttach.js'
 import type { createHarnessResourcesReader } from '../lib/harnessResources.js'
 import type { createHarnessStorageReader } from '../lib/harnessTelemetry.js'
 import type { AgentGridTarget, GridAnnotation } from '../lib/gridAnnotation.js'
 import { GRID_FLEET_MAX_TIMEOUT_MS } from '../lib/gridFleetProtocol.js'
-import type { GridLaunchOverride } from '../lib/gridLaunch.js'
+import type { GridLaunchAnswer, GridLaunchOverride, GridLaunchRequest } from '../lib/gridLaunchWire.js'
 import type { NewAgentModel } from '../lib/newAgentModel.js'
-import type { LastTurnText, LiveEvent } from '../lib/normalize.js'
+import type { LastTurnText, LiveEvent } from '../engines/kit/events.js'
 import type { SessionRecaps } from '../lib/recapReads.js'
 import type { SessionInputDelivery } from '../lib/sessionInput.js'
+import type { AgentCloseRequest, AgentCloseResult } from '../lib/closeAgentService.js'
 import { projectDisplayName, type registry, type RegisteredSession } from '../lib/registry.js'
 import type { RuntimeModelOption } from '../lib/runtimeProfile.js'
-import type { ExternalSessions, OpenSessions } from '../lib/sessionSearch/external.js'
+import { externalUnavailable, type ExternalSessionAnswer, type ExternalSessionRequest } from '../lib/externalSessionWire.js'
 import type { SessionSearchIndex } from '../lib/sessionSearch/indexer.js'
 import type { StoppedAgentStore } from '../lib/stoppedAgents.js'
 import type { TerminalBinaryClear } from '../lib/terminalBinary.js'
 import { VIEWER_UP_TYPES } from '../lib/viewerFrames.js'
 import type { RouteAnswer } from '../localWsServer.js'
-import type { SwarmPromptScopes } from '../teams/promptScope.js'
 import type { DeviceInputStatus } from './deviceInput.js'
 import { FAIL, later, readFallback, ServiceUnavailableError, type PortFallbacks } from './serviceHost.js'
 
@@ -83,6 +87,7 @@ export const TERMINALS_OFF: TerminalsPort = {
 /** Read-only conversation facts for the handoff in the edge host. Each lookup asks the core now;
  * a stopped record is never replaced by a stale live-agent list in another process. */
 export interface ConversationReads {
+  publish(prepared: PreparedHandoff, permit: HandoffPermit): Promise<HandoffOutcome>
   /** A live agent by agent/session id, otherwise the stopped record by agent id. */
   resolve(id: string): Promise<RegisteredSession | null>
   recentAsks(sessionId: string, n: number): Promise<string[]>
@@ -96,6 +101,7 @@ export interface ConversationReads {
 
 /** No retained record or history, no discovered session and no permission to read a guessed path. */
 export const CONVERSATIONS_OFF: ConversationReads = {
+  publish: async () => { throw new Error('handoff publication is unavailable') },
   resolve: async () => null,
   recentAsks: async () => [],
   lastFullText: async () => null,
@@ -105,7 +111,15 @@ export const CONVERSATIONS_OFF: ConversationReads = {
   transcriptOk: async () => false,
 }
 
+export interface UsagePort {
+  read(target: AgentUsageTarget): Promise<Record<string, unknown>>
+  stop(): void
+}
+export const USAGE_FALLBACKS: PortFallbacks<UsagePort> = { read: later(FAIL), stop: undefined }
+
 export interface CoreApi {
+  /** Last aggregate observation, never a transcript read. Optional for services that do not ask. */
+  usage?: (target: AgentUsageTarget) => Promise<AgentTokenUsage | null>
   /** The daemon's data folder; a service keeps its own files in it. */
   dataDir: string
   terminals: TerminalsPort
@@ -153,6 +167,19 @@ export interface CoreApi {
     /** What a live Claude Code or Codex agent's pane footer says it is doing ("Reading 3 files"), or null:
      *  the dial's working card. The pane is read by the core; only the line leaves it. */
     activityText(agentId: string): Promise<string | null>
+    /** `activityText` with the footer's timer, for a Harness Pro. Absent in a
+     *  core that cannot read them; the dial then gets the footer alone. */
+    activitySnapshot?(agentId: string): Promise<{ text: string; elapsedSeconds?: number } | null>
+    /** Close a harness another agent started (`startedBy: agent`) as `agent_close` closes one: its screen saved, its
+     *  process stopped, its conversation kept. `idle` refuses one that works, waits for the person or holds a draft
+     *  (`SESSION_NOT_IDLE`); `now` does not. Any other harness is refused (`NOT_AGENT_STARTED`): the agent cleanup
+     *  (services/agentCleanup.ts) closes those, and nothing else. Absent where the core does not let a service close. */
+    closeStarted?(agentId: string, mode: 'idle' | 'now'): Promise<AgentCloseResult>
+    /** When a live agent's conversation last moved, epoch ms: the latest dated work in its transcript
+     *  (lib/transcriptActivity.ts), what the apps' `updatedAt` is when there is one. Null for none live, and for an
+     *  engine that keeps no dated transcript: a hook's time or the bind's is not when it last answered. Absent where
+     *  the core is not asked it. */
+    lastActivity?(agentId: string): Promise<number | null>
   }
   /** A device's or another machine's turns for an agent on this one: the doors the web and the hooks use. */
   turns: {
@@ -165,12 +192,12 @@ export interface CoreApi {
     recent(agentId: string, n: number): Promise<RecentTurn[]>
     /** The person's own last questions to a live agent, newest first. */
     asks(agentId: string): Promise<string[]>
-    /** Deliver text into a live agent under a delivery id of the caller's own, as the Wi-Fi device, a team
-     *  and the orchestrator deliver their turns: one path for the three. What becomes of it is heard through
+    /** Deliver text into a live agent under a delivery id of the caller's own, as the Wi-Fi device, Agent
+     *  Messages and the orchestrator deliver their turns: one path for the three. What becomes of it is heard through
      *  `onDelivery`, under the same id. */
     deliver(agentId: string, text: string, deliveryId: string): void
     /** Take back a delivery not yet being written: true when it was, and it never will be; false for one
-     *  the agent's pane is already taking. Answered at once, as the teams and the orchestrator read it in
+     *  the agent's pane is already taking. Answered at once, as the orchestrator reads it in
      *  line: in a service's own process the core is asked and the answer cannot wait, so it is false there,
      *  and a delivery the core did take back is then heard `rejected` (`cancelled`). */
     cancelDelivery(deliveryId: string): boolean
@@ -192,11 +219,6 @@ export interface CoreApi {
      *  there is none yet. Read from the end of its transcript, bounded (core/transcripts/lastTurn.ts). */
     lastTurn(sessionId: string): Promise<LastTurnText | null>
   }
-  /** Conversations on this machine that Harness did not start, and which of them a process has open. */
-  external: {
-    sessions: Pick<ExternalSessions, 'list' | 'scan'>
-    open: Pick<OpenSessions, 'known' | 'fresh'>
-  }
   /** The sign-in the core holds for every service: a service never holds a credential itself. */
   account: {
     /** The account's private grid name, minted and remembered by the backend; null when an older
@@ -211,6 +233,8 @@ export interface CoreApi {
     lane: LaneSeal
     /** This machine's E2EE identity as Share's owner signs with it, held by the gateway (`ObserverKey`). */
     observerKey: ObserverKey
+    /** The account's connected services, sealed and opened by the gateway for its machines (`ConnectorVault`). */
+    connectorVault: ConnectorVault
     /** Whether this computer holds an account: a sign-in or sign-out restarts the daemon. */
     signedIn(): boolean
     /** The account's environment (`prod`, …), which the backend checks every request against. */
@@ -226,7 +250,7 @@ export interface CoreApi {
      *  until the first one lands. */
     machineName(): string | null
     /** A read or write of the account's backend, signed in by the core (`proxyBackend`): an experiment's
-     *  account-wide settings (Tab collaboration's tab channels). A failure is an answer: 502, 504, 401. */
+     *  account-wide settings, and Agent Messages' tabs. A failure is an answer: 502, 504, 401. */
     backend(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>
     /** Hear the account's changes the backend announces (`desk_changed`, …). Returns how to stop hearing. */
     onNotice(listener: (notice: BackendNotice) => void): () => void
@@ -360,6 +384,23 @@ export const OBSERVER_KEY_OFF: ObserverKey = {
   signWelcome: () => Promise.reject(new Error('no key: this process holds no E2EE identity')),
 }
 
+/**
+ * The account's connected services sealed for its machines (lib/e2ee/connectorVault.ts), by the gateway,
+ * which holds this machine's identity and reads the device key log: `seal` makes an envelope for every
+ * machine of the account's log (not suspended, not pending), `open` reads one only if such a machine
+ * signed it, and answers null otherwise. `complete` says it was sealed for every such machine: one that
+ * is not misses a machine added since, and is sealed again. The envelope is opaque JSON for the backend.
+ */
+export interface ConnectorVault {
+  seal(plaintext: string): Promise<Record<string, unknown>>
+  open(envelope: unknown): Promise<{ plaintext: string, complete: boolean } | null>
+}
+/** A process with no key of the core's: it seals and opens nothing. */
+export const CONNECTOR_VAULT_OFF: ConnectorVault = {
+  seal: () => Promise.reject(new Error('no key: this process holds no E2EE identity')),
+  open: async () => null,
+}
+
 /** A service in its own process that acts on no agent: it creates none and reads no harness's frame. */
 export const AGENT_ACTIONS_OFF: Pick<CoreApi['agents'], 'create' | 'dsh'> = {
   create: async () => ({ ok: false, error: 'SERVICE_UNAVAILABLE' }),
@@ -367,10 +408,11 @@ export const AGENT_ACTIONS_OFF: Pick<CoreApi['agents'], 'create' | 'dsh'> = {
 }
 
 /** The account as a service that reads no backend, hears no notice and signs nothing has it. */
-export const ACCOUNT_BACKEND_OFF: Pick<CoreApi['account'], 'backend' | 'onNotice' | 'observerKey'> = {
+export const ACCOUNT_BACKEND_OFF: Pick<CoreApi['account'], 'backend' | 'onNotice' | 'observerKey' | 'connectorVault'> = {
   backend: async () => ({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } }),
   onNotice: () => () => {},
   observerKey: OBSERVER_KEY_OFF,
+  connectorVault: CONNECTOR_VAULT_OFF,
 }
 
 /** Where a service that was never told runs this daemon from: the installed CLI, on no port it knows. */
@@ -455,15 +497,20 @@ export const STORE_REQUESTS = ['dsh_list', 'dsh_install', 'dsh_update', 'dsh_rem
 export const USAGE_REQUESTS = ['usage_read'] as const
 /** The machine monitor (services/monitor.ts). */
 export const MONITOR_REQUESTS = ['machine_resources'] as const
-/** The command bar (services/commandBar.ts), an experiment: the socket's `command_bar`, and the hook server's
- *  `/api/command-bar/*`, which it asks as `command_bar_http`. */
-export const COMMAND_BAR_REQUESTS = ['command_bar', 'command_bar_http'] as const
+/** Memories (services/memory.ts), an experiment: what this machine's agents remember, for the owner's Memories
+ *  panes on their other machines, and the About You profile and its on/off choice from them. */
+export const MEMORY_REQUESTS = ['memory_snapshot', 'memory_about_put', 'memory_deliver'] as const
+/** The router (services/router.ts), an experiment: where a task a person typed or said should go, decided for
+ *  the client that asks, which acts on it. */
+export const ROUTER_REQUESTS = ['route_decide'] as const
 /** The project and folder readers (services/projects.ts). */
 export const PROJECTS_REQUESTS = ['git_pull_request', 'git_project_info', 'scm_project_info', 'project_preview', 'fs_list_dir', 'agent_read_file'] as const
 /** A window's name for its repo and its work, by a small model in the background (services/windowNames.ts). */
 export const WINDOW_NAMES_REQUESTS = ['window_name'] as const
 /** Change agent's handoff file, prepared in the edge host (services/handoff.ts). */
 export const HANDOFF_REQUESTS = ['agent_handoff_prepare'] as const
+/** Connected services for every local agent, and their MCP bridge, in the edge host (services/connectors.ts). */
+export const CONNECTORS_REQUESTS = ['connectors'] as const
 /**
  * Models (services/models.ts).
  *
@@ -496,6 +543,10 @@ const MINUTE = 60_000
  *   a move onto a grid model (`moveTarget`) each wait for it.
  * - A launch target, the private grid's name and the lists each run a few `grid` calls of up to 30 s.
  * - The Store's install and update set up a harness's toolchain: minutes.
+ *
+ * A grid or saved-API launch (`gridLaunch`) is built from what models has in hand, and a saved API's target
+ * (`apiTarget`) reads its model list for at most 15 s (lib/apiModels.ts): both take the half minute, which bounds
+ * how long a launch on one can wait. A launch on the engine's own login asks models nothing.
  */
 export const LONG_ANSWERS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
   models: {
@@ -504,7 +555,7 @@ export const LONG_ANSWERS: Readonly<Record<string, Readonly<Record<string, numbe
     ensure: 15 * MINUTE, moveTarget: 15 * MINUTE,
     launchTarget: 3 * MINUTE, privateGridName: 2 * MINUTE, lists: 2 * MINUTE,
   },
-  store: { dsh_install: 30 * MINUTE, dsh_update: 30 * MINUTE },
+  store: { dsh_install: 30 * MINUTE, dsh_update: 30 * MINUTE, dshMaterialize: 6 * MINUTE },
 }
 
 /** The orchestrator (services/orchestrator.ts): its projects, for the apps and for the agents it runs. */
@@ -515,9 +566,23 @@ export const SHARE_REQUESTS = [
   'harness_share_comments', 'harness_share_comment_post', 'harness_share_comment_remove',
 ] as const
 
-/** Tab collaboration and teams (services/collaboration.ts): the teams' own requests, from the apps, from `harness team`
- *  in an agent's shell and from the other machines' teams. */
-export const TEAMS_REQUESTS = ['team', 'team_delivery'] as const
+/** Agent Messages (services/messages.ts, messages/service.ts): from `harness send` in an agent's pane, from the
+ *  owner's other machines and from the windows. A service in the edge host since 2026-10-12, no longer an
+ *  experiment: its own process cost every computer it was on 62 MiB at idle for a few MiB of messaging. */
+export const MESSAGES_REQUESTS = ['agent_messages'] as const
+
+/**
+ * What Agent Messages in a process of its own may do through the core, and nothing more (core/messagesLink.ts
+ * answers it, and checks each): the agents as the apps are shown them (`shown`) and how an agent's shell reaches
+ * this daemon (`daemon`), which its roster and its `harness send` read; the account's tabs, the one backend read it
+ * makes (`backend`, GET of `MESSAGES_BACKEND_PATH`); its log's change notice for the windows (`windows`, only
+ * `MESSAGES_WINDOW_FRAME`); and which of its typed deliveries may be written (`writable`). It writes turns into
+ * agents (core/deliveries.ts, `TURN_DELIVERERS`) and hears the account's `desk_changed`. The same questions the
+ * experiment asked, so a core of either version answers the process of the other (harnessd/services.ts).
+ */
+export const MESSAGES_QUERIES = ['writable', 'shown', 'daemon', 'backend', 'windows'] as const
+export const MESSAGES_BACKEND_PATH = '/api/agent-messages'
+export const MESSAGES_WINDOW_FRAME = 'messages_changed'
 
 /**
  * The experiments: services that cost nothing until they are on (docs/design/2026-10-06-core-boundary-next.md,
@@ -534,14 +599,19 @@ export const TEAMS_REQUESTS = ['team', 'team_delivery'] as const
  */
 export const EXPERIMENTS: Readonly<Record<string, { requests: readonly string[]; state: readonly string[] }>> = {
   orchestrator: { requests: ORCHESTRATOR_REQUESTS, state: ['orchestrator/*.json'] },
-  // Tab collaboration and teams, beside the prompt scopes in the teams' process (harnessd/services.ts). Its
-  // ledgers and mailboxes: a team was made here, or another machine's team delivered to an agent here.
-  collaboration: { requests: TEAMS_REQUESTS, state: ['teams'] },
   // Its invitations and links: a harness was shared from here.
   sharing: { requests: SHARE_REQUESTS, state: ['harness-shares.json', 'harness-collaboration.json'] },
-  // Request-only: it keeps nothing, so it is on from its first request until the daemon stops.
-  commandBar: { requests: COMMAND_BAR_REQUESTS, state: [] },
+  // Request-only, on from its first request until the daemon stops: another machine's Memories pane asks, and
+  // the package's own files are its state.
+  memory: { requests: MEMORY_REQUESTS, state: [] },
+  // Request-only too: it keeps nothing, and asks Jev only when a client asks it.
+  router: { requests: ROUTER_REQUESTS, state: [] },
 }
+
+/** The services that may write turns into agents from a process of their own (core/deliveries.ts): the experiments,
+ *  and Agent Messages, which left them for the edge host and still types a message into an idle agent. No other
+ *  process may: writing into a pane is no other service's to ask. */
+export const TURN_DELIVERERS: readonly string[] = [...Object.keys(EXPERIMENTS), 'messages']
 
 /** The core's calls into Share: an observer's frame as the relay handed it over, the relay gone (every observer
  *  with it), and stopping it. */
@@ -575,11 +645,13 @@ export const ORCHESTRATOR_FALLBACKS: PortFallbacks<OrchestratorPort> = { roleOf:
 /** The core's calls into session search: index a session at its turn boundaries, forget a purged
  *  conversation, the title it indexed for one being adopted, and stopping its sweeps. The apps' own
  *  requests (`session_search`, `session_tail`) are its `ServiceRequests`, not the core's calls. */
-export type SearchPort = Pick<SessionSearchIndex, 'touch' | 'deleteHistory' | 'session' | 'stop'>
+export type SearchPort = Pick<SessionSearchIndex, 'touch' | 'deleteHistory' | 'session' | 'stop'> & {
+  inspect(request: ExternalSessionRequest): Promise<ExternalSessionAnswer>
+}
 
 /** What the core gets when search fails: nothing indexed and no title. */
 export const SEARCH_FALLBACKS: PortFallbacks<SearchPort> = {
-  touch: undefined, deleteHistory: undefined, session: undefined, stop: undefined,
+  touch: undefined, deleteHistory: undefined, session: undefined, stop: undefined, inspect: later(externalUnavailable()),
 }
 
 /*
@@ -647,6 +719,21 @@ export interface RecapsPort {
 /** What the core gets when the recaps fail: nothing told, no recap, and no live card. */
 export const RECAPS_FALLBACKS: PortFallbacks<RecapsPort> = { lifecycle: undefined, recaps: null, liveCards: later([]) }
 
+/**
+ * The core's calls into the agent cleanup (services/agentCleanup.ts): what happens to the harnesses agents start.
+ * Notices: the core never waits for them, and one the cleanup misses leaves a harness open, as before it.
+ */
+export interface AgentCleanupPort {
+  /** A harness was closed or stopped (`agent_close`, Stop Harness, a purge): the harnesses it started close too. */
+  closed(agentId: string): void
+  /** The person typed or pasted into a harness, from a window or the phone (an agent id or a session id): one another
+   *  agent started is the person's from then on. */
+  typed(id: string): void
+  stop(): void
+}
+/** What the core gets when the cleanup fails: nothing told, and every harness left open, as before it. */
+export const AGENT_CLEANUP_FALLBACKS: PortFallbacks<AgentCleanupPort> = { closed: undefined, typed: undefined, stop: undefined }
+
 /** The core's calls into the DSH viewers: each harness agent's viewer server and verdict watch. */
 export interface ViewersPort {
   /** Start the agent's viewer and verdict watch when it has a DSH. Idempotent: called on every
@@ -676,7 +763,8 @@ export const VIEWERS_UNAVAILABLE = { error: 'SERVICE_UNAVAILABLE', service: 'vie
 
 /** What the core gets when the viewers fail: agents' frames carry no DSH context and the windows
  *  no viewer, a client's viewer stream is refused at once (core/viewerStreams.ts) and its surface
- *  answered unavailable, and a restart or shutdown goes on. */
+ *  answered unavailable, and a restart or shutdown goes on. Their process on demand, before it has
+ *  first connected, holds a stream and a surface while it starts instead (core/viewersLink.ts). */
 export const VIEWERS_FALLBACKS: PortFallbacks<ViewersPort> = {
   attach: undefined, detach: undefined, frameContext: null, forwardingUrl: null, stop: later(undefined),
   stream: false, surface: later(VIEWERS_UNAVAILABLE), closed: undefined,
@@ -703,6 +791,18 @@ export interface ModelsPort {
   moveTarget(request: { gridName: string | null; model: string }): Promise<{ target: GridLaunchOverride } | { detail: string }>
   /** An agent was just moved onto a grid model: start that grid while its pane restarts, if it sleeps. */
   moved(launch: GridLaunchOverride): void
+  /**
+   * The launch that points `request.engine` at a grid or a saved API (lib/gridLaunch.ts): what its pane starts
+   * with and the config files the core writes for it, with a saved API's endpoint and key as saved now when
+   * `refresh`. An engine that cannot be pointed there is answered with the reason. The core builds no grid launch
+   * itself (docs/design/2026-10-08-launch-port.md).
+   */
+  gridLaunch(request: GridLaunchRequest): Promise<GridLaunchAnswer>
+  /** Fresh process evidence, batched; core never waits for it to discover or bind a session. */
+  gridAssignments(processes: readonly GridAssignmentProcess[]): Promise<GridAssignmentAnswer[]>
+  /** Where an agent moved onto a saved API's model sends its inference: the key travels only into its launch. The
+   *  sentence a person reads when the API cannot be used. */
+  apiTarget(request: { connectionId: string; model: string }): Promise<{ target: GridLaunchOverride; apiBase: string } | { detail: string }>
   /** The account's private grid: the backend's word, else what this machine works out; null for none. */
   privateGridName(): Promise<string | null>
   /** What `grid_models_changed` tells the windows: the list as a window that draws row state reads it,
@@ -716,13 +816,14 @@ export interface ModelsPort {
 }
 
 /**
- * What the core gets when models fails: grid set-up and every target answered with an error (a create on
- * a grid model answers GRID_UNAVAILABLE), frames with no note and no prewarm, the private grid as the
- * backend said it or none, and no push of the lists.
+ * What the core gets when models fails: grid set-up, every target and every grid or saved-API launch answered
+ * with an error (a create on a grid model answers GRID_UNAVAILABLE, and so does a relaunch on one), frames with no
+ * note and no prewarm, the private grid as the backend said it or none, and no push of the lists. A launch on the
+ * engine's own login never asks models.
  */
 export const MODELS_FALLBACKS: PortFallbacks<ModelsPort> = {
   ensure: later(FAIL), annotation: null, prewarm: undefined, launchTarget: later(FAIL), moveTarget: later(FAIL), moved: undefined,
-  privateGridName: later(null), lists: later(FAIL), machines: undefined, signedOut: undefined,
+  gridAssignments: later(FAIL), gridLaunch: later(FAIL), apiTarget: later(FAIL), privateGridName: later(null), lists: later(FAIL), machines: undefined, signedOut: undefined,
 }
 
 /** What the core calls while `ports.models` is null (models is off): its fallbacks' answers. */
@@ -733,6 +834,9 @@ export const MODELS_OFF: ModelsPort = {
   launchTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   moveTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   moved: () => {},
+  gridAssignments: () => Promise.reject(new ServiceUnavailableError('models')),
+  gridLaunch: () => Promise.reject(new ServiceUnavailableError('models')),
+  apiTarget: () => Promise.reject(new ServiceUnavailableError('models')),
   privateGridName: async () => null,
   lists: () => Promise.reject(new ServiceUnavailableError('models')),
   machines: () => {},
@@ -770,35 +874,18 @@ export interface WorkspacesPort {
 /** What the core gets when workspaces fails: branches keep their names and nothing is swept. */
 export const WORKSPACES_FALLBACKS: PortFallbacks<WorkspacesPort> = { nameBranches: undefined, sweepUnused: undefined }
 
-/** The prompt scopes whole: the core's calls, which team a prompt belongs to, recorded as a message is
- *  written, as a turn starts (from its hook or its transcript), as it is typed into a scoped terminal, and
- *  forgotten with its agent; and the team a prompt came from (`current`), which an agent's answer to a
- *  team's question moves back (`replied`). In the core's process the teams service's own; in their own,
- *  core/teamsLink.ts. */
-export type PromptScopes = Pick<SwarmPromptScopes, 'prepare' | 'started' | 'raw' | 'forget' | 'current' | 'replied'>
-
-/** The core's calls into the teams: the prompt scopes' records, and whether a team's delivery still holds
- *  the agent's pane, asked in line as its turn is written (core/input.ts). */
-export type TeamsPort = Pick<PromptScopes, 'prepare' | 'started' | 'raw' | 'forget'> & {
+/** The core's calls into Agent Messages: whether one of its typed deliveries (a `team:` id) may still be written,
+ *  asked in line as it is written (core/input.ts); and that the core's copy of the account's switch changed
+ *  (core/experiments.ts `createAgentSettingsSync`), which wakes it when it is turned on: off, it runs no timer that
+ *  would read the file again, and a file never written has nothing to watch (messages/settingWatch.ts). */
+export interface MessagesPort {
   canWrite(deliveryId: string): boolean
+  settingsChanged(): void
 }
 
-/** What the core gets when the teams fail: the prompt is written with no team recorded for it, and a team's
- *  delivery holds no pane (it waits, unwritten). */
-export const TEAMS_FALLBACKS: PortFallbacks<TeamsPort> = { prepare: () => {}, started: undefined, raw: undefined, forget: undefined, canWrite: false }
-
-
-/** A change to the prompt scopes, as the core tells the teams' own process (core/teamsLink.ts,
- *  services/teamsProcess.ts): numbered within one core's life, stamped with when it happened, and
- *  given to the process in order, once. `raw` bytes travel as base64. */
-export type TeamsEvent = { seq: number; core: string; at: number; agentId: string } & (
-  | { kind: 'prepare'; text: string; tabId?: string; deliveryId?: string }
-  | { kind: 'unprepare'; of: number }
-  | { kind: 'started'; text: string; source: 'hook' | 'transcript'; engine?: string }
-  | { kind: 'raw'; bytes: string; tabId?: string; pasted: boolean }
-  | { kind: 'forget' }
-  | { kind: 'replied'; teamId: string; questionId: string }
-)
+/** What the core gets when Agent Messages fails: none of its deliveries may be written (each waits, unwritten), and
+ *  a settings write tells it nothing. */
+export const MESSAGES_FALLBACKS: PortFallbacks<MessagesPort> = { canWrite: false, settingsChanged: undefined }
 
 /** What a delivered turn answers: delivered, or refused with the machine's name and a reason a person can read. */
 export type SendResult = { ok: true } | { ok: false; machine: string; reason: string }
@@ -1028,6 +1115,7 @@ export type BackendNotice =
   | { type: 'zoo_changed'; revision: number }
   | { type: 'machines_changed'; reason: string }
   | { type: 'device_keys_changed' }
+  | { type: 'connectors_changed'; revision: number }
 
 /** What a person has open on this computer, per surface (lib/windowSurfaces.ts). */
 export type { LocalWindows, WindowSurface } from '../lib/windowSurfaces.js'
@@ -1221,7 +1309,8 @@ export interface GatewayOps {
   devicesList(): Promise<HttpAnswer>
   devicesRemove(pub: string): Promise<HttpAnswer>
   devicesHistory(): Promise<HttpAnswer>
-  devicesDismiss(body: { pub?: string; pubs?: string[]; baseline?: boolean }): Promise<HttpAnswer>
+  /** `confirm`: "It's mine" for the one key named, shared with the account's other devices. */
+  devicesDismiss(body: { pub?: string; pubs?: string[]; baseline?: boolean; confirm?: boolean }): Promise<HttpAnswer>
   devicesRebaseline(confirm: boolean, head?: { seq: number; hash: string }): Promise<HttpAnswer>
   /** The Wi-Fi device's direct links: discovered devices, pairing one, and its pairings. A refusal is an
    *  answer (`{ refused }`), as the device's local API words it. */
@@ -1241,6 +1330,8 @@ export interface GatewayOps {
   lane: LaneSeal
   /** Share's owner's signature on a welcome, with this machine's identity (`core.account.observerKey`). */
   observerKey: ObserverKey
+  /** The account's connected services sealed for its machines (`core.account.connectorVault`). */
+  connectorVault: ConnectorVault
 }
 
 /** A window on this computer working on another of the owner's machines, through the relay: what the
@@ -1269,24 +1360,38 @@ export interface WindowRelay {
     onClosed: (code: number, reason: string) => void): Promise<WindowRelaySession>
 }
 
+export interface StorePort {
+  dshMaterialize(request: DshMaterializeRequest): Promise<DshMaterializeAnswer>
+  dshLaunch(request: DshLaunchRequest): Promise<DshLaunchAnswer>
+}
+
+export const STORE_FALLBACKS: PortFallbacks<StorePort> = { dshMaterialize: later(FAIL), dshLaunch: later(FAIL) }
+export const STORE_OFF: StorePort = {
+  dshMaterialize: () => Promise.reject(new ServiceUnavailableError('store')),
+  dshLaunch: () => Promise.reject(new ServiceUnavailableError('store')),
+}
+
 /** Each port is filled by the service that owns it when that service starts, and is null while the
  *  service is off: the core never waits on one. */
 export interface CorePorts {
+  usage: UsagePort | null
+  store: StorePort | null
   search: SearchPort | null
   viewers: ViewersPort | null
   models: ModelsPort | null
   workspaces: WorkspacesPort | null
-  teams: TeamsPort | null
+  messages: MessagesPort | null
   devices: DevicesPort | null
   wifi: WifiPort | null
   monitor: MonitorPort | null
   orchestrator: OrchestratorPort | null
   sharing: SharingPort | null
   recaps: RecapsPort | null
+  agentCleanup: AgentCleanupPort | null
 }
 
 export function emptyPorts(): CorePorts {
-  return { search: null, viewers: null, models: null, workspaces: null, teams: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null }
+  return { usage: null, store: null, search: null, viewers: null, models: null, workspaces: null, messages: null, devices: null, wifi: null, monitor: null, orchestrator: null, sharing: null, recaps: null, agentCleanup: null }
 }
 
 export interface CoreApiDeps {
@@ -1296,8 +1401,6 @@ export interface CoreApiDeps {
   registry: Pick<typeof registry, 'list' | 'byAgent' | 'resolve' | 'advertised' | 'terminalAvailable'>
   stoppedAgents: Pick<StoppedAgentStore, 'list'>
   databaseHistory: CoreApi['transcripts']['databaseHistory']
-  externalSessions: CoreApi['external']['sessions']
-  openSessions: CoreApi['external']['open']
   syncSession: CoreApi['agents']['sync']
   runtimeModels: CoreApi['agents']['runtimeModels']
   viewerChanged: CoreApi['clients']['viewerChanged']
@@ -1309,6 +1412,7 @@ export interface CoreApiDeps {
   accessToken: CoreApi['account']['accessToken']
   lane: CoreApi['account']['lane']
   observerKey: CoreApi['account']['observerKey']
+  connectorVault: CoreApi['account']['connectorVault']
   observer: CoreApi['clients']['observer']
   privateGridName: CoreApi['account']['privateGridName']
   machineName: CoreApi['account']['machineName']
@@ -1325,6 +1429,11 @@ export interface CoreApiDeps {
   questions: CoreApi['questions']
   machine: CoreApi['machine']
   activityText: CoreApi['agents']['activityText']
+  activitySnapshot?: CoreApi['agents']['activitySnapshot']
+  /** One `agent_close` (core/agents/close.ts), for `closeStarted`; absent, a service closes nothing. */
+  closeAgent?: (request: AgentCloseRequest) => Promise<AgentCloseResult>
+  /** When an agent's conversation last moved (lib/transcriptActivity.ts), for `lastActivity`. */
+  activityAt?: (session: RegisteredSession) => Promise<number | null>
   signedIn: CoreApi['account']['signedIn']
   environment: CoreApi['account']['environment']
   machines: CoreApi['account']['machines']
@@ -1345,9 +1454,10 @@ export interface CoreApiDeps {
 }
 
 export function createCoreApi({
-  dataDir, registry, stoppedAgents, databaseHistory, externalSessions, openSessions, syncSession, runtimeModels, viewerChanged,
-  gridNamed, gridModelsChanged, dshInstallStatus, mintGridName, accessToken, lane, observerKey, observer, privateGridName, machineName, backend, onNotice,
-  runtimeProfile, setRuntime, fork, create, dsh, windows, daemon, turns, questions, terminals = TERMINALS_OFF, conversations = CONVERSATIONS_OFF, viewerFrame, machine, activityText,
+  dataDir, registry, stoppedAgents, databaseHistory, syncSession, runtimeModels, viewerChanged,
+  gridNamed, gridModelsChanged, dshInstallStatus, mintGridName, accessToken, lane, observerKey, connectorVault, observer, privateGridName, machineName, backend, onNotice,
+  runtimeProfile, setRuntime, fork, create, dsh, windows, daemon, turns, questions, terminals = TERMINALS_OFF, conversations = CONVERSATIONS_OFF, viewerFrame, machine, activityText, activitySnapshot,
+  closeAgent, activityAt,
   signedIn, environment, machines, sendLocal, sendToWindow, hasWindow, devicesChanged, dialWatching, wifi, lastTurn, turnCard, turnSummary,
   log = (line) => console.warn(line),
 }: CoreApiDeps): CoreApi {
@@ -1379,12 +1489,25 @@ export function createCoreApi({
       create,
       dsh,
       activityText,
+      activitySnapshot,
+      // Decided here, not in the service: whatever the cleanup asks, from its process or this one, the core closes only
+      // a harness another agent started, the conversation it reviewed (`agent_close`'s identity), and keeps it.
+      closeStarted: async (agentId, mode) => {
+        const session = registry.byAgent(agentId)
+        if (!session) return { error: 'AGENT_CHANGED' }
+        if (session.startedBy !== 'agent') return { error: 'NOT_AGENT_STARTED' }
+        if (!closeAgent) return { error: 'UNSUPPORTED' }
+        return closeAgent({ agentId, sessionId: session.sessionId, createdAt: new Date(session.registeredAt).toISOString(), mode })
+      },
+      lastActivity: async (agentId) => {
+        const session = registry.byAgent(agentId)
+        return session && activityAt ? activityAt(session) : null
+      },
     },
     turns,
     questions,
     transcripts: { databaseHistory, lastTurn },
-    external: { sessions: externalSessions, open: openSessions },
-    account: { mintGridName, accessToken, lane, observerKey, privateGridName, machineName, backend, onNotice, signedIn, environment, machines },
+    account: { mintGridName, accessToken, lane, observerKey, connectorVault, privateGridName, machineName, backend, onNotice, signedIn, environment, machines },
     clients: {
       viewerChanged, gridNamed, gridModelsChanged, dshInstallStatus, windows, observer, hasWindow, devicesChanged, dialWatching,
       // A viewers process speaks to the core as a service: what it may send a client is a viewer stream's

@@ -187,38 +187,7 @@ pub(super) fn list(app: &mut App, request: Request) {
         );
     }
     if kind == "host" {
-        let rows = app
-            .fleet
-            .machines
-            .iter()
-            .filter(|m| !m.shared)
-            .map(|m| {
-                let unique = app
-                    .fleet
-                    .machines
-                    .iter()
-                    .filter(|other| other.name.eq_ignore_ascii_case(&m.name))
-                    .count()
-                    == 1
-                    && !m.name.contains(':');
-                let id = if unique {
-                    m.name.as_str()
-                } else {
-                    m.id.as_str()
-                };
-                let mut row = Row::new(id, &m.name).extra(&m.id).right(if m.usable() {
-                    if m.local {
-                        "this computer"
-                    } else {
-                        "connected"
-                    }
-                } else {
-                    "offline"
-                });
-                row.disabled = !m.usable();
-                row
-            })
-            .collect();
+        let rows = host_rows(app);
         return data(app, &request, rows, String::new());
     }
     if !["folder", "model"].contains(&kind) {
@@ -234,6 +203,12 @@ pub(super) fn list(app: &mut App, request: Request) {
         .map(str::to_string)
         .or_else(|| app.homes.get(&machine).cloned())
         .unwrap_or_default();
+    // Another computer's home is read when its folders are first asked for. Nothing else did here
+    // (only New Harness read it), so its folders stayed "still loading" and only its agents'
+    // scratch folders were offered.
+    if kind == "folder" && !app.homes.contains_key(&machine) && app.shell_context.homes_asked.insert(machine.clone()) {
+        crate::input::load_dsh(app, machine.clone());
+    }
     let browsing = kind == "folder" && crate::shell_picker::folder_parts(query).0.is_some();
     let parent = if kind == "folder" {
         match folder_parent(query, &cwd, app.homes.get(&machine).map(String::as_str)) {
@@ -260,6 +235,7 @@ pub(super) fn list(app: &mut App, request: Request) {
                 .agents
                 .values()
                 .filter(|a| a.machine_id == machine && !a.cwd.is_empty())
+                .filter(|a| !super::scratch_folder(&a.cwd))
                 .collect();
             recent.sort_by_key(|a| std::cmp::Reverse(a.recency()));
             let mut seen = HashSet::new();
@@ -643,9 +619,57 @@ pub(super) fn launch(app: &mut App, request: Request) {
     });
 }
 
+/// The composer's `@ computer` rows.
+fn host_rows(app: &App) -> Vec<Row> {
+    // "This computer" stands in for this computer only until it has its own name: once the
+    // daemon has registered it, that row is the same computer a second time.
+    let named = app.fleet.registered_local_machine().is_some();
+    app.fleet
+        .machines
+        .iter()
+        .filter(|m| !m.shared && !(named && crate::local::is_local(&m.id)))
+        .map(|m| {
+            let unique = app
+                .fleet
+                .machines
+                .iter()
+                .filter(|other| other.name.eq_ignore_ascii_case(&m.name))
+                .count()
+                == 1
+                && !m.name.contains(':');
+            let id = if unique {
+                m.name.as_str()
+            } else {
+                m.id.as_str()
+            };
+            // An offline computer stays a row the arrows reach (disabled, the list stood still
+            // on the one connected computer), dim and after the connected ones a search finds;
+            // choosing it says why it cannot be used.
+            let mut row = Row::new(id, &m.name).extra(&m.id).right(if m.usable() { "connected" } else { crate::shell_picker::OFFLINE });
+            if !m.usable() { row.label_dim = m.name.chars().count(); row.tier = 1 }
+            row
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_computers_are_listed_dim_after_the_connected_ones_never_disabled() {
+        let (sink, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(19449, sink, (100, 35));
+        for (id, name, reach) in [("m1", "Mac Auto", crate::fleet::Reach::Ready), ("m2", "grid-dev", crate::fleet::Reach::Offline)] {
+            app.fleet.machines.push(crate::fleet::Machine { id: id.into(), name: name.into(), shared: false, local: false,
+                status: if reach == crate::fleet::Reach::Ready { "running" } else { "offline" }.into(), reach });
+        }
+        let rows = host_rows(&app);
+        let row = |name: &str| rows.iter().find(|r| r.label == name).unwrap();
+        assert!(rows.iter().all(|r| !r.disabled), "every computer is reachable");
+        assert_eq!((row("Mac Auto").right.as_str(), row("Mac Auto").label_dim, row("Mac Auto").tier), ("connected", 0, 0));
+        assert_eq!((row("grid-dev").right.as_str(), row("grid-dev").label_dim, row("grid-dev").tier), (crate::shell_picker::OFFLINE, 8, 1));
+    }
 
     #[tokio::test]
     async fn connecting_remote_launch_waits_and_cancellation_prevents_late_work() {

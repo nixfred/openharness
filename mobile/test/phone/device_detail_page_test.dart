@@ -111,6 +111,29 @@ void main() {
     expect(find.byKey(const Key('device-detail-remove')), findsOneWidget);
   });
 
+  testWidgets('a device another of the person’s devices confirmed says where, '
+      'in place of a banner', (tester) async {
+    final notifier = DevicesApp();
+    addTearDown(notifier.dispose);
+    final r = app();
+    final confirmed = DeviceLogRow(
+      r.member,
+      fingerprint: r.fingerprint,
+      self: false,
+      confirmed: const DeviceLogConfirmed(by: 'k', label: 'studio-mac', at: 1),
+    );
+    await pump(tester, notifier, confirmed);
+    expect(find.byKey(const Key('device-detail-confirmed')), findsOneWidget);
+    expect(find.text('on studio-mac'), findsOneWidget);
+  });
+
+  testWidgets('a device nobody confirmed elsewhere says nothing of it', (tester) async {
+    final notifier = DevicesApp();
+    addTearDown(notifier.dispose);
+    await pump(tester, notifier, app());
+    expect(find.byKey(const Key('device-detail-confirmed')), findsNothing);
+  });
+
   testWidgets('an app: no machine row, no last active when never seen, and the '
       'app wording', (tester) async {
     final notifier = DevicesApp();

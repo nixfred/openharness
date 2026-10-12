@@ -1,4 +1,5 @@
 import { daemonSession, type NewCommandDeps } from './newCommand.js'
+import { NOT_RUNNING } from './unreachable.js'
 
 /**
  * `harness grid setup` — have grid ready on this computer: installed, signed in with this computer's
@@ -13,6 +14,7 @@ import { daemonSession, type NewCommandDeps } from './newCommand.js'
 export interface GridSetupDeps extends Pick<NewCommandDeps, 'port' | 'connect' | 'timeoutMs'> {
   localMachineId: string | null
   daemonRunning: () => boolean | Promise<boolean>
+  unreachable?: () => string
   output: (line: string) => void
   error: (line: string) => void
 }
@@ -22,7 +24,7 @@ export const GRID_SETUP_TIMEOUT_MS = 5 * 60_000
 
 export async function gridSetupCommand(deps: GridSetupDeps): Promise<number> {
   if (!(await deps.daemonRunning())) {
-    deps.error('Harness is not running on this computer. Start it with `harness start`.')
+    deps.error(deps.unreachable?.() ?? NOT_RUNNING)
     return 1
   }
   if (!deps.localMachineId) {

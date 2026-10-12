@@ -941,5 +941,53 @@ class ScreenSelection(unittest.TestCase):
         run.assert_not_called()
 
 
+class RuntimeSupervision(unittest.TestCase):
+    """A CLI change takes effect only through harness-daemon.service's own daemon."""
+
+    SCREEN = [('systemctl', '--user', 'restart', 'hn-screen.service'),
+              ('systemctl', '--user', 'is-active', '--quiet', 'hn-screen.service')]
+
+    def restart(self, pids, cli_changed=True):
+        calls = []
+        with patch.object(update, 'run', side_effect=lambda *args, **kwargs: calls.append(args) or ''), \
+             patch.object(update, 'runtime_pids', side_effect=pids):
+            update.restart(cli_changed)
+        return calls
+
+    def test_the_units_daemon_is_restarted_and_must_serve_afterwards(self):
+        self.assertEqual(self.restart([(1347, 1347), (42916, 42916)]), [
+            ('systemctl', '--user', 'restart', 'harness-daemon.service'),
+            ('/usr/lib/harness-os/wait-runtime',), *self.SCREEN])
+
+    def test_a_daemon_serving_beside_the_unit_is_stopped_before_the_restart(self):
+        # 2026-10-12: a sign-in restarted the daemon outside systemd. Restarting the unit alone
+        # left that one serving the old CLI while the unit's new core failed on the taken port.
+        calls = self.restart([(2288, None), (42916, 42916)])
+        self.assertEqual(calls[:2], [('/usr/bin/harness', 'stop'), ('systemctl', '--user', 'restart', 'harness-daemon.service')])
+        self.assertEqual(self.restart([(2288, 1347), (42916, 42916)])[0], ('/usr/bin/harness', 'stop'))
+
+    def test_activation_fails_unless_the_units_own_daemon_answers(self):
+        for after in [(2288, None), (2288, 43000), (None, 43000), (None, None)]:
+            with self.subTest(after=after), self.assertRaisesRegex(ValueError, 'not running under harness-daemon.service'):
+                self.restart([(None, None), after])
+
+    def test_an_hn_only_change_leaves_the_daemon_alone(self):
+        self.assertEqual(self.restart([], cli_changed=False), self.SCREEN)
+
+    def test_pids_come_from_the_runtime_and_systemd(self):
+        def ask(answer, main):
+            opened = patch.object(update, 'urlopen', side_effect=answer if isinstance(answer, Exception) else lambda *a, **k: Response(answer))
+            with opened, patch.object(update, 'run', return_value=main) as run:
+                pids = update.runtime_pids()
+            run.assert_called_once_with('systemctl', '--user', 'show', 'harness-daemon.service', '--property=MainPID', '--value', timeout=10)
+            return pids
+        self.assertEqual(ask(b'{"pid": 1347, "version": "0.3.80"}', '1347'), (1347, 1347))
+        self.assertEqual(ask(b'{"pid": 2288}', '0'), (2288, None))
+        self.assertEqual(ask(OSError('Connection refused'), '42916'), (None, 42916))
+        for odd in [b'not json', b'[1347]', b'{"pid": "1347"}', b'{"pid": true}', b'{"pid": 0}']:
+            with self.subTest(odd=odd):
+                self.assertEqual(ask(odd, ''), (None, None))
+
+
 if __name__ == '__main__':
     unittest.main()

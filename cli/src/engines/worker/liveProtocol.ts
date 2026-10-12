@@ -5,6 +5,7 @@ import type { RegisteredSession } from '../../lib/registry.js'
 import { record, sessionEvent } from './protocol.js'
 import type { RuntimeRecord } from '../facets/runtime.js'
 import { runtimeRecord } from './runtimeProtocol.js'
+import type { TranscriptClose } from '../../lib/transcriptControls.js'
 
 export const LIVE_VERSION = 1
 export const LIVE_CAPABILITIES = 'engine_live_capabilities'
@@ -128,5 +129,11 @@ export interface LivePull {
   liveStart?: boolean
   /** Rebuild after replacement/truncation; stream a small rewritten file as history after activation. */
   rewritten?: boolean
+  /** The stream whose read found the file rewritten. Its records up to where that read found them are
+   *  history and the rest are live, as the legacy tailer placed the boundary when it noticed the rewrite.
+   *  A worker that never saw that read, or a file changed again since, hydrates as `rewritten` alone. */
+  rewrittenFrom?: string
   end?: number
+  /** Eager core decisions retained across parser reconstruction, in native byte order. */
+  closes?: readonly TranscriptClose[]
 }

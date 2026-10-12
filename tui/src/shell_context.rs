@@ -87,6 +87,16 @@ pub struct State {
     catalog_started: Option<Instant>,
     pub catalog_notice: String,
     composition: Option<composition::Catalog>,
+    /// Computers whose home folder a composer asked for: asked once, not on every keystroke.
+    homes_asked: HashSet<String>,
+}
+
+/// A system temporary folder (`/tmp`, macOS's `/private/tmp` and `/var/folders`): where test runs
+/// and throwaway agents work, not a project to start in again — a computer whose recent agents all
+/// ran there (a test matrix) offered nothing else, and its daemon refuses to open them (FORBIDDEN).
+pub fn scratch_folder(path: &str) -> bool {
+    ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].iter()
+        .any(|root| path == *root || path.starts_with(&format!("{root}/")))
 }
 
 fn path() -> std::path::PathBuf { crate::app::sessions_path(None).with_extension("shell-context.json") }
@@ -649,9 +659,11 @@ fn show(app: &mut App, query: &str) {
 
 fn context_rows(app: &App, host: bool) -> Vec<Row> {
     if host {
-        app.fleet.machines.iter().filter(|m| !m.shared).map(|m| {
+        // ("This computer" only until this computer has its own name: then it would be it twice.)
+        let named = app.fleet.registered_local_machine().is_some();
+        app.fleet.machines.iter().filter(|m| !m.shared && !(named && crate::local::is_local(&m.id))).map(|m| {
             let mut row = Row::new(m.id.clone(), m.name.clone()).extra(m.id.clone())
-                .right(if m.usable() { if m.local { "this computer" } else { "connected" } } else { "unavailable" });
+                .right(if m.usable() { "connected" } else { "unavailable" });
             row.disabled = !m.usable(); row
         }).collect()
     } else {

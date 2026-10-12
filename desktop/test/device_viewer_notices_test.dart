@@ -16,6 +16,7 @@ import 'package:harness/e2ee/bytes.dart';
 import 'package:harness/e2ee/keys.dart';
 import 'package:harness/state/account_devices.dart' show NewDeviceNotice;
 import 'package:harness/state/app_state.dart';
+import 'package:harness/viewer/device_ack.dart';
 import 'package:harness/viewer/device_log.dart';
 import 'package:harness/viewer/device_log_sync.dart';
 import 'package:harness/viewer/direct_auth_api.dart' show IssuedTokens;
@@ -155,6 +156,24 @@ class _Api extends ApiClient {
   @override
   Future<DeviceLogAppendAnswer?> appendDeviceKey(DevLogEntry entry) =>
       backend.append(entry);
+
+  /// The acknowledgements the backend keeps ("It's mine" said on a device), as it serves them.
+  final acks = <Object?>[];
+
+  /// What this app shared.
+  final posted = <DevAck>[];
+
+  @override
+  Future<List<Object?>?> deviceAcks(int since) async =>
+      offline ? null : [...acks];
+
+  @override
+  Future<bool> postDeviceAck(DevAck ack) async {
+    if (offline) return false;
+    posted.add(ack);
+    acks.add(ack.toJson());
+    return true;
+  }
 
   @override
   Future<Map<String, int>> deviceKeysSeen() async {
@@ -477,6 +496,47 @@ void main() {
     await settle();
     // Only what joined since: the two seen ones stay seen.
     expect(again.newDevices.map((d) => d.label), ['box2']);
+  });
+
+  test('"It’s mine" is shared with the account; one another trusted device shared takes the banner down, and says where', () async {
+    final app = start();
+    addTearDown(app.dispose);
+    final api = app.api as _Api;
+    final tablet = await E2eeIdentity.fromSeed(List.filled(32, 6));
+    await backend.add(box2, 'machine', 'b' * 32, 'box2');
+    await logOf(app).register();
+    await backend.add(phone, 'viewer', '', 'Phone');
+    await backend.add(intruder, 'viewer', '', 'Chrome');
+    await backend.add(tablet, 'viewer', '', 'Tablet');
+    await logOf(app).refresh();
+    await settle();
+    expect(app.newDevices.map((d) => d.label), ['Phone', 'Chrome', 'Tablet']);
+
+    // "It's mine" here: marked here, and shared for the account's other devices.
+    app.dismissNewDevice(b64e(phone.pub));
+    await settle();
+    expect(api.posted.map((a) => a.pub), [b64e(phone.pub)]);
+    expect(api.posted.single.signer, b64e((await keys.identity()).pub));
+
+    // box2 (on the account before this app) confirmed the tablet; the log is read again (the push).
+    api.acks.add(
+      (await signDevAck(
+        DevAck(v: 1, acct: _acct, pub: b64e(tablet.pub), addSeq: backend.state.active[b64e(tablet.pub)]!.seq, signer: b64e(box2.pub), at: 9000),
+        box2,
+      )).toJson(),
+    );
+    await logOf(app).refresh();
+    await settle();
+    expect(app.newDevices.map((d) => d.label), ['Chrome']);
+    final devices = (await app.loadDevices())!;
+    expect(devices.devices.firstWhere((d) => d.pub == b64e(tablet.pub)).confirmedOn, 'box2');
+    expect(devices.devices.firstWhere((d) => d.pub == b64e(phone.pub)).confirmedOn, isNull);
+
+    // Opening the list (Review) marks what it showed as seen here, and tells nobody.
+    app.seenNewDevices();
+    await settle();
+    expect((await logOf(app).list()).pending, isEmpty);
+    expect(api.posted, hasLength(1));
   });
 
   test('opening the list writes back what it read as pending even with no banner up', () async {

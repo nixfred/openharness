@@ -1,11 +1,14 @@
 import { screenFor } from '../engines/screens.js'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CloseAgentService, inspectCloseActivity as inspectCloseReading, type CloseActivity, type CloseAgentServiceDeps, type AgentCloseRequest } from './closeAgentService.js'
 import { registry, type RegisteredSession } from './registry.js'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { env } from '../config/env.js'
 import { SessionCheckpointStore } from './sessionCheckpoint.js'
+import { IdentityReadUnavailable } from '../engines/kit/identityScan.js'
+import { findResumedTranscript } from './sessionRepair.js'
+import { piSessionFolder } from '../engines/repairIdentities.js'
 
 let row: RegisteredSession
 let service: CloseAgentService
@@ -64,6 +67,61 @@ it('checkpoint failure retains the session and reports the failure', async () =>
   vi.mocked(deps.checkpoint).mockRejectedValue(Object.assign(new Error('Disk full'), { code: 'HISTORY_NOT_SAVED' }))
   expect(await service.request(request())).toMatchObject({ error: 'HISTORY_NOT_SAVED', detail: 'Disk full' })
   expect(registry.byAgent(row.agentId)).toBe(row)
+})
+it('a queued Close preserves its intent and reason while native identity is unavailable, then retries', async () => {
+  vi.mocked(deps.stop).mockRejectedValueOnce(new IdentityReadUnavailable('the process record is incomplete'))
+  await expect(service.request(request('after_task'))).resolves.toEqual({ deferred: true })
+  const plan = row.closePlan!
+  await service.tick()
+  time += 5_000
+  await service.tick()
+  expect(registry.byAgent(row.agentId)?.closePlan).toEqual({ ...plan,
+    state: 'waiting', detail: 'Conversation identity is held: the process record is incomplete.' })
+  expect(deps.checkpoint).not.toHaveBeenCalled()
+  await service.tick()
+  expect(deps.stop).toHaveBeenCalledTimes(2)
+  expect(deps.checkpoint).toHaveBeenCalledOnce()
+  expect(registry.byAgent(row.agentId)).toBeUndefined()
+})
+it.each(['capture', 'checkpoint'] as const)('a queued Pi Close retries real native evidence held during %s', async phase => {
+  const previousHome = env.PI_HOME
+  env.PI_HOME = join(env.ADAPTER_DATA_DIR, 'pi-close', row.agentId)
+  const cwd = join(env.PI_HOME, 'workspace'), directory = join(env.PI_HOME, 'checkpoints')
+  mkdirSync(cwd, { recursive: true })
+  Object.assign(row, { engine: 'pi', sessionId: 'queued-conversation', transcriptPath: null, cwd, codexHome: undefined })
+  const folder = join(env.PI_HOME, 'agent', 'sessions', piSessionFolder(cwd))
+  mkdirSync(folder, { recursive: true }); mkdirSync(directory)
+  const native = join(folder, `day_${row.sessionId}.jsonl`), duplicate = join(folder, `next_${row.sessionId}.jsonl`)
+  const header = JSON.stringify({ type: 'session', id: row.sessionId, cwd }) + '\n'
+  const store = new SessionCheckpointStore(directory)
+  deps.checkpoint = vi.fn(s => store.save(s, { screen: 'The private terminal is idle' }))
+  deps.stop = vi.fn(async (id, options) => {
+    const captured = { ...row }
+    if (phase === 'capture') captured.transcriptPath = await findResumedTranscript('pi', row.sessionId, { cwd })
+    await options.checkpoint!(captured, 'before')
+    await options.beforeStop!(captured)
+    expect(options.current!()).toBe(true)
+    registry.removeAgent(id)
+  })
+  try {
+    writeFileSync(native, '{partial')
+    expect(await service.request(request('after_task'))).toEqual({ deferred: true })
+    const plan = row.closePlan!
+    await service.tick(); time += 5_000; await service.tick()
+    expect(registry.byAgent(row.agentId)?.closePlan).toMatchObject({ id: plan.id, state: 'waiting', detail: expect.stringContaining('could not be read') })
+    expect(readdirSync(directory)).toEqual([])
+    writeFileSync(native, header); writeFileSync(duplicate, header)
+    await service.tick()
+    expect(registry.byAgent(row.agentId)?.closePlan).toMatchObject({ id: plan.id, state: 'waiting', detail: 'More than one file matches this Pi conversation.' })
+    expect(readdirSync(directory)).toEqual([])
+    rmSync(duplicate)
+    await service.tick()
+    expect(registry.byAgent(row.agentId)).toBeUndefined()
+    const saved = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(file => /^[a-f0-9]{64}\.json$/.test(file))!), 'utf8'))
+    expect(saved.source).toBe(native)
+    expect(readFileSync(join(directory, saved.file), 'utf8')).toBe(header)
+    expect(deps.stop).toHaveBeenCalledTimes(3)
+  } finally { env.PI_HOME = previousHome }
 })
 it('cleanup requires open-tab support and checks again after history is saved', async () => {
   const close = { ...request('now'), onlyIfHidden: true }
@@ -126,6 +184,29 @@ it('an inspect asked for while a close is saving waits for it, and is never answ
   finish()
   expect(await closing).toEqual({ closed: true })
   expect(await inspecting).toEqual({ error: 'AGENT_CHANGED' })
+})
+it('a close of one already closed, the same conversation, is closed: asked after it, or waiting behind the close that did it', async () => {
+  // A window closing a tab closes its panes one at a time; the harnesses a pane's harness started close with it
+  // (services/agentCleanup.ts), and the window's own close of one of them was answered AGENT_CHANGED.
+  const asked = request()
+  const closedAlready = vi.fn((r: AgentCloseRequest) => r.agentId === asked.agentId && r.sessionId === asked.sessionId && !registry.byAgent(r.agentId))
+  service.dispose()
+  service = new CloseAgentService({ ...deps, closedAlready })
+  let finish!: () => void
+  vi.mocked(deps.checkpoint).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  const cleanup = service.request(request('now'))
+  await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+  const window = service.request(request('idle'))
+  finish()
+  expect(await cleanup).toEqual({ closed: true })
+  expect(await window).toEqual({ closed: true })
+  expect(await service.request(request('now'))).toEqual({ closed: true })
+  expect(deps.stop).toHaveBeenCalledOnce()
+  // Asking what it is doing, or to close it after its task, is about a live one: it changed.
+  expect(await service.request(request('inspect'))).toEqual({ error: 'AGENT_CHANGED' })
+  expect(await service.request(request('after_task'))).toEqual({ error: 'AGENT_CHANGED' })
+  // Another conversation by that id was not closed.
+  expect(await service.request({ ...request('now'), sessionId: 'other' })).toEqual({ error: 'AGENT_CHANGED' })
 })
 it('a close now asked for while a close after the task is being planned closes now', async () => {
   let read!: (activity: CloseActivity) => void
@@ -321,6 +402,27 @@ it('automatically stops only after two timer observations of sustained idle', as
   service.dispose()
   await service.tick()
 })
+it.each(['unavailable', 'untyped', 'cancelled', 'disposed'] as const)('keeps a queued Close visible through an activity read that is %s', async phase => {
+  await service.request(request('after_task'))
+  const plan = row.closePlan!
+  vi.mocked(deps.activity).mockImplementationOnce(async () => {
+    if (phase === 'cancelled') service.cancel(row.agentId)
+    if (phase === 'disposed') service.dispose()
+    throw phase === 'untyped' ? null : new Error('The conversation reader is unavailable.')
+  })
+  await service.tick()
+  expect(deps.stop).not.toHaveBeenCalled()
+  if (phase === 'cancelled') expect(row.closePlan).toBeUndefined()
+  else if (phase === 'disposed') expect(row.closePlan).toEqual(plan)
+  else {
+    expect(row.closePlan).toMatchObject({ id: plan.id, state: 'waiting', detail: expect.any(String) })
+    expect(deps.changed).toHaveBeenLastCalledWith(row)
+    await service.tick()
+    time += 5_000
+    await service.tick()
+    expect(deps.stop).toHaveBeenCalledOnce()
+  }
+})
 it('resets a deferred idle observation after a failed read instead of stopping on stale evidence', async () => {
   await service.request(request('after_task'))
   await service.tick()
@@ -333,6 +435,20 @@ it('resets a deferred idle observation after a failed read instead of stopping o
   await service.tick()
   expect(deps.stop).not.toHaveBeenCalled()
   time += 1
+  await service.tick()
+  expect(deps.stop).toHaveBeenCalledOnce()
+})
+it.each(['persist', 'notify'] as const)('contains a failed Close reason %s and retries the existing intent', async stage => {
+  await service.request(request('after_task'))
+  const id = row.closePlan!.id
+  vi.mocked(deps.activity).mockRejectedValueOnce(new Error('Reader unavailable'))
+  if (stage === 'persist') vi.spyOn(registry, 'setClosePlan').mockImplementationOnce(() => { throw Error('Disk full') })
+  else vi.mocked(deps.changed).mockImplementationOnce(() => { throw Error('Client disconnected') })
+  await expect(service.tick()).resolves.toBeUndefined()
+  expect(row.closePlan).toMatchObject({ id, state: 'waiting' })
+  expect(deps.stop).not.toHaveBeenCalled()
+  await service.tick()
+  time += 5_000
   await service.tick()
   expect(deps.stop).toHaveBeenCalledOnce()
 })
@@ -378,3 +494,166 @@ it('a concurrent deferred tick never starts a second stop', async () => {
 function inspectCloseActivity(session: Parameters<typeof inspectCloseReading>[0], capture: string | null, turnOpen: boolean | undefined, needsInput: boolean) {
   return inspectCloseReading(session, capture === null ? null : screenFor(session.engine).inspect(capture), turnOpen, needsInput)
 }
+
+// Codex 0.162.1 in a clean macOS VM (2026-10-12): `harness close --now` a second after its start was refused with
+// "Conversation identity is held: the native control descriptor type is unavailable." and the harness kept working.
+describe('a close of a harness still starting', () => {
+  const held = () => new IdentityReadUnavailable('the native control descriptor type is unavailable')
+  let slept: number[]
+  beforeEach(() => {
+    Object.assign(row, { sessionId: '', transcriptPath: null, boundAt: null })
+    time = row.registeredAt + 1_000
+    slept = []
+    deps.sleep = vi.fn(async ms => { slept.push(ms); time += ms })
+    service = new CloseAgentService(deps)
+  })
+  const stops = () => vi.mocked(deps.stop).mock.calls.map(([, options]) => options)
+  /** As a hook binds it (registry.register): its first conversation, and no `launch` any more. */
+  const bind = (extra: Partial<RegisteredSession> = {}) => { Object.assign(row, { sessionId: 'first', boundAt: time, ...extra }); delete row.launch }
+
+  it('waits for its first conversation to bind, then closes it with that conversation', async () => {
+    const asked = request('now')
+    vi.mocked(deps.stop).mockRejectedValueOnce(held())
+    vi.mocked(deps.sleep!).mockImplementationOnce(async ms => {
+      time += ms
+      bind({ transcriptPath: '/fixture/first.jsonl' })
+    })
+    expect(await service.request(asked)).toEqual({ closed: true })
+    expect(stops()).toHaveLength(2)
+    expect(stops()[1].withoutConversation).toBeUndefined()
+    expect(registry.byAgent(row.agentId)).toBeUndefined()
+  })
+  it('never bound within the wait: stopped without a conversation, and says so', async () => {
+    let unbound = 0
+    vi.mocked(deps.stop).mockImplementation(async (id, options) => {
+      if (!options.withoutConversation) throw held()
+      options.withoutConversation()
+      unbound++
+      registry.removeAgent(id)
+    })
+    expect(await service.request(request('now'))).toEqual({ closed: true, withoutConversation: true })
+    expect(unbound).toBe(1)
+    expect(slept.reduce((a, b) => a + b, 0)).toBe(8_000)
+    expect(stops().at(-1)?.withoutConversation).toBeTypeOf('function')
+    expect(stops().slice(0, -1).every(options => !options.withoutConversation)).toBe(true)
+  })
+  it('a close that finds it idle stops it the same way; one that finds it working leaves it', async () => {
+    vi.mocked(deps.stop).mockImplementation(async (id, options) => {
+      if (!options.withoutConversation) throw held()
+      registry.removeAgent(id)
+    })
+    vi.mocked(deps.activity).mockResolvedValue('working')
+    expect(await service.request(request('idle'))).toEqual({ error: 'SESSION_NOT_IDLE', activity: 'working' })
+    vi.mocked(deps.activity).mockResolvedValue('idle')
+    // A stop that never says it went without a conversation is a close that kept what it had.
+    expect(await service.request(request('idle'))).toEqual({ closed: true })
+  })
+  it('a conversation bound while a try ran is closed with it at once, which that try read as a change', async () => {
+    vi.mocked(deps.stop).mockImplementationOnce(async () => {
+      bind()
+      throw Object.assign(new Error('Harness changed while saving its conversation. Try stopping again.'), { code: 'STOP_UNCONFIRMED' })
+    })
+    expect(await service.request(request('now'))).toEqual({ closed: true })
+    expect(deps.sleep).not.toHaveBeenCalled()
+    expect(stops()).toHaveLength(2)
+  })
+  it('bound by the last try of the wait: tried once more with its conversation, not let go', async () => {
+    let calls = 0
+    vi.mocked(deps.stop).mockImplementation(async (id, options) => {
+      if (++calls === 9) bind()
+      if (calls < 10) throw held()
+      expect(options.withoutConversation).toBeUndefined()
+      registry.removeAgent(id)
+    })
+    expect(await service.request(request('now'))).toEqual({ closed: true })
+    expect(calls).toBe(10)
+  })
+  it('a refusal of its own is answered at once', async () => {
+    vi.mocked(deps.stop).mockRejectedValue(Object.assign(new Error('Disk full'), { code: 'HISTORY_NOT_SAVED' }))
+    expect(await service.request(request('now'))).toMatchObject({ error: 'HISTORY_NOT_SAVED', detail: 'Disk full' })
+    expect(deps.sleep).not.toHaveBeenCalled()
+  })
+  it('a conversation that binds and still cannot be read is never stopped without it', async () => {
+    vi.mocked(deps.stop).mockRejectedValue(held())
+    vi.mocked(deps.sleep!).mockImplementationOnce(async ms => { time += ms; bind() })
+    expect(await service.request(request('now'))).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', detail: expect.stringContaining('descriptor') })
+    expect(stops().every(options => !options.withoutConversation)).toBe(true)
+    expect(registry.byAgent(row.agentId)).toBe(row)
+  })
+  it.each([
+    ['launched over a minute ago', () => { time = row.registeredAt + 60_000 }],
+    ['an engine typed into a terminal', () => { row.terminalHost = true }],
+    ['a resume', () => { row.resumeOnly = true }],
+    ['one discovery found', () => { delete row.launch }],
+    ['a fork, which starts on a copy of another conversation', () => { row.forkedFrom = { agentId: 'parent', name: 'parent', sessionId: 'theirs' } }],
+    ['whose engine started over a minute ago', () => { row.processIdentity!.startMarker = new Date(row.registeredAt - 1_000).toString(); time = row.registeredAt + 60_000 }],
+    ['seen through a clock that went back', () => { time = row.registeredAt - 1 }],
+  ] as const)('a harness %s is refused at once, as before', async (_, arrange) => {
+    arrange()
+    service = new CloseAgentService(deps)
+    vi.mocked(deps.stop).mockRejectedValue(held())
+    expect(await service.request(request('now'))).toMatchObject({ error: 'IDENTITY_UNAVAILABLE' })
+    expect(deps.sleep).not.toHaveBeenCalled()
+    expect(registry.byAgent(row.agentId)).toBe(row)
+  })
+  it('an inspect answers at once', async () => {
+    vi.mocked(deps.activity).mockRejectedValue(held())
+    expect(await service.request(request('inspect'))).toMatchObject({ error: 'IDENTITY_UNAVAILABLE' })
+    expect(deps.sleep).not.toHaveBeenCalled()
+  })
+  it.each(['reopened', 'replaced', 'disposed', 'removed'] as const)('the wait ends when the harness is %s', async change => {
+    vi.mocked(deps.stop).mockRejectedValue(held())
+    vi.mocked(deps.sleep!).mockImplementationOnce(async ms => {
+      time += ms
+      if (change === 'reopened') service.cancel(row.agentId)
+      else if (change === 'replaced') row.processIdentity = { pid: 778, startMarker: 'reborn', executable: 'codex' }
+      else if (change === 'disposed') service.dispose()
+      else registry.removeAgent(row.agentId)
+    })
+    expect(await service.request(request('now'))).toEqual({ error: 'AGENT_CHANGED' })
+    expect(stops()).toHaveLength(1)
+  })
+  it('the harness replaced as the wait ends is not stopped without a conversation', async () => {
+    vi.mocked(deps.stop).mockRejectedValue(held())
+    vi.mocked(deps.sleep!).mockImplementation(async ms => {
+      time += ms
+      if (slept.push(ms) === 8) row.processIdentity = { pid: 778, startMarker: 'reborn', executable: 'codex' }
+    })
+    expect(await service.request(request('now'))).toEqual({ error: 'AGENT_CHANGED' })
+    expect(stops().every(options => !options.withoutConversation)).toBe(true)
+  })
+  it('a harness whose engine installed first is starting from its engine\'s own start', async () => {
+    time = row.registeredAt + 5 * 60_000
+    row.processIdentity!.startMarker = new Date(time - 2_000).toString()
+    vi.mocked(deps.stop).mockImplementationOnce(async () => { throw held() })
+    vi.mocked(deps.sleep!).mockImplementationOnce(async ms => { time += ms; bind() })
+    expect(await service.request(request('now'))).toEqual({ closed: true })
+    expect(deps.sleep).toHaveBeenCalledOnce()
+  })
+  it('a close asked of it before its first conversation bound still names it', async () => {
+    const asked = request('now')
+    bind()
+    expect(await service.request(asked)).toEqual({ closed: true })
+    // Not once it is past starting, nor for a conversation it moved on from.
+    const later = registry.openPendingAgent({ engine: 'codex', runtimes: [{ backend: 'tmux', paneId: '%89' }], cwd: '/tmp' })!
+    Object.assign(later, { sessionId: 'second' })
+    time = later.registeredAt + 60_000
+    expect(await service.request({ agentId: later.agentId, sessionId: '', createdAt: new Date(later.registeredAt).toISOString(), mode: 'now' }))
+      .toEqual({ error: 'AGENT_CHANGED' })
+    time = later.registeredAt + 1_000
+    expect(await service.request({ agentId: later.agentId, sessionId: 'first', createdAt: new Date(later.registeredAt).toISOString(), mode: 'now' }))
+      .toEqual({ error: 'AGENT_CHANGED' })
+  })
+})
+it('waits on a real timer when no sleep is given', async () => {
+  vi.useFakeTimers()
+  Object.assign(row, { sessionId: '', transcriptPath: null, boundAt: null })
+  const start = Date.now()
+  deps.now = () => Date.now()
+  service = new CloseAgentService(deps)
+  vi.mocked(deps.stop).mockRejectedValueOnce(new IdentityReadUnavailable('the native control descriptor type is unavailable'))
+  const closing = service.request(request('now'))
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(await closing).toEqual({ closed: true })
+  expect(Date.now() - start).toBe(1_000)
+})

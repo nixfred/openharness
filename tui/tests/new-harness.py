@@ -94,6 +94,12 @@ def wait(fn, label, seconds=8):
         time.sleep(.05)
     raise AssertionError(label + '\n' + screen())
 def shows(text): wait(lambda: text in screen(), text)
+# The folder browser's first row names the folder: "Use ~/projects", not "Use this folder".
+def shows_use(): wait(lambda: re.search(r'\bUse [~/]', screen()), 'Use <folder>')
+# The machine is its own row, by name, and the project its own: never "project @ machine".
+def project_at(project, machine):
+    shows(f'Machine     {machine}'); shows(f'Project     {project}')
+    assert f'{project} @ ' not in screen(), screen()
 def snapshot(name):
     time.sleep(.1)
     if OUTPUT:
@@ -121,7 +127,15 @@ def field(label):
     click(*field_position(label))
 def choose_field(label, query):
     field(label); type_text(query); keys('Enter')
-    wait(lambda: re.search(r'› Start ', form_screen()), 'choice accepted; launch action focused')
+    wait(lambda: re.search(r'\[ Start ', form_screen()), 'choice accepted; the Start button in view')
+def press_button(label):
+    # The dialog's Start is a button, `[ Start … ]`: clicked at its middle.
+    def at():
+        for y, line in enumerate(screen().splitlines()):
+            i = line.find(f'[ {label} ]')
+            if i >= 0: return i + 2, y
+    wait(at, f'button {label}')
+    click(*at())
 def form_visible(): return re.search(field_at('Task'), form_screen()) is not None
 def new_form():
     wait(lambda:'+' in screen().splitlines()[-1], 'footer controls after status message')
@@ -191,17 +205,19 @@ try:
     before = create_count()
     input_before = len(state('reconnect')['inputs'])
     keys('Right'); assert create_count() == before, 'Right on New Harness must not launch'
-    field('Project'); type_text('office ml-lab'); keys('Enter'); shows('ml-lab @ office')
-    field('Project'); type_text('m2 webapp'); keys('Enter'); shows('webapp @ local')
+    # The machine is chosen in its own field; the projects are then that machine's.
+    choose_field('Machine', 'office'); field('Project'); type_text('ml-lab'); keys('Enter'); project_at('ml-lab', 'office')
+    choose_field('Machine', 'M2'); field('Project'); type_text('webapp'); keys('Enter'); project_at('webapp', 'M2')
     assert create_count() == before, 'searching projects across machines only changes the draft'
     print('PASS New Harness: short local machine name and remote folders after a large local history', flush=True)
-    # Moving over a field drops nothing down; entering it drops its chooser under it, in the form.
+    # Where there is room, the focused field's choices stand beside the form (as before 0.1.17),
+    # while moving over it too; entering it keeps the form whole.
     keys('Down', 'Tab')
     # (Wait for the redraw that moved the pointer to Agent before reading what it shows.)
     wait(lambda: re.search(r'›\s+(Agent|Harness)\s', form_screen()), 'Tab reaches Agent')
-    assert 'Search agents' not in screen(), 'arrowing over a field shows no chooser'
+    shows('Search agents and harnesses')
+    assert 'Search agents and harnesses' not in form_screen(), 'the choices stand beside the form, not over it'
     keys('Right'); shows('Search agents and harnesses')
-    assert 'Search agents and harnesses' in form_screen(), 'the chooser drops down inside the form'
     assert field_position('Task') == anchor, 'entering a chooser keeps the form visible'
     # (The dropdown shows a dozen rows; the harnesses follow the agents.)
     keys('PageDown', 'PageDown'); assert 'Blender' in screen(), 'the agent chooser lists the harnesses'
@@ -210,14 +226,16 @@ try:
     shows('Approvals'); keys('Right'); shows('Search agents and harnesses')
     keys('Escape'); type_text('codex'); keys('Enter'); shows('Start Codex')
     field('Project'); shows('Search projects'); snapshot('new-harness-project')
-    type_text('clone'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('GitHub URL')
+    # Clone, New and Open act on the machine already chosen: no second machine question.
+    type_text('clone'); keys('Enter'); shows('GitHub URL'); assert 'Choose a machine' not in screen()
     raw('\x1b[200~autonomous-ai/openharness\x1b[201~'); keys('Enter')
     shows('Clone: autonomous-ai/')
     assert create_count() == before, 'choosing fields must not launch'
-    field('Project'); type_text('new folder'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('Folder name')
+    field('Project'); type_text('new folder'); keys('Enter'); shows('Folder name')
     type_text('fail-once'); keys('Enter'); shows('New Folder: fail-once')
     shows('Approvals'); shows('Model'); shows('Profile')
-    assert not re.search(field_at('Options|Machine'), form_screen()), 'settings are direct fields; machine belongs in Project'
+    assert not re.search(field_at('Options'), form_screen()), 'settings are direct fields'
+    assert re.search(field_at('Machine'), form_screen()), 'the machine is its own field, not "project @ machine"'
     choose_field('Approvals', 'read only'); shows('Read only')
     task_text = 'Fix café login.\n\nKeep 界 and 🦀 intact.\nAdd a regression test.'
     field('Task'); assert 'Enter start' not in form_screen() and 'Task is optional' not in form_screen()
@@ -227,10 +245,10 @@ try:
     keys('M-Enter'); type_text('Add a regression test.'); keys('BTab')
     assert create_count() == before, 'leaving the task editor does not launch'
     snapshot('new-harness-settings')
-    field('Task'); keys('Enter')
-    assert create_count() == before, 'first task Enter only highlights Start'
-    keys('Enter', 'Enter'); shows('Fixture launch failure')
-    assert create_count() == before + 1, 'busy popup prevents double submission'
+    # With a task, Enter in it starts the harness (#1130: the second Enter, on Start, was where a
+    # newcomer stopped); the busy popup then keeps another Enter from submitting twice.
+    field('Task'); keys('Enter', 'Enter'); shows('Fixture launch failure')
+    assert create_count() == before + 1, f'Enter starts it once; a second Enter while it starts does not submit again ({create_count() - before} created)'
     shows('fail-once'); shows('Read only')
     request = state()['created'][-1]
     assert request['engine'] == 'codex', request
@@ -248,8 +266,8 @@ try:
     assert len(state('reconnect')['inputs']) == input_before, 'form input must never reach a working pane'
     print('PASS New Harness: desktop fields, keyboard, search, paste, retry and no duplicate/input leak', flush=True)
 
-    new_form(); field('Project'); type_text('open folder'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('Use this folder')
-    type_text('projects'); keys('Enter'); shows('Use this folder'); keys('Enter'); shows('projects @ local')
+    new_form(); field('Project'); type_text('open folder'); keys('Enter'); shows_use()
+    type_text('projects'); keys('Enter'); shows_use(); keys('Enter'); project_at('projects', 'M2')
     shows('[x]'); choose_field('Branch', 'feature')
     submit(before + 3)
     request = state()['created'][-1]
@@ -313,10 +331,10 @@ try:
 
     # A review capture with the requested project label, through the real folder chooser.
     choose_field('Approvals', 'auto-approve')
-    field('Project'); type_text('open folder'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('Use this folder')
+    field('Project'); type_text('open folder'); keys('Enter'); shows_use()
     keys('C-l', 'C-a', 'C-k'); type_text('/home/dev/autonomous-harness'); keys('Enter')
-    shows('Use this folder'); keys('Enter')
-    shows('autonomous-harness @ local'); shows('[x]')
+    shows_use(); keys('Enter')
+    project_at('autonomous-harness', 'M2'); shows('[x]')
     tmux('resize-window', '-t', 'test', '-x', '150', '-y', '42'); settle_ui()
     snapshot('new-harness-flat')
     field('Task'); assert 'Enter start' not in form_screen() and 'Task is optional' not in form_screen()
@@ -348,7 +366,7 @@ try:
     shows('Improve the New Harness keyboard flow.')
     assert 'This agent cannot start with a task' not in screen(), 'keyboard-only agent correction clears the live error'
     field('Task'); keys('C-Home', 'C-k', 'C-k', 'C-k', 'C-k', 'Tab'); choose_field('Agent|Harness', 'claude')
-    field('Task'); type_text('x' * 2001); keys('Enter'); field('Start Claude Code'); shows('Task is too long')
+    field('Task'); type_text('x' * 2001); keys('Enter'); press_button('Start Claude Code'); shows('Task is too long')
     assert create_count() == count, 'an overlong task is rejected before creating a harness'
     field('Task'); keys('C-Home', 'C-k', 'BTab')
     tmux('resize-window', '-t', 'test', '-x', '150', '-y', '42'); settle_ui()
@@ -357,7 +375,7 @@ try:
     snapshot('new-harness-light'); keys('Escape')
     print('PASS New Harness: draft restoration, narrow/light rendering and cancellation', flush=True)
 
-    new_form(); field('Project'); type_text('new folder'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('Folder name')
+    new_form(); field('Project'); type_text('new folder'); keys('Enter'); shows('Folder name')
     type_text('lose-reply'); keys('Enter'); shows('New Folder: lose-reply')
     count = create_count()
     before_recovery = placement()
@@ -377,7 +395,7 @@ try:
     checks = state()['creationChecks'][-2:]
     assert len(checks) == 2 and all(c['creationId'] == request['creationId'] for c in checks)
 
-    new_form(); field('Project'); type_text('new folder'); keys('Enter'); shows('Choose a machine'); keys('Enter'); shows('Folder name')
+    new_form(); field('Project'); type_text('new folder'); keys('Enter'); shows('Folder name')
     type_text('unknown-launch'); keys('Enter'); keys('Enter'); shows('Launch outcome unknown')
     count = create_count()
     keys('Enter'); shows('Launch outcome unknown')

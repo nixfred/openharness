@@ -4,13 +4,18 @@
  * UI is gone; only these two endpoints remain local.
  */
 
-import { existsSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { admitHook, hooksFor } from './engines/hooks.js'
-import { hermesSessionSource, isHermesInteractiveSource } from './engines/hermes/reader.js'
-import { hermesDbPath, listHermesHomes } from './engines/hermes/home.js'
+import { HERMES_HOMES, HERMES_SOURCE } from './engines/hermes/contract.js'
+import { readStorePool } from './engines/kit/storePool.js'
+import { isInteractiveSource } from './engines/kit/storeSource.js'
+import { IdentityReadUnavailable } from './engines/kit/identityScan.js'
+import { createPendingAdmissions, type AdmissionDecision } from './core/engines/pendingAdmission.js'
+import { paneReadIdentity } from './core/transcripts/readIdentity.js'
+import { processIdentityKey } from './lib/terminalRuntime.js'
 import { isRecentlyDeleted } from './lib/deletedSessions.js'
 import { registry, type RegisterInput, type RegisteredSession } from './lib/registry.js'
 import type { GateVerdict } from './lib/actionPolicy.js'
@@ -21,7 +26,6 @@ import { hookCredentialMatches, loadOrCreateHookCredential } from './lib/hookAut
 import { routeStoreRequest, type StoreHandler } from './lib/storeProxy.js'
 import type { HookTerminalHint } from './lib/terminalTypes.js'
 import { ENGINES, type AgentEngine } from './engines/types.js'
-import { handleCommandBarHttp, type CommandBarDoor } from './lib/commandBarHttp.js'
 import { isLoopbackRequest, loopbackHosts } from './lib/loopbackRequest.js'
 import { isTrustedLocal, listenLocalSocket, type LocalSocketServer } from './lib/localSocket.js'
 
@@ -55,7 +59,6 @@ export interface PairOutcome {
 }
 
 export interface HookServerHandlers {
-  onCommandBar?: CommandBarDoor
   onAutonomousDeviceRequest?: (method: string, target: string, body?: unknown) => Promise<{ status: number; body: unknown }>
 
   onRegistered: (
@@ -68,7 +71,7 @@ export interface HookServerHandlers {
       orphaned?: { agentId: string; sessionId: string } | null
       hookEvent?: string
     },
-  ) => void
+  ) => void | Promise<void>
 
   /** SessionEnd — a reconciliation hint only; it is never process-lifetime authority. */
   onSessionEnd: (sessionId: string, reason: string | undefined) => void
@@ -85,6 +88,13 @@ export interface HookServerHandlers {
   /** A turn is now running (Command Code's PreToolUse — its only live turn-open signal). Idempotent:
    *  it fires once per tool call, and every call after the first in a turn must be a no-op. */
   onTurnStart?: (body: { sessionId: string }) => void
+  /** Core lifecycle admission fence; Stop owns the pane before its first asynchronous capture. */
+  hookAdmissionBlocked?: (agentId: string) => boolean
+  onAdmissionHeld?: (agentId: string, reason: string | undefined) => void
+  /** Retain an uncorrelated native Stop before attaching a newly admitted conversation. */
+  onAdmissionStop?: (entry: RegisteredSession, unmatched: boolean) => boolean
+  /** Captured before a same-conversation registration waits; Cancel or forget supersedes that Stop. */
+  captureAdmissionStop?: (entry: RegisteredSession) => () => boolean
   onPromptSubmitted?: (agentId: string, prompt: string) => void
   /** A session's UserPromptSubmit hook, and when its engine ran it (`X-Harness-Hook-Fired-At`): what a Stop
    *  that arrives late is told apart from the turn the prompt opened by (core/turns/turnHooks.ts). */
@@ -171,7 +181,20 @@ export interface HookServerHandlers {
   /** POST /api/desk/ops — the window's tab edits, applied on the backend (its routes/desk.ts); a
    *  local write, so CSRF-guarded like a rename. */
   onDeskOps?: (body: unknown) => Promise<PairOutcome>
-  /** The account's Experimental switches, proxied with the daemon's own identity. */
+  /** GET /api/agent-messages — the account's tabs and who is in each (docs/design/2026-10-10-agent-messages.md),
+   *  proxied like the desk without starting the experiment's process. An older window draws each tab's chat icon
+   *  from its flag, which no daemon reads now: the account's experiment decides (lib/agentSettings.ts). */
+  onAgentMessagesRead?: () => Promise<PairOutcome>
+  /** PATCH /api/agent-messages/tabs/:tabId — an older window's tab switch, passed to the backend so it gets the
+   *  answer it expects, and deciding nothing; a local write, so CSRF-guarded like the desk's ops. */
+  onAgentMessagesWrite?: (tabId: string, body: unknown) => Promise<PairOutcome>
+  /** GET/PATCH /api/agent-settings — what the person lets agents do (lib/agentSettings.ts): the account's experiments
+   *  as this computer keeps them, and a change written through to the account (`harness settings`, and an older
+   *  window's Settings ▸ Agents). The write is CSRF-guarded like the others. */
+  onAgentSettingsRead?: () => Promise<PairOutcome>
+  onAgentSettingsWrite?: (body: unknown) => Promise<PairOutcome>
+  /** The account's Experimental switches, proxied with the daemon's own identity; what they say of agents is kept
+   *  here too (core/experiments.ts `createAgentSettingsSync`). */
   onExperimentalRead?: () => Promise<PairOutcome>
   onExperimentalWrite?: (body: unknown) => Promise<PairOutcome>
   /** /api/store/* — proxy the Harness Store's ratings and reviews to backend the same way: reads
@@ -300,6 +323,9 @@ async function verifiedBoundMutation(
   handlers: HookServerHandlers,
 ): Promise<RegisteredSession | null> {
   if (!body.sessionId || !body.engine) return null
+  const initial = registry.bySession(body.sessionId)
+  if (!initial || initial.engine !== body.engine) return null
+  const identity = paneReadIdentity(initial)
   const runtimeHints = normalizedRuntimeHints(body)
   if (!runtimeHints.length) return null
   const processAgent = handlers.resolveHookAgent
@@ -311,7 +337,9 @@ async function verifiedBoundMutation(
     })
     : body.tmuxPane ? registry.byPaneEngine(body.tmuxPane, body.engine) ?? null : null
   return processAgent?.engine === body.engine && processAgent.sessionId === body.sessionId
-    ? processAgent
+    && processAgent.agentId === initial.agentId && paneReadIdentity(processAgent) === identity
+    && paneReadIdentity(registry.byAgent(initial.agentId)) === identity
+    ? registry.byAgent(initial.agentId)!
     : null
 }
 
@@ -320,93 +348,36 @@ async function verifiedBoundMutation(
  * a leftover daemon un-findable by `lsof :<port>`). Rejects with EADDRINUSE if the port is taken (the
  * CLI reports it as "another adapter already running"). Resolves with the bound port.
  */
-/** How long to keep waiting for an engine to write the transcript it just announced. */
-const TRANSCRIPT_WAIT_MS = 500
-const HERMES_KIND_TRIES = 6
-const HERMES_KIND_WAIT_MS = 120
-const TRANSCRIPT_WAIT_TRIES = 20
-
-function registeredHookProcess(body: RegisterInput, engine: AgentEngine): RegisteredSession | undefined {
-  if (body.processIdentity) {
-    const processAgent = registry.byProcess(engine, body.processIdentity)
-    if (processAgent) return processAgent
-  }
-  for (const runtime of body.runtimes ?? []) {
-    const processAgent = registry.byRuntimeEngine(runtime, engine)
-    if (processAgent) return processAgent
-  }
-  return body.tmuxPane ? registry.byPaneEngine(body.tmuxPane, engine) : undefined
+function admissionProcessScope(session: RegisteredSession | undefined): string | undefined {
+  if (!session?.active) return undefined
+  return session.processIdentity ? processIdentityKey(session.engine, session.processIdentity) : session.agentId
 }
 
-/** The engine may correct an announcement; a failed correction leaves registration's checks intact. */
+/** A failed native correction is incomplete evidence, never the original announcement. */
 export function knownTranscriptFor(body: RegisterInput, agent: RegisteredSession | undefined): string | undefined {
-  const engine = body.engine ?? 'claude'
-  try { return hooksFor(engine)?.transcriptFor?.(body, agent) ?? body.transcriptPath } catch (error) {
-    console.warn(`[hooks] ${engine} transcript lookup failed:`, error instanceof Error ? error.message : error)
-    return body.transcriptPath
-  }
+  return hooksFor(body.engine ?? 'claude')?.transcriptFor?.(body, agent) ?? body.transcriptPath
 }
 
-/**
- * Register once the announced transcript exists.
- *
- * Runs detached from the HTTP reply on purpose: this is a SessionStart hook, and the engine is blocked
- * until the response comes back. Bounded — an announcement whose file never appears is dropped, which is
- * the same outcome as before, just after giving the engine a fair chance to finish starting up.
- */
-async function awaitTranscript(body: RegisterInput, handlers: HookServerHandlers): Promise<void> {
-  for (let i = 0; i < TRANSCRIPT_WAIT_TRIES; i++) {
-    await new Promise((resolve) => { const t = setTimeout(resolve, TRANSCRIPT_WAIT_MS); t.unref?.() })
-    const engine = body.engine ?? 'claude'
-    const processAgent = registeredHookProcess(body, engine)
-    if (!processAgent) return
-    if (isRecentlyDeleted(body.sessionId)) return
-    body.transcriptPath = knownTranscriptFor(body, processAgent)
-    if (!body.transcriptPath || !existsSync(body.transcriptPath)) continue
-    const result = registry.register(body)
-    if (!result) return
-    console.log(`[hooks] ${sid(result.entry.sessionId)} ${body.hookEvent ?? 'session-start'} · engine=${result.entry.engine}`
-      + ` · isNew=${result.isNew} · after waiting ${((i + 1) * TRANSCRIPT_WAIT_MS) / 1000}s for its transcript`)
-    handlers.onRegistered(result.entry, { isNew: result.isNew, evicted: result.evicted, rebound: result.rebound, orphaned: result.orphaned, hookEvent: body.hookEvent })
-    return
+/** Read source evidence without binding. Unreadable stores never authorize a conversation. */
+async function inspectHermesKind(sessionId: string, knownHome?: string): Promise<AdmissionDecision<string | undefined>> {
+  if (!HERMES_SOURCE.id.test(sessionId)) return { kind: 'accept', value: undefined }
+  try {
+    const found = await readStorePool(HERMES_HOMES, env.HERMES_HOME, {
+      sql: HERMES_SOURCE.query, params: [sessionId], maxRows: 1, maxBuffer: HERMES_SOURCE.maxBuffer,
+      columns: ['id', 'source'], pointKey: 'id', knownHome,
+    })
+    if (!found.length) return { kind: 'hold', reason: 'Waiting for the Hermes session source record; keeping the current conversation.' }
+    if (found.length !== 1) return { kind: 'hold', reason: 'Hermes session source is ambiguous across homes; keeping the current conversation.' }
+    const { home, aliases, row } = found[0]
+    if (knownHome && !aliases.includes(knownHome)) return { kind: 'hold', reason: 'Waiting for the Hermes source in its known home; keeping the current conversation.' }
+    const source = row[HERMES_SOURCE.column]
+    if (typeof source !== 'string' || source.length > 128) throw new IdentityReadUnavailable('the Hermes source record is invalid')
+    if (!isInteractiveSource(HERMES_SOURCE, source)) return { kind: 'reject', reason: 'hermes_subagent' }
+    return { kind: 'accept', value: knownHome ?? (home === env.HERMES_HOME ? undefined : home) }
+  } catch (error) {
+    if (!(error instanceof IdentityReadUnavailable)) throw error
+    return { kind: 'hold', reason: `Hermes session source is unavailable; keeping the current conversation. ${error.message}` }
   }
-  console.warn(`[hooks] ${sid(body.sessionId ?? '?')} announced a transcript that never appeared: ${body.transcriptPath}`)
-}
-
-/**
- * Re-check a hermes session whose `sessions` row had not landed yet, then register it only if it turns
- * out to be the user's own CLI session. Bounded: if the row never appears we register anyway, which is
- * exactly the behaviour before this guard existed.
- */
-async function awaitHermesKind(body: RegisterInput, handlers: HookServerHandlers): Promise<void> {
-  // EVERY home, not just the default. A `hermes -p <name>` session's row lives in that profile's own
-  // store, so asking the default one answered `null` (unknown) six times and fell through — and, worse,
-  // the home found here is the one the whole row then reads its history from (openharness#191).
-  const homes = await listHermesHomes()
-  let hermesHome: string | undefined
-  for (let i = 0; i < HERMES_KIND_TRIES; i++) {
-    if (i > 0) await new Promise((resolve) => { const t = setTimeout(resolve, HERMES_KIND_WAIT_MS); t.unref?.() })
-    if (!registeredHookProcess(body, 'hermes')) return
-    if (isRecentlyDeleted(body.sessionId)) return
-    let source: string | null = null
-    for (const home of homes) {
-      const answer = await hermesSessionSource(hermesDbPath(home), body.sessionId ?? '')
-      if (answer === null) continue          // not in this store — try the next home
-      source = answer
-      if (home !== env.HERMES_HOME) hermesHome = home
-      break
-    }
-    if (source === null) continue
-    if (!isHermesInteractiveSource(source)) {
-      console.log(`[hooks] ${sid(body.sessionId ?? '?')} ${body.hookEvent ?? 'session-start'} ignored · hermes_subagent`)
-      return
-    }
-    break
-  }
-  const result = registry.register(hermesHome ? { ...body, hermesHome } : body)
-  if (!result) return
-  console.log(`[hooks] ${sid(result.entry.sessionId)} ${body.hookEvent ?? 'session-start'} · engine=hermes · isNew=${result.isNew} · after a source check${hermesHome ? ` · home=${hermesHome}` : ''}`)
-  handlers.onRegistered(result.entry, { isNew: result.isNew, evicted: result.evicted, rebound: result.rebound, orphaned: result.orphaned, hookEvent: body.hookEvent })
 }
 
 export interface HookServerOptions {
@@ -414,6 +385,10 @@ export interface HookServerOptions {
   socketPath?: string | null
   /** A private socket identifies this user's daemon even when another OS user holds the TCP port. */
   allowPortFallback?: boolean
+  /** Completed acknowledgements are retained for a live process, never evicted to admit another hook. */
+  admissionReceiptCapacity?: number
+  /** Bound native payload and provenance retained by pending admission or linked Stop. */
+  admissionBytesCapacity?: number
 }
 
 export function startHookServer(
@@ -422,6 +397,23 @@ export function startHookServer(
   options: HookServerOptions = {},
 ): Promise<{ server: http.Server; port: number; localSocket: LocalSocketServer | null }> {
   const hookCredential = loadOrCreateHookCredential(env.ADAPTER_DATA_DIR)
+  const admissions = createPendingAdmissions({ isProcessCurrent: (key, scope) => admissionProcessScope(registry.byAgent(key)) === scope })
+  let admissionArrival = 0
+  const admissionHolds = new Map<string, Map<string, string>>()
+  type StopAcknowledgement = { status: number; reply: unknown }
+  type LinkedStop = (body: BoundHookBody, firedAt: number | undefined) => StopAcknowledgement | Promise<StopAcknowledgement>
+  type Receipt = { fingerprint: string; status: number; reply: unknown; pending: boolean; bytes: number; linkedStop?: LinkedStop }
+  const admissionReceipts = new Map<string, { scope: string; records: Map<string, Receipt> }>()
+  const resolvingStops = new Map<string, { fingerprint: string; stop: LinkedStop }>()
+  let receiptCount = 0, receiptBytes = 0
+  const saveReceipt = (records: Map<string, Receipt>, id: string, next?: Receipt) => {
+    const before = records.get(id)
+    if (before) { receiptCount--; receiptBytes -= before.bytes }
+    if (next) { records.set(id, next); receiptCount++; receiptBytes += next.bytes }
+    else records.delete(id)
+  }
+  const receiptCapacity = options.admissionReceiptCapacity ?? 65_536
+  const bytesCapacity = options.admissionBytesCapacity ?? 16 * 1024 * 1024
   // Filled in once the port is bound: the Host a request must name is the port actually taken.
   let hosts: ReadonlySet<string> = new Set()
   let lastRefusalLogAt = 0
@@ -481,8 +473,6 @@ export function startHookServer(
       if (req.method === 'GET' && url === '/api/health') {
         json(200, { ok: true, version: VERSION }); return
       }
-
-      if (await handleCommandBarHttp(req, res, handlers.onCommandBar)) return
 
       // The local web dashboard that `GET /` served, with its log tail (`/api/logs`) and stop button
       // (`/api/stop`), is gone: no app, website, script or the backend opened it, and the web client
@@ -574,7 +564,41 @@ export function startHookServer(
           console.warn('[hooks] restart the pane (or reload its plugins) to pick up the current build')
         }
         const engine = body.engine ?? 'claude'
-        const processAgent = handlers.resolveHookAgent
+        // Capture before process resolution yields. Native time is unchanged across client retries.
+        const admissionOrder = { firedAt: hookFiredAt(req), arrival: ++admissionArrival }
+        const fingerprint = createHash('sha256').update(JSON.stringify([body, admissionOrder.firedAt])).digest('hex')
+        const deliveryHeader = req.headers['x-harness-hook-delivery-id']
+        const nativeDeliveryId = typeof deliveryHeader === 'string' && /^[a-zA-Z0-9_-]{16,96}$/.test(deliveryHeader) ? deliveryHeader : undefined
+        const deliveryId = nativeDeliveryId ?? randomUUID()
+        const carriesStop = !!nativeDeliveryId && (engine === 'cursor' && body.hookEvent === 'stop'
+          || engine === 'commandcode' && (body.hookEvent === 'Stop' || body.hookEvent === 'StopFailure'))
+        const stopProvenance = (value: BoundHookBody, firedAt: number | undefined) => JSON.stringify([
+          value.engine, value.sessionId, value.callerPid, normalizedRuntimeHints(value), firedAt, value.status,
+        ])
+        const originalStop = stopProvenance(body, admissionOrder.firedAt)
+        const conflict = { status: 409, reply: { pending: false, error: 'HOOK_DELIVERY_CONFLICT' } }
+        const scopeOf = (row: RegisteredSession | undefined) => row && JSON.stringify([
+          row.agentId, row.engine, row.processIdentity ? processIdentityKey(row.engine, row.processIdentity) : null,
+        ])
+        const resolving = resolvingStops.get(deliveryId)
+        if (resolving) {
+          const reply = resolving.fingerprint === fingerprint ? await resolving.stop(body, admissionOrder.firedAt) : conflict
+          answer(reply.status, reply.reply); return
+        }
+        // A preliminary lookup grants no binding authority. It only remembers
+        // cancellation before process resolution yields; the proved owner below
+        // must match this exact process/conversation before the witness applies.
+        const preliminary = carriesStop && body.sessionId ? registry.bySession(body.sessionId) : undefined
+        const stopScope = preliminary?.engine === engine ? scopeOf(preliminary) : undefined
+        const stopWitness = stopScope ? handlers.captureAdmissionStop?.(preliminary!) : undefined
+        let deferred = false
+        if (carriesStop) resolvingStops.set(deliveryId, { fingerprint, stop: (stop, firedAt) => {
+          if (stopProvenance(stop, firedAt) !== originalStop) return conflict
+          deferred = true
+          return { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for the engine process record; Stop admission is not queued yet.' } }
+        } })
+        let processAgent: RegisteredSession | null
+        try { processAgent = handlers.resolveHookAgent
           ? await handlers.resolveHookAgent({
             engine,
             tmuxPane: body.tmuxPane,
@@ -586,55 +610,200 @@ export function startHookServer(
             // (hook/notify.mjs, fallbackRegister), with a row of its own in place of the agent's, which
             // the running daemon's next save took in. Told the registration is pending, it writes nothing,
             // as for a transcript not yet written below, and the wait goes on here.
-            onWait: () => answer(200, { pending: true }),
+            // Hermes admission has a separate bounded queue after resolution. Do not
+            // claim a slot before one exists: its hook client can retry this live hold.
+            onWait: () => { deferred = true; answer(202, { pending: false, retry: true, detail: 'Waiting for the engine process record; admission is not queued yet.' }) },
           })
           : body.tmuxPane ? registry.byPaneEngine(body.tmuxPane, engine) ?? null : null
+        } finally { if (carriesStop) resolvingStops.delete(deliveryId) }
         if (!processAgent || processAgent.engine !== engine) { ignore('no_matching_engine_process'); return }
-        // The process scanner is authoritative. Never accept a hook's legacy launcher id or a stale PID.
-        body.processIdentity = processAgent.processIdentity ?? undefined
-        body.runtimes = processAgent.runtimes
+        // Own the process incarnation. Each inspection refreshes its routing,
+        // but can never follow the original hinted pane to a replacement process.
+        body.processIdentity = processAgent.processIdentity ? { ...processAgent.processIdentity } : undefined
+        body.runtimes = processAgent.runtimes.map(runtime => ({ ...runtime }))
         body.primaryRuntimeKey = processAgent.primaryRuntimeKey
-        body.transcriptPath = knownTranscriptFor(body, processAgent)
-        // Deleting an agent no longer kills its pane, so the engine lives on for a moment and its catch
-        // hook still fires — and the exact process may remain alive during SIGTERM grace. Without
-        // this the tile the user just deleted re-registers itself and comes back.
         if (isRecentlyDeleted(body.sessionId)) { ignore('deleted'); return }
-        const admission = admitHook(engine, body)
-        if (!admission.accepted) { ignore(admission.reason); return }
-        // Same story for hermes, which reaches here through its own hooks rather than a transcript file:
-        // every delegated sub-agent is a hermes session that runs those hooks from the parent's pane.
-        if (body.engine === 'hermes' && body.sessionId) {
-          // Settled off the HTTP path entirely: the answer needs a SQLite read, and the row may not even
-          // be written yet (measured: a child's hook beat its own INSERT by 110ms). Registering
-          // optimistically would hand the parent's pane to a sub-agent.
+        const scope = scopeOf(processAgent)!
+        if (carriesStop && stopScope !== scope) deferred = true
+        if (scopeOf(registry.byAgent(processAgent.agentId)) !== scope) { ignore('stale_hook'); return }
+        // Pending jobs and completed receipts survive routing observations within
+        // this process incarnation. Native hints are rechecked before every commit.
+        const receiptScope = scopeOf
+        for (const [id, history] of admissionReceipts) if (receiptScope(registry.byAgent(id)) !== history.scope) {
+          for (const delivery of history.records.keys()) saveReceipt(history.records, delivery)
+          admissionReceipts.delete(id)
+        }
+        const history = admissionReceipts.get(processAgent.agentId) ?? { scope: receiptScope(processAgent)!, records: new Map() }
+        admissionReceipts.set(processAgent.agentId, history)
+        const completed = history.records.get(deliveryId)
+        if (completed) {
+          if (completed.fingerprint === fingerprint) answer(completed.status, completed.reply)
+          else answer(409, { pending: false, error: 'HOOK_DELIVERY_CONFLICT' })
+          return
+        }
+        // Strings can occupy two bytes per code unit; include the immutable
+        // process snapshot and fixed closure/record overhead in this admission budget.
+        const retainedBytes = 2 * (JSON.stringify(body).length + JSON.stringify(processAgent).length) + 2_048
+        if (receiptCount >= receiptCapacity || receiptBytes + retainedBytes > bytesCapacity) {
+          answer(429, { pending: false, error: 'HOOK_ADMISSION_BUSY', detail: 'Hook acknowledgement storage is full; this delivery was not queued.' })
+          return
+        }
+        let inspectionIdentity: string | undefined
+        let prepared: RegisterInput = body
+        let committed: ReturnType<typeof registry.register> = null
+        let settled = false, stopRetained = false, stopUnmatched = false, stopInvocationClaimed = false
+        const stopCurrent = processAgent.sessionId === body.sessionId && stopScope === scope ? stopWitness : undefined
+        let followupFingerprint: string | undefined, committedIdentity: string | undefined
+        const live = () => registry.byAgent(processAgent.agentId)
+        const current = () => !isRecentlyDeleted(processAgent.agentId) && !isRecentlyDeleted(body.sessionId)
+          && live()?.active !== false && scopeOf(live()) === scope
+        const publishHold = () => {
+          const reason = [...admissionHolds.get(processAgent.agentId)?.values() ?? []].at(-1)
+          try { handlers.onAdmissionHeld?.(processAgent.agentId, reason) }
+          catch (error) { console.warn('[hooks] admission status notification failed', error) }
+        }
+        const held = (reason: string) => {
+          deferred = true
+          const holds = admissionHolds.get(processAgent.agentId) ?? new Map<string, string>()
+          holds.set(deliveryId, reason); admissionHolds.set(processAgent.agentId, holds)
+          publishHold()
+          console.log(`[hooks] ${sid(body.sessionId ?? '?')} ${body.hookEvent ?? 'session-start'} held · ${reason}`)
           answer(200, { pending: true })
-          void awaitHermesKind(body, handlers)
-          return
         }
-        if (body.hookEvent === 'UserPromptSubmit') {
-          handlers.onPromptSubmitted?.(processAgent.agentId, body.prompt ?? '')
-          const fired = hookFiredAt(req)
-          if (fired && body.sessionId) handlers.onPromptHook?.(body.sessionId, fired)
+        const clearHold = () => {
+          const holds = admissionHolds.get(processAgent.agentId)
+          if (!holds?.delete(deliveryId)) return
+          if (!holds.size) admissionHolds.delete(processAgent.agentId)
+          publishHold()
         }
-        let result = registry.register(body)
-        if (!result && body.transcriptPath && !existsSync(body.transcriptPath)) {
-          // The engine announced the session BEFORE writing its transcript. Measured on claude: the hook
-          // arrived at 13:03:31 and the file appeared at 13:03:34, so registration was refused (a session
-          // is only accepted with a real file behind it) and the agent stayed off the list until something
-          // else noticed it. Wait for the file instead of dropping the announcement — in the background,
-          // because a SessionStart hook blocks the CLI that is waiting on this reply.
-          answer(200, { pending: true })
-          void awaitTranscript(body, handlers)
-          return
+        const completedReply = (status: number, reply: unknown) => {
+          // A pruned old process cannot reinsert its receipts from a late callback.
+          if (admissionReceipts.get(processAgent.agentId) === history) saveReceipt(history.records, deliveryId,
+            { ...history.records.get(deliveryId)!, status, reply, pending: false, bytes: carriesStop ? retainedBytes : 0 })
+          settled = true
+          answer(status, reply)
         }
-        if (!result) {
-          console.warn(`[hooks] ${sid(body.sessionId ?? '?')} REJECTED · engine=${body.engine} pane=${body.tmuxPane}`)
-          answer(400, { error: 'invalid session registration' })
-          return
+        const linkedStop: LinkedStop = async (stop, firedAt) => {
+          if (stopProvenance(stop, firedAt) !== originalStop) return conflict
+          const sent = createHash('sha256').update(JSON.stringify(stop)).digest('hex')
+          if (followupFingerprint && sent !== followupFingerprint) return conflict
+          followupFingerprint = sent
+          // The registration itself owns this native Stop, even if its second
+          // HTTP delivery outruns source recovery. Never close a later live turn.
+          if (!settled || stopRetained) {
+            deferred = true
+            return { status: 200, reply: { pending: true } }
+          }
+          if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
+          if (stopInvocationClaimed) return { status: 200, reply: { ok: true, duplicate: true } }
+          const owner = await verifiedBoundMutation(stop, handlers)
+          if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
+          if (stopInvocationClaimed) return { status: 200, reply: { ok: true, duplicate: true } }
+          if (stopRetained) return { status: 200, reply: { pending: true } }
+          if (!current() || live()?.sessionId !== body.sessionId) {
+            return { status: 403, reply: { error: 'UNBOUND_HOOK' } }
+          }
+          if (!owner || paneReadIdentity(owner) !== committedIdentity) {
+            // The original delivery still belongs to this process/conversation,
+            // but its parser or routing was rebuilt. Preserve completion without
+            // applying it to whichever turn the replacement happened to load.
+            stopRetained = handlers.onAdmissionStop?.(live()!, true) ?? false
+            return stopRetained ? { status: 200, reply: { pending: true } }
+              : { status: 202, reply: { pending: false, retry: true, detail: 'Waiting for core ownership of the unmatched Stop.' } }
+          }
+          if (!stopInvocationClaimed) {
+            // Claim after the final authority fence, before optional async drains.
+            stopInvocationClaimed = true
+            handlers.onTurnStop?.({ sessionId: owner.sessionId, status: stop.status,
+              transcriptPath: stop.transcriptPath, ...(firedAt ? { firedAt } : {}) })
+            return { status: 200, reply: { ok: true } }
+          }
+          return { status: 200, reply: { ok: true, duplicate: true } }
         }
-        console.log(`[hooks] ${sid(result.entry.sessionId)} ${body.hookEvent ?? 'session-start'} · engine=${result.entry.engine} · isNew=${result.isNew}`)
-        handlers.onRegistered(result.entry, { isNew: result.isNew, evicted: result.evicted, rebound: result.rebound, orphaned: result.orphaned, hookEvent: body.hookEvent })
-        answer(200, { ok: true })
+        const prepare = (): AdmissionDecision<string | undefined> | null => {
+          if (!current()) return { kind: 'reject', reason: 'stale_hook' }
+          if (handlers.hookAdmissionBlocked?.(processAgent.agentId)) return { kind: 'hold', reason: 'Waiting for Stop to settle before admitting the hook.' }
+          const row = live()!
+          if (!runtimeHints.some(hint => row.runtimes.some(runtime => runtime.backend === hint.backend && runtime.paneId === hint.paneId))) {
+            return { kind: 'hold', reason: 'Waiting for the original hook pane to belong to its engine process.' }
+          }
+          inspectionIdentity = paneReadIdentity(row)
+          prepared = { ...body, processIdentity: row.processIdentity ? { ...row.processIdentity } : undefined,
+            runtimes: row.runtimes.map(runtime => ({ ...runtime })), primaryRuntimeKey: row.primaryRuntimeKey,
+            transcriptPath: knownTranscriptFor(body, row) }
+          const admission = admitHook(engine, prepared)
+          if (!admission.accepted) return admission.reason === 'engine_hook_failed'
+            ? { kind: 'hold', reason: 'Waiting for complete native hook evidence.' } : { kind: 'reject', reason: admission.reason }
+          return null
+        }
+        const commit = (hermesHome: string | undefined): AdmissionDecision<string | undefined> => {
+          if (!current() || paneReadIdentity(live()) !== inspectionIdentity) return { kind: 'hold', reason: 'Waiting for fresh evidence after the binding changed.' }
+          if (handlers.hookAdmissionBlocked?.(processAgent.agentId)) return { kind: 'hold', reason: 'Waiting for Stop to settle before admitting the hook.' }
+          const prior = live()
+          const before = prior && { sessionId: prior.sessionId, transcriptPath: prior.transcriptPath,
+            held: !!(prior.identityHold || prior.interpretationHold) }
+          committed = registry.register(hermesHome ? { ...prepared, hermesHome } : prepared, { verifiedNativeSource: true })
+          if (stopCurrent && !stopCurrent()) stopInvocationClaimed = true
+          if (committed && carriesStop && !stopRetained && !stopInvocationClaimed) {
+            stopUnmatched ||= deferred || before?.sessionId !== committed.entry.sessionId
+              || before?.transcriptPath !== committed.entry.transcriptPath || before?.held === true
+            if (!handlers.onAdmissionStop && stopUnmatched) return { kind: 'hold', reason: 'Waiting for core ownership of the unmatched Stop.' }
+            stopRetained = handlers.onAdmissionStop?.(committed.entry, stopUnmatched) ?? false
+            if (stopUnmatched && !stopRetained) return { kind: 'hold', reason: 'Waiting for core ownership of the unmatched Stop.' }
+          }
+          if (committed) committedIdentity = paneReadIdentity(committed.entry)
+          return committed ? { kind: 'accept', value: hermesHome } : { kind: 'reject', reason: 'invalid_session_registration' }
+        }
+        const notify = () => {
+          const result = committed!
+          clearHold()
+          console.log(`[hooks] ${sid(result.entry.sessionId)} ${body.hookEvent ?? 'session-start'} · engine=${result.entry.engine} · isNew=${result.isNew}`
+            + (engine === 'hermes' ? ` · after a source check${result.entry.hermesHome ? ` · home=${result.entry.hermesHome}` : ''}` : ''))
+          const optional = (call: () => void | Promise<void>) => {
+            try { void Promise.resolve(call()).catch(error => console.warn('[hooks] committed admission notification failed', error)) }
+            catch (error) { console.warn('[hooks] committed admission notification failed', error) }
+          }
+          // Native prompt credit follows the durable bind, never an attempted one.
+          if (body.hookEvent === 'UserPromptSubmit') {
+            optional(() => handlers.onPromptSubmitted?.(result.entry.agentId, body.prompt ?? ''))
+            if (admissionOrder.firedAt && body.sessionId) optional(() => handlers.onPromptHook?.(body.sessionId!, admissionOrder.firedAt!))
+          }
+          optional(() => handlers.onRegistered(result.entry, { isNew: result.isNew, evicted: result.evicted, rebound: result.rebound,
+            orphaned: result.orphaned, hookEvent: body.hookEvent }))
+        }
+        const enqueue = () => {
+          saveReceipt(history.records, deliveryId, { fingerprint, status: 200, reply: { pending: true }, pending: true, bytes: retainedBytes,
+            ...(carriesStop ? { linkedStop } : {}) })
+          const queued = admissions.submit(processAgent.agentId, deliveryId, {
+            conversationId: body.sessionId,
+            order: { ...admissionOrder, scope: admissionProcessScope(processAgent) ?? processAgent.agentId },
+            binding: () => { const row = live(); return row && { id: row.sessionId, at: row.boundAt } },
+            current,
+            inspect: async () => prepare() ?? (engine === 'hermes' && body.sessionId
+              ? await inspectHermesKind(body.sessionId, live()?.hermesHome ?? undefined) : { kind: 'accept', value: undefined }),
+            commit,
+            held,
+            reject: reason => {
+              clearHold()
+              console.log(`[hooks] ${sid(body.sessionId ?? '?')} ${body.hookEvent ?? 'session-start'} ignored · ${reason}`)
+              if (reason === 'invalid_session_registration') completedReply(400, { error: 'invalid session registration' })
+              else completedReply(200, { ignored: true, reason })
+            },
+            accept: () => { completedReply(200, { ok: true }); notify() },
+          })
+          if (queued) {
+            // Synchronous native admission settles in this turn's microtasks. A
+            // queued predecessor or asynchronous source gets an owned pending reply.
+            if (engine === 'hermes') answer(200, { pending: true })
+            else setImmediate(() => { if (!settled) deferred = true; answer(200, { pending: true }) })
+          } else {
+            saveReceipt(history.records, deliveryId)
+            const detail = 'Too many unverified hooks are pending; this hook was not queued. Retry after recovery.'
+            console.log(`[hooks] ${sid(body.sessionId ?? '?')} held · ${detail}`)
+            answer(429, { pending: false, error: 'HOOK_ADMISSION_BUSY', detail })
+          }
+        }
+        enqueue()
         return
       }
 
@@ -720,12 +889,28 @@ export function startHookServer(
           if (!validHookBody(parsed)) { json(400, { error: 'invalid hook body' }); return }
           body = parsed
         } catch { json(400, { error: 'bad json' }); return }
-        if (!await verifiedBoundMutation(body, handlers)) { json(403, { error: 'UNBOUND_HOOK' }); return }
+        const delivery = req.headers['x-harness-hook-delivery-id']
+        if (typeof delivery === 'string') {
+          const pending = resolvingStops.get(delivery)?.stop ?? [...admissionReceipts.values()]
+            .map(history => history.records.get(delivery)?.linkedStop).find(Boolean)
+          const acknowledgement = await pending?.(body, hookFiredAt(req))
+          if (acknowledgement) { json(acknowledgement.status, acknowledgement.reply); return }
+          if (/^[a-zA-Z0-9_-]{16,96}$/.test(delivery) && (body.engine === 'cursor' || body.engine === 'commandcode')) {
+            // These native clients register this same delivery before Stop. A
+            // refused queue or a restarted core has no completion authority yet.
+            json(202, { pending: false, retry: true, detail: 'Waiting for the linked Stop registration to be admitted.' }); return
+          }
+        }
+        const owner = await verifiedBoundMutation(body, handlers)
+        if (!owner) { json(403, { error: 'UNBOUND_HOOK' }); return }
         if (body.sessionId) {
+          const identity = paneReadIdentity(owner)
           console.log(`[hooks] ${sid(body.sessionId)} turn-stop${body.status ? ` · status=${body.status}` : ''}`)
           const fired = hookFiredAt(req)
           const stop = { sessionId: body.sessionId, status: body.status, transcriptPath: body.transcriptPath, ...(fired ? { firedAt: fired } : {}) }
-          if (handlers.stopHookDelayMs) setTimeout(() => handlers.onTurnStop?.(stop), handlers.stopHookDelayMs)
+          if (handlers.stopHookDelayMs) setTimeout(() => {
+            if (paneReadIdentity(registry.byAgent(owner.agentId)) === identity) handlers.onTurnStop?.(stop)
+          }, handlers.stopHookDelayMs)
           else handlers.onTurnStop?.(stop)
         }
         json(200, { ok: true })
@@ -846,7 +1031,7 @@ export function startHookServer(
       if (req.method === 'POST' && url === '/api/devices/dismiss') {
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
         if (!handlers.onDevicesDismiss) { json(503, { error: 'UNAVAILABLE' }); return }
-        let body: { pub?: unknown; pubs?: unknown; baseline?: unknown }
+        let body: { pub?: unknown; pubs?: unknown; baseline?: unknown; confirm?: unknown }
         try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
         if (!body || typeof body !== 'object') { json(400, { error: 'bad json' }); return }
         if (body.pub !== undefined && (typeof body.pub !== 'string' || !body.pub)) { json(400, { error: 'MISSING_PUB' }); return }
@@ -857,6 +1042,8 @@ export function startHookServer(
           ...(typeof body.pub === 'string' ? { pub: body.pub } : {}),
           ...(Array.isArray(body.pubs) ? { pubs: body.pubs as string[] } : {}),
           ...(body.baseline === true ? { baseline: true } : {}),
+          // "It's mine" for one device: the account's other devices are told too (deviceLogSyncer `dismiss`).
+          ...(body.confirm === true ? { confirm: true } : {}),
         }); json(out.status, out.body); return
       }
 
@@ -890,6 +1077,29 @@ export function startHookServer(
         let body: unknown
         try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
         await proxied(() => handlers.onDeskOps!(body)); return
+      }
+      if (req.method === 'GET' && url === '/api/agent-messages') {
+        if (!handlers.onAgentMessagesRead) { json(503, { error: 'UNAVAILABLE' }); return }
+        await proxied(handlers.onAgentMessagesRead); return
+      }
+      const agentMessagesTab = req.method === 'PATCH' ? /^\/api\/agent-messages\/tabs\/([A-Za-z0-9_-]{1,64})$/.exec(url) : null
+      if (agentMessagesTab) {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onAgentMessagesWrite) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
+        await proxied(() => handlers.onAgentMessagesWrite!(agentMessagesTab[1], body)); return
+      }
+      if (req.method === 'GET' && url === '/api/agent-settings') {
+        if (!handlers.onAgentSettingsRead) { json(503, { error: 'UNAVAILABLE' }); return }
+        await proxied(handlers.onAgentSettingsRead); return
+      }
+      if (req.method === 'PATCH' && url === '/api/agent-settings') {
+        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
+        if (!handlers.onAgentSettingsWrite) { json(503, { error: 'UNAVAILABLE' }); return }
+        let body: unknown
+        try { body = JSON.parse(await readBody(req)) } catch { json(400, { error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }); return }
+        await proxied(() => handlers.onAgentSettingsWrite!(body)); return
       }
       if (req.method === 'GET' && url === '/api/experimental-settings') {
         if (!handlers.onExperimentalRead) { json(503, { error: 'UNAVAILABLE' }); return }
@@ -983,6 +1193,7 @@ export function startHookServer(
     })
   }
   const server = http.createServer(handle)
+  server.once('close', () => admissions.close())
 
   return new Promise((resolve, reject) => {
     let fellBack = false

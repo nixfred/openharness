@@ -1,0 +1,60 @@
+{
+  "manifest_version": "0.3",
+  "name": "harness",
+  "display_name": "Harness",
+  "version": "0.0.0",
+  "description": "Start Claude Code and Codex agents the person can watch, wait for them and read their answers.",
+  "long_description": "Harness runs coding agents (Claude Code, Codex) in sessions of their own, on this computer or the person's other machines. The person can watch and join every one in the Harness app. With this extension, Claude can start harnesses, wait for them, read their answers and close them.\n\n**It needs the Harness CLI** (macOS or Linux):\n\n```\ncurl -fsSL https://harness.autonomous.ai/cli/install.sh | bash\nharness start\n```\n\nOn Linux the installer installs tmux and curl with apt-get, which asks for your password.\n\nNo account is needed for harnesses on this computer. Until the CLI is installed, the extension offers one tool, `harness_setup`, that says how to install it.\n\nClaude may give work to, and close, only the harnesses it started. The rest are the person's.",
+  "author": {
+    "name": "Autonomous",
+    "url": "https://harness.autonomous.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/autonomous-ai/openharness"
+  },
+  "homepage": "https://harness.autonomous.ai/agents",
+  "documentation": "https://harness.autonomous.ai/agents",
+  "support": "https://github.com/autonomous-ai/openharness/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/bin.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/bin.mjs"]
+    }
+  },
+  "tools": [
+    {
+      "name": "harness_list",
+      "description": "The harnesses on this machine: name, agent, state, who started each, when it was last active, its folder, and what it is about."
+    },
+    {
+      "name": "harness_start",
+      "description": "Start a new harness: an agent in a session of its own, working on a task in a folder, or in a new project Harness makes for it. Returns at once."
+    },
+    {
+      "name": "harness_wait",
+      "description": "Wait until harnesses stop working, then say each one's state."
+    },
+    {
+      "name": "harness_read",
+      "description": "A harness's state and its last turn: what it was asked and what it answered."
+    },
+    {
+      "name": "harness_close",
+      "description": "Close a harness you started, once it is done. Its conversation is kept: the person can resume it."
+    }
+  ],
+  "tools_generated": true,
+  "keywords": ["agents", "parallel", "claude-code", "codex", "orchestration", "tmux"],
+  "license": "MIT",
+  "privacy_policies": ["https://www.autonomous.ai/privacy"],
+  "compatibility": {
+    "platforms": ["darwin", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

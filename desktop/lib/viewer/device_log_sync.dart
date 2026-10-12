@@ -3,6 +3,7 @@ import 'dart:math';
 
 import '../e2ee/bytes.dart';
 import '../e2ee/keys.dart';
+import 'device_ack.dart';
 import 'device_history.dart';
 import 'device_log.dart';
 import 'group_sync.dart';
@@ -19,6 +20,9 @@ export 'device_history.dart'
 /// log or rolls it back FREEZES it here: nothing more is pinned from it until someone reviews what
 /// changed ([rebaseline]). A key added after this app joined the log is announced ("New device: X") and
 /// stays pending until it is marked seen; what the log says is never read against what the roster holds.
+/// "It's mine" here ([dismiss] with `confirm`) is signed and shared beside the log (device_ack.dart), and
+/// one another trusted device shared takes a key off `pending` here: the person confirms a new device
+/// once, on any of their devices.
 
 /// What `GET /api/device-keys?since=` answered; null from the fetcher when there is no log to read.
 typedef DeviceLogFetched = ({String acct, DevLogHead head, List<Object?> entries});
@@ -28,6 +32,32 @@ typedef DeviceLogAppendAnswer = ({DevLogHead? head, String? error});
 
 typedef DeviceLogFetch = Future<DeviceLogFetched?> Function(int since);
 typedef DeviceLogAppend = Future<DeviceLogAppendAnswer?> Function(DevLogEntry entry);
+
+/// `GET /api/device-keys/acks?since=`: the acknowledgements of keys added after entry `since`, unchecked
+/// (every one is judged here); null when there are none to read (a backend from before them: 404).
+typedef DeviceLogFetchAcks = Future<List<Object?>?> Function(int since);
+
+/// `POST /api/device-keys/acks`: whether the backend kept one this app signed.
+typedef DeviceLogPostAck = Future<bool> Function(DevAck ack);
+
+/// Another of the person's trusted devices said "It's mine" for a key that was new here, so it is not New
+/// here any more: which device ([by]), what it was called then, and when this app read it. Trusts nothing.
+class DeviceLogConfirmed {
+  const DeviceLogConfirmed({required this.by, required this.label, required this.at});
+
+  final String by;
+  final String label;
+  final int at;
+
+  Map<String, Object?> toJson() => {'by': by, 'label': label, 'at': at};
+
+  static DeviceLogConfirmed? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final by = raw['by'], label = raw['label'], at = raw['at'];
+    if (by is! String || label is! String || at is! int) return null;
+    return DeviceLogConfirmed(by: by, label: label, at: at);
+  }
+}
 
 class DeviceLogFreeze {
   const DeviceLogFreeze(this.reason, this.at, this.lastGoodHead);
@@ -64,6 +94,7 @@ class _File {
     this.owner,
     this.joining = false,
     this.departed = const [],
+    this.confirmed = const {},
   });
 
   DevLogState? state;
@@ -108,6 +139,10 @@ class _File {
   /// New keys removed before anyone looked (oldest first, at most [_departedKept]).
   List<DeviceLogDeparted> departed;
 
+  /// New keys another trusted device confirmed, by pub: "Confirmed on <label>". Only ever the reason a
+  /// key left [pending]; it trusts nothing.
+  Map<String, DeviceLogConfirmed> confirmed;
+
   Map<String, Object?> toJson() => {
     'state': state?.toJson(),
     'recent': [for (final e in recent.skip(max(0, recent.length - _recentKept))) e.toJson()],
@@ -128,6 +163,13 @@ class _File {
       'looseRemoved': [for (final e in looseRemoved.skip(max(0, looseRemoved.length - _recentKept))) e.toJson()],
     if (departed.isNotEmpty)
       'departed': [for (final d in departed.skip(max(0, departed.length - _departedKept))) d.toJson()],
+    if (confirmed.isNotEmpty) 'confirmed': {for (final e in confirmed.entries) e.key: e.value.toJson()},
+  };
+
+  static Map<String, DeviceLogConfirmed> _confirmed(Object? raw) => {
+    if (raw is Map)
+      for (final e in raw.entries)
+        if (e.key is String) e.key as String: ?DeviceLogConfirmed.fromJson(e.value),
   };
 
   static List<String> _strings(Object? raw) => raw is List ? [for (final v in raw) if (v is String) v] : <String>[];
@@ -152,6 +194,7 @@ class _File {
       owner: raw['owner'] is String && (raw['owner'] as String).isNotEmpty ? raw['owner'] as String : null,
       joining: raw['joining'] == true,
       departed: DeviceLogDeparted.listFromJson(raw['departed']),
+      confirmed: _confirmed(raw['confirmed']),
     );
   }
 }
@@ -186,6 +229,7 @@ class DeviceLogRow {
     required this.self,
     this.pending = false,
     this.suspended = false,
+    this.confirmed,
   });
 
   final DevLogMember member;
@@ -197,6 +241,9 @@ class DeviceLogRow {
 
   /// Not trusted here after a fork, until the list is reviewed.
   final bool suspended;
+
+  /// Another trusted device said "It's mine" for it while it was new here; null when none did.
+  final DeviceLogConfirmed? confirmed;
 }
 
 class DeviceLogListing {
@@ -328,6 +375,8 @@ class ViewerDeviceLog {
     required this.fetch,
     required this.append,
     required this.label,
+    this.fetchAcks,
+    this.postAck,
     this.onAnnounce,
     this.onRemoved,
     this.onSignedOut,
@@ -340,6 +389,12 @@ class ViewerDeviceLog {
   final ViewerKeyStore keys;
   final DeviceLogFetch fetch;
   final DeviceLogAppend append;
+
+  /// The acknowledgements beside the log ("It's mine" said on another device); null: none are read.
+  final DeviceLogFetchAcks? fetchAcks;
+
+  /// Where this app's own "It's mine" is shared; null: it stays here.
+  final DeviceLogPostAck? postAck;
 
   /// How this app calls itself in the account's list of devices.
   final String Function() label;
@@ -864,6 +919,86 @@ class ViewerDeviceLog {
       await _endJoin();
       if (expecting && !_registering && round == _signInRound) _signingInAgain = false;
     }
+    // After the entries, so a key added and confirmed while this app was closed is first announced, as
+    // every new key is — the one-time "New device: X" never waits on, or is skipped for, anyone's word —
+    // and only then taken off the list.
+    await _applyAcks();
+  }
+
+  /// [marks] cut to the keys still active, as a file's [_File.confirmed].
+  Map<String, DeviceLogConfirmed> _keptConfirmed(Map<String, DeviceLogConfirmed> marks, DevLogState state) => {
+    for (final e in marks.entries)
+      if (state.active.containsKey(e.key)) e.key: e.value,
+  };
+
+  /// The keys an acknowledgement could take off `pending` in [file]: new here, still active, not
+  /// suspended, not this app — and none at all from a log that is frozen or not this sign-in's.
+  Future<List<DevLogMember>> _ackable(_File file) async {
+    final state = file.state;
+    if (state == null || file.frozen != null || !await _ownsFile(file)) return const [];
+    final selfPub = await _selfPub();
+    final suspended = await suspendedPubs();
+    return [
+      for (final k in file.pending.toSet())
+        if (state.active[k] case final m? when m.pub != selfPub && !suspended.contains(k)) m,
+    ];
+  }
+
+  /// Take off `pending` every key another of the person's trusted devices said "It's mine" for
+  /// (device_ack.dart), and remember which device did ("Confirmed on <label>").
+  ///
+  /// The backend's word counts for nothing: each acknowledgement must check out against the log as THIS
+  /// app verified it ([checkDevAck]: signature, a signer active on it, the key added at the entry it
+  /// names), and against this app's own marks. The key must still be new here and not suspended — an
+  /// acknowledgement never lifts a suspension; only the person does, here, with "It's mine" on that very
+  /// device. The signer must be a device this app trusts: not new here itself (two new devices must not
+  /// vouch for each other), not suspended, not removed (a departed key is not active), not tombstoned in
+  /// the trust group, and not this app (its own "It's mine" already took the key off). Nothing is read
+  /// while the log is frozen or not yet this sign-in's. Never throws.
+  Future<void> _applyAcks() async {
+    final read = fetchAcks;
+    if (read == null) return;
+    try {
+      final candidates = await _ackable(await _read());
+      // Nothing new here: nothing to ask (and no request at all, on every read, for most of an app's life).
+      if (candidates.isEmpty) return;
+      final raw = await read(candidates.map((m) => m.seq).reduce(min) - 1);
+      if (raw == null || raw.isEmpty) return;
+      final confirmed = await _locked(() async {
+        // Judged against the file as it is NOW: the log may have moved, or a key been looked at, meanwhile.
+        final file = await _read();
+        final state = file.state;
+        final open = {for (final m in await _ackable(file)) m.pub};
+        final out = <String, DeviceLogConfirmed>{};
+        if (state == null || open.isEmpty) return out;
+        final selfPub = await _selfPub();
+        final pending = file.pending.toSet();
+        final suspended = await suspendedPubs();
+        final roster = GroupRoster.parse(await keys.groupRoster());
+        final inRoster = {for (final m in roster.members) m.pub};
+        final tombstoned = {for (final t in roster.removed) if (!inRoster.contains(t.pub)) t.pub};
+        for (final r in raw) {
+          final ack = (await checkDevAck(state, r)).ack;
+          if (ack == null || !open.contains(ack.pub) || out.containsKey(ack.pub)) continue;
+          if (ack.signer == selfPub ||
+              pending.contains(ack.signer) ||
+              suspended.contains(ack.signer) ||
+              tombstoned.contains(ack.signer)) {
+            continue;
+          }
+          out[ack.pub] = DeviceLogConfirmed(by: ack.signer, label: state.active[ack.signer]!.label, at: _now());
+        }
+        if (out.isEmpty) return out;
+        file
+          ..pending = [for (final k in file.pending) if (!out.containsKey(k)) k]
+          ..confirmed = _keptConfirmed({...file.confirmed, ...out}, state);
+        await _write(file);
+        return out;
+      });
+      if (confirmed.isNotEmpty) onChanged?.call();
+    } catch (_) {
+      // Unreadable now: the list stays as it was, and the next read asks again.
+    }
   }
 
   Future<void> _readPages() async {
@@ -1085,7 +1220,8 @@ class ViewerDeviceLog {
       ..pending = _prune(pendingNow, applied.state)
       ..announced = _prune([...file.announced, for (final m in toAnnounce) m.pub], applied.state)
       ..suspended = _prune(file.suspended, applied.state)
-      ..departed = _withDeparted(file.departed, departed);
+      ..departed = _withDeparted(file.departed, departed)
+      ..confirmed = _keptConfirmed(file.confirmed, applied.state);
     await _carrySuspensionsIn(file);
     await _write(file);
     await _trust(bootstrap ? applied.state.active.values.toList() : [...applied.added, ...applied.relabeled]);
@@ -1479,11 +1615,20 @@ class ViewerDeviceLog {
   /// [pub] — "It's mine" on that very device — is the person vouching for it, and lifts its suspension
   /// (here and in every kept account's log). A key that joined and left before anyone looked
   /// ([DeviceLogListing.departed]) is cleared the same way: named, or every one.
-  Future<void> dismiss({String? pub, List<String>? pubs}) async {
+  ///
+  /// [confirm] — "It's mine", pressed for ONE device ([pub], or [pubs] naming only it) — also tells the
+  /// account's other devices, with an acknowledgement this app signs (device_ack.dart): they stop showing
+  /// it as New too. Never for a list that was only looked at, or every device at once: only an explicit
+  /// "It's mine" vouches. Marking it seen here is done first; the result says whether the other devices
+  /// were told (false: the backend did not take it, or there was nothing to tell).
+  Future<bool> dismiss({String? pub, List<String>? pubs, bool confirm = false}) async {
+    final one = pub ?? (pubs != null && pubs.length == 1 ? pubs.first : null);
+    var share = false;
     final lifted = <DevLogMember>[];
     final changed = await _locked(() async {
       final file = await _marksIn();
       if (file.state == null) return false;
+      final wasNew = one != null && file.pending.contains(one);
       final named = pub != null || pubs != null;
       final gone = {...?pubs, ?pub};
       file.pending = [
@@ -1503,9 +1648,38 @@ class ViewerDeviceLog {
       await _write(file);
       if (lifting != null) await _unsuspendArchivedIn([lifting]);
       if (lifted.isNotEmpty) await _trust(lifted);
+      // Only a key that was new here, and that this app trusts now: one a fork suspended here (and
+      // "It's mine" did not lift) is not this app's to vouch for.
+      share = confirm && wasNew && !(await suspendedPubs()).contains(one);
       return true;
     });
     if (changed) onChanged?.call();
+    return share ? _shareAck(one!) : false;
+  }
+
+  /// Sign "It's mine" for [pub] and hand it to the backend for the account's other devices. Only from a
+  /// log this app verified, is on, and that is not frozen (a frozen list is not one to vouch from), about
+  /// a key on it that is not this app. Never throws.
+  Future<bool> _shareAck(String pub) async {
+    final post = postAck;
+    if (post == null) return false;
+    try {
+      final file = await _read();
+      final state = file.state;
+      final identity = await keys.identity();
+      final selfPub = b64e(identity.pub);
+      if (state == null || file.frozen != null || !await _ownsFile(file)) return false;
+      if (pub == selfPub || state.active[selfPub] == null) return false;
+      final member = state.active[pub];
+      if (member == null) return false;
+      final ack = await signDevAck(
+        DevAck(v: devAckVersion, acct: state.acct, pub: pub, addSeq: member.seq, signer: selfPub, at: _now()),
+        identity,
+      );
+      return await post(ack);
+    } catch (_) {
+      return false;
+    }
   }
 
   /// The "Already on your account" list was acknowledged: the first read is over, whatever comes after
@@ -1621,6 +1795,7 @@ class ViewerDeviceLog {
             self: m.pub == selfPub,
             pending: file.pending.contains(m.pub),
             suspended: file.suspended.contains(m.pub),
+            confirmed: file.confirmed[m.pub],
           ),
       ],
       frozen: file.frozen,

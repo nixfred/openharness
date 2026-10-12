@@ -32,6 +32,7 @@ class _QuietApi extends ApiClient {
     String? pub,
     List<String>? pubs,
     bool baseline = false,
+    bool confirm = false,
   }) async => true;
 }
 

@@ -18,7 +18,25 @@ use crate::pane::{encode_key, encode_mouse, Phase};
 use crate::picker::Picker;
 use crate::theme;
 
+/// A trusted OS form while sign-in is required. It receives text, never hn's
+/// root/prefix shortcuts. Resize and focus events still reach the client.
+pub fn system_form_input(app: &mut App, pane: u64, event: &CEvent) -> bool {
+    let bytes = match event {
+        CEvent::Key(key) if key.kind != KeyEventKind::Release =>
+            app.panes.get(&pane).and_then(|p| encode_key(key, p.mode())),
+        CEvent::Paste(text) => Some(text.as_bytes().to_vec()),
+        CEvent::Key(_) | CEvent::Mouse(_) => None,
+        _ => return false,
+    };
+    if let Some(bytes) = bytes {
+        if app.panes.get(&pane).is_some_and(|p| p.stream.is_some()) { app.send_input(pane, &bytes); }
+        else if let Some(p) = app.panes.get_mut(&pane) { p.queued.push(bytes); }
+    }
+    true
+}
+
 pub fn handle(app: &mut App, event: CEvent) {
+    if crate::account::entry_input(app, &event) { return }
     app.sync_copy_modal();
     match event {
         // A key is the session's activity (session_update_activity): a script's command with no -t
@@ -281,6 +299,7 @@ fn on_paste(app: &mut App, text: String) {
         chars.splice(at..at, pasted);
         prompt.value = chars.into_iter().collect();
         prompt.buttons = false;
+        prompt.error.clear();
         return;
     }
     app.tab_mut().home = false;
@@ -858,12 +877,7 @@ fn fill_rows(app: &App, kind: &PickerKind, picker: &mut Picker) {
                 if let Some(want) = in_use.or(top) { picker.select(&want); picker.placed = picker.selected_id.clone() }
             }
             picker.right_half = true;
-            // (On a Jev model there is nothing to use: Enter copies how to call it.)
-            picker.hints = match picker.selected_id.as_deref() {
-                Some(id) if id.starts_with("mv:jev:") => vec![("enter", "copy how to call it")],
-                Some(id) if id.starts_with("mv:jevlocal:") => vec![("enter", "get · start · copy"), ("C-s", "stop it")],
-                _ => vec![("enter", "use · get"), ("C-s", "stop a local model")],
-            };
+            picker.hints = vec![("enter", "use · get"), ("C-s", "stop a local model")];
             picker.empty = if crate::models::target(app).is_none() { crate::models::no_target_why(app) } else { "Loading its models…".into() };
             picker.status = crate::models::target(app).and_then(|t| app.fleet.agent(&t.machine, &t.agent)).map(|a| a.name.clone()).unwrap_or_default();
         }
@@ -896,8 +910,9 @@ fn fill_rows(app: &App, kind: &PickerKind, picker: &mut Picker) {
             picker.hints = vec![("→/enter", "open"), ("enter", "set"), ("esc", "done")];
         }
         // (Typed into, it ranks by match, best first, as fzf does; empty, it keeps its groups. A
-        // query matches a command's name and keywords, not the description shown beside it.)
-        PickerKind::Commands => { picker.live = true; picker.set_rows(modal::command_rows_for(app, !picker.query.is_empty(), crate::settings::in_tmux(picker))); picker.hints = vec![("enter", "run"), ("M-k", "change its key")] }
+        // query matches a command's name and its keywords — what a row used to say beside it is
+        // searched, not shown, so hn's own commands still rank above tmux's.)
+        PickerKind::Commands => { picker.live = true; picker.search_extra = true; picker.set_rows(modal::command_rows_for(app, !picker.query.is_empty(), crate::settings::in_tmux(picker))); picker.hints = vec![("enter", "run"), ("M-k", "change its key")] }
         // ── keys ──
         PickerKind::Keybinds => { picker.keep_order = true; picker.set_rows(modal::keybind_rows(app)); picker.hints = vec![("enter", "change"), ("esc", "done")] }
         PickerKind::Help => { picker.set_rows(modal::mode_rows(app)); picker.hints = vec![("enter", "go")] }
@@ -1609,6 +1624,7 @@ fn creation_finished(app: &mut App, machine: String, session: u32, opts: NewOpts
         Ok(reply) => {
             if let Some(id) = reply.pointer("/agent/id").and_then(|v| v.as_str()) {
                 if let Some(form_id) = &opts.form_id { crate::new_harness::created(app, form_id, &reply["agent"]); }
+                if opts.first_run { crate::first_run::created(app, &machine, id) }
                 app.fleet.agents.insert((machine.clone(), id.to_string()), crate::fleet::agent_from(&machine, &reply["agent"], None));
                 if reply["agent"]["engine"] == "terminal" { app.shells.insert((machine.clone(), id.to_string())); }
                 // Keep new harnesses in the current window, filling it or splitting beside
@@ -1644,12 +1660,14 @@ fn creation_finished(app: &mut App, machine: String, session: u32, opts: NewOpts
             } else {
                 if let Some(tx) = app.held_reply.take().filter(|_| opts.print.is_some()) { app.print_new = None; let _ = tx.send((Vec::new(), vec!["the machine created no harness".into()], 1)); return }
                 if let Some(form_id) = &opts.form_id { crate::new_harness::completed(app, form_id, Some("The machine created no harness — try again".into())); }
+                if opts.first_run { crate::first_run::failed(app) }
                 app.say("The machine created no harness", theme::DANGER)
             }
         }
         Err(e) => {
             if let Some(tx) = app.held_reply.take().filter(|_| opts.print.is_some()) { app.print_new = None; let _ = tx.send((Vec::new(), vec![format!("create harness failed: {e}")], 1)); return }
             if let Some(form_id) = &opts.form_id { crate::new_harness::completed(app, form_id, Some(format!("Could not start it: {e}"))); }
+            if opts.first_run { crate::first_run::failed(app) }
             app.say(format!("Could not start it: {e}"), theme::DANGER)
         }
     }
@@ -1762,10 +1780,10 @@ fn prompt_mouse(app: &mut App, mouse: MouseEvent) {
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) { return }
     let at = ratatui::layout::Position::new(mouse.column, mouse.row);
     let Some(Modal::Prompt(mut p)) = app.modal.take() else { return };
-    if !r.contains(at) { return after_prompt(app) }
+    if !r.contains(at) { prompt_cancelled(app, &p); return after_prompt(app) }
     match p.row().click(a.row, at) {
         Some(1) => submit_prompt(app, p),
-        Some(_) => {}
+        Some(_) => prompt_cancelled(app, &p),
         None => {
             if a.input.is_some_and(|i| i.contains(at)) { p.buttons = false }
             app.modal = Some(Modal::Prompt(p));
@@ -1815,14 +1833,14 @@ fn prompt_key(app: &mut App, key: KeyEvent, mut p: Prompt) {
             let mut row = p.row();
             match row.key(key.code, key.modifiers) {
                 crate::buttons::Answer::Chosen(1) => return submit_prompt(app, p),
-                crate::buttons::Answer::Chosen(_) | crate::buttons::Answer::Cancel => return,
+                crate::buttons::Answer::Chosen(_) | crate::buttons::Answer::Cancel => return prompt_cancelled(app, &p),
                 crate::buttons::Answer::Moved => p.chosen = row.chosen,
                 crate::buttons::Answer::Ignored => {}
             }
             app.modal = Some(Modal::Prompt(p));
             return;
         }
-        if key.code == KeyCode::Esc { return }
+        if key.code == KeyCode::Esc { return prompt_cancelled(app, &p) }
     }
     let (single, incremental, ptype) = match &p.kind { PromptKind::Command { one, incremental, ptype, .. } => (*one, *incremental, *ptype), PromptKind::Tree { ask, .. } => (false, false, ask.ptype()), _ => (false, false, 0) };
     // status-keys vi (tmux's default when $EDITOR names vi): Esc leaves insert for normal mode.
@@ -1847,11 +1865,11 @@ fn prompt_key(app: &mut App, key: KeyEvent, mut p: Prompt) {
     let at = p.cursor.min(size);
     let space = |i: usize| chars.get(i) == Some(&' ');
     let in_list = |i: usize| chars.get(i).map(|c| ws.contains(*c)).unwrap_or(false);
-    let set = |p: &mut Prompt, v: Vec<char>, c: usize| { p.value = v.into_iter().collect(); p.cursor = c; };
+    let set = |p: &mut Prompt, v: Vec<char>, c: usize| { p.value = v.into_iter().collect(); p.cursor = c; p.error.clear(); };
     let (mut changed, mut appended, mut prefix) = (false, false, '=');
     match key.code {
-        KeyCode::Esc => return,
-        KeyCode::Char('c' | 'g') if ctrl => return,
+        KeyCode::Esc => return prompt_cancelled(app, &p),
+        KeyCode::Char('c' | 'g') if ctrl => return prompt_cancelled(app, &p),
         KeyCode::Enter => {
             if !p.value.is_empty() && matches!(p.kind, PromptKind::Command { .. } | PromptKind::Tree { .. }) { add_history(app, ptype, &p.value) }
             // An incremental prompt has done its work as it went.
@@ -3127,6 +3145,8 @@ fn choose(app: &mut App, kind: PickerKind, mut picker: Picker, choice: Choice) {
         PickerKind::Models if id.as_deref().is_some_and(crate::models::is_row) => {
             if !matches!(choice, Choice::Enter | Choice::SplitDown) { return keep(app, kind, picker) }
             crate::models::choose(app, &mut picker, id.as_deref().unwrap_or(""), choice == Choice::SplitDown);
+            // (Set up signed out opened the account page, Add API its dialog: that is shown, not this list.)
+            if app.modal.is_some() { return }
             fill(app, &kind, &mut picker);
             return keep(app, kind, picker);
         }
@@ -3253,11 +3273,17 @@ fn store_install(app: &mut App, kind: PickerKind, mut picker: Picker) {
     app.modal = Some(Modal::Picker { kind, picker });
 }
 
+/// A dialog put away without its answer: one of the Models view's goes back to the view.
+fn prompt_cancelled(app: &mut App, p: &Prompt) {
+    if let PromptKind::Api(draft) = &p.kind { crate::models::api_cancelled(app, draft) }
+}
+
 fn submit_prompt(app: &mut App, p: Prompt) {
     let value = p.value.trim().to_string();
     match p.kind {
         // Answered by a key press in prompt_key; nothing to submit.
         PromptKind::Key { .. } => {}
+        PromptKind::Api(draft) => crate::models::api_answer(app, *draft, value),
         PromptKind::Tree { pane, ask } => crate::tree::answer(app, pane, ask, Some(&p.value)),
         PromptKind::Command { template, mut more, mut answers, one, digits, incremental, ptype, last } => {
             // The answer as typed (tmux keeps its spaces); the next prompt, if there is one.
@@ -3520,6 +3546,8 @@ pub struct NewOpts {
     /// Additional project/permission choices from the interactive draft.
     pub extra: Option<serde_json::Value>, pub form_id: Option<String>,
     pub target: Option<LaunchTarget>,
+    /// A computer's first hn (first_run.rs): told what was made, or that nothing was.
+    pub first_run: bool,
 }
 
 #[derive(Clone, Debug)]

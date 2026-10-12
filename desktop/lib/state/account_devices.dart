@@ -20,6 +20,7 @@ class AccountDevice {
     this.seq,
     this.pending = false,
     this.suspended = false,
+    this.confirmedOn,
   });
 
   final String pub;
@@ -46,11 +47,16 @@ class AccountDevice {
   /// Not trusted here after a fork, until the list is reviewed.
   final bool suspended;
 
+  /// What the device that said "It's mine" for it was called, when another of the person's devices
+  /// confirmed it while it was new here ('' when it had no name); null when none did.
+  final String? confirmedOn;
+
   bool get isMachine => kind == 'machine';
 
   AccountDevice withLastSeen(DateTime? at) => AccountDevice(
     pub: pub, label: label, kind: kind, machineId: machineId, addedAt: addedAt,
     fingerprint: fingerprint, self: self, lastSeen: at, seq: seq, pending: pending, suspended: suspended,
+    confirmedOn: confirmedOn,
   );
 
   static AccountDevice? fromDaemon(Object? raw) {
@@ -58,19 +64,22 @@ class AccountDevice {
     final pub = raw['pub'], label = raw['label'], kind = raw['kind'], machineId = raw['machineId'];
     final addedAt = raw['addedAt'], fp = raw['fingerprint'], self = raw['self'];
     if (pub is! String || label is! String || kind is! String || addedAt is! int || fp is! String) return null;
+    final confirmed = raw['confirmed'];
     return AccountDevice(
       pub: pub, label: label, kind: kind, machineId: machineId is String ? machineId : '',
       addedAt: DateTime.fromMillisecondsSinceEpoch(addedAt), fingerprint: fp, self: self == true,
       seq: raw['seq'] is int ? raw['seq'] as int : null,
       pending: raw['pending'] == true,
       suspended: raw['suspended'] == true,
+      // A daemon that predates "It's mine" for the account sends none.
+      confirmedOn: confirmed is Map && confirmed['label'] is String ? confirmed['label'] as String : null,
     );
   }
 
   static AccountDevice fromRow(DeviceLogRow row) => AccountDevice(
     pub: row.member.pub, label: row.member.label, kind: row.member.kind, machineId: row.member.machineId,
     addedAt: DateTime.fromMillisecondsSinceEpoch(row.member.addedAt), fingerprint: row.fingerprint, self: row.self,
-    seq: row.member.seq, pending: row.pending, suspended: row.suspended,
+    seq: row.member.seq, pending: row.pending, suspended: row.suspended, confirmedOn: row.confirmed?.label,
   );
 }
 

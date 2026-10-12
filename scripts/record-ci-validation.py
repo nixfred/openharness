@@ -31,7 +31,10 @@ SCOPES["full"] = CLI_JOBS | TUI_JOBS | SCOPES["backend"] | DESKTOP_JOBS | {"comp
 # whole workflow/action and helper trees: a changed test, toolchain pin, cache
 # recipe or source contract must invalidate earlier evidence too.
 SOURCE_INPUTS = {
-    "process": (".github/", "scripts/", "desktop/scripts/", ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
+    # The CLI's and the backend's release commands are here for scripts/tests/test_release_contains_last.py,
+    # which runs all four release commands; the desktop's and the web's are in desktop/scripts/.
+    "process": (".github/", "scripts/", "desktop/scripts/", "cli/scripts/release-cli.sh", "backend/scripts/release-be.sh",
+                ".gitattributes", ".gitignore", ".gitmodules", "Makefile"),
     # VM tests also read CLI protocol definitions, shared layout fixtures,
     # daemon metadata and store catalog/artwork, including docs/images posters,
     # the Hub's publication rules that desktop/lib/community/hub_contract.dart mirrors, and the

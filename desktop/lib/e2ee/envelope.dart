@@ -17,8 +17,8 @@ const int e2eVersion = 1;
 const Set<String> encryptedDownTypes = {
   'harness_devices_list',
   'harness_device_settings',
-  'team',
-  'team_delivery',
+  // Agent Messages (CLI messages/wire.ts): a tab's log carries what agents said to each other.
+  'agent_messages',
   'harness_share_list',
   'harness_share_invite',
   'harness_share_remove',
@@ -35,8 +35,8 @@ const Set<String> encryptedDownTypes = {
   'phone_pair',
   'viewer_surface',
   'api_connections',
+  'connectors',
   'orchestrator',
-  'command_bar',
   'route_task',
   'route_send',
   'grid_fleet_models_list',
@@ -50,7 +50,7 @@ const Set<String> encryptedDownTypes = {
   'session_get',
   'models_list',
   'agent_create',
-  'agent_create_status',
+  'agent_create_status', 'agent_create_cancel',
   'agent_delete',
   'agent_restart',
   // Reopens stopped work and forks a harness: the CLI has required both sealed since they were
@@ -69,6 +69,10 @@ const Set<String> encryptedDownTypes = {
   // The harness's branch and pull-request history is a machine RPC too (applicationFrames.ts
   // `MACHINE_REQUESTS`): unsealed, the machine answers E2EE_REQUIRED.
   'git_pull_request',
+  // Memories across machines (CLI services/memory.ts).
+  'memory_snapshot',
+  'memory_about_put',
+  'memory_deliver',
   // The trust-group roster swap (`viewer/group_sync.dart`): the keys every member trusts.
   'group_sync',
   'codex_profiles_list',

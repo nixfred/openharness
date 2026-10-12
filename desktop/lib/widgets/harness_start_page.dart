@@ -58,7 +58,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
     canRequestFocus: false,
   );
   final _searchGroup = Object();
-  final _customizeButtonFocus = FocusNode(debugLabel: 'Customize Harness');
+  final _customizeButtonFocus = FocusNode(debugLabel: 'Appearance');
   bool _customizing = false;
   SwarmSearchController? _search;
   SwarmSearchDraft? _draft;
@@ -395,7 +395,7 @@ class _HarnessStartPageState extends State<HarnessStartPage> {
                           key: const ValueKey('harness-customize-button'),
                           focusNode: _customizeButtonFocus,
                           onPressed: onPressed,
-                          label: 'Customize Harness',
+                          label: 'Appearance',
                           overArtwork:
                               prefs.background != HarnessBackground.plain,
                         );

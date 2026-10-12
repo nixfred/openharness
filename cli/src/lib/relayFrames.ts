@@ -38,7 +38,7 @@ export type DownTransport = 'relay' | 'local' | 'p2p'
  * lib/e2ee/deviceLogSyncer.ts): forged, the first only makes this daemon re-read and verify the log,
  * the second could fake an answer to its own append — neither is anything a client should be sending.
  */
-export const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed', 'device_keys_changed', 'devlog_append_result'])
+export const BACKEND_ONLY_DOWN_TYPES = new Set(['machine_meta', 'machine_revoked', 'desk_changed', 'zoo_changed', 'machines_changed', 'device_keys_changed', 'connectors_changed', 'devlog_append_result'])
 
 /** A frame type as the sender spelled it, fit for one log line: the relay chooses it, so it is bounded
  *  and escaped rather than trusted not to carry a newline that forges the next line. */
@@ -70,10 +70,9 @@ export class RelayConnectError extends Error {
  */
 export const DAEMON_LOCAL_ONLY_TYPES: ReadonlySet<string> = new Set(['device_key_added', 'device_key_removed', 'device_conflict', 'device_keys_changed'])
 
-/** ⌘K's task delivery, which the devices answer (lib/ownerCommands.ts). */
+/** ⌘K's task delivery, which the devices answer (lib/ownerCommands.ts): the owner's commands, sealed and the
+ *  owner's only. */
 export const ROUTE_COMMAND_TYPES: ReadonlySet<string> = new Set(['route_task', 'route_send'])
-/** The owner's commands from the window's command bar (services/commandBar.ts) and ⌘K, sealed and the owner's only. */
-export const OWNER_COMMAND_TYPES = new Set(['command_bar', ...ROUTE_COMMAND_TYPES])
 /** The pair brain, machine to machine (daemons/BRAIN.md): retired, and refused (lib/e2ee/applicationFrames.ts). */
 export const PAIR_REQUESTS = new Set(['pair_watch', 'pair_journal', 'pair_read', 'pair_list',
   'pair_answer', 'pair_send', 'pair_stop', 'pair_start', 'pair_pause', 'pair_resume'])

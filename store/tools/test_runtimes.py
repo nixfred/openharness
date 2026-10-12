@@ -129,6 +129,12 @@ class Checksum(unittest.TestCase):
         self.assertEqual(box.run('_harness_sha256 f').stdout.strip(), "bbb")
         self.assertIn("sha256sum f", box.logged())
 
+    def test_a_locale_the_machine_lacks_does_not_reach_the_tool(self):
+        box = Box(self)
+        (box.root / "f").write_text("x")
+        box.stub("shasum", '[ "$LC_ALL" = C ] || exit 255; echo "aaa  f"')
+        self.assertEqual(box.run('_harness_sha256 f', LC_ALL="C.UTF-8").stdout.strip(), "aaa")
+
 
 class Fetch(unittest.TestCase):
     def test_a_download_that_fails_leaves_nothing(self):
@@ -144,6 +150,14 @@ class Fetch(unittest.TestCase):
         box.checksum("not-the-pin")
         r = box.run('_harness_fetch https://example.com/x "$PWD/x" abc || echo "rc=$?"')
         self.assertEqual(lines(r), ["miss https://example.com/x did not match its pinned checksum; nothing was installed", "rc=1"])
+        self.assertFalse(any(p.name.startswith("x") for p in box.root.iterdir()))
+
+    def test_a_checksum_tool_that_prints_nothing_is_not_a_mismatch(self):
+        box = Box(self)
+        box.serve(b"payload")
+        box.stub("shasum", "exit 255")
+        r = box.run('_harness_fetch https://example.com/x "$PWD/x" abc || echo "rc=$?"')
+        self.assertEqual(lines(r), ["miss could not checksum https://example.com/x — shasum and sha256sum both failed on this machine; nothing was installed", "rc=1"])
         self.assertFalse(any(p.name.startswith("x") for p in box.root.iterdir()))
 
     def test_a_matching_download_lands(self):

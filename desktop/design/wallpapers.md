@@ -1,6 +1,6 @@
 # Backgrounds
 
-Blank remains the default and uses the selected tab's workspace color. Choose artwork under Customize Harness → Background. Any background but Blank shows behind the panes of a running harness tab, seen through them; there is no separate switch. **Pane opacity** (0–100%, default 50%) sets how solid the panes stay over it. Settings shows the slider only while a background other than Blank is chosen. Older builds saved a Behind harnesses on/off flag beside the opacity; it is ignored. Empty welcome and new-tab pages are plain.
+Blank remains the default and uses the selected tab's workspace color. Choose artwork under Appearance → Wallpaper. Any background but Blank shows behind the panes of a running harness tab, seen through them; there is no separate switch. **Pane opacity** (0–100%, default 50%) sets how solid the panes stay over it. Settings shows the slider only while a background other than Blank is chosen. Older builds saved a Behind harnesses on/off flag beside the opacity; it is ignored. Empty welcome and new-tab pages are plain.
 
 The four images below were created with the built-in image generation tool. The PNG outputs were copied into the app without retouching. They are bundled locally; changing wallpaper does not make a network request. The center is deliberately quiet so the terminal-font welcome message remains readable.
 
@@ -47,7 +47,7 @@ While the custom background is selected, **Dim** (0–80%, default 40%) darkens 
 
 Rendered app previews: [welcome with terminal wallpaper](review/welcome-terminal-wallpaper.png) and [keyboard shortcut popup](review/keyboard-shortcuts-browser.png).
 
-`test/welcome_wallpaper_shortcuts_test.dart` loads the actual bundled images and renders the welcome content with the terminal font. It checks selection persistence, the blank default, font changes and compact layouts. `test/workspace_start_guide_test.dart` checks that opening and closing both command panels preserves the welcome text and wallpaper bounds, and that Customize Harness opens the wallpaper picker.
+`test/welcome_wallpaper_shortcuts_test.dart` loads the actual bundled images and renders the welcome content with the terminal font. It checks selection persistence, the blank default, font changes and compact layouts. `test/workspace_start_guide_test.dart` checks that opening and closing both command panels preserves the welcome text and wallpaper bounds, and that Appearance opens the wallpaper picker.
 
 To capture review images outside the repository:
 

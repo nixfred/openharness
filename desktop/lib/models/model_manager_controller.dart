@@ -65,7 +65,31 @@ class ModelManagerController extends ChangeNotifier {
   String? _dismissedReadyId;
   GridModels? models;
   List<LocalModel> localModels = const [];
+
+  /// The machine's RAM. On an NVIDIA machine a model runs in the card, not in this: see [fitsInVram].
   double? memoryBytes;
+
+  /// What the catalog fits models to (`fitBytes`) — on an NVIDIA machine the VRAM its card has for
+  /// models: what is free on it and what our own running model holds, which starting another frees —
+  /// and that card's VRAM in all (`gpuMemoryBytes`); null when the daemon did not say.
+  double? fitBytes, gpuMemoryBytes;
+
+  /// Models run in an NVIDIA card's VRAM here (`fitMemory: vram`): the figures to show are the card's,
+  /// and "fits" is judged against [fitBytes], not the machine's RAM.
+  bool fitsInVram = false;
+
+  /// The figure a heading names this machine's memory by, and what follows it: an NVIDIA card's VRAM
+  /// (`VRAM`, or `VRAM for models` where only that is known), else the machine's memory
+  /// (`unit` empty).
+  ({double bytes, String unit})? get headingMemory => fitsInVram
+      ? gpuMemoryBytes != null
+            ? (bytes: gpuMemoryBytes!, unit: 'VRAM')
+            : fitBytes != null
+            ? (bytes: fitBytes!, unit: 'VRAM for models')
+            : null
+      : memoryBytes != null
+      ? (bytes: memoryBytes!, unit: '')
+      : null;
 
   /// Free space where downloads land, or null when the daemon did not say.
   double? freeDiskBytes;
@@ -225,6 +249,9 @@ class ModelManagerController extends ChangeNotifier {
       models = null;
       localModels = const [];
       memoryBytes = null;
+      fitBytes = null;
+      gpuMemoryBytes = null;
+      fitsInVram = false;
       freeDiskBytes = null;
       hardware = null;
       error = null;
@@ -579,10 +606,14 @@ class ModelManagerController extends ChangeNotifier {
               .map(LocalModel.fromJson)
               .where((m) => m.id.isNotEmpty)
               .toList();
-          final memory = answer['memoryBytes'];
-          memoryBytes = memory is num && memory.isFinite && memory > 0
-              ? memory.toDouble()
+          double? positive(Object? value) =>
+              value is num && value.isFinite && value > 0
+              ? value.toDouble()
               : null;
+          memoryBytes = positive(answer['memoryBytes']);
+          fitBytes = positive(answer['fitBytes']);
+          gpuMemoryBytes = positive(answer['gpuMemoryBytes']);
+          fitsInVram = answer['fitMemory'] == 'vram';
           final disk = answer['freeDiskBytes'];
           freeDiskBytes = disk is num && disk.isFinite && disk >= 0
               ? disk.toDouble()

@@ -44,10 +44,19 @@ class MachinePickerForm extends StatefulWidget {
     required this.onFocusChanged,
     this.onSwitchPane,
     this.machineId,
+    this.remove,
+    this.signsOut = false,
   });
   final AppNotifier app;
   final MachinePickerFormKind kind;
   final String? machineId;
+
+  /// What [MachinePickerFormKind.delete] does instead of deleting the machine record alone: the
+  /// Machines picker signs the computer out of the account as well ([signsOut]).
+  final Future<String?> Function()? remove;
+
+  /// The delete also signs the computer out of the account, and its confirmation says so.
+  final bool signsOut;
   final ValueChanged<String?> onClose;
   final ValueChanged<bool> onFocusChanged;
   final VoidCallback? onSwitchPane;
@@ -313,7 +322,8 @@ class MachinePickerFormState extends State<MachinePickerForm> {
         widget.machineId!,
         _value.text.trim(),
       ),
-      MachinePickerFormKind.delete => app.deleteMachine(widget.machineId!),
+      MachinePickerFormKind.delete =>
+        widget.remove?.call() ?? app.deleteMachine(widget.machineId!),
       MachinePickerFormKind.password when machine!.isLocalMachine =>
         _clearConfirmation
             ? app.clearRemotePassword()
@@ -451,7 +461,7 @@ class MachinePickerFormState extends State<MachinePickerForm> {
       (
         label: switch (widget.kind) {
           MachinePickerFormKind.connect => 'Connect',
-          MachinePickerFormKind.delete => 'Delete',
+          MachinePickerFormKind.delete => widget.signsOut ? 'Remove' : 'Delete',
           _ => _clearConfirmation ? 'Clear' : 'Save',
         },
         run: _busy || _loading ? null : _submit,
@@ -472,7 +482,7 @@ class MachinePickerFormState extends State<MachinePickerForm> {
     MachinePickerFormKind.connect => machineLinkProgress(
       app.machineLinkStage(widget.machineId!),
     ),
-    MachinePickerFormKind.delete => 'Deleting…',
+    MachinePickerFormKind.delete => widget.signsOut ? 'Removing…' : 'Deleting…',
     _ => 'Saving…',
   };
 
@@ -735,6 +745,13 @@ class MachinePickerFormState extends State<MachinePickerForm> {
             gap,
             // Signing in is what makes this app trust it (the device key log): no password to set.
             line('It appears here and connects on its own.'),
+          ] else if (widget.kind == MachinePickerFormKind.delete &&
+              widget.signsOut) ...[
+            line('Remove this computer from your account?'),
+            line('It is signed out, and its machine record is deleted.'),
+            line(
+              'Its panes in this window will close. Signing in on it again adds it back as a new device.',
+            ),
           ] else if (widget.kind == MachinePickerFormKind.delete) ...[
             line('Delete this machine from your account?'),
             line('Its panes in this window will close.'),
@@ -821,7 +838,9 @@ class MachinePickerFormState extends State<MachinePickerForm> {
                         () => FocusNode(debugLabel: action.label),
                       ),
                       foregroundColor:
-                          action.label == 'Delete' || action.label == 'Clear'
+                          action.label == 'Delete' ||
+                              action.label == 'Remove' ||
+                              action.label == 'Clear'
                           ? Theme.of(context).colorScheme.error
                           : null,
                       onPressed: action.run,

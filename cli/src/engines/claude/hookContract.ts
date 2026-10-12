@@ -21,9 +21,26 @@ export const hooks: HookContract = {
     // notify.mjs exits at once for it in a tmux pane, and posts nothing at all while watch mode is off.
     events: [{ event: 'SessionStart' }, { event: 'SessionEnd' }, { event: 'UserPromptSubmit' }, { event: 'Stop' }, { event: 'StopFailure' }, { event: 'Notification' }],
     timeout: 5,
+    // Agent Messages: a teammate's message reaches a working agent at its next tool call (kit/messagesHook.ts).
+    inbox: { event: 'PostToolUse' },
+    // Harness's agent commands and MCP tools, in the person's permission rules (facets/hooks.ts HarnessAllowance):
+    // auto mode's check refused a Harness command outright, and a person away from the pane cannot answer a
+    // question. Claude Code checks deny, then ask, then allow; a verb the person's deny or ask names in any spelling
+    // gets no allow in any. The launcher's full path too: Claude Code does not match `/…/harness ps` to `harness ps`.
+    // Not `{node} {cli}`, whose versioned path would leave a stale rule in the person's list at every runtime update
+    // (a rules file of its own can be rewritten; this list is theirs). The MCP tools by name, under both names Claude
+    // Code gives them: a server the person added as `harness` (`claude mcp add harness -- harness mcp`, as /agents
+    // says), and the plugin's (`mcp__plugin_<plugin>_<server>__<tool>`). By name, not `mcp__harness__*`: another
+    // product's MCP server is also often added as `harness`, and its tools are not Harness's to allow. And
+    // `harness --help`, which every harness is told to read as it starts (lib/agentAttribution.ts): in ask mode it was
+    // the one question left in a hand-off (2026-10-12, in a clean VM). It only prints.
+    allow: {
+      list: ['permissions', 'allow'],
+      unless: ['deny', 'ask'],
+      rules: ['Bash(harness --help)', 'Bash(harness -h)', 'Bash({launcher} --help)',
+        'Bash(harness {verb}:*)', 'Bash({launcher} {verb}:*)', 'mcp__harness__{tool}', 'mcp__plugin_harness_harness__{tool}'],
+    },
     commandNamesHome: false,
-    unreadable: 'replace',
-    write: 'in-place',
     upToDate: { command: 'first-ours', matcher: false },
     messages: {
       current: '[hooks] Claude session + turn (Stop/StopFailure) hooks already installed',

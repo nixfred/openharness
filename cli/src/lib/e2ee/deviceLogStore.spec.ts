@@ -142,6 +142,20 @@ describe('DeviceLogStore — writes and the archive of other accounts', () => {
     expect(store.read().departed?.map((x) => x.pub)).toEqual(['k1'])
   })
 
+  it('keeps which device confirmed a key, and drops unreadable marks rather than failing the read', () => {
+    const path = file()
+    const store = new DeviceLogStore(path)
+    const mark = { by: 'B', label: 'box2', at: 7 }
+    store.write(of('a', { confirmed: { k1: mark } }))
+    expect(store.read().confirmed).toEqual({ k1: mark })
+    writeFileSync(path, JSON.stringify({ ...of('a'), confirmed: { k1: mark, k2: { by: 'B' }, k3: null, k4: { ...mark, at: '7' } } }))
+    expect(store.read().confirmed).toEqual({ k1: mark })
+    for (const junk of [['k1'], 'k1', null]) {
+      writeFileSync(path, JSON.stringify({ ...of('a'), confirmed: junk }))
+      expect(store.read().confirmed).toBeUndefined()
+    }
+  })
+
   it('never restores a kept file under an account it is not for', () => {
     const path = file()
     const store = new DeviceLogStore(path)

@@ -136,6 +136,54 @@ void main() {
   });
 
   testWidgets(
+    'the panel is Appearance, as every way in calls it, and its tabs say what they hold',
+    (tester) async {
+      final store = AppearancePrefsStore(storage: _Storage());
+      addTearDown(store.dispose);
+      tester.view.physicalSize = const Size(440, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: grid.buildAppTheme(brightness: Brightness.light),
+          home: Scaffold(
+            body: HarnessCustomizePane(store: store, onClose: () {}),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Not Appearance › Appearance: the title once, and no tab under it of the same name.
+      expect(find.text('Appearance'), findsOneWidget);
+      expect(find.text('Customize Harness'), findsNothing);
+      expect(find.byTooltip('Close Appearance'), findsOneWidget);
+      final tabs = [
+        for (final key in [
+          'customize-prompt',
+          'customize-appearance',
+          'customize-wallpaper',
+          'customize-terminal',
+        ])
+          tester
+              .widget<Text>(
+                find.descendant(
+                  of: find.byKey(ValueKey(key)),
+                  matching: find.byType(Text),
+                ),
+              )
+              .data,
+      ];
+      expect(tabs, ['Status', 'Workspace', 'Wallpaper', 'Terminal']);
+      // Workspace: the panes' shading, the tabs' names and the colour palette.
+      await tester.tap(find.byKey(const ValueKey('customize-appearance')));
+      await tester.pumpAndSettle();
+      expect(find.text('Shade inactive panes'), findsOneWidget);
+      expect(find.text('Auto rename'), findsOneWidget);
+      expect(find.text('Color palette'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'prompt choices preview, accept keyboard input and survive reopening',
     (tester) async {
       final storage = _Storage();
@@ -314,7 +362,7 @@ void main() {
         matching: find.text('Robbyrussell'),
       );
       final beforeStyle = tester.widget<Text>(otherLabel).style!;
-      final beforeHeader = tester.getSize(find.text('Customize Harness'));
+      final beforeHeader = tester.getSize(find.text('Appearance'));
       expect(beforeStyle.fontFamily, grid.AppType.sansFamily);
       expect(
         beforeStyle.color,
@@ -327,7 +375,7 @@ void main() {
       terminalFontStore.value = terminalFontStore.value.copyWith(fontSize: 24);
       await tester.pumpAndSettle();
       expect(tester.widget<Text>(otherLabel).style, beforeStyle);
-      expect(tester.getSize(find.text('Customize Harness')), beforeHeader);
+      expect(tester.getSize(find.text('Appearance')), beforeHeader);
       final sample = find.byKey(const ValueKey('prompt-example-standard'));
       final sampleText = tester.widget<Text>(
         find.descendant(of: sample, matching: find.byType(Text)),
@@ -470,7 +518,8 @@ void main() {
           await chord(tester, LogicalKeyboardKey.comma);
           await tester.pumpAndSettle();
           expect(find.byType(SettingsScreen), findsOneWidget);
-          await tester.tap(find.text('Customize'));
+          // The rail's Appearance row (was Customize) opens the same panel.
+          await tester.tap(find.text('Appearance'));
         } else {
           await chord(tester, LogicalKeyboardKey.keyP, shift: true);
           await tester.enterText(

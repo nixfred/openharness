@@ -94,6 +94,13 @@ The same terminal process, heartbeat and project must survive. This is a quick
 integration check, followed by a fresh final image test. It does not establish
 physical laptop suspend, radio, audio or battery behavior.
 
+`checks=sign-in` reuses a verified image and installs the candidate OS launcher,
+onboarding script and exact-source TUI into a disposable BIOS installation. It
+checks that the real network form runs before the TUI, connecting Ethernet opens
+required sign-in, workspace shortcuts stay gated and Wi-Fi settings can return
+to sign-in. The receipt identifies the base image and each candidate file. This
+does not exercise a live account, physical Wi-Fi radio or a complete new image.
+
 The focused sleep test uses QEMU standard VGA (`bochs-drm`), whose pinned LTS
 driver implements display suspend/resume. The normal install tests retain
 `virtio-vga`. Preview 4's Virtio display resumed with a working guest and terminal
@@ -366,7 +373,12 @@ The installed system keeps hn's standard status bar. Super+u records an update
 request and selects the Updates terminal; the request starts checking/applying
 without another key. `harness updates` opens the same screen for inspection,
 with a clickable **Update** button. An hn-only change reconnects the screen;
-a CLI change also restarts its supervised service. Failure restores the previous
+a CLI change also restarts its supervised service. Only `harness-daemon.service`'s own
+daemon counts: one serving beside it is stopped first, and activation fails unless the
+unit's daemon answers afterward. The CLI starts and stops the daemon through that unit
+on Harness OS (`cli/src/lib/platformDaemon.ts`), so a sign-in or sign-out cannot move it
+outside systemd. Never `systemctl stop` the unit: every pane's scope is PartOf it.
+Failure restores the previous
 selection. `harness updates rollback` restores the previous runtime and holds
 rejected versions until a newer release arrives. Ordinary macOS/Linux hn is unchanged.
 

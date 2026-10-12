@@ -571,6 +571,14 @@ export class RelayGateway implements GatewayPort {
       return
     }
 
+    // The account's sealed connections changed (backend routes/connectorVault.ts): the connectors service
+    // re-reads and merges them. Backend-only, like desk_changed.
+    if (type === 'connectors_changed') {
+      const revision = (typeof frame.payload === 'object' && frame.payload !== null ? (frame.payload as { revision?: unknown }).revision : undefined)
+      this.core.notice({ type, revision: typeof revision === 'number' ? revision : 0 })
+      return
+    }
+
     // The account's device key log grew: this daemon re-reads and verifies it (deviceLogSyncer.ts), and
     // the window re-reads its Devices list. Backend-only for the same reason as desk_changed.
     if (type === 'device_keys_changed') {

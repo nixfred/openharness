@@ -5,7 +5,7 @@ import { PNG } from 'pngjs'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { decodePack } from '../cable/pets/pack.js'
 import { PetStore } from '../cable/pets/store.js'
-import { harnessDevicesRequest, type HarnessDevicesService } from './harnessDevices.js'
+import { deviceSettingsPatchSchema, harnessDevicesRequest, type HarnessDevicesService } from './harnessDevices.js'
 import type { DialStatus, DeviceSettings } from '../cable/cableSession.js'
 import { encryptDownFrame, encryptRpcResult } from './e2ee/applicationFrames.js'
 import { ENCRYPTED_UP_TYPES } from './e2ee/core.js'
@@ -36,6 +36,12 @@ describe('owner device management', () => {
     const reply = await harnessDevicesRequest(service, 'harness_device_settings', { id: 'usb-b', patch: { brightness: 35 } })
     expect(set).toHaveBeenCalledExactlyOnceWith('usb-b', { brightness: 35 })
     expect(reply).toMatchObject({ ok: true, status: { devices: [{ settings: { brightness: 80 } }, { settings: { brightness: 80 } }, {}, {}] } })
+  })
+  it('passes a Pro\'s screen turn through, and refuses a turn that is not a boolean', async () => {
+    const { service, set } = fixture()
+    await harnessDevicesRequest(service, 'harness_device_settings', { id: 'usb-b', patch: { screenTurned: true } })
+    expect(set).toHaveBeenCalledExactlyOnceWith('usb-b', { screenTurned: true })
+    expect(deviceSettingsPatchSchema.safeParse({ screenTurned: 'yes' }).success).toBe(false)
   })
   it('refuses missing, disconnected, updating and invalid targets without a write', async () => {
     const { service, set } = fixture()
@@ -68,7 +74,7 @@ function petStubs() {
 }
 
 // What the defaults come to on sheetPng: only idle and running are drawn.
-const DEFAULT_ROWS_IDLE = { rest: 'idle', working: 'running', listening: 'idle', sending: 'idle', asking: 'idle' }
+const DEFAULT_ROWS_IDLE = { rest: 'idle', working: 'running', listening: 'idle', sending: 'idle', asking: 'idle', relaxing: 'idle' }
 
 // A 768 x 936 sheet with an idle and a running row.
 function sheetPng(): Buffer {
@@ -150,12 +156,22 @@ describe('pet requests', () => {
     const swapped = await harnessDevicesRequest(service, 'pet_preview', { path: sheet, rows: { rest: 'running', working: 'idle', other: 'x' } }) as Record<string, any>
     expect(swapped.ok).toBe(true)
     expect(swapped.id).not.toBe(plain.id)
-    expect(swapped.rows).toEqual({ rest: 'running', working: 'idle', listening: 'running', sending: 'running', asking: 'running' })
+    expect(swapped.rows).toEqual({ rest: 'running', working: 'idle', listening: 'running', sending: 'running', asking: 'running', relaxing: 'running' })
     const same = await harnessDevicesRequest(service, 'pet_preview', { path: sheet, rows: { listening: 'idle' } }) as Record<string, any>
     expect(same.id).toBe(plain.id)
     await harnessDevicesRequest(service, 'pet_apply', { target: 'all', id: swapped.id })
     const status = await harnessDevicesRequest(service, 'pet_status', {}) as { pets: Record<string, { rows: unknown }> }
     expect(status.pets[swapped.id].rows).toEqual(swapped.rows)
+  })
+  it('pet_preview accepts a relaxing row: it is its own pack and its own scene', async () => {
+    const { service, sheet } = await fixture()
+    const plain = await harnessDevicesRequest(service, 'pet_preview', { path: sheet }) as Record<string, any>
+    const calm = await harnessDevicesRequest(service, 'pet_preview', { path: sheet, rows: { relaxing: 'running' } }) as Record<string, any>
+    expect(calm.ok).toBe(true)
+    expect(calm.rows).toEqual({ ...DEFAULT_ROWS_IDLE, relaxing: 'running' })
+    expect(calm.id).not.toBe(plain.id)
+    expect(calm.frames.relaxing).toBeUndefined()
+    expect(await harnessDevicesRequest(service, 'pet_preview', { path: sheet, rows: { relaxing: 'sideways' } })).toEqual({ error: 'BAD_PET_REQUEST' })
   })
   it('pet_preview refuses an unknown row name and explains an empty chosen row', async () => {
     const { service, sheet } = await fixture()

@@ -56,27 +56,11 @@ One implementation, `pair/control.ts`, behind a local-only `pair` request. Expos
 Every write, local or remote, runs through the owning machine's `PairOwner` (`pair/owner.ts`), so the
 floor and the journal live where the harness does.
 
-The experimental coding-memory service is enabled in **Settings → Experimental → Coding memory**,
-in addition to the companion and watching controls. The choice is local to this computer and account,
-defaults off, and takes effect without restarting. `HARNESS_CODING_MEMORY=1` remains a migration default
-only until the owner saves a choice; an explicit off wins. `recall_memory { query, conditions? }` is an agent read, bound by
-the host to the current collection, with a byte-bounded historical-context packet and an unverified
-delivery receipt. Its token is required even at `watch`; it cannot select an owner, project, session,
-or avatar. It cannot inspect the owner's whole library, correct records, change privacy, or forget.
-
-The separate `pair { verb: "memory", action: … }` control is for the person. Even reads require a
-verified loopback process outside Harness panes and belonging to the daemon's OS user; a pair token
-is refused. Unix-socket callers whose PID cannot be established are refused, not assumed to be the
-person. `harness pair memory list|status|show <id> --json` exposes the initial read-only CLI.
-The internal owner API also supplies paginated listing, retained evidence, and correction/forget/
-Learn/Recall previews. Applying a change needs a two-minute, one-use capability bound to owner,
-process, connection, exact command, and the unchanged library snapshot. `confirmed: true` never
-counts. The desktop viewer uses this transport in **Companions → Memories**. Two preference actions,
-`experiment` and `configure_experiment { enabled, expected }`, remain available while companions are off;
-the latter checks the saved revision. Neither can access memories or start learning with companions off.
-Turning Coding memory off cancels its background work and keeps saved records. Real-model quality and
-the rollout gates remain unverified. Like existing lesson approval, process checks do not defend against
-arbitrary malware running as the same OS user with access to the memory files.
+Coding memory (`recall_memory`, `pair { verb: "memory" }`) was taken out of the daemon in #684
+(2026-10-03): core answers every `pair` request with `UNSUPPORTED`, so `recall_memory` returns nothing and
+the companion's Memories page cannot load. Its Settings → Experimental switch, which could no longer be
+turned on, was removed on 2026-10-12. Memory in Harness is now the Memories harness in the Store
+(`store/agents/memories`), which reads the agents' own memory files and has its own switch.
 
 **Autonomy dial** (zoo op `zoo.autonomy`, default `watch`): `watch` (read tools only, facts; lines
 carry only `[g]`) · `suggest` (it recommends, every action waits for your key) · `act-on-key` (it may

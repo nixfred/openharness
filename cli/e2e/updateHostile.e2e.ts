@@ -616,7 +616,11 @@ describe.skipIf(!DISKFULL)('an update on a disk that fills', () => {
     // safe mode. The build before would too: the master keeps the update on trial and tries again,
     // backing off. Before, it rolled back (the rollback freeing the room the build before needed) and
     // remembered a good build as bad.
-    await until('the master to try the new bundle again for want of room', () => count(machine.log().slice(from), 'had no room to start') >= 2, 150_000, 100)
+    // The volume is kept full until then. The master may be writing its lean bundle out as the volume fills: what
+    // it had written is given back when that write fails (leanBundle.ts leaves no half behind), and with that
+    // room the core starts and the update simply stays up, which is right and is not this test (a slow macOS
+    // runner, 2026-10-12).
+    await until('the master to try the new bundle again for want of room', () => { fill(); return count(machine.log().slice(from), 'had no room to start') >= 2 }, 150_000, 100)
     expect(machine.log().slice(from)).toContain('could not start on the new bundle for want of room on the disk (listen ENOSPC')
     expect(machine.log().slice(from)).not.toContain('the updated core failed')
     expect(IsolatedDaemon.alive(master), 'the master outlives a full disk in the middle of an update').toBe(true)

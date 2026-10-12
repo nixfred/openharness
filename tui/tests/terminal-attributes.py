@@ -5,6 +5,7 @@ Run from tui/: python3 tests/terminal-attributes.py [frozen-binary]
 No daemon is started. Every process uses a private HOME and explicit guarded sockets.
 """
 import os,pathlib,shlex,shutil,socket,subprocess,sys,tempfile,time,json,signal
+from account_fixture import signed_in_account
 port=int(os.environ.get('HN_ATTR_TEST_PORT','19412'))
 assert 19410<=port<=19419, 'refusing port outside the test range'
 name='hn-attrs-test-'+os.urandom(4).hex()
@@ -16,6 +17,7 @@ binary=root/'hn';shutil.copy2(source,binary)
 tmux=shutil.which('tmux')
 assert tmux, 'tmux must be on PATH'
 env={'PATH':os.environ['PATH'],'HOME':str(home),'SHELL':'/bin/sh','TERM':'xterm-256color','LANG':'en_US.UTF-8','PORT':str(port),'HN_SOCKET_NAME':name,'HN_TMPDIR':str(root),'HARNESS_TUI_DESK':'off','HN_DESKTOP':'off','HARNESS_TUI_NOTIFY':'off'}
+signed_in_account(env, root)
 config=root/'tmux.conf';config.write_text('set -g default-shell /bin/sh\nset -g @hn-look tmux\nset -g status off\nset -g pane-border-status off\nset -g automatic-rename off\n')
 program=root/'program.py';program.write_text('''import os,tty,time
 # Attribute-only repaints must travel even when text and ratatui modifiers are unchanged.

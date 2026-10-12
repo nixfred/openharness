@@ -16,6 +16,7 @@
 #                                                      # generated commit list
 #   bash scripts/release-desktop.sh --wait             # finish when this tag is live and verified
 #   bash scripts/release-desktop.sh --prepare          # package the pushed PR head during final checks; no publication
+#   bash scripts/release-desktop.sh --allow-older      # a rollback: older code under a higher version
 #
 # THE NEXT VERSION COMES FROM TWO SOURCES, AND BOTH MATTER. Git tags alone are not enough: this repo
 # had one tag (v1.0.52) while the live manifest was already serving 1.0.61, because
@@ -44,6 +45,7 @@ WAIT=0
 PREPARE=0
 DO_MINOR=0
 ALLOW_NO_MANIFEST=0
+ALLOW_OLDER=0
 NEW_VER=""
 NOTES_FILE=""
 
@@ -56,9 +58,10 @@ for arg in "$@"; do
     --prepare) PREPARE=1 ;;
     --minor) DO_MINOR=1 ;;
     --allow-no-manifest) ALLOW_NO_MANIFEST=1 ;;
+    --allow-older) ALLOW_OLDER=1 ;;
     --notes-file) want_notes_file=1 ;;
     --notes-file=*) NOTES_FILE="${arg#*=}" ;;
-    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "ERROR unknown flag: $arg" >&2; exit 1 ;;
     *) NEW_VER="$arg" ;;
   esac
@@ -189,6 +192,34 @@ if [ -z "$GCS_VER" ]; then
     echo "      Re-run with --allow-no-manifest only if the bucket is genuinely down." >&2
     exit 1
   fi
+fi
+
+# --- preflight: this release must contain the one before it ---
+# HEAD on origin/$BRANCH is not enough: a checkout nobody updated is on it too, and a tag cut there ships
+# older code under a newer version, which every app installs. v1.2.36_desktop was cut that way on
+# October 1, 2026, twenty commits behind v1.2.35_desktop, and v0.3.82_cli on October 12.
+# Checked against the highest tag and against the tag of the version being served: they differ when a
+# tag's release never published. A rollback is the one release that means to do this. Not for --prepare,
+# which publishes nothing: its candidate is a PR's head, and the release itself is cut after the merge.
+contains_release() {
+  local tag="$1" sha
+  git rev-parse -q --verify "refs/tags/$tag" >/dev/null || return 0
+  sha="$(git rev-list -n1 "$tag")"
+  git merge-base --is-ancestor "$sha" "$HEAD_SHA" 2>/dev/null && return 0
+  if [ "$ALLOW_OLDER" -eq 1 ]; then
+    echo ">> WARNING HEAD (${HEAD_SHA:0:12}) does not contain $tag (${sha:0:12}) — releasing older code (--allow-older)" >&2
+    return 0
+  fi
+  echo "ERROR HEAD (${HEAD_SHA:0:12}) does not contain $tag (${sha:0:12})." >&2
+  echo "      This release would ship older code under a newer version, taking back" >&2
+  echo "      $(git rev-list --count "$HEAD_SHA..$sha") commit(s) that $tag already shipped." >&2
+  echo "      Update this checkout first: git fetch origin && git checkout --detach origin/$BRANCH" >&2
+  echo "      Re-run with --allow-older only to roll back on purpose." >&2
+  exit 1
+}
+if [ "$PREPARE" -eq 0 ]; then
+  [ -z "$LAST_TAG" ] || contains_release "$LAST_TAG"
+  contains_release "v${GCS_VER}_desktop"
 fi
 
 # --- the next version ---

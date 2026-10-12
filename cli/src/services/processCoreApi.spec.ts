@@ -2,10 +2,24 @@ import { describe, expect, it, vi } from 'vitest'
 import type { RegisteredSession } from '../lib/registry.js'
 import { agentsIn, daemonIn, isSession, processCoreApi, type ShownAgent } from './processCoreApi.js'
 import { turnsLink } from './turnsLink.js'
+import { usageTarget } from '../lib/agentUsageWire.js'
 
 const agent = (agentId: string, over: Partial<RegisteredSession> = {}) => ({ agentId, sessionId: `s-${agentId}`, engine: 'claude', cwd: `/work/${agentId}`, ...over }) as RegisteredSession
 
 describe('the core API a light service runs on in its own process', () => {
+  it('reads only an exact validated usage snapshot, without reading a transcript', async () => {
+    const target = usageTarget(agent('a', { transcriptPath: '/fixture/session', registeredAt: 1 }))
+    expect(await processCoreApi('/data', 'projects').usage!(target)).toBeNull()
+    const ask = vi.fn(async () => ({ target, value: { totalTokens: 4, updatedAt: '2026-10-01T00:00:00Z' } }))
+    const api = processCoreApi('/data', 'projects', { ask })
+    expect(await api.usage!(target)).toMatchObject({ totalTokens: 4 })
+    for (const answer of [{}, { target: { ...target, sessionId: 'other' }, value: null }, { target, value: { totalTokens: -1 } }]) {
+      ask.mockResolvedValueOnce(answer as never)
+      expect(await api.usage!(target)).toBeNull()
+    }
+    ask.mockRejectedValueOnce(new Error('offline'))
+    expect(await api.usage!(target)).toBeNull()
+  })
   it('answers the agents from what the core last said, by agent id or session id', () => {
     const live = [agent('a1'), agent('a2')]
     const api = processCoreApi('/data', 'projects', { live: () => live, advertised: () => [live[1]] })
@@ -40,10 +54,6 @@ describe('the core API a light service runs on in its own process', () => {
     await expect(api.questions.answerReviewed({} as never)).resolves.toBe(false)
     expect(api.transcripts.databaseHistory(agent('a1'))).toBeUndefined()
     expect(await api.transcripts.lastTurn('s1')).toBeNull()
-    expect(api.external.sessions.list()).toEqual([])
-    await expect(api.external.sessions.scan()).resolves.toEqual([])
-    expect(api.external.open.known().size).toBe(0)
-    await expect(api.external.open.fresh()).resolves.toEqual(new Map())
     await expect(api.account.mintGridName()).resolves.toBeNull()
     // A service holds no credential, and says which one asked.
     await expect(api.account.accessToken()).rejects.toThrow('usage holds no credential')
@@ -78,7 +88,7 @@ describe('the core API a light service runs on in its own process', () => {
     expect(api.turns.cancelDelivery('d1')).toBe(false)
     expect(api.daemon).toMatchObject({ command: 'harness', port: 0 })
     expect(api.daemon.machineId()).toBe('')
-    expect(await api.account.backend('GET', '/api/tab-channels')).toEqual({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } })
+    expect(await api.account.backend('GET', '/api/agent-messages')).toEqual({ status: 503, body: { error: 'SERVICE_UNAVAILABLE' } })
     expect(api.account.onNotice(() => {})()).toBeUndefined()
   })
 
@@ -86,11 +96,11 @@ describe('the core API a light service runs on in its own process', () => {
     let answer: Record<string, unknown> | Error = { status: 200, body: { success: true } }
     const ask = vi.fn(async () => { if (answer instanceof Error) throw answer; return answer })
     const listeners: Array<(notice: never) => void> = []
-    const api = processCoreApi('/data', 'collaboration', { ask, onNotice: (listener) => { listeners.push(listener as never); return () => {} } })
-    expect(await api.account.backend('PATCH', '/api/tab-channels/settings', { enabled: true })).toEqual({ status: 200, body: { success: true } })
-    expect(ask).toHaveBeenLastCalledWith('backend', { method: 'PATCH', path: '/api/tab-channels/settings', body: { enabled: true } })
-    await api.account.backend('GET', '/api/tab-channels')
-    expect(ask).toHaveBeenLastCalledWith('backend', { method: 'GET', path: '/api/tab-channels' })
+    const api = processCoreApi('/data', 'messages', { ask, onNotice: (listener) => { listeners.push(listener as never); return () => {} } })
+    expect(await api.account.backend('PATCH', '/api/agent-messages/tabs/t1', { enabled: true })).toEqual({ status: 200, body: { success: true } })
+    expect(ask).toHaveBeenLastCalledWith('backend', { method: 'PATCH', path: '/api/agent-messages/tabs/t1', body: { enabled: true } })
+    await api.account.backend('GET', '/api/agent-messages')
+    expect(ask).toHaveBeenLastCalledWith('backend', { method: 'GET', path: '/api/agent-messages' })
     answer = { error: 'INVALID_REQUEST' }
     expect(await api.account.backend('GET', '/nope')).toEqual({ status: 502, body: { error: 'INVALID_REQUEST' } })
     answer = { status: 200 }

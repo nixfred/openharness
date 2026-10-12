@@ -1,0 +1,16 @@
+{
+  "name": "openharness",
+  "owner": {
+    "name": "Autonomous"
+  },
+  "metadata": {
+    "description": "Harness for agents: run Claude Code, Codex and other coding agents in parallel, wait for them and read their answers, while the person watches every one."
+  },
+  "plugins": [
+    {
+      "name": "harness",
+      "source": "plugins/harness",
+      "description": "Start, wait for, read and close other coding agents through Harness: the harness skill and Harness's MCP server."
+    }
+  ]
+}

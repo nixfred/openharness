@@ -364,7 +364,7 @@ class _WorkspaceWelcomeState extends State<WorkspaceWelcome> {
               child: TerminalTextAction(
                 key: const ValueKey('welcome-customize'),
                 onPressed: () => onCommand('app.customize'),
-                label: 'Customize Harness',
+                label: 'Appearance',
                 overArtwork: hasArtwork,
               ),
             ),

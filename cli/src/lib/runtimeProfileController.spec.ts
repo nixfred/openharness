@@ -4,6 +4,14 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { codexEffortRows, parseCodexPicker } from '../engines/codex/modelPicker.js'
 import type { RegisteredSession } from './registry.js'
+import { loadEngine } from '../engines/inProcess.js'
+
+// The other engines' pane drivers read with their engine's own code, loaded in this process; a test may say it
+// could not be.
+vi.mock('../engines/inProcess.js', async (real) => {
+  const actual = await real<typeof import('../engines/inProcess.js')>()
+  return { ...actual, loadEngine: vi.fn(actual.loadEngine) }
+})
 import { encodeRuntimeProfile, parseRuntimeProfile, RuntimeProfileManager } from './runtimeProfile.js'
 import {
   inspectRuntimePane,
@@ -227,6 +235,27 @@ describe('runtime pane parsing', () => {
     // A grey hint sitting BESIDE typed text does not make the line a placeholder — every visible
     // character has to be muted, not merely some of them.
     expect(inspectRuntimePane('opencode', pane(`${WHITE}fix the parser${GREY}  ⏎ send`)))
+      .toMatchObject({ idle: false, draft: true })
+  })
+
+  it('reads OpenCode 2\'s lighter grey placeholder as a placeholder, not a draft', () => {
+    // Copied off a brand-new OpenCode 2.0.24 pane (2026-10-12): the placeholder is
+    // `38;2;180;180;180` over the box's `48;2;25;25;25`, one step lighter than 1.18's 128, and just
+    // above the grey this reader took for muted (≤ 0xb0). A new harness read as holding a draft, was
+    // never idle, and switching its model came back AGENT_BUSY until a first message cleared it.
+    const BOX = '\u001b[48;2;25;25;25m'
+    const WHITE = '\u001b[38;2;255;255;255m'
+    const HINT = '\u001b[38;2;180;180;180m'
+    const pane = (composer: string) => [
+      `  \u001b[38;2;178;148;187m┃${WHITE}${BOX}  ${composer}${WHITE}     \u001b[49m`,
+      `  \u001b[38;2;178;148;187m┃${WHITE}${BOX}  \u001b[38;2;178;148;187mBuild${WHITE} ${HINT}·${WHITE} DeepSeek-V4-Flash-0731\u001b[49m`,
+      '  \u001b[38;2;178;148;187m╹\u001b[38;2;25;25;25m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+    ].join('\n')
+
+    expect(inspectRuntimePane('opencode', pane(`${HINT}Ask anything… "Fix a TODO in the codebase"`)))
+      .toMatchObject({ idle: true, draft: false })
+    // ⚠️ Still the direction that must never be wrong: what the user types is the composer's white.
+    expect(inspectRuntimePane('opencode', pane(`${WHITE}switch me please`)))
       .toMatchObject({ idle: false, draft: true })
   })
 
@@ -1032,5 +1061,27 @@ describe('RuntimeProfileController', () => {
     await expect(controller.setProfile('s1', target)).rejects.toMatchObject({ code: 'UNSUPPORTED_CLI_VERSION' })
     expect(sendKey).not.toHaveBeenCalled()
     expect(sendText).not.toHaveBeenCalled()
+  })
+
+  it('refuses a switch of another engine whose code could not be loaded, before any key or the input lock', async () => {
+    // Behind the gate above today; were it to open again, a driver must not press keys it cannot read the
+    // answer to.
+    const value = session('opencode')
+    const manager = new RuntimeProfileManager()
+    manager.hydrate(value, [])
+    const target = encodeRuntimeProfile({ sessionId: 'h1', engine: 'opencode', model: 'vibe/minimax-m3', effort: 'auto' })
+    vi.spyOn(manager, 'supportsControl').mockReturnValue(true)
+    vi.spyOn(manager, 'modelsForSession').mockResolvedValue([{ id: target, displayName: 'MiniMax M3' }])
+    vi.mocked(loadEngine).mockResolvedValueOnce(null as never)
+    const sendKey = vi.fn().mockResolvedValue(true)
+    const acquireInput = vi.fn(() => () => undefined)
+    const controller = new RuntimeProfileController({
+      manager, getSession: () => value, validateRuntime: async () => true, capture: async () => '',
+      sendText: vi.fn().mockResolvedValue(true), sendKey, sendLiteral: vi.fn().mockResolvedValue(true), acquireInput,
+    })
+    await expect(controller.setProfile('s1', target)).rejects.toMatchObject({ code: 'UNSUPPORTED_CLI_VERSION' })
+    expect(loadEngine).toHaveBeenCalledWith('opencode')
+    expect(acquireInput).not.toHaveBeenCalled()
+    expect(sendKey).not.toHaveBeenCalled()
   })
 })

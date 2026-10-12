@@ -21,7 +21,9 @@ beforeEach(() => {
   mkdirSync(join(codexHome, 'sessions'), { recursive: true }); mkdirSync(cwd)
   session = registry.openPendingAgent({ engine: 'codex', cwd, codexHome, runtimes: [{ backend: 'tmux', paneId: '%77' }] })!
   Object.assign(session, { sessionId: 'selected-session', launch: { state: 'ready' }, transcriptPath: join(codexHome, 'sessions', 'selected-session.jsonl') })
-  writeFileSync(session.transcriptPath!, 'selected conversation')
+  writeFileSync(session.transcriptPath!, JSON.stringify({ type: 'session_meta', payload: {
+    id: session.sessionId, cwd, source: 'cli',
+  } }) + '\n')
   writeFileSync(join(codexHome, 'sessions', 'other.jsonl'), 'another conversation')
   writeFileSync(join(cwd, 'project.txt'), 'project files stay')
   stopped = new StoppedAgentStore(join(root, 'stopped'))
@@ -111,7 +113,7 @@ describe('selected session and worktree cleanup', () => {
     expect(await service.request({ ...target, mode: 'delete', reviewId: String(plan.reviewId), choices: choices(false, true), path: tree.path })).toMatchObject({ deleted: true, historyKept: true })
     expect(existsSync(originalPath)).toBe(true)
   })
-  it('reports completed worktree deletion when subsequent history deletion fails, without retrying', async () => {
+  it('holds remaining history after worktree deletion and retries only that remaining stage', async () => {
     const tree = treeReview()
     vi.spyOn(worktrees, 'inspectWorktree').mockResolvedValue(tree)
     const eraseTree = vi.spyOn(worktrees, 'removeReviewedWorktree').mockImplementation(async () => {
@@ -121,10 +123,13 @@ describe('selected session and worktree cleanup', () => {
     const plan = await service.request({ ...target, mode: 'inspect', includeWorktree: true })
     const request = { ...target, mode: 'delete' as const, reviewId: String(plan.reviewId), choices: choices(true, true), path: tree.path }
     const result = await service.request(request)
-    expect(result).toMatchObject({ error: 'DELETE_REFUSED', worktreeDeleted: true })
+    expect(result).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', retryable: true, worktreeDeleted: true })
     expect(result.detail).toContain('worktree was deleted')
     expect(existsSync(session.transcriptPath!)).toBe(true)
-    expect(await service.request(request)).toHaveProperty('error')
+    expect(await service.request(request)).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', retryable: true, worktreeDeleted: true })
+    rmSync(session.transcriptPath!); renameSync(session.transcriptPath! + '.old', session.transcriptPath!)
+    expect(await service.request(request)).toMatchObject({ deleted: true, sessionDeleted: true, worktreeDeleted: true })
+    expect(stop).toHaveBeenCalledOnce()
     expect(eraseTree).toHaveBeenCalledOnce()
   })
 })
@@ -170,7 +175,7 @@ it('keeps history if stopping fails, another harness uses it, or the file was re
   const changed = await review()
   renameSync(session.transcriptPath!, session.transcriptPath! + '.old')
   writeFileSync(session.transcriptPath!, 'different file')
-  expect(await remove(changed.reviewId)).toMatchObject({ error: 'DELETE_REFUSED', stopped: true })
+  expect(await remove(changed.reviewId)).toMatchObject({ error: 'IDENTITY_UNAVAILABLE', retryable: true, stopped: false })
   expect(existsSync(session.transcriptPath!)).toBe(true)
   expect(deleted).not.toHaveBeenCalled()
 })

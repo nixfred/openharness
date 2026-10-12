@@ -203,7 +203,7 @@ void main() {
   });
 
   testWidgets(
-    'over a picture, Customize keeps its shared capsule action and restores focus',
+    'over a picture, Appearance keeps its shared capsule action and restores focus',
     (tester) async {
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = const Size(1280, 800);
@@ -232,10 +232,7 @@ void main() {
       await tester.pump();
       final button = find.byKey(const ValueKey('harness-customize-button'));
       expect(tester.widget(button), isA<TerminalTextAction>());
-      expect(
-        find.widgetWithText(TextButton, 'Customize Harness'),
-        findsOneWidget,
-      );
+      expect(find.widgetWithText(TextButton, 'Appearance'), findsOneWidget);
       expect(
         find.descendant(of: button, matching: find.byType(Icon)),
         findsNothing,

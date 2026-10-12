@@ -23,9 +23,15 @@ directory.
 identity key to the account's device key log, and the account's other devices trust it end to end
 with no password. So anyone who can sign in as you — or whoever runs the backend — can add a device.
 This is deliberate, and it is not prevented, only made visible: every device announces each key added
-after it joined ("New device: X") and keeps it marked New until you look, says who removed a device,
-and the device list shows every one with a Remove and the full add/remove history. Devices check the
-log against what they already verified and compare it among themselves, so the backend cannot rewrite
+after it joined ("New device: X") and keeps it marked New until you confirm it on one of your trusted
+devices (It's mine) or review it on each, says who removed a device, and the device list shows every one
+with a Remove and the full add/remove history. A confirmation is a signed acknowledgement kept beside
+the log, never in it; each device checks it against its own verified log and counts it only from a
+device it already trusts (not one that is itself new there), so the backend cannot forge one, and it
+never makes a device trusted or lifts a suspension — it only clears the New mark. One device's It's
+mine then speaks for all of them: confirm only a device you recognise. The one-time "New device: X"
+notice still comes on every device. Devices check the log against what they already verified and
+compare it among themselves, so the backend cannot rewrite
 or roll back that history, hide a key from one device, or move a device to another account's list
 without a fresh sign-in there: the list freezes instead, and keys added after a detected split are
 not trusted until someone reviews it. Stopping the backend from adding a device in the first place is

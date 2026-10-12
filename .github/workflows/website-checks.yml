@@ -49,7 +49,7 @@ jobs:
       - name: Production build (standalone, with the pinned Flutter bundle)
         run: npm run build
 
-      - name: Verify production routes and static OS page
+      - name: Verify production routes and the static OS and agents pages
         run: |
           set -euo pipefail
           PORT=3000 HOSTNAME=127.0.0.1 node .next/standalone/server.js > /tmp/website-server.log 2>&1 &
@@ -65,4 +65,5 @@ jobs:
           done
           if [ "$ready" != true ]; then cat /tmp/website-server.log; exit 1; fi
           node scripts/check-os-site.mjs
+          node scripts/check-agents-site.mjs
           node scripts/check-harness-web.mjs

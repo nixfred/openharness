@@ -39,6 +39,31 @@ export function deriveTurnBody(text: string): string {
   return clip(stripMarkdown(text).replace(/\s+/g, ' ').trim(), BODY_MAX_CHARS)
 }
 
+/** The longer text a `recap: "long-v1"` device draws under the headline. */
+export const LONG_RECAP_MAX_CHARS = 1200
+/** The frame cap is 8192 B; the long text never takes more than this many UTF-8 bytes of it. */
+export const LONG_RECAP_MAX_BYTES = 3600
+
+/**
+ * The answer's prose for a device with room to read: markdown stripped, whitespace collapsed, clipped
+ * on a word boundary with "…". Null when there is nothing to say.
+ */
+export function deriveLongRecap(text: string): string | null {
+  // Controls and lone surrogates are written by JSON as six bytes each: a frame of them would pass the byte
+  // cap here and overflow the cable's. Neither is prose.
+  const flat = stripMarkdown(text)
+    .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '')
+    .replace(/\s+/g, ' ').trim()
+  let max = LONG_RECAP_MAX_CHARS
+  let out = clip(flat, max)
+  // Multibyte prose (Vietnamese, CJK) reaches the byte cap before the character cap.
+  while (out && Buffer.byteLength(out, 'utf8') > LONG_RECAP_MAX_BYTES) {
+    max = Math.floor(max * 0.9)
+    out = clip(flat, max)
+  }
+  return out || null
+}
+
 /** Cut to `max` characters on a word boundary, marking the cut. Never mid-word if it can be helped. */
 function clip(text: string, max: number, marker = '…'): string {
   const t = text.trim()
@@ -65,7 +90,12 @@ function stripMarkdown(text: string): string {
     .replace(/^\s*\d+\.\s+/gm, '')            // ordered-list markers
     .replace(/^\s*>\s?/gm, '')                // block quotes
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')  // links and images → their label
-    .replace(/[*_~`]/g, '')                   // emphasis and inline code marks
+    // Emphasis marks go, but never from inside code or a word: an agent's "name it `MAX_SIZE`" read back as
+    // "name it MAXSIZE" in `harness ps` (2026-10-11, in a clean VM), and agents act on what they read there.
+    .split(/(`[^`\n]*`)/)
+    .map((part) => part.startsWith('`') && part.endsWith('`') && part.length > 1 ? part.slice(1, -1)
+      : part.replace(/[*~`]/g, '').replace(/(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, ''))
+    .join('')
     .replace(/[ \t]+/g, ' ')
     .trim()
 }

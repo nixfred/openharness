@@ -1,5 +1,5 @@
 /** Stopped work is durable history, separate from the registry of live terminal routes. */
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readdirSync, statSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs'
+import { closeSync, constants, fsyncSync, lstatSync, openSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { env } from '../config/env.js'
@@ -117,10 +117,25 @@ export class StoppedAgentStore {
     // A temporarily unbound observation of the SAME process cannot erase a known conversation.
     // A replacement process must earn its own binding; never carry history across PID reuse.
     if (!session.sessionId && previous?.sessionId && previous.engine === session.engine
+      && session.registeredAt === previous.registeredAt
+      && (session.codexHome ?? null) === (previous.codexHome ?? null)
+      && (!session.hermesHome || session.hermesHome === previous.hermesHome)
       && sameProcessIdentity(session.processIdentity, previous.processIdentity)
       && session.processIdentity!.executable === previous.processIdentity!.executable) {
       session = { ...session, sessionId: previous.sessionId, transcriptPath: previous.transcriptPath,
-        boundAt: previous.boundAt, source: previous.source }
+        hermesHome: previous.hermesHome, boundAt: previous.boundAt, source: previous.source }
+    }
+    // With optional readers absent, Stop can capture a path the live row has not learned.
+    // Hooks during its checkpoint and the final forget both save that pathless row. They
+    // must not erase the captured path, or Close succeeds but Resume loses the conversation.
+    if (session.sessionId && !session.transcriptPath && previous?.transcriptPath
+      && session.sessionId === previous.sessionId && session.engine === previous.engine
+      && session.registeredAt === previous.registeredAt
+      && (session.codexHome ?? null) === (previous.codexHome ?? null)
+      && (session.hermesHome ?? null) === (previous.hermesHome ?? null)
+      && sameProcessIdentity(session.processIdentity, previous.processIdentity)
+      && session.processIdentity!.executable === previous.processIdentity!.executable) {
+      session = { ...session, transcriptPath: previous.transcriptPath }
     }
     secureStateDirectory(dirname(this.directory))
     secureStateDirectory(this.directory)
@@ -133,6 +148,11 @@ export class StoppedAgentStore {
     }
     // A later Resume is an explicit new visit, never an instruction to close it again.
     delete snapshot.closePlan
+    // A hold describes this daemon's current observation, never durable conversation evidence.
+    delete snapshot.admissionHold
+    delete snapshot.identityHold
+    delete snapshot.interpretationHold
+    delete snapshot.evidenceRevision
     // A snapshot without a tmux pane omits the legacy alias just like registry persistence.
     if (!snapshot.tmuxPane) delete (snapshot as Partial<RegisteredSession>).tmuxPane
     atomicWriteJson(join(this.directory, `${session.agentId}.json`), { version: 1, session: snapshot })
@@ -214,6 +234,24 @@ export class StoppedAgentStore {
     unlinkSync(join(this.directory, `${agentId}.json`))
     this.forgetCatalogRecord(agentId)
     this.syncDirectory()
+  }
+
+  /**
+   * Sets a record aside because another harness owns its conversation now (core/agents/conversationOwners.ts).
+   * Moved into `superseded/`, never deleted, so a wrong owner can be put back by hand; a reservation it left
+   * goes with it, since nothing can resume a record that is not listed. Null when there is no such record.
+   */
+  supersede(agentId: string): RegisteredSession | null {
+    if (!SAFE_ID.test(agentId)) return null
+    const saved = this.get(agentId)
+    if (!saved) return null
+    const aside = join(this.directory, 'superseded')
+    secureStateDirectory(aside)
+    renameSync(join(this.directory, `${agentId}.json`), join(aside, `${agentId}.json`))
+    this.forgetCatalogRecord(agentId)
+    this.finishResume(agentId)
+    this.syncDirectory()
+    return saved
   }
 
   /** Suppress archives whose identity or conversation is already running. */

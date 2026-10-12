@@ -81,7 +81,7 @@ const List<List<WebMenuItem>> kWebMenuGroups = [
     ),
     (
       command: 'app.customize',
-      label: 'Customize',
+      label: 'Appearance',
       icon: Icon(AppIcons.palette),
       width: WebMenuWidth.any,
     ),

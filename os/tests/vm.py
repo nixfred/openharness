@@ -253,7 +253,7 @@ class VM:
             raise RuntimeError(f'Guest file transfer is incomplete: {path}')
         return base64.b64decode(''.join(match.group(1).splitlines()), validate=True)
 
-    def login_installed(self, config, unlock_delay=0):
+    def login_installed(self, config, unlock_delay=0, wait_workspace=True):
         if config['encrypt']:
             self.unlock_count += 1
             self.wait_unlock()
@@ -288,7 +288,8 @@ class VM:
                     self.keys('minus' if char == '-' else char)
                 self.keys('ret')
                 time.sleep(2)
-        self.command('for n in $(seq 1 90); do systemctl --user is-active --quiet hn-screen && pgrep -x "hn|harness-tui" >/dev/null && exit 0; sleep 1; done; exit 1', timeout=110)
+        if wait_workspace:
+            self.command('for n in $(seq 1 90); do systemctl --user is-active --quiet hn-screen && pgrep -x "hn|harness-tui" >/dev/null && exit 0; sleep 1; done; exit 1', timeout=110)
         self.command('/usr/lib/harness-os/wait-runtime', timeout=160)
         self.boot_event('harness-ready')
 

@@ -25,8 +25,9 @@
 // (Claude Code) works on after its first stop because the /goal hook refused it (`!goalpause <condition>`:
 // refused, and the goal paused with no further output), `!compactmid` compacts in the
 // middle of a turn as an automatic compaction does, `!version` answers with the version this
-// process is, `!goal` and `!goal done` (Codex) start and achieve a goal the way Codex 0.160 shows one
-// under its composer, `!browse` (Codex) leaves Codex browsing its transcript in its default fullscreen
+// process is, `!env <prefix>[,<prefix>…]` with the names of the variables in its environment that start with a
+// prefix (never their values), as an agent that reads its own environment can, `!goal` and `!goal done`
+// (Codex) start and achieve a goal the way Codex 0.160 shows one under its composer, `!browse` (Codex) leaves Codex browsing its transcript in its default fullscreen
 // mode, and `!browse scrollback` in its scrollback mode, `!transcript` (Claude Code) leaves it in its
 // transcript view, as ctrl+o does, `!overlay` (Codex) in its transcript overlay, as ctrl+t does in its
 // scrollback mode, `!search` searching its prompt history, as ctrl+r does, `!config` (Claude Code) in its
@@ -44,7 +45,10 @@
 // rewriting its wrapper: `version` is what it reports and writes, `without` lists the flags and
 // subcommands that release no longer has, `updateAvailable` (Codex) names a newer release it asks to update
 // to before it starts, and `startDelayMs` is how long it takes, once started, before
-// it draws or announces anything (an engine's first run after an update). `firstHookDelayMs` is how long
+// it draws or announces anything (an engine's first run after an update). `unreadableDescriptorMs` is how long,
+// once started, it holds a descriptor the daemon's process reader has no name for, as Codex 0.162.1 did for its
+// first seconds in a clean macOS VM (2026-10-12): every read of its process was refused until then ("the native
+// control descriptor type is unavailable"). `firstHookDelayMs` is how long
 // its first SessionStart takes to reach the daemon once the engine is up: the hook command starting on a
 // loaded machine, while the daemon has already found the engine and its conversation. `root` is the
 // test's throwaway root, the only place whose hooks it will run, and `hookLog` where it notes every hook
@@ -60,7 +64,7 @@
 // child in the same process group and terminal (`codexWrapper`).
 import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -72,8 +76,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
  * as the CLI has no such moment to run it at.
  */
 const HOOK_EVENTS = {
-  claude: new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']),
-  codex: new Set(['SessionStart', 'UserPromptSubmit']),
+  // PostToolUse: Agent Messages' hook (engines/kit/messagesHook.ts), run after each tool of the `!work` directive.
+  claude: new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd', 'PostToolUse']),
+  codex: new Set(['SessionStart', 'UserPromptSubmit', 'PostToolUse']),
 }
 
 /** Inside `root`, or `root` itself. */
@@ -110,6 +115,23 @@ async function codexWrapper(config) {
   const ended = await new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
   if (ended.signal) process.kill(process.pid, ended.signal)
   else process.exit(ended.code ?? 1)
+}
+
+/**
+ * A descriptor the daemon's process reader cannot classify, held for [ms] (`unreadableDescriptorMs`). Which one the real
+ * Codex held is not known; what the daemon met is: a descriptor of a kind its reader refuses. On macOS that is a
+ * symbolic link opened as itself (O_SYMLINK: a vnode of a type the reader has no name for, the same refusal); on Linux a
+ * network namespace, whose target (`net:[…]`) is no path, socket, pipe or anonymous inode.
+ */
+function holdUnreadableDescriptor(config, ms) {
+  let fd
+  if (process.platform === 'darwin') {
+    const link = join(config.root, `unreadable-descriptor-${process.pid}`)
+    if (!within(config.root, link)) throw new Error('unreadable descriptor outside its throwaway home')
+    symlinkSync('nothing', link)
+    fd = openSync(link, constants.O_RDONLY | constants.O_SYMLINK)
+  } else fd = openSync('/proc/self/ns/net', 'r')
+  setTimeout(() => closeSync(fd), ms).unref()
 }
 
 export async function run(engine, config = {}, { native = false } = {}) {
@@ -168,11 +190,14 @@ export async function run(engine, config = {}, { native = false } = {}) {
   // conversation on that command line). The title used to be the name alone, so no argument was ever on
   // the command line discovery read. The name is padded to the 16 columns macOS's `ps` gives a name in a
   // table, so the arguments are not read as part of it; a control character is shown as `ps` shows one.
-  process.title = [engine.padEnd(16), ...args].join(' ').replace(/[\x00-\x1f\x7f]/g, '?')
+  // Node's title rewrite makes macOS ps omit the environment. Evidence tests keep the interpreter
+  // and its actual engine entrypoint, which discovery also recognizes, so endpoint markers are readable.
+  if (!config.preserveProcessArgs) process.title = [engine.padEnd(16), ...args].join(' ').replace(/[\x00-\x1f\x7f]/g, '?')
   // Raw at once, as the real CLIs are (Ink and ratatui take the terminal before they draw anything): a
   // terminal still in line mode keeps at most 1 KiB of a line, so a paste that arrived before the
   // engine was ready lost the rest of itself (measured: 1,018 of 2,406 characters).
   process.stdin.setRawMode?.(true)
+  if (config.unreadableDescriptorMs) holdUnreadableDescriptor(config, config.unreadableDescriptorMs)
   // Slow to start, as an engine is on its first run after an update: the process is there and holds
   // the terminal, and nothing is drawn, announced or read until it is ready.
   // October 6 sibling-conversation incident: hold startup before this process has a transcript, while
@@ -406,13 +431,16 @@ export async function run(engine, config = {}, { native = false } = {}) {
     const env = engine === 'claude' ? { ...process.env, CLAUDE_PROJECT_DIR: cwd } : process.env
     let child
     try {
-      child = spawn('/bin/sh', ['-c', command], { cwd, env, stdio: ['pipe', 'ignore', 'pipe'] })
+      // What a PostToolUse hook prints is read, as both CLIs read it: its additionalContext reaches the model.
+      child = spawn('/bin/sh', ['-c', command], { cwd, env, stdio: ['pipe', event === 'PostToolUse' ? 'pipe' : 'ignore', 'pipe'] })
     } catch (error) {
       hookLog(`${what} could not start: ${error?.message ?? error}`)
       done()
       return
     }
-    let stderr = ''
+    let stderr = '', stdout = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk) => { if (stdout.length < 70_000) stdout += chunk })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk) => { if (stderr.length < 2_000) stderr += chunk })
     const limit = (Number(timeoutSeconds) > 0 ? Number(timeoutSeconds) : 60) * 1000
@@ -428,6 +456,16 @@ export async function run(engine, config = {}, { native = false } = {}) {
       clearTimeout(timer)
       hookLog(`${what} ${killed ? 'ended after it was killed' : 'ran'} in ${Date.now() - started} ms · exit=${code ?? signal}`
         + (stderr.trim() ? ` · stderr=${JSON.stringify(stderr.trim().slice(0, 500))}` : ''))
+      if (stdout.trim()) {
+        let context = null
+        try { context = JSON.parse(stdout).hookSpecificOutput?.additionalContext ?? null } catch { /* not JSON: the CLIs ignore it here */ }
+        if (typeof context === 'string') {
+          hookLog(`${event} context=${JSON.stringify(context)}`)
+          // Where each CLI puts it: Claude Code an attachment on the tool's turn, Codex developer context.
+          if (engine === 'claude') claude({ type: 'attachment', attachment: { type: 'hook_additional_context', hookName: event, content: [context] } })
+          else codex('response_item', { type: 'message', role: 'developer', content: [{ type: 'input_text', text: context }] })
+        }
+      }
       done()
     })
     child.stdin.on('error', () => { /* a hook that exits without reading its input */ })
@@ -1434,6 +1472,12 @@ export async function run(engine, config = {}, { native = false } = {}) {
       return
     }
     if (directive?.[1] === 'version') { await finish(versionLine); return }
+    if (directive?.[1] === 'env') {
+      const prefixes = directive[2].split(',').filter(Boolean)
+      const names = Object.keys(process.env).filter((name) => prefixes.some((prefix) => name.startsWith(prefix))).sort()
+      await finish(`env ${directive[2]}: ${names.join(',') || '(none)'}`)
+      return
+    }
     if (engine === 'codex' && directive?.[1] === 'goal') {
       bottom = goalBottom(directive[2] === 'done' ? 'Goal achieved (1m)' : 'Pursuing goal (1m)')
       await finish(`answer ${turn}: ${prompt}`)
@@ -1469,6 +1513,22 @@ export async function run(engine, config = {}, { native = false } = {}) {
       bottom = directive[2] === 'scrollback' ? pagerBottom(prompt, `answer ${turn}: ${prompt}`) : browsingBottom
       await finish(`answer ${turn}: ${prompt}`)
       return
+    }
+    if (directive?.[1] === 'work') {
+      // A long turn of tool calls, one a second, each followed by its PostToolUse hooks: how a working agent hears
+      // Agent Messages (engines/kit/messagesHook.ts) without a keystroke reaching its pane.
+      for (let step = 1; step <= (Number(directive[2]) || 5); step++) {
+        const id = `call_${turn}_${step}`
+        if (engine === 'claude') {
+          claude({ type: 'assistant', message: { id: `msg_${turn}_w${step}`, role: 'assistant', model: claudeModel, content: [{ type: 'tool_use', id, name: 'Bash', input: { command: `step ${step}` } }], stop_reason: 'tool_use' } })
+          claude({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `ran step ${step}` }] } })
+        } else {
+          codex('response_item', { type: 'function_call', call_id: id, name: 'exec_command', arguments: JSON.stringify({ cmd: `step ${step}` }) })
+          codex('response_item', { type: 'function_call_output', call_id: id, output: `ran step ${step}` })
+        }
+        await runHooks('PostToolUse', { tool_name: 'Bash', tool_input: { command: `step ${step}` }, tool_use_id: id })
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
     }
     if (directive?.[1] === 'slow') await new Promise((resolve) => setTimeout(resolve, Number(directive[2]) || 1000))
     await finish(`answer ${turn}: ${prompt}`)
@@ -1686,8 +1746,26 @@ export async function run(engine, config = {}, { native = false } = {}) {
       }
     }
   })
+  // A first message on the command line (`claude "…"`, `codex "…"`, the daemon's `firstPromptArgs`) is sent as the
+  // session starts, as both CLIs send theirs. The fake used to drop it, so a harness started with a task never
+  // started its turn here (found by the agent verbs' end to end, e2e/agentClient.e2e.ts).
+  const launchPrompt = firstPromptOf(args)
+  if (launchPrompt) queue = queue.then(() => handle(launchPrompt))
   process.on('SIGTERM', () => process.exit(0))
   setInterval(() => {}, 60_000)
+}
+
+/** The options both CLIs read a value after, and Codex's `resume <id>` and `fork <id>`: the word after one is not a
+ *  prompt. `--settings <file-or-json>` carries the pull request line of a harness another agent started
+ *  (lib/agentAttribution.ts), last on a relaunch, where no first message follows it. */
+const TAKES_VALUE = new Set(['--model', '-m', '--permission-mode', '--resume', '-r', '--session-id', '--append-system-prompt',
+  '--mcp-config', '--effort', '--settings', '-c', '--config', '-s', '--sandbox', '-a', '--ask-for-approval', 'resume', 'fork'])
+
+/** The prompt at the end of the command line, when there is one. */
+function firstPromptOf(args) {
+  const last = args.at(-1)
+  if (!last || last.startsWith('-') || TAKES_VALUE.has(last) || args.length > 1 && TAKES_VALUE.has(args.at(-2))) return null
+  return last
 }
 
 // The native Codex: this module run as a script by `codexWrapper`. Last, so everything `run` reads at

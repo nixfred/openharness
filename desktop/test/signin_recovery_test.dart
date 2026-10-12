@@ -101,7 +101,7 @@ void main() {
         if (hasUrl) {
           cli.attempts.single.authorize('https://auth.example/fixture');
           await tester.pump(const Duration(milliseconds: 100));
-          expect(find.text('Waiting for your browser'), findsOneWidget);
+          expect(find.text('Continue with Google'), findsOneWidget);
         }
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pump(const Duration(milliseconds: 100));
@@ -180,23 +180,23 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump(const Duration(milliseconds: 100));
       expect(cli.attempts, hasLength(1));
-      expect(find.text('Signing in…'), findsOneWidget);
-      expect(find.text('Copy link'), findsNothing);
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.text('Copy sign-in link'), findsNothing);
       const url = 'https://auth.example/authorize?state=fixture';
       cli.attempts.single.authorize(url);
       await tester.pump(const Duration(milliseconds: 100));
       expect(find.textContaining('Couldn’t open your browser'), findsOneWidget);
       expect(app.signingIn, isTrue);
-      await tester.tap(find.text('Open browser'));
+      await tester.tap(find.text('Copy sign-in link'));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(clipboard, url);
+      expect(find.text('Link copied'), findsOneWidget);
+      await tester.tap(find.text('Continue with Google'));
       await tester.pump(const Duration(milliseconds: 100));
       expect(launches, [url, url]);
       expect(cli.attempts, hasLength(1));
       expect(app.loginBrowserError, isNull);
-      await tester.tap(find.text('Copy link'));
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(clipboard, url);
-      expect(find.text('Link copied'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump(const Duration(milliseconds: 100));
       expect(app.signingIn, isFalse);
       expect(app.status, AppStatus.unauthenticated);

@@ -1,20 +1,20 @@
 /** Capture original Harness viewers with isolated demo data, never the user's fleet/models.
- * node capture-covers.mjs <all|machine-monitor|harness-monitor|mlx-lm|ollama|vllm|home-assistant>
+ * node capture-covers.mjs <all|machine-monitor|harness-monitor|memories|mlx-lm|ollama|vllm|home-assistant>
  *   --playwright /path/to/playwright/index.mjs --output /tmp/store-covers
- * COVER_DUMP_TEXT=1 prints Harness Monitor's visible text, to check it holds nothing personal.
+ * COVER_DUMP_TEXT=1 prints Harness Monitor's and Memories' visible text, to check it holds nothing personal.
  * Home Assistant is the upstream public demo; all other pages run on loopback.
  */
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const args = process.argv.slice(2);
 const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 const mode = args[0] || 'all';
-const ids = ['machine-monitor', 'harness-monitor', 'mlx-lm', 'ollama', 'vllm', 'home-assistant'];
+const ids = ['machine-monitor', 'harness-monitor', 'memories', 'mlx-lm', 'ollama', 'vllm', 'home-assistant'];
 if (mode !== 'all' && !ids.includes(mode)) throw new Error(`Choose all or ${ids.join(', ')}.`);
 const output = resolve(option('--output', join(tmpdir(), 'harness-cover-captures')));
 const playwright = option('--playwright', 'playwright');
@@ -120,6 +120,126 @@ try {
         await page.close(); await viewer.close(); await rm(workspace, { recursive: true, force: true });
         for (const [key, value] of Object.entries(env)) value === undefined ? delete process.env[key] : process.env[key] = value;
       }
+    } else if (id === 'memories') {
+      const { createViewer } = await source('store/agents/memories/viewer.mjs');
+      const { sessionIndex, DAY } = await source('store/agents/memories/test/fixtures.mjs');
+      const { writeAbout } = await source('store/agents/memories/lib/about.mjs');
+      // An invented person's home: what five agents remember and four months of messages, all made up here.
+      const home = await mkdtemp(join(tmpdir(), 'memories-cover-'));
+      const put = async (path, text) => { await mkdir(dirname(join(home, path)), { recursive: true }); await writeFile(join(home, path), text); };
+      // Projects, and what Claude Code saved in each: [file, type, description, body].
+      const notes = {
+        payments: [
+          ['short-answers', 'feedback', 'Wants replies under five lines', 'Keep replies short; lead with the answer.'],
+          ['merge-when-green', 'feedback', 'Lands pull requests once CI passes', 'Merge green pull requests without asking.'],
+          ['webhook-retries', 'project', 'Retries back off to one hour', 'Webhook retries back off to one hour, then page.'],
+        ],
+        widgets: [
+          ['tests-first', 'feedback', 'Run the tests before saying done', 'Run `make test` before calling anything done.'],
+          ['screenshots-for-ui', 'feedback', 'Reviews UI from screenshots', 'Send a screenshot with every UI change.'],
+          ['legacy-renderer', 'project', 'The legacy renderer is going away', 'New work targets the grid renderer only.'],
+        ],
+        'docs-site': [
+          ['plain-words', 'user', 'Writes docs in plain words', 'Short sentences and no jargon in anything a reader sees.'],
+          ['deploys-from-main', 'project', 'Every merge to main publishes the site', 'The docs site deploys on every merge to main.'],
+        ],
+        'mobile-app': [
+          ['mockup-first', 'feedback', 'Agree on a mockup before UI code', 'Show a mockup and agree on it before writing UI code.'],
+          ['release-train', 'project', 'Releases go out on Tuesdays', 'Never release on a Friday.'],
+        ],
+        infra: [
+          ['no-weekend-deploys', 'feedback', 'Merge on weekends, deploy on Monday', 'Merges may land over the weekend; deploys wait for Monday.'],
+        ],
+        'ml-pipeline': [
+          ['measure-first', 'feedback', 'Wants numbers before a change', 'Measure before and after any performance change.'],
+          ['ranker-evals', 'project', 'The eval set is frozen per quarter', 'The ranker eval set is frozen each quarter.'],
+        ],
+        'design-system': [
+          ['keyboard-first', 'feedback', 'Every action needs a key', 'Every action must be reachable from the keyboard.'],
+          ['terminal-taste', 'user', 'Likes the feel of vim, tmux and fzf', 'Tools should feel quiet, fast and typed.'],
+        ],
+        cli: [
+          ['small-core', 'feedback', 'Keep the core small and stable', 'Features go in services the core can run without.'],
+          ['why-comments', 'feedback', 'Comments say why, not what', 'Comments name the incident or the measurement behind the code.'],
+        ],
+        website: [
+          ['speed-matters', 'feedback', 'Pages should feel instant', 'Every page should feel instant; measure the first paint.'],
+        ],
+      };
+      for (const [project, list] of Object.entries(notes)) {
+        await mkdir(join(home, 'code', project), { recursive: true });
+        const key = join(home, 'code', project).replace(/[^A-Za-z0-9]/g, '-');
+        for (const [name, type, description, body] of list) {
+          await put(`.claude/projects/${key}/memory/${name}.md`, `---\nname: ${name}\ndescription: ${description}\ntype: ${type}\n---\n\n${body}\n`);
+        }
+      }
+      await put('.codex/config.toml', '[features]\nmemories = true\n');
+      await put('.codex/memories/memory_summary.md', 'Prefers small pull requests with one change each.\n');
+      await put('.codex/memories/MEMORY.md', '# Handbook\n\n## Testing\nRun `make test` first.\n\n## Reviews\nOne change per pull request.\n');
+      await put('.grok/config.toml', '[memory]\nenabled = true\n');
+      await put('.grok/memory-v2/global/topics/code-style.md', '# Code style\n\nTwo-space indentation everywhere.\n');
+      await put('.hermes/memories/USER.md', 'Prefers terse answers.\n§\nHands work off overnight and reads a summary in the morning.\n');
+      await put('.gemini/GEMINI.md', '## Gemini Added Memories\n- Prefers tabs in Go files\n- Lives in UTC+1\n');
+      const asks = ['keep it short, tldr only', 'run the tests before you say done', 'one change per pull request',
+        'why does the retry back off that far?', 'walk me through the ledger migration', 'ship it once CI is green',
+        'make the empty state clearer', 'never release on a Friday', 'write the docs in plain words', 'add a test that fails first'];
+      const engines = ['claude', 'codex', 'codex', 'claude', 'grok', 'hermes'];
+      const projects = Object.keys(notes);
+      const now = Date.now();
+      const turns = [];
+      for (let day = 0; day < 120; day++) {
+        // Busy weekdays, quiet weekends, and a holiday week: a believable four months.
+        const weekday = new Date(now - day * DAY).getDay();
+        const count = day >= 50 && day < 57 ? 0 : weekday === 0 || weekday === 6 ? day % 3 : 2 + ((day * 7) % 9);
+        for (let n = 0; n < count; n++) {
+          const project = projects[(day + n) % projects.length];
+          turns.push({ session: `s${day}-${n % 3}`, engine: engines[(day * 5 + n) % engines.length], cwd: join(home, 'code', project),
+            title: `${project} work`, ask: asks[(day * 3 + n) % asks.length], answer: 'done', daysAgo: day + n / 24 });
+        }
+      }
+      sessionIndex(join(home, '.harness', 'cli', 'data'), { now, turns });
+      const env = { MEMORIES_HOME: join(home, '.harness', 'memory') };
+      const line = (text, ...sources) => `- ${text} [${sources.map((s) => s.includes(':') ? s : `claude:${s}.md`).join(', ')}]`;
+      writeAbout(env.MEMORIES_HOME, ['# About you', '', 'Built from 509 of your messages over the last 120 days.', '',
+        '## How you work',
+        line('Works in Claude Code and Codex side by side, most days of the week.', 'asks:480'),
+        line('Gives UI feedback with screenshots.', 'screenshots-for-ui', 'asks:41'),
+        line('Hands work off overnight and reads a summary in the morning.', 'hermes:USER.md', 'asks:22'),
+        line('Measures before and after any performance change.', 'measure-first'),
+        '', '## What you want from agents',
+        line('Short answers that lead with the result.', 'short-answers', 'hermes:USER.md', 'asks:98'),
+        line('Tests run before anything is called done.', 'tests-first', 'codex:MEMORY.md'),
+        line('Green pull requests merged without asking.', 'merge-when-green', 'asks:36'),
+        line('A mockup agreed before UI code.', 'mockup-first'),
+        line('One change per pull request.', 'codex:memory_summary.md', 'codex:MEMORY.md'),
+        '', '## Taste',
+        line('Tools that feel like vim, tmux and fzf: quiet, fast, typed.', 'terminal-taste', 'asks:26'),
+        line('Every action reachable from the keyboard.', 'keyboard-first'),
+        line('Pages that feel instant.', 'speed-matters'),
+        line('Plain words; no jargon.', 'plain-words'),
+        line('Two-space indentation, tabs in Go.', 'grok:code-style.md', 'gemini:GEMINI.md'),
+        '', '## Engineering principles',
+        line('A small, stable core; features as services.', 'small-core'),
+        line('Comments say why, naming the incident.', 'why-comments'),
+        line('Merge on weekends, deploy on Monday.', 'no-weekend-deploys', 'release-train'),
+        '', '## Right now',
+        line('Freezing the ranker eval set for the quarter.', 'ranker-evals'),
+        line('Retiring the legacy renderer.', 'legacy-renderer'),
+        line('Webhook retries that back off to an hour.', 'webhook-retries', 'deploys-from-main'),
+        ''].join('\n'), { gen: now, now });
+      const viewer = createViewer({ workspace: home, intervalMs: 60_000, env, home });
+      const page = await browser.newPage({ viewport: { width: 1080, height: 720 }, deviceScaleFactor: 1, colorScheme: 'dark' });
+      try {
+        await page.goto(`http://127.0.0.1:${await viewer.start()}/`);
+        // The pane is Sense of Self: wait for the scene, skip its arrival, and let the light settle.
+        await page.waitForFunction(() => document.getElementById('stage')?.inspectSelf?.().ready);
+        await page.keyboard.press('Escape');
+        // "Short answers that lead with the result": a belief whose roots reach memories, lit.
+        await page.keyboard.press('ArrowRight');
+        await page.waitForTimeout(2500);
+        await page.screenshot({ path: join(output, `${id}.png`) });
+        if (process.env.COVER_DUMP_TEXT) console.log(await page.innerText('body'));
+      } finally { await page.close(); await viewer.close(); await rm(home, { recursive: true, force: true }); }
     } else {
       const { createServer } = await source('store/agents/mlx-lm/src/server.mjs');
       const { MLX_CATALOG } = await source('store/agents/mlx-lm/src/mlx.mjs');

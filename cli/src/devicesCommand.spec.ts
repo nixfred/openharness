@@ -14,6 +14,8 @@ const dirs: string[] = []
 let rebaseConflict = false
 /** The daemon answers OTHER_ACCOUNT: on the preview, or only on the confirm. */
 let rebaseOther: 'no' | 'preview' | 'confirm' = 'no'
+/** Whether the fake daemon says an "It's mine" reached the account's other devices. */
+let dismissShared = false
 const servers: Server[] = []
 
 afterEach(async () => {
@@ -55,8 +57,9 @@ function fakeDaemon(lastSeen: Record<string, number> = { 'pub-old': now - 3 * DA
             at: new Date(2026, 9, 1, 14, 5).getTime(), thisDevice: false, afterJoin: true, pending: true, active: true, whileFrozen: false,
           }] }))
         } else if (newRoutes && req.method === 'POST' && req.url === '/api/devices/dismiss') {
-          dismissed.push(JSON.parse(raw))
-          res.end(JSON.stringify({ ok: true }))
+          const body = JSON.parse(raw) as { confirm?: boolean }
+          dismissed.push(body)
+          res.end(JSON.stringify({ ok: true, ...(body.confirm ? { shared: dismissShared } : {}) }))
         } else if (newRoutes && req.method === 'POST' && req.url === '/api/devices/rebaseline') {
           const body = JSON.parse(raw) as { confirm?: boolean; head?: unknown }
           rebased.push(body)
@@ -417,9 +420,15 @@ describe('harness devices', () => {
     const d = await fakeDaemon(undefined, undefined, {}, true)
     const all = await run(d.port, ['dismiss'])
     expect(all.stdout).toContain('Marked every device as seen.')
+    // One device named is "It's mine" for it; every device at once is only seen here.
     const one = await run(d.port, ['dismiss', '3'])
     expect(one.stdout).toContain('Marked phone as seen.')
-    expect(d.dismissed).toEqual([{}, { pub: 'pub-new' }])
+    expect(d.dismissed).toEqual([{}, { pub: 'pub-new', confirm: true }])
+    dismissShared = true
+    try {
+      const shared = await run(d.port, ['dismiss', '3'])
+      expect(shared.stdout).toContain('Marked phone as yours, here and on your other devices.')
+    } finally { dismissShared = false }
   }, 30_000)
 
   it('lists a key that joined and left before you looked, and dismisses it by its key code', async () => {
@@ -430,7 +439,7 @@ describe('harness devices', () => {
     expect(list.stdout).toContain('⚠ Chrome joined and left before you looked — mark it seen: harness devices dismiss 7777·6666·5555·4444')
     const one = await run(d.port, ['dismiss', '7777·6666'])
     expect(one.stdout).toContain('Marked Chrome as seen.')
-    expect(d.dismissed).toEqual([{ pub: 'pub-gone' }])
+    expect(d.dismissed).toEqual([{ pub: 'pub-gone', confirm: true }])
   }, 30_000)
 
   it('list flags only what the daemon says is pending, and shows the conflict and suspended lines', async () => {
