@@ -72,6 +72,8 @@ describe('countsTowardBranch', () => {
     expect(countsTowardBranch({ state: 'offline', since: now }, now)).toBe(false)
     expect(countsTowardBranch({ state: 'done', since: now - 2 * H }, now)).toBe(false) // a finished headless run still listed as "done, unreviewed"
     expect(countsTowardBranch({ state: 'idle', since: 0 }, now)).toBe(false) // never seen doing anything
+    expect(countsTowardBranch({ state: 'idle', since: now, detail: 'watching' }, now)).toBe(false) // a SessionStart and no turn: the resumed-session phantom
+    expect(countsTowardBranch({ state: 'idle', since: now, detail: 'reviewed' }, now)).toBe(true) // a real session whose finished turn was looked at, just now
   })
   it('a forgotten "done" row beside the one live session raises no branch collision (the hourly "mobs and mobs on branch main")', () => {
     const w = new CollisionWatcher({ now: () => now })

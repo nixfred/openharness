@@ -52,10 +52,13 @@ export const COLLISION_WINDOW_MS = 60 * 60 * 1000
  * A session that finished long ago is still advertised by the daemon as "done, unreviewed" (a finished headless
  * run, a pane that was closed) and was seen on its branch at every poll, so the same pair ("mobs and mobs on
  * branch main") was raised again every hour for ever, and the dial said COLLISION over a single live session.
- * Offline rows never count; a row never seen doing anything (since 0) does not either.
+ * Offline rows never count; a row never seen doing anything (since 0) does not either; nor does one that is
+ * only "idle, watching" (a SessionStart and no turn: a resumed session keeps its old record and gains such
+ * an extra one, and that phantom made spaces.x.omarchy alarm hourly against its own live session).
  */
-export function countsTowardBranch(row: { state: string; since: number }, now: number, windowMs = COLLISION_WINDOW_MS): boolean {
+export function countsTowardBranch(row: { state: string; since: number; detail?: string }, now: number, windowMs = COLLISION_WINDOW_MS): boolean {
   if (row.state === 'offline') return false
+  if (row.state === 'idle' && row.detail === 'watching') return false
   if (row.state === 'working') return true
   return now - row.since <= windowMs
 }

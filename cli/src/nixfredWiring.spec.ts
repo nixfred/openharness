@@ -261,10 +261,11 @@ describe('Nixfred wiring', () => {
     const repo = mkdtempSync(join(tmpdir(), 'nixfred-repo-'))
     try {
       execFileSync('git', ['init', '-q', '-b', 'main', repo])
-      sessions = [session('live', { cwd: repo, name: 'mobs' }), session('ghost', { cwd: repo, name: 'mobs' })]
+      sessions = [session('live', { cwd: repo, name: 'mobs' }), session('ghost', { cwd: repo, name: 'mobs' }), session('phantom', { cwd: repo, name: 'mobs' })]
       nix.attention.turnStarted('ghost', 'old bug hunt')
       nix.attention.turnEnded('ghost') // "done, unreviewed"
       now += 50 * 3_600_000 // two days later, still listed
+      nix.attention.set('phantom', 'idle', 'watching') // a resumed session's extra record, made just now: a SessionStart and no turn
       nix.attention.turnStarted('live', 'working now')
       await nix.pollBranches()
       expect(nix.collisions.recent()).toEqual([]) // one live session on the branch is not a collision

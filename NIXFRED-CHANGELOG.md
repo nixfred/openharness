@@ -9,6 +9,22 @@ not. Upstream's own CHANGELOG.md is untouched. Nothing here has been submitted u
 
 Always `systemctl --user stop harness.service` BEFORE `idf.py flash`. The running daemon holds /dev/ttyACM0; on the nixfred.8 flash that left a new bootloader over the old app until a second flash with the daemon stopped. Start the service again after the flash and confirm `on fw <version>` in `journalctl --user -u harness.service`.
 
+## The branch collision alarm ignores finished and forgotten sessions, 2026-10-12
+
+Fred's dial said COLLISION "mobs and mobs on branch main" over a single live session, every hour. On nixfred/main cd6aad618.
+
+- Cause: `pollBranches` fed every advertised, active row to the CollisionWatcher each minute, which refreshed that row's touch. So a
+  session that finished long ago (a headless run still listed `done, unreviewed`) or a resumed session's extra record (`idle, watching`:
+  a SessionStart and no turn) never aged out of the one-hour window, and the same pair was raised again every hour. The audit journal
+  held 61 such alerts for mobs, 43 for spaces.x.omarchy, 24 for danny, 21 for omaspotify, 18 for blip and 15 for clarity.
+- Fix: `countsTowardBranch` in `nixfred/collisionWatch.ts`, used by `pollBranches`. A row counts only if it is working, or its attention
+  state changed inside the hour. Offline rows, rows never seen doing anything and `idle, watching` rows never count. Two sessions that
+  both worked inside the hour still collide.
+- Verified: new `collisionWatch.spec.ts` tests, and `nixfredWiring.spec.ts` runs `pollBranches` against a real temporary git repo (the
+  test fails on the old code). `tsc --noEmit` clean.
+- Not verified on the live daemon: it takes effect when the daemon restarts (`bash cli/scripts/install-cli.sh` restarts it).
+- Not changed: file and folder collisions (`noteTool`), which come from real tool calls, not from presence.
+
 ## Clicking an attention toast opens that agent's herdr pane, 2026-10-09
 
 Fred: clicking a "needs my attention" toast did not go to the session. Two faults in `lib/desktopNotify.ts`:
